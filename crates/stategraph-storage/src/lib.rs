@@ -10,10 +10,14 @@
 pub mod memory;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "indexeddb")]
+pub mod indexeddb;
 pub mod traits;
 
 // Re-export primary types
 pub use memory::MemoryStorage;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
+#[cfg(feature = "indexeddb")]
+pub use indexeddb::IndexedDbStorage;
 pub use traits::{CommitStore, ObjectStore, RefStore, Storage, StorageError};

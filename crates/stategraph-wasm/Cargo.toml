@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 stategraph = { path = "../stategraph", default-features = false }
 stategraph-core = { path = "../stategraph-core" }
-stategraph-storage = { path = "../stategraph-storage", default-features = false }
+stategraph-storage = { path = "../stategraph-storage", default-features = false, features = ["indexeddb"] }
 wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

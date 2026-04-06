@@ -9,6 +9,7 @@ description = "Pluggable storage backends for StateGraph"
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite"]
+indexeddb = []
 
 [dependencies]
 stategraph-core = { path = "../stategraph-core" }

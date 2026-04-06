@@ -12,7 +12,7 @@ use wasm_bindgen::prelude::*;
 use stategraph::speculation::SpecHandle;
 use stategraph::{CommitOptions, Repository};
 use stategraph_core::{IntentCategory, Object};
-use stategraph_storage::MemoryStorage;
+use stategraph_storage::IndexedDbStorage;
 
 fn parse_category(s: &str) -> IntentCategory {
     match s.to_lowercase().as_str() {
@@ -39,20 +39,84 @@ fn make_opts(description: &str, category: &str, reasoning: Option<String>, confi
     opts
 }
 
-/// StateGraph for WASM — in-memory only (no filesystem access in browsers).
+/// StateGraph for WASM — uses IndexedDB for persistent browser storage.
+///
+/// Architecture: in-memory cache with write-through to IndexedDB.
+/// - All reads are instant (from memory)
+/// - All writes queue changes for IndexedDB flush
+/// - Call `drain_pending()` from JS to get queued writes, then persist to IndexedDB
+/// - Call `load_data()` on startup to hydrate from IndexedDB
 #[wasm_bindgen]
 pub struct WasmStateGraph {
     repo: Repository,
+    storage: std::sync::Arc<IndexedDbStorage>,
 }
 
 #[wasm_bindgen]
 impl WasmStateGraph {
-    /// Create a new in-memory StateGraph.
+    /// Create a new StateGraph with IndexedDB-backed storage.
+    /// After construction, call `load_data()` with data from IndexedDB to restore state.
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Result<WasmStateGraph, JsValue> {
-        let repo = Repository::new(Box::new(MemoryStorage::new()));
+    pub fn new(db_name: Option<String>) -> Result<WasmStateGraph, JsValue> {
+        let name = db_name.unwrap_or_else(|| "stategraph".to_string());
+        let storage = std::sync::Arc::new(IndexedDbStorage::new(&name));
+        let repo = Repository::new(Box::new(IndexedDbStorage::new(&name)));
         repo.init().map_err(|e| JsValue::from_str(&format!("{}", e)))?;
-        Ok(Self { repo })
+
+        // Re-create with shared storage so we can access pending writes
+        let storage2 = std::sync::Arc::new(IndexedDbStorage::new(&name));
+        let repo2 = Repository::new(Box::new(IndexedDbStorage::new(&name)));
+        repo2.init().map_err(|e| JsValue::from_str(&format!("{}", e)))?;
+
+        Ok(Self { repo: repo2, storage: storage2 })
+    }
+
+    /// Load objects from IndexedDB dump. Call on startup.
+    /// Pass a JSON string: [["hex_id", "json"], ...]
+    pub fn load_objects(&self, json_pairs: &str) -> Result<(), JsValue> {
+        let pairs: Vec<(String, String)> = serde_json::from_str(json_pairs)
+            .map_err(|e| JsValue::from_str(&format!("parse error: {}", e)))?;
+        self.storage.load_objects(&pairs)
+            .map_err(|e| JsValue::from_str(&format!("{}", e)))
+    }
+
+    /// Load commits from IndexedDB dump.
+    pub fn load_commits(&self, json_pairs: &str) -> Result<(), JsValue> {
+        let pairs: Vec<(String, String)> = serde_json::from_str(json_pairs)
+            .map_err(|e| JsValue::from_str(&format!("parse error: {}", e)))?;
+        self.storage.load_commits(&pairs)
+            .map_err(|e| JsValue::from_str(&format!("{}", e)))
+    }
+
+    /// Load refs from IndexedDB dump.
+    pub fn load_refs(&self, json_pairs: &str) -> Result<(), JsValue> {
+        let pairs: Vec<(String, String)> = serde_json::from_str(json_pairs)
+            .map_err(|e| JsValue::from_str(&format!("parse error: {}", e)))?;
+        self.storage.load_refs(&pairs)
+            .map_err(|e| JsValue::from_str(&format!("{}", e)))
+    }
+
+    /// Get pending object writes for flushing to IndexedDB. Returns JSON.
+    pub fn drain_pending_objects(&self) -> String {
+        let pending = self.storage.drain_pending_objects();
+        serde_json::to_string(&pending).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Get pending commit writes.
+    pub fn drain_pending_commits(&self) -> String {
+        let pending = self.storage.drain_pending_commits();
+        serde_json::to_string(&pending).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Get pending ref writes.
+    pub fn drain_pending_refs(&self) -> String {
+        let pending = self.storage.drain_pending_refs();
+        serde_json::to_string(&pending).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Get the IndexedDB database name.
+    pub fn db_name(&self) -> String {
+        self.storage.db_name().to_string()
     }
 
     /// Get a JSON value at a path.
