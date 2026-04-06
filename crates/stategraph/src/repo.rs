@@ -19,6 +19,9 @@ use crate::tree::{self, TreeError};
 pub struct Repository {
     storage: Box<dyn Storage>,
     specs: SpeculationManager,
+    session_mgr: crate::session::SessionManager,
+    watch_mgr: crate::watch::WatchManager,
+    epochs: std::sync::RwLock<Vec<stategraph_core::Epoch>>,
 }
 
 /// Options for creating a commit.
@@ -105,6 +108,9 @@ impl Repository {
         Self {
             storage,
             specs: SpeculationManager::new(),
+            session_mgr: crate::session::SessionManager::new(),
+            watch_mgr: crate::watch::WatchManager::new(),
+            epochs: std::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -444,6 +450,164 @@ impl Repository {
     /// Get a specific commit by ID.
     pub fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, RepoError> {
         Ok(self.storage.get_commit(id)?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Query operations
+    // -----------------------------------------------------------------------
+
+    /// Query commits with composable filters.
+    pub fn query_commits(
+        &self,
+        ref_name: &str,
+        filters: &stategraph_core::QueryFilters,
+        limit: usize,
+    ) -> Result<Vec<Commit>, RepoError> {
+        let all_commits = self.log(ref_name, 1000)?; // get a large window
+        let filtered = stategraph_core::filter_commits(&all_commits, filters);
+        Ok(filtered.into_iter().take(limit).collect())
+    }
+
+    /// Blame — for a path, find which commit last modified it and why.
+    pub fn blame(
+        &self,
+        ref_name: &str,
+        path: &str,
+    ) -> Result<stategraph_core::BlameEntry, RepoError> {
+        let commits = self.log(ref_name, 1000)?;
+        let state_path = StatePath::parse(path)
+            .map_err(|e| RepoError::Tree(tree::TreeError::PathNotFound(e.to_string())))?;
+
+        // Walk commits and find the first one where the value at this path differs from its parent
+        for commit in &commits {
+            if commit.parents.is_empty() {
+                // Initial commit — this is where everything was "set"
+                if tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path).is_ok()
+                {
+                    return Ok(stategraph_core::BlameEntry {
+                        path: path.to_string(),
+                        commit_id: commit.id.short(),
+                        agent_id: commit.agent_id.clone(),
+                        intent_category: format!("{:?}", commit.intent.category),
+                        intent_description: commit.intent.description.clone(),
+                        reasoning: commit.reasoning.clone(),
+                        timestamp: commit.timestamp,
+                    });
+                }
+            } else if let Some(parent_id) = commit.parents.first() {
+                if let Some(parent) = self.storage.get_commit(parent_id)? {
+                    let current_val =
+                        tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path);
+                    let parent_val =
+                        tree::tree_get(self.storage.as_ref(), &parent.state_root, &state_path);
+
+                    // If the value is different (or didn't exist in parent), this commit is the blame target
+                    match (current_val.ok(), parent_val.ok()) {
+                        (Some(curr), Some(prev)) if curr != prev => {
+                            return Ok(stategraph_core::BlameEntry {
+                                path: path.to_string(),
+                                commit_id: commit.id.short(),
+                                agent_id: commit.agent_id.clone(),
+                                intent_category: format!("{:?}", commit.intent.category),
+                                intent_description: commit.intent.description.clone(),
+                                reasoning: commit.reasoning.clone(),
+                                timestamp: commit.timestamp,
+                            });
+                        }
+                        (Some(_), None) => {
+                            // Value was added in this commit
+                            return Ok(stategraph_core::BlameEntry {
+                                path: path.to_string(),
+                                commit_id: commit.id.short(),
+                                agent_id: commit.agent_id.clone(),
+                                intent_category: format!("{:?}", commit.intent.category),
+                                intent_description: commit.intent.description.clone(),
+                                reasoning: commit.reasoning.clone(),
+                                timestamp: commit.timestamp,
+                            });
+                        }
+                        _ => continue,
+                    }
+                }
+            }
+        }
+
+        Err(RepoError::RefNotFound(format!(
+            "no commit found that modified {}",
+            path
+        )))
+    }
+
+    // -----------------------------------------------------------------------
+    // Session operations (sub-agent orchestration)
+    // -----------------------------------------------------------------------
+
+    /// Get the session manager for sub-agent orchestration.
+    pub fn sessions(&self) -> &crate::session::SessionManager {
+        &self.session_mgr
+    }
+
+    // -----------------------------------------------------------------------
+    // Watch operations
+    // -----------------------------------------------------------------------
+
+    /// Get the watch manager for subscribing to state changes.
+    pub fn watches(&self) -> &crate::watch::WatchManager {
+        &self.watch_mgr
+    }
+
+    // -----------------------------------------------------------------------
+    // Epoch operations
+    // -----------------------------------------------------------------------
+
+    /// Create a new epoch.
+    pub fn create_epoch(
+        &self,
+        id: &str,
+        description: &str,
+        root_intents: Vec<String>,
+    ) -> Result<stategraph_core::Epoch, RepoError> {
+        let epoch = stategraph_core::Epoch::new(id, description, root_intents);
+        let mut epochs = self.epochs.write().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        epochs.push(epoch.clone());
+        Ok(epoch)
+    }
+
+    /// Seal an epoch, making it immutable.
+    pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), RepoError> {
+        let mut epochs = self.epochs.write().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let epoch = epochs
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| RepoError::RefNotFound(format!("epoch not found: {}", id)))?;
+
+        // Compute seal hash from all commits in the epoch
+        let mut hasher_input = Vec::new();
+        for commit_id in &epoch.commits {
+            hasher_input.extend_from_slice(commit_id.as_bytes());
+        }
+        let seal_hash = ObjectId::hash(&hasher_input);
+
+        epoch
+            .seal(summary.to_string(), seal_hash)
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        Ok(())
+    }
+
+    /// List all epochs.
+    pub fn list_epochs(&self) -> Result<Vec<stategraph_core::EpochEntry>, RepoError> {
+        let epochs = self.epochs.read().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        Ok(epochs.iter().map(|e| e.to_entry()).collect())
+    }
+
+    /// Get a specific epoch by ID.
+    pub fn get_epoch(&self, id: &str) -> Result<stategraph_core::Epoch, RepoError> {
+        let epochs = self.epochs.read().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        epochs
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+            .ok_or_else(|| RepoError::RefNotFound(format!("epoch not found: {}", id)))
     }
 
     // -----------------------------------------------------------------------

@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use stategraph::speculation::SpecHandle;
 use stategraph::{CommitOptions, Repository};
-use stategraph_core::{IntentCategory, Object};
+use stategraph_core::{IntentCategory, Object, QueryFilters};
 
 /// The StateGraph MCP server.
 #[derive(Clone)]
@@ -153,6 +153,62 @@ pub struct CommitSpecParams {
 pub struct DiscardParams {
     /// Speculation handle ID.
     pub handle_id: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct QueryParams {
+    /// Branch to query (default: "main").
+    pub r#ref: Option<String>,
+    /// Filter by agent ID.
+    pub agent_id: Option<String>,
+    /// Filter by intent category.
+    pub intent_category: Option<String>,
+    /// Filter by tags (all must match).
+    pub tags: Option<Vec<String>>,
+    /// Filter by authority principal.
+    pub authority_principal: Option<String>,
+    /// Full-text search in reasoning traces.
+    pub reasoning_contains: Option<String>,
+    /// Minimum confidence (used with confidence_max for range).
+    pub confidence_min: Option<f64>,
+    /// Maximum confidence.
+    pub confidence_max: Option<f64>,
+    /// Only results with deviations from plan.
+    pub has_deviations: Option<bool>,
+    /// Max results (default: 20).
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct BlameParams {
+    /// Branch (default: "main").
+    pub r#ref: Option<String>,
+    /// Path to blame (e.g., "/nodes/2/status").
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateEpochParams {
+    /// Epoch ID (e.g., "2026-04-incident-node3").
+    pub id: String,
+    /// Description.
+    pub description: String,
+    /// Root intent IDs that define this epoch.
+    pub root_intents: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SealEpochParams {
+    /// Epoch ID.
+    pub id: String,
+    /// Final summary of the epoch's work.
+    pub summary: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SessionListParams {
+    /// Optional agent filter.
+    pub agent_id: Option<String>,
 }
 
 fn default_ref() -> String {
@@ -395,6 +451,118 @@ impl StateGraphServer {
             Ok(()) => format!("Speculation {} discarded", p.handle_id),
             Err(e) => format!("Error: {}", e),
         }
+    }
+
+    // -- Query tools --
+
+    #[tool(description = "Query commits with composable filters. Filter by agent, intent category, tags, reasoning text, confidence range, date range, and more. All filters are AND-combined.")]
+    async fn stategraph_query(&self, params: Parameters<QueryParams>) -> String {
+        let p = params.0;
+        let filters = QueryFilters {
+            agent_id: p.agent_id,
+            intent_category: p.intent_category,
+            tags: p.tags,
+            reasoning_contains: p.reasoning_contains,
+            confidence_range: p.confidence_min.zip(p.confidence_max),
+            authority_principal: p.authority_principal,
+            has_deviations: p.has_deviations,
+            ..Default::default()
+        };
+        let limit = p.limit.unwrap_or(20);
+        let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
+
+        match self.repo.query_commits(&ref_name, &filters, limit) {
+            Ok(commits) => {
+                let entries: Vec<serde_json::Value> = commits.iter().map(|c| {
+                    serde_json::json!({
+                        "id": c.id.short(),
+                        "agent": c.agent_id,
+                        "intent": {
+                            "category": format!("{:?}", c.intent.category),
+                            "description": c.intent.description,
+                            "tags": c.intent.tags,
+                        },
+                        "reasoning": c.reasoning,
+                        "confidence": c.confidence,
+                        "timestamp": c.timestamp.to_rfc3339(),
+                    })
+                }).collect();
+                serde_json::to_string_pretty(&entries).unwrap_or_default()
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Blame — find which commit last modified a value at a path and why. Returns the agent, intent, reasoning, and timestamp.")]
+    async fn stategraph_blame(&self, params: Parameters<BlameParams>) -> String {
+        let p = params.0;
+        let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
+        match self.repo.blame(&ref_name, &p.path) {
+            Ok(entry) => serde_json::to_string_pretty(&entry).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    // -- Epoch tools --
+
+    #[tool(description = "Create a new epoch to group related work. Commits are associated by intent lineage.")]
+    async fn stategraph_create_epoch(&self, params: Parameters<CreateEpochParams>) -> String {
+        let p = params.0;
+        match self.repo.create_epoch(&p.id, &p.description, p.root_intents) {
+            Ok(epoch) => format!("Epoch '{}' created (status: {:?})", epoch.id, epoch.status),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "Seal an epoch, making it read-only and tamper-evident. Cannot be undone.")]
+    async fn stategraph_seal_epoch(&self, params: Parameters<SealEpochParams>) -> String {
+        let p = params.0;
+        match self.repo.seal_epoch(&p.id, &p.summary) {
+            Ok(()) => format!("Epoch '{}' sealed", p.id),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "List all epochs with their status, dates, and commit counts.")]
+    async fn stategraph_list_epochs(&self) -> String {
+        match self.repo.list_epochs() {
+            Ok(entries) => {
+                let json: Vec<serde_json::Value> = entries.iter().map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "description": e.description,
+                        "status": format!("{:?}", e.status),
+                        "commits": e.commit_count,
+                        "agents": e.agents,
+                        "tags": e.tags,
+                        "created": e.created_at.to_rfc3339(),
+                        "sealed": e.sealed_at.map(|t| t.to_rfc3339()),
+                    })
+                }).collect();
+                serde_json::to_string_pretty(&json).unwrap_or_default()
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    // -- Session tools --
+
+    #[tool(description = "List active agent sessions. Shows parent-child relationships and path scoping.")]
+    async fn stategraph_sessions(&self, params: Parameters<SessionListParams>) -> String {
+        let sessions = self.repo.sessions().list(params.0.agent_id.as_deref());
+        let json: Vec<serde_json::Value> = sessions.iter().map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "agent": s.agent_id,
+                "branch": s.working_branch,
+                "parent_session": s.parent_session,
+                "delegated_intent": s.delegated_intent,
+                "report_to": s.report_to,
+                "path_scope": s.path_scope,
+                "created": s.created_at.to_rfc3339(),
+            })
+        }).collect();
+        serde_json::to_string_pretty(&json).unwrap_or_default()
     }
 }
 

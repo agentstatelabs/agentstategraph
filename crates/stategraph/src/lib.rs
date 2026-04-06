@@ -16,8 +16,10 @@
 //! ```
 
 pub mod repo;
+pub mod session;
 pub mod speculation;
 pub mod tree;
+pub mod watch;
 
 // Re-export core and storage for convenience
 pub use stategraph_core as core;
@@ -25,4 +27,6 @@ pub use stategraph_storage as storage;
 
 // Re-export primary types
 pub use repo::{CommitOptions, RepoError, Repository};
+pub use session::{Session, SessionError, SessionManager};
 pub use speculation::{SpecComparison, SpecHandle, SpeculationManager};
+pub use watch::{PathPattern, SubscriptionId, WatchEvent, WatchManager};
