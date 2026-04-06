@@ -1,0 +1,52 @@
+---
+title: StateGraph
+description: AI-native versioned state store for intent-based systems.
+template: splash
+hero:
+  tagline: The missing infrastructure primitive for the AI agent era. Every state change captures what changed, why, who authorized it, and what alternatives were considered.
+  actions:
+    - text: Get Started
+      link: /StateGraph/guides/quickstart/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/agentstatelabs/StateGraph
+      variant: minimal
+      icon: github
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why StateGraph?
+
+<CardGrid>
+	<Card title="Intent-Aware" icon="pencil">
+		Every commit carries structured intent metadata — category, description, tags, reasoning, and confidence. Query by "why," not just "what."
+	</Card>
+	<Card title="Branching & Speculation" icon="random">
+		Agents explore state spaces via O(1) branching. Create speculations, compare side-by-side, commit the winner, discard the rest.
+	</Card>
+	<Card title="Full Provenance" icon="approve-check">
+		Authority chains, delegation, resolution reports, and notification policies. Trust becomes auditable, not assumed.
+	</Card>
+	<Card title="Multi-Agent Native" icon="list-format">
+		Sub-agent orchestration with scoped sessions, path restrictions, and intent decomposition trees. Built for the orchestrator pattern.
+	</Card>
+</CardGrid>
+
+## The Four Architecture Eras
+
+| Era | Unit of Work | Key Primitives |
+|-----|-------------|----------------|
+| Monolithic | Function call | OS, filesystem, local DB |
+| Batch / Request-Response | Request → Response | HTTP, REST, SQL, queues |
+| Streaming | Event | Kafka, Flink, event stores, CQRS |
+| **Intent-based** | **Intent → Outcome** | **StateGraph** |
+
+## Use It From Anywhere
+
+- **MCP Server** — 20 tools, any MCP-compatible agent
+- **Rust** — native library, 137 tests
+- **Python** — PyO3 bindings
+- **TypeScript/Node** — napi-rs bindings
+- **Go** — CGo via C FFI
+- **WASM** — 997KB, runs in any browser

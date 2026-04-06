@@ -1,0 +1,8 @@
+:root {
+	--sl-color-accent-low: #1a1a2e;
+	--sl-color-accent: #7b68ee;
+	--sl-color-accent-high: #c4b5fd;
+	--sl-color-white: #e0e0e0;
+	--sl-color-gray-1: #c0c0c0;
+	--sl-font-system: system-ui, -apple-system, sans-serif;
+}
