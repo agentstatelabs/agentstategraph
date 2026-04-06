@@ -1008,6 +1008,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "stategraph-ffi"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "stategraph",
+ "stategraph-core",
+ "stategraph-storage",
+]
+
+[[package]]
 name = "stategraph-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1054,6 +1064,19 @@ dependencies = [
  "serde_json",
  "stategraph-core",
  "thiserror",
+]
+
+[[package]]
+name = "stategraph-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "serde",
+ "serde_json",
+ "stategraph",
+ "stategraph-core",
+ "stategraph-storage",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1246,6 +1269,8 @@ dependencies = [
  "cfg-if",
  "once_cell",
  "rustversion",
+ "serde",
+ "serde_json",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
 ]

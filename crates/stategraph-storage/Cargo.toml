@@ -6,9 +6,13 @@ authors.workspace = true
 license.workspace = true
 description = "Pluggable storage backends for StateGraph"
 
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+
 [dependencies]
 stategraph-core = { path = "../stategraph-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, optional = true }

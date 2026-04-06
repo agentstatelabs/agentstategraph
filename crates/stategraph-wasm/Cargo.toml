@@ -1,20 +1,19 @@
 [package]
-name = "stategraph"
+name = "stategraph-wasm"
 version.workspace = true
-edition.workspace = true
+edition = "2021"
 authors.workspace = true
 license.workspace = true
-description = "AI-native versioned state store for intent-based systems"
+description = "WASM bindings for StateGraph — browser, Deno, Node"
 
-[features]
-default = ["sqlite"]
-sqlite = ["stategraph-storage/sqlite"]
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+stategraph = { path = "../stategraph", default-features = false }
 stategraph-core = { path = "../stategraph-core" }
 stategraph-storage = { path = "../stategraph-storage", default-features = false }
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
+js-sys = "0.3"

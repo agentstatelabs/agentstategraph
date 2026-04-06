@@ -8,10 +8,12 @@
 //! (which is a blanket impl over `ObjectStore + CommitStore + RefStore`).
 
 pub mod memory;
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
 pub mod traits;
 
 // Re-export primary types
 pub use memory::MemoryStorage;
+#[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
 pub use traits::{CommitStore, ObjectStore, RefStore, Storage, StorageError};
