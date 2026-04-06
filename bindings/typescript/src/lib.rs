@@ -302,4 +302,103 @@ impl StateGraph {
         let handle = SpecHandle::from_id(handle_id as u64);
         self.repo.discard_speculation(handle).map_err(err)
     }
+
+    // -- Query --
+
+    /// Query commits with composable filters. All optional, AND-combined.
+    #[napi]
+    pub fn query(
+        &self,
+        reference: Option<String>,
+        agent_id: Option<String>,
+        intent_category: Option<String>,
+        tags: Option<Vec<String>>,
+        reasoning_contains: Option<String>,
+        confidence_min: Option<f64>,
+        confidence_max: Option<f64>,
+        has_deviations: Option<bool>,
+        limit: Option<u32>,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let ref_name = reference.unwrap_or_else(|| "main".to_string());
+        let max = limit.unwrap_or(20) as usize;
+        let filters = stategraph_core::QueryFilters {
+            agent_id,
+            intent_category,
+            tags,
+            reasoning_contains,
+            confidence_range: confidence_min.zip(confidence_max),
+            has_deviations,
+            ..Default::default()
+        };
+        let commits = self.repo.query_commits(&ref_name, &filters, max).map_err(err)?;
+        Ok(commits.iter().map(|c| {
+            serde_json::json!({
+                "id": c.id.short(),
+                "agent": c.agent_id,
+                "intent": {
+                    "category": format!("{:?}", c.intent.category),
+                    "description": c.intent.description,
+                    "tags": c.intent.tags,
+                },
+                "reasoning": c.reasoning,
+                "confidence": c.confidence,
+                "timestamp": c.timestamp.to_rfc3339(),
+            })
+        }).collect())
+    }
+
+    /// Blame — who last modified a value at a path and why.
+    #[napi]
+    pub fn blame(&self, path: String, reference: Option<String>) -> napi::Result<serde_json::Value> {
+        let ref_name = reference.unwrap_or_else(|| "main".to_string());
+        let entry = self.repo.blame(&ref_name, &path).map_err(err)?;
+        serde_json::to_value(&entry).map_err(err)
+    }
+
+    // -- Epochs --
+
+    /// Create a new epoch.
+    #[napi]
+    pub fn create_epoch(&self, id: String, description: String, root_intents: Vec<String>) -> napi::Result<String> {
+        self.repo.create_epoch(&id, &description, root_intents)
+            .map(|e| format!("Epoch '{}' created", e.id))
+            .map_err(err)
+    }
+
+    /// Seal an epoch.
+    #[napi]
+    pub fn seal_epoch(&self, id: String, summary: String) -> napi::Result<()> {
+        self.repo.seal_epoch(&id, &summary).map_err(err)
+    }
+
+    /// List all epochs.
+    #[napi]
+    pub fn list_epochs(&self) -> napi::Result<Vec<serde_json::Value>> {
+        let entries = self.repo.list_epochs().map_err(err)?;
+        Ok(entries.iter().map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "description": e.description,
+                "status": format!("{:?}", e.status),
+                "commits": e.commit_count,
+                "agents": e.agents,
+                "tags": e.tags,
+            })
+        }).collect())
+    }
+
+    /// List active sessions.
+    #[napi]
+    pub fn sessions(&self, agent_id: Option<String>) -> napi::Result<Vec<serde_json::Value>> {
+        let sessions = self.repo.sessions().list(agent_id.as_deref());
+        Ok(sessions.iter().map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "agent": s.agent_id,
+                "branch": s.working_branch,
+                "parent_session": s.parent_session,
+                "path_scope": s.path_scope,
+            })
+        }).collect())
+    }
 }

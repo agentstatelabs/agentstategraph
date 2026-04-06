@@ -311,6 +311,119 @@ impl StateGraph {
         self.repo.discard_speculation(handle)
             .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
     }
+
+    // -- Query --
+
+    /// Query commits with composable filters. All filters are AND-combined.
+    #[pyo3(signature = (r#ref="main", agent_id=None, intent_category=None, tags=None, reasoning_contains=None, confidence_min=None, confidence_max=None, has_deviations=None, limit=20))]
+    fn query(
+        &self,
+        py: Python<'_>,
+        r#ref: &str,
+        agent_id: Option<String>,
+        intent_category: Option<String>,
+        tags: Option<Vec<String>>,
+        reasoning_contains: Option<String>,
+        confidence_min: Option<f64>,
+        confidence_max: Option<f64>,
+        has_deviations: Option<bool>,
+        limit: usize,
+    ) -> PyResult<PyObject> {
+        let filters = stategraph_core::QueryFilters {
+            agent_id,
+            intent_category,
+            tags,
+            reasoning_contains,
+            confidence_range: confidence_min.zip(confidence_max),
+            has_deviations,
+            ..Default::default()
+        };
+        let commits = self.repo.query_commits(r#ref, &filters, limit)
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        let entries: Vec<serde_json::Value> = commits.iter().map(|c| {
+            serde_json::json!({
+                "id": c.id.short(),
+                "agent": c.agent_id,
+                "intent": {
+                    "category": format!("{:?}", c.intent.category),
+                    "description": c.intent.description,
+                    "tags": c.intent.tags,
+                },
+                "reasoning": c.reasoning,
+                "confidence": c.confidence,
+                "timestamp": c.timestamp.to_rfc3339(),
+            })
+        }).collect();
+        let json = serde_json::to_value(&entries)
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        json_to_py(py, &json)
+    }
+
+    /// Blame — who last modified a value at a path and why.
+    #[pyo3(signature = (path, r#ref="main"))]
+    fn blame(&self, py: Python<'_>, path: &str, r#ref: &str) -> PyResult<PyObject> {
+        let entry = self.repo.blame(r#ref, path)
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        let json = serde_json::to_value(&entry)
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        json_to_py(py, &json)
+    }
+
+    // -- Epochs --
+
+    /// Create a new epoch to group related work.
+    fn create_epoch(&self, id: &str, description: &str, root_intents: Vec<String>) -> PyResult<String> {
+        self.repo.create_epoch(id, description, root_intents)
+            .map(|e| format!("Epoch '{}' created", e.id))
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
+    }
+
+    /// Seal an epoch, making it immutable and tamper-evident.
+    fn seal_epoch(&self, id: &str, summary: &str) -> PyResult<()> {
+        self.repo.seal_epoch(id, summary)
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
+    }
+
+    /// List all epochs.
+    fn list_epochs(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let entries = self.repo.list_epochs()
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        let json: Vec<serde_json::Value> = entries.iter().map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "description": e.description,
+                "status": format!("{:?}", e.status),
+                "commits": e.commit_count,
+                "agents": e.agents,
+                "tags": e.tags,
+            })
+        }).collect();
+        let val = serde_json::to_value(&json)
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        json_to_py(py, &val)
+    }
+
+    // -- Watch --
+
+    /// Subscribe to state changes matching a path pattern. Returns subscription ID.
+    /// pattern_type: "exact", "prefix", or "all"
+    #[pyo3(signature = (pattern_type="all", pattern=None))]
+    fn watch(&self, pattern_type: &str, pattern: Option<String>) -> PyResult<u64> {
+        let pat = match pattern_type {
+            "exact" => stategraph::PathPattern::Exact(pattern.unwrap_or_default()),
+            "prefix" => stategraph::PathPattern::Prefix(pattern.unwrap_or_default()),
+            _ => stategraph::PathPattern::All,
+        };
+        let sub_id = self.repo.watches().subscribe(pat);
+        // Return the raw inner value — SubscriptionId is opaque
+        Ok(0) // placeholder — need to expose SubscriptionId
+    }
+
+    /// Get pending events for a watch subscription.
+    fn watch_events(&self, py: Python<'_>, subscription_id: u64) -> PyResult<PyObject> {
+        // Simplified: return empty for now until SubscriptionId is properly exposed
+        json_to_py(py, &serde_json::json!([]))
+    }
 }
 
 /// Convert serde_json::Value to a Python object.
