@@ -508,7 +508,7 @@ impl Repository {
                 stategraph_core::Node::List(items) => items.clone(),
                 stategraph_core::Node::Set(items) => items.clone(),
             };
-            for child_id in children {
+            for _child_id in children {
                 // Children should already be in the store (from the original branches)
                 // Only new merge-created objects need storing, and those are the root nodes
             }

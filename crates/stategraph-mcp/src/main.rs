@@ -1,10 +1,8 @@
 //! stategraph-mcp — MCP server for StateGraph.
 //!
 //! Run with: cargo run -p stategraph-mcp
-//! Or install and run: stategraph-mcp
-//!
-//! Connects to any MCP-compatible agent over stdio.
-//! Default storage: SQLite at ./stategraph.db
+//! Or with options: cargo run -p stategraph-mcp -- --storage memory
+//!                  cargo run -p stategraph-mcp -- --path /data/my-state.db
 
 mod server;
 
@@ -12,30 +10,77 @@ use std::sync::Arc;
 
 use rmcp::ServiceExt;
 use stategraph::Repository;
-use stategraph_storage::SqliteStorage;
+use stategraph_storage::{MemoryStorage, SqliteStorage};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Log to stderr (stdout is for MCP protocol)
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut storage_type = "sqlite";
+    let mut db_path = "./stategraph.db".to_string();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--storage" | "-s" => {
+                i += 1;
+                if i < args.len() {
+                    storage_type = if args[i] == "memory" { "memory" } else { "sqlite" };
+                }
+            }
+            "--path" | "-p" => {
+                i += 1;
+                if i < args.len() {
+                    db_path = args[i].clone();
+                }
+            }
+            "--help" | "-h" => {
+                eprintln!("StateGraph MCP Server v{}", env!("CARGO_PKG_VERSION"));
+                eprintln!();
+                eprintln!("USAGE:");
+                eprintln!("  stategraph-mcp [OPTIONS]");
+                eprintln!();
+                eprintln!("OPTIONS:");
+                eprintln!("  -s, --storage <TYPE>  Storage backend: sqlite (default) or memory");
+                eprintln!("  -p, --path <PATH>     SQLite database path (default: ./stategraph.db)");
+                eprintln!("  -h, --help            Print help");
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
     eprintln!("StateGraph MCP Server v{}", env!("CARGO_PKG_VERSION"));
-    eprintln!("Storage: ./stategraph.db");
 
-    // Initialize storage and repository
-    let storage = SqliteStorage::open("./stategraph.db")?;
-    let repo = Arc::new(Repository::new(Box::new(storage)));
+    let repo: Arc<Repository> = match storage_type {
+        "memory" => {
+            eprintln!("Storage: in-memory (ephemeral)");
+            Arc::new(Repository::new(Box::new(MemoryStorage::new())))
+        }
+        _ => {
+            eprintln!("Storage: {}", db_path);
+            let storage = SqliteStorage::open(&db_path)?;
+            Arc::new(Repository::new(Box::new(storage)))
+        }
+    };
+
     repo.init()?;
+    eprintln!("Repository initialized. Waiting for MCP client...");
 
-    eprintln!("Repository initialized. Waiting for MCP client connection...");
+    // Build and run the async runtime
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let service = server::StateGraphServer::new(repo)
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|e| format!("MCP server error: {}", e))?;
 
-    // Create the MCP server and serve over stdio
-    let service = server::StateGraphServer::new(repo)
-        .serve(rmcp::transport::stdio())
-        .await
-        .map_err(|e| format!("Failed to start MCP server: {}", e))?;
+            service.waiting().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
 
-    // Wait for the connection to close
-    service.waiting().await?;
-
-    eprintln!("MCP server shutting down.");
+    eprintln!("MCP server shut down.");
     Ok(())
 }

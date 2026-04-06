@@ -134,7 +134,7 @@ impl SpeculationManager {
         let state_path = stategraph_core::StatePath::parse(path)
             .map_err(|e| TreeError::PathNotFound(e.to_string()))?;
         // Use tree_get but with overlay resolution
-        let root = resolver
+        let _root = resolver
             .resolve_to_object(&spec.current_root)
             .ok_or_else(|| TreeError::PathNotFound("root not found".to_string()))?;
         Ok(tree::tree_get(&OverlayObjectStore(&resolver), &spec.current_root, &state_path)?)

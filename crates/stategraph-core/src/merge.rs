@@ -170,7 +170,7 @@ fn merge_objects(
 
         // All three are sets — union
         (
-            Object::Node(Node::Set(base_items)),
+            Object::Node(Node::Set(_base_items)),
             Object::Node(Node::Set(our_items)),
             Object::Node(Node::Set(their_items)),
         ) => merge_sets(our_items, their_items),
@@ -336,7 +336,7 @@ fn merge_maps(
 }
 
 fn merge_lists(
-    resolver: &dyn ObjectResolver,
+    _resolver: &dyn ObjectResolver,
     path: &str,
     base_items: &[ObjectId],
     our_items: &[ObjectId],
