@@ -1,0 +1,14 @@
+[package]
+name = "stategraph-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pluggable storage backends for StateGraph"
+
+[dependencies]
+stategraph-core = { path = "../stategraph-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }

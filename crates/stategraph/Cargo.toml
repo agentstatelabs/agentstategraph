@@ -1,0 +1,16 @@
+[package]
+name = "stategraph"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "AI-native versioned state store for intent-based systems"
+
+[dependencies]
+stategraph-core = { path = "../stategraph-core" }
+stategraph-storage = { path = "../stategraph-storage" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

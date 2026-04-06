@@ -1,0 +1,21 @@
+[package]
+name = "stategraph-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MCP server for StateGraph — AI-native versioned state store"
+
+[[bin]]
+name = "stategraph-mcp"
+path = "src/main.rs"
+
+[dependencies]
+stategraph = { path = "../stategraph" }
+stategraph-core = { path = "../stategraph-core" }
+stategraph-storage = { path = "../stategraph-storage" }
+rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
+schemars = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["full"] }

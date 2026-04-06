@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stategraph-core",
+    "crates/stategraph-storage",
+    "crates/stategraph",
+    "crates/stategraph-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Craig Brown"]
+license = "MIT OR Apache-2.0"
+description = "AI-native versioned state store for intent-based systems"
+repository = "https://github.com/user/stategraph"
+
+[workspace.dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
