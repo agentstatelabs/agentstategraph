@@ -1,0 +1,17 @@
+[package]
+name = "stategraph-python"
+version = "0.1.0"
+edition = "2024"
+description = "Python bindings for StateGraph — AI-native versioned state store"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "stategraph_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+stategraph = { path = "../../crates/stategraph" }
+stategraph-core = { path = "../../crates/stategraph-core" }
+stategraph-storage = { path = "../../crates/stategraph-storage" }
+pyo3 = { version = "0.24", features = ["extension-module"] }
+serde_json = "1"

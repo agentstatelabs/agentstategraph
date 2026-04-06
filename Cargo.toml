@@ -5,6 +5,7 @@ members = [
     "crates/stategraph-storage",
     "crates/stategraph",
     "crates/stategraph-mcp",
+    "bindings/python",
 ]
 
 [workspace.package]
