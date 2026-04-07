@@ -8,8 +8,8 @@ description: Connect StateGraph to Claude Code, GPT, or any MCP-compatible agent
 ```bash
 git clone https://github.com/agentstatelabs/StateGraph.git
 cd StateGraph
-cargo build --release -p stategraph-mcp
-cargo run --release -p stategraph-mcp
+cargo build --release -p agentstategraph-mcp
+cargo run --release -p agentstategraph-mcp
 # Creates ./stategraph.db, listens on stdio
 ```
 
@@ -21,7 +21,7 @@ Add to `~/.claude.json` or your project's `.mcp.json`:
 {
   "mcpServers": {
     "stategraph": {
-      "command": "/path/to/StateGraph/target/release/stategraph-mcp"
+      "command": "/path/to/StateGraph/target/release/agentstategraph-mcp"
     }
   }
 }
@@ -34,7 +34,7 @@ Or run from source:
   "mcpServers": {
     "stategraph": {
       "command": "cargo",
-      "args": ["run", "--release", "-p", "stategraph-mcp", "--manifest-path", "/path/to/StateGraph/Cargo.toml"]
+      "args": ["run", "--release", "-p", "agentstategraph-mcp", "--manifest-path", "/path/to/StateGraph/Cargo.toml"]
     }
   }
 }
@@ -44,7 +44,7 @@ Restart Claude Code. The 20 StateGraph tools appear automatically.
 
 ## Connect to Other MCP Clients
 
-Any MCP client that supports stdio transport works. Point it at the `stategraph-mcp` binary.
+Any MCP client that supports stdio transport works. Point it at the `agentstategraph-mcp` binary.
 
 ## Configuration
 

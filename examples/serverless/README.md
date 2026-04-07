@@ -35,7 +35,7 @@ StateGraph (WASM, ~1MB)
 ```typescript
 // deno run --allow-net serverless_agent.ts
 
-import init, { WasmStateGraph } from "./stategraph_wasm.js";
+import init, { WasmStateGraph } from "./agentstategraph_wasm.js";
 
 await init();
 
@@ -87,7 +87,7 @@ console.log("Response:", JSON.stringify(response, null, 2));
 //   [build]
 //   command = "wasm-pack build --target bundler"
 
-import init, { WasmStateGraph } from "./stategraph_wasm.js";
+import init, { WasmStateGraph } from "./agentstategraph_wasm.js";
 
 let initialized = false;
 

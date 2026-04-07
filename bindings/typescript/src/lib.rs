@@ -11,10 +11,10 @@
 #[macro_use]
 extern crate napi_derive;
 
-use stategraph::speculation::SpecHandle;
-use stategraph::{CommitOptions, Repository};
-use stategraph_core::{IntentCategory, Object};
-use stategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph::speculation::SpecHandle;
+use agentstategraph::{CommitOptions, Repository};
+use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 
 fn parse_category(s: &str) -> IntentCategory {
     match s.to_lowercase().as_str() {
@@ -261,12 +261,12 @@ impl StateGraph {
         let obj = self.repo.spec_get(handle, &path).map_err(err)?;
         match &obj {
             Object::Atom(a) => match a {
-                stategraph_core::Atom::Null => Ok(serde_json::Value::Null),
-                stategraph_core::Atom::Bool(b) => Ok(serde_json::json!(b)),
-                stategraph_core::Atom::Int(i) => Ok(serde_json::json!(i)),
-                stategraph_core::Atom::Float(f) => Ok(serde_json::json!(f)),
-                stategraph_core::Atom::String(s) => Ok(serde_json::json!(s)),
-                stategraph_core::Atom::Bytes(b) => Ok(serde_json::json!(format!("bytes:{}", b.len()))),
+                agentstategraph_core::Atom::Null => Ok(serde_json::Value::Null),
+                agentstategraph_core::Atom::Bool(b) => Ok(serde_json::json!(b)),
+                agentstategraph_core::Atom::Int(i) => Ok(serde_json::json!(i)),
+                agentstategraph_core::Atom::Float(f) => Ok(serde_json::json!(f)),
+                agentstategraph_core::Atom::String(s) => Ok(serde_json::json!(s)),
+                agentstategraph_core::Atom::Bytes(b) => Ok(serde_json::json!(format!("bytes:{}", b.len()))),
             },
             _ => Ok(serde_json::json!(format!("{:?}", obj))),
         }
@@ -321,7 +321,7 @@ impl StateGraph {
     ) -> napi::Result<Vec<serde_json::Value>> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let max = limit.unwrap_or(20) as usize;
-        let filters = stategraph_core::QueryFilters {
+        let filters = agentstategraph_core::QueryFilters {
             agent_id,
             intent_category,
             tags,

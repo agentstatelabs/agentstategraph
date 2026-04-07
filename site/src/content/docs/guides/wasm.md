@@ -11,31 +11,31 @@ cargo install wasm-pack
 
 # Build the WASM package
 cd /path/to/StateGraph
-wasm-pack build crates/stategraph-wasm --target web --out-dir pkg
+wasm-pack build crates/agentstategraph-wasm --target web --out-dir pkg
 ```
 
 This produces `pkg/` with:
-- `stategraph_wasm.js` — JS glue code
-- `stategraph_wasm_bg.wasm` — the WASM binary
-- `stategraph_wasm.d.ts` — TypeScript types
+- `agentstategraph_wasm.js` — JS glue code
+- `agentstategraph_wasm_bg.wasm` — the WASM binary
+- `agentstategraph_wasm.d.ts` — TypeScript types
 
 For bundler targets (webpack, vite):
 
 ```bash
-wasm-pack build crates/stategraph-wasm --target bundler --out-dir pkg
+wasm-pack build crates/agentstategraph-wasm --target bundler --out-dir pkg
 ```
 
 For Node.js:
 
 ```bash
-wasm-pack build crates/stategraph-wasm --target nodejs --out-dir pkg
+wasm-pack build crates/agentstategraph-wasm --target nodejs --out-dir pkg
 ```
 
 ## Browser Usage
 
 ```html
 <script type="module">
-import init, { WasmStateGraph } from './pkg/stategraph_wasm.js'
+import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js'
 
 await init()
 const sg = new WasmStateGraph()
@@ -165,7 +165,7 @@ StateGraph WASM works in any runtime that supports `WebAssembly`:
 
 **Cloudflare Workers:**
 ```javascript
-import { WasmStateGraph } from './pkg/stategraph_wasm.js'
+import { WasmStateGraph } from './pkg/agentstategraph_wasm.js'
 
 export default {
   async fetch(request) {
@@ -179,7 +179,7 @@ export default {
 
 **Deno:**
 ```typescript
-import init, { WasmStateGraph } from './pkg/stategraph_wasm.js'
+import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js'
 await init()
 const sg = new WasmStateGraph()
 sg.set("/name", '"deno-app"', "Checkpoint", "init")

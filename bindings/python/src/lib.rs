@@ -14,10 +14,10 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
 
-use stategraph::speculation::SpecHandle;
-use stategraph::{CommitOptions, Repository};
-use stategraph_core::{IntentCategory, Object};
-use stategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph::speculation::SpecHandle;
+use agentstategraph::{CommitOptions, Repository};
+use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 
 /// Convert a Python JSON-compatible value to a StateGraph Object.
 fn py_to_object(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Object> {
@@ -268,12 +268,12 @@ impl StateGraph {
         // Convert Object to Python via JSON
         let json = match &obj {
             Object::Atom(a) => match a {
-                stategraph_core::Atom::Null => serde_json::Value::Null,
-                stategraph_core::Atom::Bool(b) => serde_json::json!(b),
-                stategraph_core::Atom::Int(i) => serde_json::json!(i),
-                stategraph_core::Atom::Float(f) => serde_json::json!(f),
-                stategraph_core::Atom::String(s) => serde_json::json!(s),
-                stategraph_core::Atom::Bytes(b) => serde_json::json!(format!("bytes:{}", b.len())),
+                agentstategraph_core::Atom::Null => serde_json::Value::Null,
+                agentstategraph_core::Atom::Bool(b) => serde_json::json!(b),
+                agentstategraph_core::Atom::Int(i) => serde_json::json!(i),
+                agentstategraph_core::Atom::Float(f) => serde_json::json!(f),
+                agentstategraph_core::Atom::String(s) => serde_json::json!(s),
+                agentstategraph_core::Atom::Bytes(b) => serde_json::json!(format!("bytes:{}", b.len())),
             },
             _ => serde_json::json!(format!("{:?}", obj)),
         };
@@ -329,7 +329,7 @@ impl StateGraph {
         has_deviations: Option<bool>,
         limit: usize,
     ) -> PyResult<PyObject> {
-        let filters = stategraph_core::QueryFilters {
+        let filters = agentstategraph_core::QueryFilters {
             agent_id,
             intent_category,
             tags,
@@ -410,9 +410,9 @@ impl StateGraph {
     #[pyo3(signature = (pattern_type="all", pattern=None))]
     fn watch(&self, pattern_type: &str, pattern: Option<String>) -> PyResult<u64> {
         let pat = match pattern_type {
-            "exact" => stategraph::PathPattern::Exact(pattern.unwrap_or_default()),
-            "prefix" => stategraph::PathPattern::Prefix(pattern.unwrap_or_default()),
-            _ => stategraph::PathPattern::All,
+            "exact" => agentstategraph::PathPattern::Exact(pattern.unwrap_or_default()),
+            "prefix" => agentstategraph::PathPattern::Prefix(pattern.unwrap_or_default()),
+            _ => agentstategraph::PathPattern::All,
         };
         let sub_id = self.repo.watches().subscribe(pat);
         // Return the raw inner value — SubscriptionId is opaque
@@ -437,7 +437,7 @@ fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
 
 /// Python module definition.
 #[pymodule]
-fn stategraph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn agentstategraph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StateGraph>()?;
     Ok(())
 }

@@ -1,0 +1,19 @@
+[package]
+name = "agentstategraph-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pluggable storage backends for StateGraph"
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+indexeddb = []
+
+[dependencies]
+agentstategraph-core = { path = "../agentstategraph-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true, optional = true }

@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --workspace --exclude stategraph-wasm --exclude stategraph-python --exclude stategraph-napi
+        run: cargo test --workspace --exclude agentstategraph-wasm --exclude agentstategraph-python --exclude agentstategraph-napi
 
   clippy:
     name: Clippy
@@ -30,7 +30,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy --workspace --exclude stategraph-wasm --exclude stategraph-python --exclude stategraph-napi -- -D warnings
+        run: cargo clippy --workspace --exclude agentstategraph-wasm --exclude agentstategraph-python --exclude agentstategraph-napi -- -D warnings
         continue-on-error: true  # Don't block PRs on clippy initially
 
   fmt:
@@ -54,7 +54,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Build WASM
-        run: cargo build -p stategraph-wasm --target wasm32-unknown-unknown --release
+        run: cargo build -p agentstategraph-wasm --target wasm32-unknown-unknown --release
 
   go:
     name: Go Tests
@@ -67,7 +67,7 @@ jobs:
           go-version: '1.24'
       - uses: Swatinem/rust-cache@v2
       - name: Build FFI
-        run: cargo build --release -p stategraph-ffi
+        run: cargo build --release -p agentstategraph-ffi
       - name: Run Go tests
         working-directory: bindings/go
         run: CGO_LDFLAGS="-L../../target/release" go test -v

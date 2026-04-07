@@ -15,12 +15,12 @@ Thank you for your interest in StateGraph! This project is building a new infras
 stategraph/
 ├── spec/STATEGRAPH-RFC.md          # The specification (read this first!)
 ├── crates/
-│   ├── stategraph-core/            # Types, diff, merge, schema — zero I/O
-│   ├── stategraph-storage/         # Pluggable backends (memory, SQLite, IndexedDB)
+│   ├── agentstategraph-core/            # Types, diff, merge, schema — zero I/O
+│   ├── agentstategraph-storage/         # Pluggable backends (memory, SQLite, IndexedDB)
 │   ├── stategraph/                 # High-level Repository API
-│   ├── stategraph-mcp/             # MCP server (20 tools)
-│   ├── stategraph-ffi/             # C ABI for language bindings
-│   └── stategraph-wasm/            # Browser/Deno WASM build
+│   ├── agentstategraph-mcp/             # MCP server (20 tools)
+│   ├── agentstategraph-ffi/             # C ABI for language bindings
+│   └── agentstategraph-wasm/            # Browser/Deno WASM build
 ├── bindings/
 │   ├── python/                     # PyO3 bindings
 │   ├── typescript/                 # napi-rs bindings
@@ -66,7 +66,7 @@ Look for issues labeled `good-first-issue`. These are designed to be approachabl
 - Follow standard Rust conventions
 - Write doc comments for all public items
 - Add tests for new functionality
-- Keep stategraph-core free of I/O dependencies
+- Keep agentstategraph-core free of I/O dependencies
 
 ## Architecture Principles
 

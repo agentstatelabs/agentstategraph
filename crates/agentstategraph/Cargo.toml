@@ -1,0 +1,20 @@
+[package]
+name = "agentstategraph"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "AI-native versioned state store for intent-based systems"
+
+[features]
+default = ["sqlite"]
+sqlite = ["agentstategraph-storage/sqlite"]
+
+[dependencies]
+agentstategraph-core = { path = "../agentstategraph-core" }
+agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

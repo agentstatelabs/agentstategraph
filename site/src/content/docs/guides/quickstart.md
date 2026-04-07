@@ -8,8 +8,8 @@ description: Get StateGraph running in under 5 minutes.
 ```bash
 git clone https://github.com/agentstatelabs/StateGraph.git
 cd StateGraph
-cargo build --release -p stategraph-mcp
-cargo run --release -p stategraph-mcp
+cargo build --release -p agentstategraph-mcp
+cargo run --release -p agentstategraph-mcp
 ```
 
 Add to Claude Code config:
@@ -17,7 +17,7 @@ Add to Claude Code config:
 {
   "mcpServers": {
     "stategraph": {
-      "command": "/path/to/StateGraph/target/release/stategraph-mcp"
+      "command": "/path/to/StateGraph/target/release/agentstategraph-mcp"
     }
   }
 }
@@ -28,13 +28,13 @@ Then ask your agent to use StateGraph tools.
 ## Option 2: Rust Library
 
 ```bash
-cargo add stategraph stategraph-core stategraph-storage
+cargo add stategraph agentstategraph-core agentstategraph-storage
 ```
 
 ```rust
 use stategraph::{Repository, CommitOptions};
-use stategraph_storage::SqliteStorage;
-use stategraph_core::{IntentCategory, Object};
+use agentstategraph_storage::SqliteStorage;
+use agentstategraph_core::{IntentCategory, Object};
 
 let storage = SqliteStorage::open("./state.db").unwrap();
 let repo = Repository::new(Box::new(storage));
@@ -65,7 +65,7 @@ pip install maturin && maturin develop --release
 ```
 
 ```python
-from stategraph_py import StateGraph
+from agentstategraph_py import StateGraph
 
 sg = StateGraph("state.db")  # SQLite, or StateGraph() for in-memory
 sg.set("/name", "my-project", "Init", category="Checkpoint")

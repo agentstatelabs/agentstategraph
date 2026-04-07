@@ -10,7 +10,7 @@
 package stategraph
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/../../target/release -lstategraph_ffi
+#cgo LDFLAGS: -L${SRCDIR}/../../target/release -lagentstategraph_ffi
 #include <stdlib.h>
 
 typedef void* SgRepo;

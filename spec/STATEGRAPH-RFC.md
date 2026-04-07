@@ -1590,10 +1590,10 @@ StateGraph emits structured events that MCP clients can subscribe to:
 ```
 stategraph/
 ├── crates/
-│   ├── stategraph-core/        # Object model, types, DAG, diff, merge, schema
+│   ├── agentstategraph-core/        # Object model, types, DAG, diff, merge, schema
 │   │                           # Zero I/O dependencies. Pure logic.
 │   │
-│   ├── stategraph-storage/     # Storage traits + backend implementations
+│   ├── agentstategraph-storage/     # Storage traits + backend implementations
 │   │   ├── traits.rs           # ObjectStore, RefStore, SessionStore
 │   │   ├── memory.rs           # In-memory backend (default)
 │   │   ├── sqlite.rs           # SQLite backend
@@ -1606,9 +1606,9 @@ stategraph/
 │   │   ├── watch.rs            # Watch/subscribe system
 │   │   └── query.rs            # Intent queries, search, bisect
 │   │
-│   ├── stategraph-mcp/         # MCP server implementation
-│   ├── stategraph-ffi/         # C ABI surface for language bindings
-│   └── stategraph-wasm/        # wasm-bindgen for browser/Deno/Node
+│   ├── agentstategraph-mcp/         # MCP server implementation
+│   ├── agentstategraph-ffi/         # C ABI surface for language bindings
+│   └── agentstategraph-wasm/        # wasm-bindgen for browser/Deno/Node
 │
 ├── bindings/
 │   ├── python/                 # PyO3 + maturin
@@ -1674,9 +1674,9 @@ trait SessionStore: Send + Sync {
 |----------|-----------|-------------|
 | **Python** | PyO3 + maturin | `pip install stategraph` |
 | **TypeScript/Node** | napi-rs | `npm install stategraph` |
-| **Go** | CGo wrapping stategraph-ffi | `go get stategraph` |
-| **Browser/Deno** | wasm-bindgen (stategraph-wasm) | npm or direct WASM import |
-| **Any (C ABI)** | stategraph-ffi | Shared library (.so/.dylib/.dll) |
+| **Go** | CGo wrapping agentstategraph-ffi | `go get stategraph` |
+| **Browser/Deno** | wasm-bindgen (agentstategraph-wasm) | npm or direct WASM import |
+| **Any (C ABI)** | agentstategraph-ffi | Shared library (.so/.dylib/.dll) |
 
 ---
 
@@ -2063,21 +2063,21 @@ Each layer has:
 - A standalone example demonstrating the layer's capabilities
 - Documentation that can be read independently
 
-### 11.3 MCP Server (`stategraph-mcp`)
+### 11.3 MCP Server (`agentstategraph-mcp`)
 
 A standalone MCP server that any MCP-compatible agent (Claude, GPT, open-source agents) can connect to immediately.
 
 **Distribution and startup:**
 ```bash
 # npm (zero install)
-npx stategraph-mcp
+npx agentstategraph-mcp
 
 # pip
-pip install stategraph-mcp
-stategraph-mcp
+pip install agentstategraph-mcp
+agentstategraph-mcp
 
 # Binary (from releases)
-./stategraph-mcp
+./agentstategraph-mcp
 
 # Docker
 docker run -p 3000:3000 stategraph/mcp-server
@@ -2100,7 +2100,7 @@ That's the default — durable SQLite storage in a single file, zero external de
   "mcpServers": {
     "stategraph": {
       "command": "npx",
-      "args": ["stategraph-mcp"]
+      "args": ["agentstategraph-mcp"]
     }
   }
 }
@@ -2113,7 +2113,7 @@ An agent connecting for the first time discovers all available tools via the MCP
 A complete example that demonstrates the core workflow, suitable for inclusion in the README and as an agent's first interaction with StateGraph:
 
 ```
-# Agent connects to stategraph-mcp and runs:
+# Agent connects to agentstategraph-mcp and runs:
 
 # 1. Set initial state
 stategraph_set(ref="main", path="/app/name", value="my-project",

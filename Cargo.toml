@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/stategraph-core",
-    "crates/stategraph-storage",
-    "crates/stategraph",
-    "crates/stategraph-mcp",
-    "crates/stategraph-ffi",
-    "crates/stategraph-wasm",
+    "crates/agentstategraph-core",
+    "crates/agentstategraph-storage",
+    "crates/agentstategraph",
+    "crates/agentstategraph-mcp",
+    "crates/agentstategraph-ffi",
+    "crates/agentstategraph-wasm",
     "bindings/python",
     "bindings/typescript",
 ]
@@ -19,7 +19,7 @@ license = "MIT OR Apache-2.0"
 description = "AI-native versioned state store for intent-based systems"
 repository = "https://github.com/agentstatelabs/StateGraph"
 homepage = "https://github.com/agentstatelabs/StateGraph"
-documentation = "https://docs.rs/stategraph"
+documentation = "https://docs.rs/agentstategraph"
 
 [workspace.dependencies]
 blake3 = "1"

@@ -1,0 +1,16 @@
+[package]
+name = "agentstategraph-ffi"
+version.workspace = true
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+description = "C ABI for StateGraph — enables Go, Ruby, Java, C# bindings"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+agentstategraph = { path = "../agentstategraph" }
+agentstategraph-core = { path = "../agentstategraph-core" }
+agentstategraph-storage = { path = "../agentstategraph-storage" }
+serde_json = { workspace = true }

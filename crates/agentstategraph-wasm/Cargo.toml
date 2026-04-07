@@ -1,0 +1,19 @@
+[package]
+name = "agentstategraph-wasm"
+version.workspace = true
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+description = "WASM bindings for StateGraph — browser, Deno, Node"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+agentstategraph = { path = "../agentstategraph", default-features = false }
+agentstategraph-core = { path = "../agentstategraph-core" }
+agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false, features = ["indexeddb"] }
+wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+js-sys = "0.3"

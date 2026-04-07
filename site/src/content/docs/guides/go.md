@@ -13,10 +13,10 @@ description: Use StateGraph from Go via C FFI bindings.
 
 ```bash
 cd /path/to/StateGraph
-cargo build --release -p stategraph-ffi
+cargo build --release -p agentstategraph-ffi
 ```
 
-This produces `target/release/libstategraph_ffi.a` (static) and `libstategraph_ffi.so`/`.dylib` (dynamic).
+This produces `target/release/libagentstategraph_ffi.a` (static) and `libagentstategraph_ffi.so`/`.dylib` (dynamic).
 
 ## Link in Your Go Project
 
@@ -25,7 +25,7 @@ The Go bindings live in `bindings/go/`. Copy or symlink the package into your pr
 The CGo directive in `stategraph.go` expects the library at `../../target/release/`:
 
 ```go
-// #cgo LDFLAGS: -L${SRCDIR}/../../target/release -lstategraph_ffi
+// #cgo LDFLAGS: -L${SRCDIR}/../../target/release -lagentstategraph_ffi
 ```
 
 Adjust the path if your layout differs.
@@ -137,7 +137,7 @@ val, _ := sg.Get("/app/version", "feature/v2")
 For static linking (no runtime dependency on the `.so`/.`dylib`):
 
 ```go
-// #cgo LDFLAGS: -L${SRCDIR}/../../target/release -lstategraph_ffi -lm -ldl -lpthread
+// #cgo LDFLAGS: -L${SRCDIR}/../../target/release -lagentstategraph_ffi -lm -ldl -lpthread
 ```
 
 Build with:

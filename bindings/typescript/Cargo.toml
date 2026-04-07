@@ -1,5 +1,5 @@
 [package]
-name = "stategraph-napi"
+name = "agentstategraph-napi"
 version = "0.1.0"
 edition = "2024"
 description = "TypeScript/Node.js bindings for StateGraph via napi-rs"
@@ -9,9 +9,9 @@ license = "MIT OR Apache-2.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-stategraph = { path = "../../crates/stategraph" }
-stategraph-core = { path = "../../crates/stategraph-core" }
-stategraph-storage = { path = "../../crates/stategraph-storage" }
+agentstategraph = { path = "../../crates/agentstategraph" }
+agentstategraph-core = { path = "../../crates/agentstategraph-core" }
+agentstategraph-storage = { path = "../../crates/agentstategraph-storage" }
 napi = { version = "2", features = ["napi9", "serde-json"] }
 napi-derive = "2"
 serde_json = "1"

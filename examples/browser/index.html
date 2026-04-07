@@ -30,10 +30,10 @@
 
     <script type="module">
         // NOTE: In production, import from the wasm-pack output:
-        // import init, { WasmStateGraph } from './pkg/stategraph_wasm.js';
+        // import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js';
 
         // For this demo, we simulate the StateGraph API to show the concept.
-        // Build the real WASM with: wasm-pack build crates/stategraph-wasm --target web
+        // Build the real WASM with: wasm-pack build crates/agentstategraph-wasm --target web
 
         const log = document.getElementById('log');
 
@@ -117,7 +117,7 @@
             print('');
 
             // In production, this would use the real WASM module:
-            // import init, { WasmStateGraph } from './pkg/stategraph_wasm.js';
+            // import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js';
             // await init();
             // const sg = new WasmStateGraph("my-app");
 
@@ -166,7 +166,7 @@
             print('  ✓ ~1MB WASM binary, instant startup');
             print('');
             print('Build the WASM module:', 'info');
-            print('  cd stategraph && wasm-pack build crates/stategraph-wasm --target web');
+            print('  cd stategraph && wasm-pack build crates/agentstategraph-wasm --target web');
             print('');
             print('=== Demo complete ===', 'info');
         };

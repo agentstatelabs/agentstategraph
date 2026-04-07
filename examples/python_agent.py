@@ -14,7 +14,7 @@ Run:
     python3 examples/python_agent.py
 """
 
-from stategraph_py import StateGraph
+from agentstategraph_py import StateGraph
 
 
 def main():

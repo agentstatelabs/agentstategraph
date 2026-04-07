@@ -14,7 +14,7 @@ pip install maturin && maturin develop --release
 ## Create a Store
 
 ```python
-from stategraph_py import StateGraph
+from agentstategraph_py import StateGraph
 
 # In-memory (ephemeral)
 sg = StateGraph()

@@ -73,7 +73,7 @@ How StateGraph exposes itself as an MCP server.
 
 Implementation structure.
 
-- **8.1 Crate Structure** -- `stategraph-core` (types, diff, merge), `stategraph-storage` (pluggable backends), `stategraph` (high-level API), `stategraph-mcp` (MCP server).
+- **8.1 Crate Structure** -- `agentstategraph-core` (types, diff, merge), `agentstategraph-storage` (pluggable backends), `stategraph` (high-level API), `agentstategraph-mcp` (MCP server).
 - **8.2 Storage Traits** -- The `Storage` trait interface for pluggable backends (Memory, SQLite, IndexedDB).
 - **8.3 Performance Design** -- Content-addressed deduplication, O(1) branch creation, copy-on-write speculation.
 - **8.4 Language Bindings** -- Python (PyO3), TypeScript (napi-rs), Go (C FFI), WASM (wasm-bindgen).
@@ -103,7 +103,7 @@ Implementation details and test coverage.
 
 - **11.1 Principles** -- Correctness over performance, content-addressed everything, zero unsafe.
 - **11.2 Rust Reference Library** -- The `stategraph` crate with Repository API.
-- **11.3 MCP Server** -- The `stategraph-mcp` crate with all 20 tools.
+- **11.3 MCP Server** -- The `agentstategraph-mcp` crate with all 20 tools.
 - **11.4 Getting Started Example** -- End-to-end code walkthrough.
 - **11.5 Implementation Test Suite** -- 137 tests covering all operations.
 

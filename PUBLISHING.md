@@ -7,10 +7,10 @@
 3. Run:
 ```bash
 cargo login <your-token>
-cargo publish -p stategraph-core
-cargo publish -p stategraph-storage
+cargo publish -p agentstategraph-core
+cargo publish -p agentstategraph-storage
 cargo publish -p stategraph
-cargo publish -p stategraph-mcp
+cargo publish -p agentstategraph-mcp
 ```
 
 Note: Publish in order — each crate depends on the previous.
@@ -45,14 +45,14 @@ Users install with: `npm install stategraph`
 1. Install wasm-pack: `cargo install wasm-pack`
 2. Run:
 ```bash
-wasm-pack build crates/stategraph-wasm --target web --release
-cd crates/stategraph-wasm/pkg
+wasm-pack build crates/agentstategraph-wasm --target web --release
+cd crates/agentstategraph-wasm/pkg
 npm publish
 ```
 
 Users import with:
 ```js
-import init, { WasmStateGraph } from 'stategraph-wasm';
+import init, { WasmStateGraph } from 'agentstategraph-wasm';
 await init();
 const sg = new WasmStateGraph();
 ```

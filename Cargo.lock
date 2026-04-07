@@ -3,6 +3,103 @@
 version = 4
 
 [[package]]
+name = "agentstategraph"
+version = "0.1.0"
+dependencies = [
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "agentstategraph-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "agentstategraph-ffi"
+version = "0.1.0"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "serde_json",
+]
+
+[[package]]
+name = "agentstategraph-mcp"
+version = "0.1.0"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "agentstategraph-napi"
+version = "0.1.0"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde_json",
+]
+
+[[package]]
+name = "agentstategraph-python"
+version = "0.1.0"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "pyo3",
+ "serde_json",
+]
+
+[[package]]
+name = "agentstategraph-storage"
+version = "0.1.0"
+dependencies = [
+ "agentstategraph-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "agentstategraph-wasm"
+version = "0.1.0"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -980,103 +1077,6 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys",
-]
-
-[[package]]
-name = "stategraph"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "stategraph-core",
- "stategraph-storage",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "stategraph-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "stategraph-ffi"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "stategraph",
- "stategraph-core",
- "stategraph-storage",
-]
-
-[[package]]
-name = "stategraph-mcp"
-version = "0.1.0"
-dependencies = [
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "stategraph",
- "stategraph-core",
- "stategraph-storage",
- "tokio",
-]
-
-[[package]]
-name = "stategraph-napi"
-version = "0.1.0"
-dependencies = [
- "napi",
- "napi-build",
- "napi-derive",
- "serde_json",
- "stategraph",
- "stategraph-core",
- "stategraph-storage",
-]
-
-[[package]]
-name = "stategraph-python"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "serde_json",
- "stategraph",
- "stategraph-core",
- "stategraph-storage",
-]
-
-[[package]]
-name = "stategraph-storage"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "stategraph-core",
- "thiserror",
-]
-
-[[package]]
-name = "stategraph-wasm"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "serde",
- "serde_json",
- "stategraph",
- "stategraph-core",
- "stategraph-storage",
- "wasm-bindgen",
 ]
 
 [[package]]

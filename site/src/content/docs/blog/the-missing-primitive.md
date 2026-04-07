@@ -110,7 +110,7 @@ StateGraph is open source (MIT/Apache-2.0) and available today:
 
 **As an MCP server** (connect to Claude, GPT, or any MCP agent):
 ```bash
-cargo run -p stategraph-mcp
+cargo run -p agentstategraph-mcp
 ```
 
 **As a Rust library**:
@@ -123,7 +123,7 @@ repo.set("main", "/cluster/name", &Object::string("prod"),
 
 **From Python**:
 ```python
-from stategraph_py import StateGraph
+from agentstategraph_py import StateGraph
 sg = StateGraph("state.db")
 sg.set("/name", "prod", "init", category="Checkpoint")
 ```

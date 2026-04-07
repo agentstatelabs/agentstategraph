@@ -22,10 +22,10 @@ Agents don't execute linear scripts — they explore state spaces. They need a p
 ```bash
 # Clone and build
 git clone <repo-url> && cd stategraph
-cargo build -p stategraph-mcp
+cargo build -p agentstategraph-mcp
 
 # Run the MCP server
-cargo run -p stategraph-mcp
+cargo run -p agentstategraph-mcp
 # → Creates ./stategraph.db, waits for MCP client connection
 ```
 
@@ -35,7 +35,7 @@ Add to your Claude Code MCP config (`~/.claude.json` or project `.mcp.json`):
   "mcpServers": {
     "stategraph": {
       "command": "cargo",
-      "args": ["run", "-p", "stategraph-mcp", "--manifest-path", "/path/to/stategraph/Cargo.toml"]
+      "args": ["run", "-p", "agentstategraph-mcp", "--manifest-path", "/path/to/stategraph/Cargo.toml"]
     }
   }
 }
@@ -53,8 +53,8 @@ Then in Claude Code, you can:
 
 ```rust
 use stategraph::{Repository, CommitOptions};
-use stategraph_storage::SqliteStorage;
-use stategraph_core::{IntentCategory, Object};
+use agentstategraph_storage::SqliteStorage;
+use agentstategraph_core::{IntentCategory, Object};
 
 // Create a repo with durable SQLite storage
 let storage = SqliteStorage::open("./my-state.db").unwrap();
@@ -141,10 +141,10 @@ Every commit captures the **full provenance chain**:
 
 ```
 stategraph/
-├── stategraph-core        # Types, diff, merge — zero I/O deps
-├── stategraph-storage     # Pluggable backends (memory, SQLite)
+├── agentstategraph-core        # Types, diff, merge — zero I/O deps
+├── agentstategraph-storage     # Pluggable backends (memory, SQLite)
 ├── stategraph             # High-level Repository API
-└── stategraph-mcp         # MCP server (13 tools over stdio)
+└── agentstategraph-mcp         # MCP server (13 tools over stdio)
 ```
 
 ## Specification
