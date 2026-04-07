@@ -1,6 +1,6 @@
 ---
 title: WebAssembly
-description: Run StateGraph in the browser, Deno, or serverless/edge runtimes via WASM.
+description: Run AgentStateGraph in the browser, Deno, or serverless/edge runtimes via WASM.
 ---
 
 ## Build with wasm-pack
@@ -161,7 +161,7 @@ const epochs = JSON.parse(sg.listEpochs())
 
 ## Serverless / Edge Runtimes
 
-StateGraph WASM works in any runtime that supports `WebAssembly`:
+AgentStateGraph WASM works in any runtime that supports `WebAssembly`:
 
 **Cloudflare Workers:**
 ```javascript

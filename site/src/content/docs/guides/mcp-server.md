@@ -1,6 +1,6 @@
 ---
 title: MCP Server
-description: Connect StateGraph to Claude Code, GPT, or any MCP-compatible agent.
+description: Connect AgentStateGraph to Claude Code, GPT, or any MCP-compatible agent.
 ---
 
 ## Build and Run
@@ -40,7 +40,7 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 20 StateGraph tools appear automatically.
+Restart Claude Code. The 20 AgentStateGraph tools appear automatically.
 
 ## Connect to Other MCP Clients
 

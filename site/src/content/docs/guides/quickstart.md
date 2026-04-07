@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: Get StateGraph running in under 5 minutes.
+description: Get AgentStateGraph running in under 5 minutes.
 ---
 
 ## Option 1: MCP Server (connect to Claude, GPT, any agent)
@@ -23,7 +23,7 @@ Add to Claude Code config:
 }
 ```
 
-Then ask your agent to use StateGraph tools.
+Then ask your agent to use AgentStateGraph tools.
 
 ## Option 2: Rust Library
 

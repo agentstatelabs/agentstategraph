@@ -1,6 +1,6 @@
 ---
 title: Core Concepts
-description: The building blocks of StateGraph.
+description: The building blocks of AgentStateGraph.
 ---
 
 ## Objects
@@ -9,7 +9,7 @@ All state is composed of **Objects** — either atoms (null, bool, int, float, s
 
 ## Commits
 
-A **Commit** links a state tree to its history and provenance. Beyond git's tree + parents + message, StateGraph commits carry:
+A **Commit** links a state tree to its history and provenance. Beyond git's tree + parents + message, AgentStateGraph commits carry:
 
 - **agent_id** — who performed the action
 - **authority** — who authorized it, with delegation chain

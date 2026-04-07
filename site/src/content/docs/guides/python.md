@@ -1,6 +1,6 @@
 ---
 title: Python
-description: Use StateGraph from Python via native bindings (PyO3).
+description: Use AgentStateGraph from Python via native bindings (PyO3).
 ---
 
 ## Install

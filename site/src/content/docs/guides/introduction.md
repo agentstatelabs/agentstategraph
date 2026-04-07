@@ -1,9 +1,9 @@
 ---
 title: Introduction
-description: What StateGraph is and why it exists.
+description: What AgentStateGraph is and why it exists.
 ---
 
-StateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems.
+AgentStateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems.
 
 ## The Problem
 
@@ -17,9 +17,9 @@ AI agents don't execute linear scripts — they explore state spaces. An agent a
 
 No existing tool supports this natively. Git is text-oriented. Databases lack branching. Event sourcing is append-only.
 
-## What StateGraph Provides
+## What AgentStateGraph Provides
 
-Every state change in StateGraph captures the **full provenance chain**:
+Every state change in AgentStateGraph captures the **full provenance chain**:
 
 | Field | Question |
 |-------|----------|

@@ -6,8 +6,8 @@ export default defineConfig({
 	site: 'https://agentstategraph.dev',
 	integrations: [
 		starlight({
-			title: 'StateGraph',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/agentstatelabs/StateGraph' }],
+			title: 'AgentStateGraph',
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/agentstatelabs/AgentStateGraph' }],
 			customCss: ['./src/styles/custom.css'],
 			sidebar: [
 				{

@@ -1,6 +1,6 @@
 ---
 title: TypeScript / Node.js
-description: Use StateGraph from TypeScript and Node.js via native bindings (napi-rs).
+description: Use AgentStateGraph from TypeScript and Node.js via native bindings (napi-rs).
 ---
 
 ## Install

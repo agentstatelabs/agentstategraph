@@ -1,6 +1,6 @@
 ---
 title: RFC Specification
-description: Overview of the StateGraph RFC-0001 specification and what each section covers.
+description: Overview of the AgentStateGraph RFC-0001 specification and what each section covers.
 ---
 
 The full specification lives at [`spec/STATEGRAPH-RFC.md`](https://github.com/agentstatelabs/AgentStateGraph/blob/main/spec/STATEGRAPH-RFC.md) in the repository.
@@ -15,7 +15,7 @@ The full specification lives at [`spec/STATEGRAPH-RFC.md`](https://github.com/ag
 
 ### 1. Motivation
 
-Why StateGraph exists. Covers the four architecture eras (monolithic, batch, streaming, intent-based), the provenance gap in AI systems, the shift from single-agent to orchestrator patterns, what existing tools lack, and what StateGraph provides.
+Why AgentStateGraph exists. Covers the four architecture eras (monolithic, batch, streaming, intent-based), the provenance gap in AI systems, the shift from single-agent to orchestrator patterns, what existing tools lack, and what StateGraph provides.
 
 ### 2. Glossary
 

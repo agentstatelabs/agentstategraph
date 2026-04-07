@@ -1,6 +1,6 @@
 ---
 title: Go
-description: Use StateGraph from Go via C FFI bindings.
+description: Use AgentStateGraph from Go via C FFI bindings.
 ---
 
 ## Prerequisites

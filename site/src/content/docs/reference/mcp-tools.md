@@ -1,6 +1,6 @@
 ---
 title: MCP Tools Reference
-description: Complete reference for all 20 StateGraph MCP tools with parameters and examples.
+description: Complete reference for all 20 AgentStateGraph MCP tools with parameters and examples.
 ---
 
 ## State Operations

@@ -49,9 +49,9 @@ There's a deeper issue. Intent-based systems have a fundamental trust problem fr
 
 Without provenance, trust in AI systems requires faith. Faith doesn't survive the first incident.
 
-## What We Built: StateGraph
+## What We Built: AgentStateGraph
 
-StateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems.
+AgentStateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems.
 
 Every state change captures the **full provenance chain**:
 
@@ -70,13 +70,13 @@ Every state change captures the **full provenance chain**:
 
 Today's agent systems are mostly single-agent. But the architecture is shifting. The emerging pattern is the **orchestrator model**: a lead agent decomposes a complex intent into sub-tasks, delegates to specialist agents, monitors progress, and synthesizes results.
 
-A single user intent can spider out into dozens of agent sessions, hundreds of tool calls, and multiple layers of delegation. Without something like StateGraph, that entire execution tree evaporates when the conversation ends.
+A single user intent can spider out into dozens of agent sessions, hundreds of tool calls, and multiple layers of delegation. Without something like AgentStateGraph, that entire execution tree evaporates when the conversation ends.
 
-StateGraph captures the tree: intent decomposition, delegation chains, per-agent branches with scoped state changes, and structured resolutions reporting back up the chain.
+AgentStateGraph captures the tree: intent decomposition, delegation chains, per-agent branches with scoped state changes, and structured resolutions reporting back up the chain.
 
 ### Schema-Aware Merge
 
-When multiple agents work on the same state concurrently, conflicts are inevitable in text-based systems. StateGraph uses schema annotations to auto-resolve most conflicts:
+When multiple agents work on the same state concurrently, conflicts are inevitable in text-based systems. AgentStateGraph uses schema annotations to auto-resolve most conflicts:
 
 - Both agents add nodes? -> `union-by-id` merges by record key
 - Both increment a counter? -> `sum` adds the deltas
@@ -85,7 +85,7 @@ When multiple agents work on the same state concurrently, conflicts are inevitab
 
 ### Speculative Execution
 
-Agents explore by branching. StateGraph makes this a first-class primitive:
+Agents explore by branching. AgentStateGraph makes this a first-class primitive:
 
 ```
 spec_a = speculate("main")    // try NFS
@@ -106,7 +106,7 @@ For enterprise adoption, work can be grouped into **epochs** -- bounded, sealabl
 
 ## Try It Now
 
-StateGraph is open source (MIT/Apache-2.0) and available today:
+AgentStateGraph is open source (MIT/Apache-2.0) and available today:
 
 **As an MCP server** (connect to Claude, GPT, or any MCP agent):
 ```bash
@@ -136,11 +136,11 @@ sg.set("/name", "prod", "init", category="Checkpoint")
 
 ## What's Next
 
-- **StateGraph Chat**: An LLM-agnostic chat app with branchable conversations, built on StateGraph. The visual proof-of-concept.
+- **StateGraph Chat**: An LLM-agnostic chat app with branchable conversations, built on AgentStateGraph. The visual proof-of-concept.
 - **Schema merge in the engine**: Wire the CRDT-inspired merge hints into the merge engine for fully automatic conflict resolution.
 - **Conformance test suite**: Any implementation that passes the suite is spec-compliant.
 
-StateGraph is one of the missing infrastructure primitives for the intent-based era. If you're building with AI agents and feel the gap, come build with us.
+AgentStateGraph is one of the missing infrastructure primitives for the intent-based era. If you're building with AI agents and feel the gap, come build with us.
 
 ---
 
