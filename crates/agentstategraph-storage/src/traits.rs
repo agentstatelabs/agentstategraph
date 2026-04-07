@@ -91,12 +91,7 @@ pub trait RefStore: Send + Sync {
     /// Updates the ref only if it currently points to `expected`.
     /// Returns true if the swap succeeded, false if the ref's current value
     /// didn't match `expected`.
-    fn cas_ref(
-        &self,
-        name: &str,
-        expected: ObjectId,
-        new: ObjectId,
-    ) -> Result<bool, StorageError>;
+    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError>;
 
     /// List all refs matching a prefix.
     fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError>;

@@ -99,11 +99,7 @@ impl SessionManager {
         let sessions = self.sessions.read().unwrap();
         sessions
             .values()
-            .filter(|s| {
-                agent_filter
-                    .map(|f| s.agent_id == f)
-                    .unwrap_or(true)
-            })
+            .filter(|s| agent_filter.map(|f| s.agent_id == f).unwrap_or(true))
             .cloned()
             .collect()
     }
@@ -243,9 +239,33 @@ mod tests {
     #[test]
     fn test_list_by_agent() {
         let mgr = SessionManager::new();
-        mgr.create("agent/a", "br/a", ObjectId::hash(b"h"), None, None, None, None);
-        mgr.create("agent/b", "br/b", ObjectId::hash(b"h"), None, None, None, None);
-        mgr.create("agent/a", "br/a2", ObjectId::hash(b"h"), None, None, None, None);
+        mgr.create(
+            "agent/a",
+            "br/a",
+            ObjectId::hash(b"h"),
+            None,
+            None,
+            None,
+            None,
+        );
+        mgr.create(
+            "agent/b",
+            "br/b",
+            ObjectId::hash(b"h"),
+            None,
+            None,
+            None,
+            None,
+        );
+        mgr.create(
+            "agent/a",
+            "br/a2",
+            ObjectId::hash(b"h"),
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(mgr.list(Some("agent/a")).len(), 2);
         assert_eq!(mgr.list(Some("agent/b")).len(), 1);

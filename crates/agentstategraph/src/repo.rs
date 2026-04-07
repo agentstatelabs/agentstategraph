@@ -152,7 +152,8 @@ impl Repository {
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
 
-        let state_path = StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
         let obj = tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path)?;
         Ok(obj)
     }
@@ -179,8 +180,14 @@ impl Repository {
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
 
-        let state_path = StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
-        let new_root = tree::tree_set(self.storage.as_ref(), &commit.state_root, &state_path, value)?;
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let new_root = tree::tree_set(
+            self.storage.as_ref(),
+            &commit.state_root,
+            &state_path,
+            value,
+        )?;
 
         let new_commit = self.create_commit(new_root, vec![commit_id], options)?;
         self.storage.set_ref(ref_name, new_commit.id)?;
@@ -217,7 +224,8 @@ impl Repository {
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
 
-        let state_path = StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
         let new_root = tree::tree_delete(self.storage.as_ref(), &commit.state_root, &state_path)?;
 
         let new_commit = self.create_commit(new_root, vec![commit_id], options)?;
@@ -249,7 +257,10 @@ impl Repository {
     }
 
     /// List all branches, optionally filtered by prefix.
-    pub fn list_branches(&self, prefix: Option<&str>) -> Result<Vec<(String, ObjectId)>, RepoError> {
+    pub fn list_branches(
+        &self,
+        prefix: Option<&str>,
+    ) -> Result<Vec<(String, ObjectId)>, RepoError> {
         Ok(self.storage.list_refs(prefix.unwrap_or(""))?)
     }
 
@@ -318,9 +329,7 @@ impl Repository {
                 self.storage.set_ref(target, ff_commit)?;
                 Ok(ff_commit)
             }
-            MergeResult::Conflicts { conflicts, .. } => {
-                Err(RepoError::MergeConflicts(conflicts))
-            }
+            MergeResult::Conflicts { conflicts, .. } => Err(RepoError::MergeConflicts(conflicts)),
         }
     }
 
@@ -482,8 +491,7 @@ impl Repository {
         for commit in &commits {
             if commit.parents.is_empty() {
                 // Initial commit — this is where everything was "set"
-                if tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path).is_ok()
-                {
+                if tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path).is_ok() {
                     return Ok(agentstategraph_core::BlameEntry {
                         path: path.to_string(),
                         commit_id: commit.id.short(),
@@ -568,14 +576,20 @@ impl Repository {
         root_intents: Vec<String>,
     ) -> Result<agentstategraph_core::Epoch, RepoError> {
         let epoch = agentstategraph_core::Epoch::new(id, description, root_intents);
-        let mut epochs = self.epochs.write().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let mut epochs = self
+            .epochs
+            .write()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
         epochs.push(epoch.clone());
         Ok(epoch)
     }
 
     /// Seal an epoch, making it immutable.
     pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), RepoError> {
-        let mut epochs = self.epochs.write().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let mut epochs = self
+            .epochs
+            .write()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
         let epoch = epochs
             .iter_mut()
             .find(|e| e.id == id)
@@ -596,13 +610,19 @@ impl Repository {
 
     /// List all epochs.
     pub fn list_epochs(&self) -> Result<Vec<agentstategraph_core::EpochEntry>, RepoError> {
-        let epochs = self.epochs.read().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let epochs = self
+            .epochs
+            .read()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
         Ok(epochs.iter().map(|e| e.to_entry()).collect())
     }
 
     /// Get a specific epoch by ID.
     pub fn get_epoch(&self, id: &str) -> Result<agentstategraph_core::Epoch, RepoError> {
-        let epochs = self.epochs.read().map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let epochs = self
+            .epochs
+            .read()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
         epochs
             .iter()
             .find(|e| e.id == id)
@@ -616,11 +636,7 @@ impl Repository {
 
     /// Find the common ancestor of two commits by walking parent chains.
     /// Simple implementation: collect all ancestors of one, find first match in other.
-    fn find_common_ancestor(
-        &self,
-        a: &ObjectId,
-        b: &ObjectId,
-    ) -> Result<ObjectId, RepoError> {
+    fn find_common_ancestor(&self, a: &ObjectId, b: &ObjectId) -> Result<ObjectId, RepoError> {
         // Collect all ancestors of 'a'
         let mut ancestors_a = std::collections::HashSet::new();
         let mut current = Some(*a);
@@ -668,7 +684,9 @@ impl Repository {
         self.storage.put_object(obj)?;
         if let Object::Node(node) = obj {
             let children = match node {
-                agentstategraph_core::Node::Map(entries) => entries.values().copied().collect::<Vec<_>>(),
+                agentstategraph_core::Node::Map(entries) => {
+                    entries.values().copied().collect::<Vec<_>>()
+                }
                 agentstategraph_core::Node::List(items) => items.clone(),
                 agentstategraph_core::Node::Set(items) => items.clone(),
             };
@@ -754,8 +772,13 @@ mod tests {
     fn test_set_and_get() {
         let repo = test_repo();
 
-        repo.set("main", "/name", &Object::string("my-cluster"), quick_opts("set name"))
-            .unwrap();
+        repo.set(
+            "main",
+            "/name",
+            &Object::string("my-cluster"),
+            quick_opts("set name"),
+        )
+        .unwrap();
 
         let obj = repo.get("main", "/name").unwrap();
         assert_eq!(obj, Object::string("my-cluster"));
@@ -787,8 +810,13 @@ mod tests {
     fn test_delete() {
         let repo = test_repo();
 
-        repo.set("main", "/temp", &Object::string("temporary"), quick_opts("add temp"))
-            .unwrap();
+        repo.set(
+            "main",
+            "/temp",
+            &Object::string("temporary"),
+            quick_opts("add temp"),
+        )
+        .unwrap();
 
         repo.delete("main", "/temp", quick_opts("remove temp"))
             .unwrap();
@@ -812,8 +840,13 @@ mod tests {
             .unwrap();
 
         // Modify branch
-        repo.set("feature", "/value", &Object::int(3), quick_opts("update feature"))
-            .unwrap();
+        repo.set(
+            "feature",
+            "/value",
+            &Object::int(3),
+            quick_opts("update feature"),
+        )
+        .unwrap();
 
         // Both diverged
         assert_eq!(repo.get("main", "/value").unwrap(), Object::int(2));
@@ -852,9 +885,12 @@ mod tests {
     fn test_commit_log() {
         let repo = test_repo();
 
-        repo.set("main", "/a", &Object::int(1), quick_opts("first")).unwrap();
-        repo.set("main", "/b", &Object::int(2), quick_opts("second")).unwrap();
-        repo.set("main", "/c", &Object::int(3), quick_opts("third")).unwrap();
+        repo.set("main", "/a", &Object::int(1), quick_opts("first"))
+            .unwrap();
+        repo.set("main", "/b", &Object::int(2), quick_opts("second"))
+            .unwrap();
+        repo.set("main", "/c", &Object::int(3), quick_opts("third"))
+            .unwrap();
 
         let log = repo.log("main", 10).unwrap();
         assert_eq!(log.len(), 4); // 3 + init commit
@@ -869,10 +905,14 @@ mod tests {
     fn test_intent_metadata_preserved() {
         let repo = test_repo();
 
-        let opts = CommitOptions::new("agent/planner-v2", IntentCategory::Explore, "try NFS storage")
-            .with_reasoning("NFS is simpler than Ceph for 2-node clusters")
-            .with_confidence(0.8)
-            .with_tags(vec!["storage".to_string(), "nfs".to_string()]);
+        let opts = CommitOptions::new(
+            "agent/planner-v2",
+            IntentCategory::Explore,
+            "try NFS storage",
+        )
+        .with_reasoning("NFS is simpler than Ceph for 2-node clusters")
+        .with_confidence(0.8)
+        .with_tags(vec!["storage".to_string(), "nfs".to_string()]);
 
         repo.set("main", "/storage/type", &Object::string("nfs"), opts)
             .unwrap();
@@ -945,7 +985,8 @@ mod tests {
     #[test]
     fn test_diff_identical_branches() {
         let repo = test_repo();
-        repo.set("main", "/x", &Object::int(1), quick_opts("set")).unwrap();
+        repo.set("main", "/x", &Object::int(1), quick_opts("set"))
+            .unwrap();
         repo.branch("copy", "main").unwrap();
 
         let ops = repo.diff("main", "copy").unwrap();
@@ -955,11 +996,21 @@ mod tests {
     #[test]
     fn test_diff_value_change() {
         let repo = test_repo();
-        repo.set("main", "/status", &Object::string("healthy"), quick_opts("init"))
-            .unwrap();
+        repo.set(
+            "main",
+            "/status",
+            &Object::string("healthy"),
+            quick_opts("init"),
+        )
+        .unwrap();
         repo.branch("feature", "main").unwrap();
-        repo.set("feature", "/status", &Object::string("unhealthy"), quick_opts("break"))
-            .unwrap();
+        repo.set(
+            "feature",
+            "/status",
+            &Object::string("unhealthy"),
+            quick_opts("break"),
+        )
+        .unwrap();
 
         let ops = repo.diff("main", "feature").unwrap();
         assert_eq!(ops.len(), 1);
@@ -985,15 +1036,29 @@ mod tests {
         repo.branch("feature", "main").unwrap();
 
         // Change name, remove region, add version
-        repo.set("feature", "/cluster/name", &Object::string("staging"), quick_opts("rename"))
-            .unwrap();
+        repo.set(
+            "feature",
+            "/cluster/name",
+            &Object::string("staging"),
+            quick_opts("rename"),
+        )
+        .unwrap();
         repo.delete("feature", "/cluster/region", quick_opts("remove region"))
             .unwrap();
-        repo.set("feature", "/cluster/version", &Object::string("v2"), quick_opts("add version"))
-            .unwrap();
+        repo.set(
+            "feature",
+            "/cluster/version",
+            &Object::string("v2"),
+            quick_opts("add version"),
+        )
+        .unwrap();
 
         let ops = repo.diff("main", "feature").unwrap();
-        assert!(ops.len() >= 3, "expected at least 3 diff ops, got {}", ops.len());
+        assert!(
+            ops.len() >= 3,
+            "expected at least 3 diff ops, got {}",
+            ops.len()
+        );
 
         // Verify it's JSON-serializable (MCP-ready)
         let json = serde_json::to_string_pretty(&ops).unwrap();
@@ -1009,18 +1074,36 @@ mod tests {
         let repo = test_repo();
 
         // Set initial state with two keys
-        repo.set("main", "/a", &Object::int(1), quick_opts("init a")).unwrap();
-        repo.set("main", "/b", &Object::int(2), quick_opts("init b")).unwrap();
+        repo.set("main", "/a", &Object::int(1), quick_opts("init a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::int(2), quick_opts("init b"))
+            .unwrap();
 
         // Branch
         repo.branch("feature", "main").unwrap();
 
         // Change different keys on each branch
-        repo.set("main", "/a", &Object::int(10), quick_opts("update a on main")).unwrap();
-        repo.set("feature", "/b", &Object::int(20), quick_opts("update b on feature")).unwrap();
+        repo.set(
+            "main",
+            "/a",
+            &Object::int(10),
+            quick_opts("update a on main"),
+        )
+        .unwrap();
+        repo.set(
+            "feature",
+            "/b",
+            &Object::int(20),
+            quick_opts("update b on feature"),
+        )
+        .unwrap();
 
         // Merge feature into main
-        let merge_opts = CommitOptions::new("agent/test", IntentCategory::Merge, "merge feature into main");
+        let merge_opts = CommitOptions::new(
+            "agent/test",
+            IntentCategory::Merge,
+            "merge feature into main",
+        );
         repo.merge("feature", "main", merge_opts).unwrap();
 
         // Both changes should be present
@@ -1032,12 +1115,20 @@ mod tests {
     fn test_merge_with_conflict() {
         let repo = test_repo();
 
-        repo.set("main", "/x", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/x", &Object::int(1), quick_opts("init"))
+            .unwrap();
         repo.branch("feature", "main").unwrap();
 
         // Both change the same key to different values
-        repo.set("main", "/x", &Object::int(2), quick_opts("main change")).unwrap();
-        repo.set("feature", "/x", &Object::int(3), quick_opts("feature change")).unwrap();
+        repo.set("main", "/x", &Object::int(2), quick_opts("main change"))
+            .unwrap();
+        repo.set(
+            "feature",
+            "/x",
+            &Object::int(3),
+            quick_opts("feature change"),
+        )
+        .unwrap();
 
         let merge_opts = CommitOptions::new("agent/test", IntentCategory::Merge, "merge");
         let result = repo.merge("feature", "main", merge_opts);
@@ -1054,11 +1145,18 @@ mod tests {
     #[test]
     fn test_merge_fast_forward() {
         let repo = test_repo();
-        repo.set("main", "/x", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/x", &Object::int(1), quick_opts("init"))
+            .unwrap();
         repo.branch("feature", "main").unwrap();
 
         // Only feature changes, main stays the same
-        repo.set("feature", "/x", &Object::int(2), quick_opts("feature change")).unwrap();
+        repo.set(
+            "feature",
+            "/x",
+            &Object::int(2),
+            quick_opts("feature change"),
+        )
+        .unwrap();
 
         let merge_opts = CommitOptions::new("agent/test", IntentCategory::Merge, "ff merge");
         repo.merge("feature", "main", merge_opts).unwrap();
@@ -1069,11 +1167,14 @@ mod tests {
     #[test]
     fn test_merge_creates_merge_commit() {
         let repo = test_repo();
-        repo.set("main", "/a", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/a", &Object::int(1), quick_opts("init"))
+            .unwrap();
         repo.branch("feature", "main").unwrap();
 
-        repo.set("main", "/a", &Object::int(10), quick_opts("main")).unwrap();
-        repo.set("feature", "/b", &Object::int(20), quick_opts("feature")).unwrap();
+        repo.set("main", "/a", &Object::int(10), quick_opts("main"))
+            .unwrap();
+        repo.set("feature", "/b", &Object::int(20), quick_opts("feature"))
+            .unwrap();
 
         let merge_opts = CommitOptions::new("agent/test", IntentCategory::Merge, "merge feature");
         let merge_commit_id = repo.merge("feature", "main", merge_opts).unwrap();
@@ -1081,28 +1182,42 @@ mod tests {
         let log = repo.log("main", 1).unwrap();
         let merge_commit = &log[0];
         assert_eq!(merge_commit.intent.category, IntentCategory::Merge);
-        assert_eq!(merge_commit.parents.len(), 2, "merge commit should have 2 parents");
+        assert_eq!(
+            merge_commit.parents.len(),
+            2,
+            "merge commit should have 2 parents"
+        );
     }
 
     #[test]
     fn test_merge_preserves_intent_metadata() {
         let repo = test_repo();
-        repo.set("main", "/a", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/a", &Object::int(1), quick_opts("init"))
+            .unwrap();
         repo.branch("feature", "main").unwrap();
-        repo.set("main", "/c", &Object::int(99), quick_opts("main work")).unwrap();
-        repo.set("feature", "/b", &Object::int(2), quick_opts("feature work")).unwrap();
+        repo.set("main", "/c", &Object::int(99), quick_opts("main work"))
+            .unwrap();
+        repo.set("feature", "/b", &Object::int(2), quick_opts("feature work"))
+            .unwrap();
 
-        let merge_opts = CommitOptions::new("agent/planner", IntentCategory::Merge, "integrate feature work")
-            .with_reasoning("Feature branch had the storage config we need")
-            .with_confidence(0.9)
-            .with_tags(vec!["storage".to_string(), "merge".to_string()]);
+        let merge_opts = CommitOptions::new(
+            "agent/planner",
+            IntentCategory::Merge,
+            "integrate feature work",
+        )
+        .with_reasoning("Feature branch had the storage config we need")
+        .with_confidence(0.9)
+        .with_tags(vec!["storage".to_string(), "merge".to_string()]);
 
         repo.merge("feature", "main", merge_opts).unwrap();
 
         let log = repo.log("main", 1).unwrap();
         let commit = &log[0];
         assert_eq!(commit.agent_id, "agent/planner");
-        assert_eq!(commit.reasoning, Some("Feature branch had the storage config we need".to_string()));
+        assert_eq!(
+            commit.reasoning,
+            Some("Feature branch had the storage config we need".to_string())
+        );
         assert_eq!(commit.confidence, Some(0.9));
         assert_eq!(commit.intent.tags, vec!["storage", "merge"]);
     }
@@ -1110,9 +1225,11 @@ mod tests {
     #[test]
     fn test_diff_is_json_serializable() {
         let repo = test_repo();
-        repo.set("main", "/a", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/a", &Object::int(1), quick_opts("init"))
+            .unwrap();
         repo.branch("b", "main").unwrap();
-        repo.set("b", "/a", &Object::int(2), quick_opts("change")).unwrap();
+        repo.set("b", "/a", &Object::int(2), quick_opts("change"))
+            .unwrap();
 
         let ops = repo.diff("main", "b").unwrap();
         let json = serde_json::to_value(&ops).unwrap();
@@ -1127,7 +1244,8 @@ mod tests {
     #[test]
     fn test_speculate_and_read() {
         let repo = test_repo();
-        repo.set("main", "/value", &Object::int(42), quick_opts("init")).unwrap();
+        repo.set("main", "/value", &Object::int(42), quick_opts("init"))
+            .unwrap();
 
         let h = repo.speculate("main", Some("test".to_string())).unwrap();
         let obj = repo.spec_get(h, "/value").unwrap();
@@ -1137,7 +1255,8 @@ mod tests {
     #[test]
     fn test_speculate_modify_isolation() {
         let repo = test_repo();
-        repo.set("main", "/x", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/x", &Object::int(1), quick_opts("init"))
+            .unwrap();
 
         let h = repo.speculate("main", None).unwrap();
         repo.spec_set(h, "/x", &Object::int(99)).unwrap();
@@ -1157,13 +1276,16 @@ mod tests {
             "/storage",
             &serde_json::json!({"type": "none"}),
             quick_opts("init"),
-        ).unwrap();
+        )
+        .unwrap();
 
         let nfs = repo.speculate("main", Some("NFS".to_string())).unwrap();
         let ceph = repo.speculate("main", Some("Ceph".to_string())).unwrap();
 
-        repo.spec_set(nfs, "/storage/type", &Object::string("nfs")).unwrap();
-        repo.spec_set(ceph, "/storage/type", &Object::string("ceph")).unwrap();
+        repo.spec_set(nfs, "/storage/type", &Object::string("nfs"))
+            .unwrap();
+        repo.spec_set(ceph, "/storage/type", &Object::string("ceph"))
+            .unwrap();
 
         let comparison = repo.compare_speculations(&[nfs, ceph]).unwrap();
         assert_eq!(comparison.entries.len(), 2);
@@ -1174,14 +1296,19 @@ mod tests {
     #[test]
     fn test_commit_speculation() {
         let repo = test_repo();
-        repo.set("main", "/x", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/x", &Object::int(1), quick_opts("init"))
+            .unwrap();
 
         let h = repo.speculate("main", Some("winner".to_string())).unwrap();
         repo.spec_set(h, "/x", &Object::int(42)).unwrap();
 
         // Commit the speculation
-        let opts = CommitOptions::new("agent/planner", IntentCategory::Refine, "picked best approach")
-            .with_reasoning("Option A was better because...");
+        let opts = CommitOptions::new(
+            "agent/planner",
+            IntentCategory::Refine,
+            "picked best approach",
+        )
+        .with_reasoning("Option A was better because...");
         repo.commit_speculation(h, opts).unwrap();
 
         // Main now has the speculated value
@@ -1196,7 +1323,8 @@ mod tests {
     #[test]
     fn test_discard_speculation() {
         let repo = test_repo();
-        repo.set("main", "/x", &Object::int(1), quick_opts("init")).unwrap();
+        repo.set("main", "/x", &Object::int(1), quick_opts("init"))
+            .unwrap();
 
         let h = repo.speculate("main", None).unwrap();
         repo.spec_set(h, "/x", &Object::int(999)).unwrap();
@@ -1222,33 +1350,53 @@ mod tests {
                 "network": {"subnet": "10.0.0.0/24"}
             }),
             quick_opts("initial cluster state"),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Agent creates three speculations
-        let nfs = repo.speculate("main", Some("NFS approach".to_string())).unwrap();
-        let ceph = repo.speculate("main", Some("Ceph approach".to_string())).unwrap();
-        let local = repo.speculate("main", Some("Local SSD".to_string())).unwrap();
+        let nfs = repo
+            .speculate("main", Some("NFS approach".to_string()))
+            .unwrap();
+        let ceph = repo
+            .speculate("main", Some("Ceph approach".to_string()))
+            .unwrap();
+        let local = repo
+            .speculate("main", Some("Local SSD".to_string()))
+            .unwrap();
 
         // Each speculation explores a different approach
-        repo.spec_set(nfs, "/cluster/storage/type", &Object::string("nfs")).unwrap();
-        repo.spec_set(nfs, "/cluster/storage/mount", &Object::string("/shared")).unwrap();
+        repo.spec_set(nfs, "/cluster/storage/type", &Object::string("nfs"))
+            .unwrap();
+        repo.spec_set(nfs, "/cluster/storage/mount", &Object::string("/shared"))
+            .unwrap();
 
-        repo.spec_set(ceph, "/cluster/storage/type", &Object::string("ceph")).unwrap();
-        repo.spec_set(ceph, "/cluster/storage/replicas", &Object::int(3)).unwrap();
+        repo.spec_set(ceph, "/cluster/storage/type", &Object::string("ceph"))
+            .unwrap();
+        repo.spec_set(ceph, "/cluster/storage/replicas", &Object::int(3))
+            .unwrap();
 
-        repo.spec_set(local, "/cluster/storage/type", &Object::string("local-ssd")).unwrap();
-        repo.spec_set(local, "/cluster/storage/path", &Object::string("/dev/nvme0")).unwrap();
+        repo.spec_set(local, "/cluster/storage/type", &Object::string("local-ssd"))
+            .unwrap();
+        repo.spec_set(
+            local,
+            "/cluster/storage/path",
+            &Object::string("/dev/nvme0"),
+        )
+        .unwrap();
 
         // Compare all three
         let comparison = repo.compare_speculations(&[nfs, ceph, local]).unwrap();
         assert_eq!(comparison.entries.len(), 3);
 
         // Agent picks NFS (Ceph needs too many nodes, local isn't shared)
-        let opts = CommitOptions::new("agent/storage-planner", IntentCategory::Refine,
-            "Selected NFS — Ceph requires 3+ nodes, local SSD not shared")
-            .with_reasoning("NFS provides shared storage with minimal node requirements")
-            .with_confidence(0.85)
-            .with_tags(vec!["storage".to_string(), "nfs".to_string()]);
+        let opts = CommitOptions::new(
+            "agent/storage-planner",
+            IntentCategory::Refine,
+            "Selected NFS — Ceph requires 3+ nodes, local SSD not shared",
+        )
+        .with_reasoning("NFS provides shared storage with minimal node requirements")
+        .with_confidence(0.85)
+        .with_tags(vec!["storage".to_string(), "nfs".to_string()]);
 
         repo.commit_speculation(nfs, opts).unwrap();
 

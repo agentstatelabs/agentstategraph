@@ -45,15 +45,9 @@ pub enum DiffOp {
         old_value: DiffValue,
     },
     /// An element was added to a set.
-    AddToSet {
-        path: String,
-        value: DiffValue,
-    },
+    AddToSet { path: String, value: DiffValue },
     /// An element was removed from a set.
-    RemoveFromSet {
-        path: String,
-        old_value: DiffValue,
-    },
+    RemoveFromSet { path: String, old_value: DiffValue },
     /// The type of a node changed (e.g., map became a list).
     ChangeType {
         path: String,
@@ -95,15 +89,9 @@ impl DiffValue {
     /// Create a summary DiffValue for a Node.
     pub fn from_node(node: &Node) -> Self {
         match node {
-            Node::Map(entries) => {
-                DiffValue::Complex(format!("{{map: {} keys}}", entries.len()))
-            }
-            Node::List(items) => {
-                DiffValue::Complex(format!("[list: {} items]", items.len()))
-            }
-            Node::Set(items) => {
-                DiffValue::Complex(format!("{{set: {} items}}", items.len()))
-            }
+            Node::Map(entries) => DiffValue::Complex(format!("{{map: {} keys}}", entries.len())),
+            Node::List(items) => DiffValue::Complex(format!("[list: {} items]", items.len())),
+            Node::Set(items) => DiffValue::Complex(format!("{{set: {} items}}", items.len())),
         }
     }
 
@@ -140,9 +128,7 @@ pub fn diff(
     let new_obj = resolver.resolve(new_root);
 
     match (old_obj, new_obj) {
-        (Some(old), Some(new)) => {
-            diff_objects(resolver, &StatePath::root(), &old, &new)
-        }
+        (Some(old), Some(new)) => diff_objects(resolver, &StatePath::root(), &old, &new),
         (None, Some(_)) => {
             // Old didn't exist — entire new tree is an addition
             // This shouldn't normally happen at root level
@@ -288,12 +274,7 @@ fn diff_lists(
 
                     match (old_obj, new_obj) {
                         (Some(old_child), Some(new_child)) => {
-                            ops.extend(diff_objects(
-                                resolver,
-                                &child_path,
-                                &old_child,
-                                &new_child,
-                            ));
+                            ops.extend(diff_objects(resolver, &child_path, &old_child, &new_child));
                         }
                         _ => {
                             ops.push(DiffOp::SetValue {
@@ -499,7 +480,11 @@ mod tests {
         let ops = diff(&r, &old, &new);
         assert_eq!(ops.len(), 1);
         match &ops[0] {
-            DiffOp::RemoveKey { path, key, old_value } => {
+            DiffOp::RemoveKey {
+                path,
+                key,
+                old_value,
+            } => {
                 assert_eq!(path, "/");
                 assert_eq!(key, "b");
                 assert_eq!(*old_value, DiffValue::Int(2));
@@ -612,7 +597,11 @@ mod tests {
         let ops = diff(&r, &old, &new);
         assert_eq!(ops.len(), 1);
         match &ops[0] {
-            DiffOp::RemoveElement { path, index, old_value } => {
+            DiffOp::RemoveElement {
+                path,
+                index,
+                old_value,
+            } => {
                 assert_eq!(path, "/items");
                 assert_eq!(*index, 2);
                 assert_eq!(*old_value, DiffValue::Int(3));
@@ -653,7 +642,11 @@ mod tests {
 
         assert_eq!(ops.len(), 1);
         match &ops[0] {
-            DiffOp::ChangeType { path, old_type, new_type } => {
+            DiffOp::ChangeType {
+                path,
+                old_type,
+                new_type,
+            } => {
                 assert_eq!(path, "/value");
                 assert_eq!(old_type, "string");
                 assert_eq!(new_type, "list");

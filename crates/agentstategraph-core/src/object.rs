@@ -157,14 +157,22 @@ mod tests {
     fn test_content_addressing_deterministic() {
         let obj1 = Object::string("hello");
         let obj2 = Object::string("hello");
-        assert_eq!(obj1.id(), obj2.id(), "identical objects must have the same ObjectId");
+        assert_eq!(
+            obj1.id(),
+            obj2.id(),
+            "identical objects must have the same ObjectId"
+        );
     }
 
     #[test]
     fn test_different_content_different_id() {
         let obj1 = Object::string("hello");
         let obj2 = Object::string("world");
-        assert_ne!(obj1.id(), obj2.id(), "different objects must have different ObjectIds");
+        assert_ne!(
+            obj1.id(),
+            obj2.id(),
+            "different objects must have different ObjectIds"
+        );
     }
 
     #[test]
@@ -183,7 +191,11 @@ mod tests {
 
         let obj1 = Object::map(map1);
         let obj2 = Object::map(map2);
-        assert_eq!(obj1.id(), obj2.id(), "maps with same entries in different order must have same ObjectId");
+        assert_eq!(
+            obj1.id(),
+            obj2.id(),
+            "maps with same entries in different order must have same ObjectId"
+        );
     }
 
     #[test]
@@ -192,7 +204,7 @@ mod tests {
         let id_b = Object::string("b").id();
 
         let obj1 = Object::set(vec![id_a, id_b, id_a]); // duplicate
-        let obj2 = Object::set(vec![id_b, id_a]);        // different order
+        let obj2 = Object::set(vec![id_b, id_a]); // different order
 
         assert_eq!(obj1.id(), obj2.id(), "sets must be deduplicated and sorted");
     }
@@ -202,7 +214,10 @@ mod tests {
         let obj = Object::string("test");
         let id = obj.id();
         let display = format!("{}", id);
-        assert!(display.starts_with("sg_"), "ObjectId display should start with sg_ prefix");
+        assert!(
+            display.starts_with("sg_"),
+            "ObjectId display should start with sg_ prefix"
+        );
     }
 
     #[test]
@@ -220,7 +235,10 @@ mod tests {
 
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
-                assert_ne!(ids[i], ids[j], "different atom types/values must have different ObjectIds");
+                assert_ne!(
+                    ids[i], ids[j],
+                    "different atom types/values must have different ObjectIds"
+                );
             }
         }
     }

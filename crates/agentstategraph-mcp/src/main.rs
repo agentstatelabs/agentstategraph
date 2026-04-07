@@ -8,9 +8,9 @@ mod server;
 
 use std::sync::Arc;
 
-use rmcp::ServiceExt;
 use agentstategraph::Repository;
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use rmcp::ServiceExt;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -24,7 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--storage" | "-s" => {
                 i += 1;
                 if i < args.len() {
-                    storage_type = if args[i] == "memory" { "memory" } else { "sqlite" };
+                    storage_type = if args[i] == "memory" {
+                        "memory"
+                    } else {
+                        "sqlite"
+                    };
                 }
             }
             "--path" | "-p" => {
@@ -41,7 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!();
                 eprintln!("OPTIONS:");
                 eprintln!("  -s, --storage <TYPE>  Storage backend: sqlite (default) or memory");
-                eprintln!("  -p, --path <PATH>     SQLite database path (default: ./stategraph.db)");
+                eprintln!(
+                    "  -p, --path <PATH>     SQLite database path (default: ./stategraph.db)"
+                );
                 eprintln!("  -h, --help            Print help");
                 std::process::exit(0);
             }

@@ -137,7 +137,10 @@ mod tests {
     #[test]
     fn test_parse_simple_key() {
         let path = StatePath::parse("/nodes").unwrap();
-        assert_eq!(path.components(), &[PathComponent::Key("nodes".to_string())]);
+        assert_eq!(
+            path.components(),
+            &[PathComponent::Key("nodes".to_string())]
+        );
     }
 
     #[test]
@@ -173,7 +176,10 @@ mod tests {
 
     #[test]
     fn test_push() {
-        let path = StatePath::root().push_key("nodes").push_index(0).push_key("hostname");
+        let path = StatePath::root()
+            .push_key("nodes")
+            .push_index(0)
+            .push_key("hostname");
         assert_eq!(path.to_string(), "/nodes/0/hostname");
     }
 

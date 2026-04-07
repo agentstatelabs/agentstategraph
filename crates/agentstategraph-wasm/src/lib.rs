@@ -27,7 +27,12 @@ fn parse_category(s: &str) -> IntentCategory {
     }
 }
 
-fn make_opts(description: &str, category: &str, reasoning: Option<String>, confidence: Option<f64>) -> CommitOptions {
+fn make_opts(
+    description: &str,
+    category: &str,
+    reasoning: Option<String>,
+    confidence: Option<f64>,
+) -> CommitOptions {
     let cat = parse_category(category);
     let mut opts = CommitOptions::new("wasm", cat, description);
     if let Some(r) = reasoning {
@@ -61,14 +66,20 @@ impl WasmStateGraph {
         let name = db_name.unwrap_or_else(|| "stategraph".to_string());
         let storage = std::sync::Arc::new(IndexedDbStorage::new(&name));
         let repo = Repository::new(Box::new(IndexedDbStorage::new(&name)));
-        repo.init().map_err(|e| JsValue::from_str(&format!("{}", e)))?;
+        repo.init()
+            .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
 
         // Re-create with shared storage so we can access pending writes
         let storage2 = std::sync::Arc::new(IndexedDbStorage::new(&name));
         let repo2 = Repository::new(Box::new(IndexedDbStorage::new(&name)));
-        repo2.init().map_err(|e| JsValue::from_str(&format!("{}", e)))?;
+        repo2
+            .init()
+            .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
 
-        Ok(Self { repo: repo2, storage: storage2 })
+        Ok(Self {
+            repo: repo2,
+            storage: storage2,
+        })
     }
 
     /// Load objects from IndexedDB dump. Call on startup.
@@ -76,7 +87,8 @@ impl WasmStateGraph {
     pub fn load_objects(&self, json_pairs: &str) -> Result<(), JsValue> {
         let pairs: Vec<(String, String)> = serde_json::from_str(json_pairs)
             .map_err(|e| JsValue::from_str(&format!("parse error: {}", e)))?;
-        self.storage.load_objects(&pairs)
+        self.storage
+            .load_objects(&pairs)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
@@ -84,7 +96,8 @@ impl WasmStateGraph {
     pub fn load_commits(&self, json_pairs: &str) -> Result<(), JsValue> {
         let pairs: Vec<(String, String)> = serde_json::from_str(json_pairs)
             .map_err(|e| JsValue::from_str(&format!("parse error: {}", e)))?;
-        self.storage.load_commits(&pairs)
+        self.storage
+            .load_commits(&pairs)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
@@ -92,7 +105,8 @@ impl WasmStateGraph {
     pub fn load_refs(&self, json_pairs: &str) -> Result<(), JsValue> {
         let pairs: Vec<(String, String)> = serde_json::from_str(json_pairs)
             .map_err(|e| JsValue::from_str(&format!("parse error: {}", e)))?;
-        self.storage.load_refs(&pairs)
+        self.storage
+            .load_refs(&pairs)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
@@ -122,7 +136,9 @@ impl WasmStateGraph {
     /// Get a JSON value at a path.
     pub fn get(&self, path: &str, reference: Option<String>) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
-        let val = self.repo.get_json(&ref_name, path)
+        let val = self
+            .repo
+            .get_json(&ref_name, path)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(serde_json::to_string(&val).unwrap_or_default())
     }
@@ -142,7 +158,9 @@ impl WasmStateGraph {
         let value: serde_json::Value = serde_json::from_str(json_value)
             .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
         let opts = make_opts(description, category, reasoning, confidence);
-        let id = self.repo.set_json(&ref_name, path, &value, opts)
+        let id = self
+            .repo
+            .set_json(&ref_name, path, &value, opts)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
     }
@@ -157,7 +175,9 @@ impl WasmStateGraph {
     ) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let opts = make_opts(description, category, None, None);
-        let id = self.repo.delete(&ref_name, path, opts)
+        let id = self
+            .repo
+            .delete(&ref_name, path, opts)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
     }
@@ -165,7 +185,9 @@ impl WasmStateGraph {
     /// Create a branch.
     pub fn branch(&self, name: &str, from: Option<String>) -> Result<String, JsValue> {
         let from_ref = from.unwrap_or_else(|| "main".to_string());
-        let id = self.repo.branch(name, &from_ref)
+        let id = self
+            .repo
+            .branch(name, &from_ref)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
     }
@@ -180,14 +202,18 @@ impl WasmStateGraph {
         let target_ref = target.unwrap_or_else(|| "main".to_string());
         let desc = description.unwrap_or_else(|| "merge".to_string());
         let opts = make_opts(&desc, "Merge", None, None);
-        let id = self.repo.merge(source, &target_ref, opts)
+        let id = self
+            .repo
+            .merge(source, &target_ref, opts)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
     }
 
     /// Structured diff between two refs. Returns JSON.
     pub fn diff(&self, ref_a: &str, ref_b: &str) -> Result<String, JsValue> {
-        let ops = self.repo.diff(ref_a, ref_b)
+        let ops = self
+            .repo
+            .diff(ref_a, ref_b)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(serde_json::to_string(&ops).unwrap_or_default())
     }
@@ -196,29 +222,36 @@ impl WasmStateGraph {
     pub fn log(&self, reference: Option<String>, limit: Option<u32>) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let max = limit.unwrap_or(10) as usize;
-        let commits = self.repo.log(&ref_name, max)
+        let commits = self
+            .repo
+            .log(&ref_name, max)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
-        let entries: Vec<serde_json::Value> = commits.iter().map(|c| {
-            serde_json::json!({
-                "id": c.id.short(),
-                "agent": c.agent_id,
-                "intent": {
-                    "category": format!("{:?}", c.intent.category),
-                    "description": c.intent.description,
-                    "tags": c.intent.tags,
-                },
-                "reasoning": c.reasoning,
-                "confidence": c.confidence,
-                "timestamp": c.timestamp.to_rfc3339(),
+        let entries: Vec<serde_json::Value> = commits
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.short(),
+                    "agent": c.agent_id,
+                    "intent": {
+                        "category": format!("{:?}", c.intent.category),
+                        "description": c.intent.description,
+                        "tags": c.intent.tags,
+                    },
+                    "reasoning": c.reasoning,
+                    "confidence": c.confidence,
+                    "timestamp": c.timestamp.to_rfc3339(),
+                })
             })
-        }).collect();
+            .collect();
         Ok(serde_json::to_string(&entries).unwrap_or_default())
     }
 
     /// Blame — who modified a path and why.
     pub fn blame(&self, path: &str, reference: Option<String>) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
-        let entry = self.repo.blame(&ref_name, path)
+        let entry = self
+            .repo
+            .blame(&ref_name, path)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(serde_json::to_string(&entry).unwrap_or_default())
     }
@@ -226,7 +259,9 @@ impl WasmStateGraph {
     /// Create a speculation. Returns handle ID.
     pub fn speculate(&self, from: Option<String>, label: Option<String>) -> Result<u32, JsValue> {
         let from_ref = from.unwrap_or_else(|| "main".to_string());
-        let handle = self.repo.speculate(&from_ref, label)
+        let handle = self
+            .repo
+            .speculate(&from_ref, label)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(handle.id() as u32)
     }
@@ -234,7 +269,9 @@ impl WasmStateGraph {
     /// Get from a speculation.
     pub fn spec_get(&self, handle_id: u32, path: &str) -> Result<String, JsValue> {
         let handle = SpecHandle::from_id(handle_id as u64);
-        let obj = self.repo.spec_get(handle, path)
+        let obj = self
+            .repo
+            .spec_get(handle, path)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         let val = match &obj {
             Object::Atom(a) => match a {
@@ -259,13 +296,17 @@ impl WasmStateGraph {
             serde_json::Value::Null => Object::null(),
             serde_json::Value::Bool(b) => Object::bool(*b),
             serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() { Object::int(i) }
-                else { Object::float(n.as_f64().unwrap_or(0.0)) }
+                if let Some(i) = n.as_i64() {
+                    Object::int(i)
+                } else {
+                    Object::float(n.as_f64().unwrap_or(0.0))
+                }
             }
             serde_json::Value::String(s) => Object::string(s.clone()),
             _ => Object::string(value.to_string()),
         };
-        self.repo.spec_set(handle, path, &obj)
+        self.repo
+            .spec_set(handle, path, &obj)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
@@ -280,7 +321,9 @@ impl WasmStateGraph {
     ) -> Result<String, JsValue> {
         let handle = SpecHandle::from_id(handle_id as u64);
         let opts = make_opts(description, category, reasoning, confidence);
-        let id = self.repo.commit_speculation(handle, opts)
+        let id = self
+            .repo
+            .commit_speculation(handle, opts)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
     }
@@ -288,35 +331,43 @@ impl WasmStateGraph {
     /// Discard a speculation.
     pub fn discard_speculation(&self, handle_id: u32) -> Result<(), JsValue> {
         let handle = SpecHandle::from_id(handle_id as u64);
-        self.repo.discard_speculation(handle)
+        self.repo
+            .discard_speculation(handle)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
     /// Create an epoch.
     pub fn create_epoch(&self, id: &str, description: &str) -> Result<String, JsValue> {
-        self.repo.create_epoch(id, description, vec![])
+        self.repo
+            .create_epoch(id, description, vec![])
             .map(|e| format!("Epoch '{}' created", e.id))
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
     /// Seal an epoch.
     pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), JsValue> {
-        self.repo.seal_epoch(id, summary)
+        self.repo
+            .seal_epoch(id, summary)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
     /// List epochs. Returns JSON.
     pub fn list_epochs(&self) -> Result<String, JsValue> {
-        let entries = self.repo.list_epochs()
+        let entries = self
+            .repo
+            .list_epochs()
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
-        let json: Vec<serde_json::Value> = entries.iter().map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "description": e.description,
-                "status": format!("{:?}", e.status),
-                "commits": e.commit_count,
+        let json: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "description": e.description,
+                    "status": format!("{:?}", e.status),
+                    "commits": e.commit_count,
+                })
             })
-        }).collect();
+            .collect();
         Ok(serde_json::to_string(&json).unwrap_or_default())
     }
 }

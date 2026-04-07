@@ -37,42 +37,63 @@ impl Default for MemoryStorage {
 
 impl ObjectStore for MemoryStorage {
     fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, StorageError> {
-        let store = self.objects.read().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let store = self
+            .objects
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(store.get(id).cloned())
     }
 
     fn put_object(&self, obj: &Object) -> Result<ObjectId, StorageError> {
         let id = obj.id();
-        let mut store = self.objects.write().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let mut store = self
+            .objects
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         store.entry(id).or_insert_with(|| obj.clone());
         Ok(id)
     }
 
     fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
-        let store = self.objects.read().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let store = self
+            .objects
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(store.contains_key(id))
     }
 }
 
 impl CommitStore for MemoryStorage {
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
-        let store = self.commits.read().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let store = self
+            .commits
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(store.get(id).cloned())
     }
 
     fn put_commit(&self, commit: &Commit) -> Result<(), StorageError> {
-        let mut store = self.commits.write().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let mut store = self
+            .commits
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         store.insert(commit.id, commit.clone());
         Ok(())
     }
 
     fn has_commit(&self, id: &ObjectId) -> Result<bool, StorageError> {
-        let store = self.commits.read().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let store = self
+            .commits
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(store.contains_key(id))
     }
 
     fn list_commits(&self, from: &ObjectId, limit: usize) -> Result<Vec<Commit>, StorageError> {
-        let store = self.commits.read().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let store = self
+            .commits
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         let mut result = Vec::new();
         let mut current = Some(*from);
 
@@ -95,23 +116,27 @@ impl CommitStore for MemoryStorage {
 
 impl RefStore for MemoryStorage {
     fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError> {
-        let store = self.refs.read().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let store = self
+            .refs
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(store.get(name).copied())
     }
 
     fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError> {
-        let mut store = self.refs.write().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let mut store = self
+            .refs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         store.insert(name.to_string(), target);
         Ok(())
     }
 
-    fn cas_ref(
-        &self,
-        name: &str,
-        expected: ObjectId,
-        new: ObjectId,
-    ) -> Result<bool, StorageError> {
-        let mut store = self.refs.write().map_err(|e| StorageError::Backend(e.to_string()))?;
+    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError> {
+        let mut store = self
+            .refs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         match store.get(name) {
             Some(&current) if current == expected => {
                 store.insert(name.to_string(), new);
@@ -127,7 +152,10 @@ impl RefStore for MemoryStorage {
     }
 
     fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError> {
-        let store = self.refs.read().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let store = self
+            .refs
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         let result = store
             .range(prefix.to_string()..)
             .take_while(|(k, _)| k.starts_with(prefix))
@@ -137,7 +165,10 @@ impl RefStore for MemoryStorage {
     }
 
     fn delete_ref(&self, name: &str) -> Result<bool, StorageError> {
-        let mut store = self.refs.write().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let mut store = self
+            .refs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(store.remove(name).is_some())
     }
 }
@@ -196,8 +227,12 @@ mod tests {
     fn test_list_refs_with_prefix() {
         let store = MemoryStorage::new();
 
-        store.set_ref("agents/planner/workspace", ObjectId::hash(b"a")).unwrap();
-        store.set_ref("agents/storage/workspace", ObjectId::hash(b"b")).unwrap();
+        store
+            .set_ref("agents/planner/workspace", ObjectId::hash(b"a"))
+            .unwrap();
+        store
+            .set_ref("agents/storage/workspace", ObjectId::hash(b"b"))
+            .unwrap();
         store.set_ref("main", ObjectId::hash(b"c")).unwrap();
 
         let agent_refs = store.list_refs("agents/").unwrap();

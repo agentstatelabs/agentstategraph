@@ -37,10 +37,10 @@ pub struct IndexedDbStorage {
     /// Database name (for IndexedDB).
     db_name: String,
     /// Pending writes queue — flushed to IndexedDB by the WASM layer.
-    pending_objects: RwLock<Vec<(String, String)>>,  // (hex_id, json)
-    pending_commits: RwLock<Vec<(String, String)>>,  // (hex_id, json)
-    pending_refs: RwLock<Vec<(String, String)>>,     // (name, hex_id)
-    deleted_refs: RwLock<Vec<String>>,                // names to delete
+    pending_objects: RwLock<Vec<(String, String)>>, // (hex_id, json)
+    pending_commits: RwLock<Vec<(String, String)>>, // (hex_id, json)
+    pending_refs: RwLock<Vec<(String, String)>>,    // (name, hex_id)
+    deleted_refs: RwLock<Vec<String>>,              // names to delete
 }
 
 impl IndexedDbStorage {
@@ -84,7 +84,9 @@ impl IndexedDbStorage {
                 .ok_or_else(|| StorageError::Serialization("invalid hex id".to_string()))?;
             let mut arr = [0u8; 32];
             if bytes.len() != 32 {
-                return Err(StorageError::Serialization("id must be 32 bytes".to_string()));
+                return Err(StorageError::Serialization(
+                    "id must be 32 bytes".to_string(),
+                ));
             }
             arr.copy_from_slice(&bytes);
             let id = ObjectId::from_bytes(arr);
@@ -132,8 +134,8 @@ impl ObjectStore for IndexedDbStorage {
         let id = self.memory.put_object(obj)?;
         // Queue for IndexedDB flush
         let hex_id = format!("{}", id);
-        let json = serde_json::to_string(obj)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(obj).map_err(|e| StorageError::Serialization(e.to_string()))?;
         self.pending_objects.write().unwrap().push((hex_id, json));
         Ok(id)
     }
@@ -174,7 +176,10 @@ impl RefStore for IndexedDbStorage {
     fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError> {
         self.memory.set_ref(name, target)?;
         let hex_id = format!("{}", target);
-        self.pending_refs.write().unwrap().push((name.to_string(), hex_id));
+        self.pending_refs
+            .write()
+            .unwrap()
+            .push((name.to_string(), hex_id));
         Ok(())
     }
 
@@ -182,7 +187,10 @@ impl RefStore for IndexedDbStorage {
         let result = self.memory.cas_ref(name, expected, new)?;
         if result {
             let hex_id = format!("{}", new);
-            self.pending_refs.write().unwrap().push((name.to_string(), hex_id));
+            self.pending_refs
+                .write()
+                .unwrap()
+                .push((name.to_string(), hex_id));
         }
         Ok(result)
     }
@@ -281,7 +289,8 @@ mod tests {
             "agent/test",
             Authority::simple("test"),
             Intent::new(IntentCategory::Checkpoint, "test"),
-        ).build();
+        )
+        .build();
 
         store.put_commit(&commit).unwrap();
 

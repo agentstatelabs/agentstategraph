@@ -22,17 +22,19 @@ pub mod schema;
 
 // Re-export primary types for convenience
 pub use commit::{Commit, CommitBuilder};
+pub use diff::{DiffOp, DiffValue, ObjectResolver};
+pub use epoch::{
+    CrossRefType, CrossReference, Epoch, EpochEntry, EpochError, EpochStatus, Registry,
+};
 pub use error::CoreError;
 pub use intent::{
     AgentId, AuthScope, Authority, DelegationLink, Deviation, DeviationImpact, FormatHint, Intent,
     IntentCategory, IntentId, IntentLifecycle, IntentStatus, NotificationPolicy, Outcome,
     Principal, Resolution, SessionId, ToolCall, Urgency,
 };
-pub use object::{Atom, Node, Object, ObjectId};
-pub use diff::{DiffOp, DiffValue, ObjectResolver};
-pub use epoch::{CrossRefType, CrossReference, Epoch, EpochEntry, EpochError, EpochStatus, Registry};
 pub use lifecycle::{LifecycleError, is_valid_transition, transition};
 pub use merge::{Conflict, ConflictValue, MergeResult};
+pub use object::{Atom, Node, Object, ObjectId};
 pub use path::{PathComponent, PathError, StatePath};
 pub use query::{BlameEntry, Query, QueryFilters, QueryOptions, QueryTarget, filter_commits};
 pub use schema::{EnforcementMode, MergeHint, Schema, ValidationResult};

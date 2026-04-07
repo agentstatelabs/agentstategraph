@@ -175,15 +175,10 @@ mod tests {
     #[test]
     fn test_commit_builder() {
         let state_root = ObjectId::hash(b"test-state");
-        let commit = CommitBuilder::new(
-            state_root,
-            "agent/test",
-            test_authority(),
-            test_intent(),
-        )
-        .reasoning("this is a test")
-        .confidence(0.95)
-        .build();
+        let commit = CommitBuilder::new(state_root, "agent/test", test_authority(), test_intent())
+            .reasoning("this is a test")
+            .confidence(0.95)
+            .build();
 
         assert_eq!(commit.state_root, state_root);
         assert_eq!(commit.agent_id, "agent/test");
@@ -213,7 +208,10 @@ mod tests {
         )
         .build();
 
-        assert_ne!(commit1.id, commit2.id, "different commits should have different IDs");
+        assert_ne!(
+            commit1.id, commit2.id,
+            "different commits should have different IDs"
+        );
     }
 
     #[test]
@@ -221,14 +219,9 @@ mod tests {
         let parent_id = ObjectId::hash(b"parent-commit");
         let state_root = ObjectId::hash(b"child-state");
 
-        let commit = CommitBuilder::new(
-            state_root,
-            "agent/test",
-            test_authority(),
-            test_intent(),
-        )
-        .parent(parent_id)
-        .build();
+        let commit = CommitBuilder::new(state_root, "agent/test", test_authority(), test_intent())
+            .parent(parent_id)
+            .build();
 
         assert_eq!(commit.parents, vec![parent_id]);
     }
@@ -236,14 +229,9 @@ mod tests {
     #[test]
     fn test_confidence_clamped() {
         let state_root = ObjectId::hash(b"test");
-        let commit = CommitBuilder::new(
-            state_root,
-            "agent/test",
-            test_authority(),
-            test_intent(),
-        )
-        .confidence(1.5) // over 1.0
-        .build();
+        let commit = CommitBuilder::new(state_root, "agent/test", test_authority(), test_intent())
+            .confidence(1.5) // over 1.0
+            .build();
 
         assert_eq!(commit.confidence, Some(1.0));
     }

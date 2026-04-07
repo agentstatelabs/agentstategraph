@@ -70,4 +70,4 @@ jobs:
         run: cargo build --release -p agentstategraph-ffi
       - name: Run Go tests
         working-directory: bindings/go
-        run: CGO_LDFLAGS="-L../../target/release" go test -v
+        run: CGO_LDFLAGS="-L../../target/release" LD_LIBRARY_PATH="../../target/release" go test -v

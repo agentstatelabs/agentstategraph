@@ -23,7 +23,11 @@ fn main() {
         "main",
         "/app/name",
         &Object::string("my-project"),
-        CommitOptions::new("developer", IntentCategory::Checkpoint, "Initialize project"),
+        CommitOptions::new(
+            "developer",
+            IntentCategory::Checkpoint,
+            "Initialize project",
+        ),
     )
     .unwrap();
 
@@ -36,7 +40,11 @@ fn main() {
             "max_retries": 3,
             "features": ["auth", "logging"]
         }),
-        CommitOptions::new("developer", IntentCategory::Checkpoint, "Set default config"),
+        CommitOptions::new(
+            "developer",
+            IntentCategory::Checkpoint,
+            "Set default config",
+        ),
     )
     .unwrap();
     println!("✓ State set on main\n");
@@ -62,13 +70,18 @@ fn main() {
 
     // main is untouched
     assert!(repo.get("main", "/app/config/theme").is_err()); // doesn't exist on main
-    let branch_theme = repo.get_json("feature/dark-mode", "/app/config/theme").unwrap();
+    let branch_theme = repo
+        .get_json("feature/dark-mode", "/app/config/theme")
+        .unwrap();
     println!("  main: no theme (correct — branch isolation)");
     println!("  feature/dark-mode: theme = {}", branch_theme);
 
     // ─── 5. Diff ──────────────────────────────────────────────────
     let changes = repo.diff("main", "feature/dark-mode").unwrap();
-    println!("\n✓ Diff main → feature/dark-mode ({} changes):", changes.len());
+    println!(
+        "\n✓ Diff main → feature/dark-mode ({} changes):",
+        changes.len()
+    );
     for op in &changes {
         println!("  {:?}", op);
     }
@@ -100,7 +113,11 @@ fn main() {
     repo.delete(
         "main",
         "/app/config/debug",
-        CommitOptions::new("developer", IntentCategory::Refine, "Remove debug flag for production"),
+        CommitOptions::new(
+            "developer",
+            IntentCategory::Refine,
+            "Remove debug flag for production",
+        ),
     )
     .unwrap();
     assert!(repo.get("main", "/app/config/debug").is_err());

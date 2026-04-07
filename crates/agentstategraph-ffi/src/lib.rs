@@ -33,7 +33,9 @@ pub extern "C" fn stategraph_new_memory() -> *mut SgRepo {
 #[no_mangle]
 pub extern "C" fn stategraph_new_sqlite(path: *const c_char) -> *mut SgRepo {
     let path = unsafe {
-        if path.is_null() { return ptr::null_mut(); }
+        if path.is_null() {
+            return ptr::null_mut();
+        }
         match CStr::from_ptr(path).to_str() {
             Ok(s) => s.to_string(),
             Err(_) => return ptr::null_mut(),
@@ -54,7 +56,9 @@ pub extern "C" fn stategraph_new_sqlite(path: *const c_char) -> *mut SgRepo {
 #[no_mangle]
 pub extern "C" fn stategraph_free(repo: *mut SgRepo) {
     if !repo.is_null() {
-        unsafe { drop(Box::from_raw(repo)); }
+        unsafe {
+            drop(Box::from_raw(repo));
+        }
     }
 }
 
@@ -62,7 +66,9 @@ pub extern "C" fn stategraph_free(repo: *mut SgRepo) {
 #[no_mangle]
 pub extern "C" fn stategraph_free_string(s: *mut c_char) {
     if !s.is_null() {
-        unsafe { drop(CString::from_raw(s)); }
+        unsafe {
+            drop(CString::from_raw(s));
+        }
     }
 }
 
@@ -147,7 +153,10 @@ pub extern "C" fn stategraph_branch(
     from: *const c_char,
 ) -> *mut c_char {
     let repo = unsafe { repo.as_ref() };
-    let repo = match repo { Some(r) => r, None => return ptr::null_mut() };
+    let repo = match repo {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
     let name = unsafe { c_to_str(name) };
     let from = unsafe { c_to_str(from) };
 
@@ -165,7 +174,10 @@ pub extern "C" fn stategraph_diff(
     ref_b: *const c_char,
 ) -> *mut c_char {
     let repo = unsafe { repo.as_ref() };
-    let repo = match repo { Some(r) => r, None => return ptr::null_mut() };
+    let repo = match repo {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
     let ref_a = unsafe { c_to_str(ref_a) };
     let ref_b = unsafe { c_to_str(ref_b) };
 
@@ -184,7 +196,10 @@ pub extern "C" fn stategraph_merge(
     description: *const c_char,
 ) -> *mut c_char {
     let repo = unsafe { repo.as_ref() };
-    let repo = match repo { Some(r) => r, None => return ptr::null_mut() };
+    let repo = match repo {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
     let source = unsafe { c_to_str(source) };
     let target = unsafe { c_to_str(target) };
     let desc = unsafe { c_to_str(description) };
@@ -204,21 +219,27 @@ pub extern "C" fn stategraph_log(
     limit: u32,
 ) -> *mut c_char {
     let repo = unsafe { repo.as_ref() };
-    let repo = match repo { Some(r) => r, None => return ptr::null_mut() };
+    let repo = match repo {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
     let ref_name = unsafe { c_to_str(ref_name) };
 
     match repo.inner.log(&ref_name, limit as usize) {
         Ok(commits) => {
-            let entries: Vec<serde_json::Value> = commits.iter().map(|c| {
-                serde_json::json!({
-                    "id": c.id.short(),
-                    "agent": c.agent_id,
-                    "intent_category": format!("{:?}", c.intent.category),
-                    "intent_description": c.intent.description,
-                    "reasoning": c.reasoning,
-                    "confidence": c.confidence,
+            let entries: Vec<serde_json::Value> = commits
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "id": c.id.short(),
+                        "agent": c.agent_id,
+                        "intent_category": format!("{:?}", c.intent.category),
+                        "intent_description": c.intent.description,
+                        "reasoning": c.reasoning,
+                        "confidence": c.confidence,
+                    })
                 })
-            }).collect();
+                .collect();
             to_c_string(&serde_json::to_string(&entries).unwrap_or_default())
         }
         Err(_) => ptr::null_mut(),

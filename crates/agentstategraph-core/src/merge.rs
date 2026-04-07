@@ -12,8 +12,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::object::{Node, Object, ObjectId};
 use crate::diff::ObjectResolver;
+use crate::object::{Node, Object, ObjectId};
 
 /// The result of a merge operation.
 #[derive(Debug, Clone)]
@@ -118,7 +118,14 @@ pub fn three_way_merge(
     let path = String::from("/");
     let mut conflicts = Vec::new();
 
-    let merged = merge_objects(resolver, &path, &base_obj, &ours_obj, &theirs_obj, &mut conflicts);
+    let merged = merge_objects(
+        resolver,
+        &path,
+        &base_obj,
+        &ours_obj,
+        &theirs_obj,
+        &mut conflicts,
+    );
 
     if conflicts.is_empty() {
         MergeResult::Success(merged)
@@ -159,14 +166,28 @@ fn merge_objects(
             Object::Node(Node::Map(base_entries)),
             Object::Node(Node::Map(our_entries)),
             Object::Node(Node::Map(their_entries)),
-        ) => merge_maps(resolver, path, base_entries, our_entries, their_entries, conflicts),
+        ) => merge_maps(
+            resolver,
+            path,
+            base_entries,
+            our_entries,
+            their_entries,
+            conflicts,
+        ),
 
         // All three are lists — element-wise merge (limited)
         (
             Object::Node(Node::List(base_items)),
             Object::Node(Node::List(our_items)),
             Object::Node(Node::List(their_items)),
-        ) => merge_lists(resolver, path, base_items, our_items, their_items, conflicts),
+        ) => merge_lists(
+            resolver,
+            path,
+            base_items,
+            our_items,
+            their_items,
+            conflicts,
+        ),
 
         // All three are sets — union
         (
@@ -244,9 +265,8 @@ fn merge_maps(
 
                     match (base_obj, our_obj, their_obj) {
                         (Some(bo), Some(oo), Some(to)) => {
-                            let merged_child = merge_objects(
-                                resolver, &child_path, &bo, &oo, &to, conflicts,
-                            );
+                            let merged_child =
+                                merge_objects(resolver, &child_path, &bo, &oo, &to, conflicts);
                             // Store the merged object — we need to compute its ID
                             let merged_id = merged_child.id();
                             merged.insert(key.clone(), merged_id);
@@ -283,8 +303,12 @@ fn merge_maps(
                     // Both added same key with different values — conflict
                     conflicts.push(Conflict {
                         path: child_path,
-                        ours: resolver.resolve(o).map(|obj| ConflictValue::from_object(&obj)),
-                        theirs: resolver.resolve(t).map(|obj| ConflictValue::from_object(&obj)),
+                        ours: resolver
+                            .resolve(o)
+                            .map(|obj| ConflictValue::from_object(&obj)),
+                        theirs: resolver
+                            .resolve(t)
+                            .map(|obj| ConflictValue::from_object(&obj)),
                         base: None,
                         suggested_resolution: None,
                     });
@@ -300,8 +324,12 @@ fn merge_maps(
                     conflicts.push(Conflict {
                         path: child_path,
                         ours: None, // deleted
-                        theirs: resolver.resolve(t).map(|obj| ConflictValue::from_object(&obj)),
-                        base: base_id.and_then(|b| resolver.resolve(b)).map(|obj| ConflictValue::from_object(&obj)),
+                        theirs: resolver
+                            .resolve(t)
+                            .map(|obj| ConflictValue::from_object(&obj)),
+                        base: base_id
+                            .and_then(|b| resolver.resolve(b))
+                            .map(|obj| ConflictValue::from_object(&obj)),
                         suggested_resolution: None,
                     });
                     // Default: keep deleted (ours wins)
@@ -315,9 +343,13 @@ fn merge_maps(
                     // Ours modified, theirs deleted — conflict
                     conflicts.push(Conflict {
                         path: child_path,
-                        ours: resolver.resolve(o).map(|obj| ConflictValue::from_object(&obj)),
+                        ours: resolver
+                            .resolve(o)
+                            .map(|obj| ConflictValue::from_object(&obj)),
                         theirs: None, // deleted
-                        base: base_id.and_then(|b| resolver.resolve(b)).map(|obj| ConflictValue::from_object(&obj)),
+                        base: base_id
+                            .and_then(|b| resolver.resolve(b))
+                            .map(|obj| ConflictValue::from_object(&obj)),
                         suggested_resolution: None,
                     });
                     merged.insert(key.clone(), *o); // default: keep ours
@@ -352,9 +384,18 @@ fn merge_lists(
     // For now, if both sides modified the list differently, it's a conflict
     conflicts.push(Conflict {
         path: path.to_string(),
-        ours: Some(ConflictValue::Complex(format!("[list: {} items]", our_items.len()))),
-        theirs: Some(ConflictValue::Complex(format!("[list: {} items]", their_items.len()))),
-        base: Some(ConflictValue::Complex(format!("[list: {} items]", base_items.len()))),
+        ours: Some(ConflictValue::Complex(format!(
+            "[list: {} items]",
+            our_items.len()
+        ))),
+        theirs: Some(ConflictValue::Complex(format!(
+            "[list: {} items]",
+            their_items.len()
+        ))),
+        base: Some(ConflictValue::Complex(format!(
+            "[list: {} items]",
+            base_items.len()
+        ))),
         suggested_resolution: None,
     });
 
@@ -381,7 +422,9 @@ mod tests {
 
     impl TestResolver {
         fn new() -> Self {
-            Self { objects: HashMap::new() }
+            Self {
+                objects: HashMap::new(),
+            }
         }
         fn store(&mut self, obj: &Object) -> ObjectId {
             let id = obj.id();
@@ -396,8 +439,11 @@ mod tests {
                 serde_json::Value::Null => Object::null(),
                 serde_json::Value::Bool(b) => Object::bool(*b),
                 serde_json::Value::Number(n) => {
-                    if let Some(i) = n.as_i64() { Object::int(i) }
-                    else { Object::float(n.as_f64().unwrap()) }
+                    if let Some(i) = n.as_i64() {
+                        Object::int(i)
+                    } else {
+                        Object::float(n.as_f64().unwrap())
+                    }
                 }
                 serde_json::Value::String(s) => Object::string(s.clone()),
                 serde_json::Value::Array(arr) => {

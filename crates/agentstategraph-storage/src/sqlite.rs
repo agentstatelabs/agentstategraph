@@ -6,8 +6,8 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, OptionalExtension};
 use agentstategraph_core::{Commit, Object, ObjectId};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::traits::{CommitStore, ObjectStore, RefStore, StorageError};
 
@@ -42,7 +42,10 @@ impl SqliteStorage {
     }
 
     fn init_tables(&self) -> Result<(), StorageError> {
-        let conn = self.conn.lock().map_err(|e| StorageError::Backend(e.to_string()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
 
         conn.execute_batch(
             "
@@ -81,9 +84,11 @@ impl ObjectStore for SqliteStorage {
     fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, StorageError> {
         let conn = self.lock_conn()?;
         let result: Option<Vec<u8>> = conn
-            .query_row("SELECT data FROM objects WHERE id = ?1", params![id.as_bytes().as_slice()], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT data FROM objects WHERE id = ?1",
+                params![id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(|e| StorageError::Backend(format!("get object: {}", e)))?;
 
@@ -99,8 +104,8 @@ impl ObjectStore for SqliteStorage {
 
     fn put_object(&self, obj: &Object) -> Result<ObjectId, StorageError> {
         let id = obj.id();
-        let data = serde_json::to_vec(obj)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_vec(obj).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         let conn = self.lock_conn()?;
         conn.execute(
@@ -157,9 +162,11 @@ impl CommitStore for SqliteStorage {
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
         let conn = self.lock_conn()?;
         let result: Option<Vec<u8>> = conn
-            .query_row("SELECT data FROM commits WHERE id = ?1", params![id.as_bytes().as_slice()], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT data FROM commits WHERE id = ?1",
+                params![id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(|e| StorageError::Backend(format!("get commit: {}", e)))?;
 
@@ -174,8 +181,8 @@ impl CommitStore for SqliteStorage {
     }
 
     fn put_commit(&self, commit: &Commit) -> Result<(), StorageError> {
-        let data = serde_json::to_vec(commit)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_vec(commit).map_err(|e| StorageError::Serialization(e.to_string()))?;
         let timestamp = commit.timestamp.to_rfc3339();
 
         let conn = self.lock_conn()?;
@@ -212,9 +219,11 @@ impl CommitStore for SqliteStorage {
             }
 
             let data: Option<Vec<u8>> = conn
-                .query_row("SELECT data FROM commits WHERE id = ?1", params![id.as_bytes().as_slice()], |row| {
-                    row.get(0)
-                })
+                .query_row(
+                    "SELECT data FROM commits WHERE id = ?1",
+                    params![id.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )
                 .optional()
                 .map_err(|e| StorageError::Backend(format!("list commits: {}", e)))?;
 
@@ -237,9 +246,11 @@ impl RefStore for SqliteStorage {
     fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError> {
         let conn = self.lock_conn()?;
         let result: Option<Vec<u8>> = conn
-            .query_row("SELECT target FROM refs WHERE name = ?1", params![name], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT target FROM refs WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(|e| StorageError::Backend(format!("get ref: {}", e)))?;
 
@@ -263,19 +274,18 @@ impl RefStore for SqliteStorage {
         Ok(())
     }
 
-    fn cas_ref(
-        &self,
-        name: &str,
-        expected: ObjectId,
-        new: ObjectId,
-    ) -> Result<bool, StorageError> {
+    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError> {
         let conn = self.lock_conn()?;
 
         // Use UPDATE with WHERE to make it atomic
         let rows = conn
             .execute(
                 "UPDATE refs SET target = ?1 WHERE name = ?2 AND target = ?3",
-                params![new.as_bytes().as_slice(), name, expected.as_bytes().as_slice()],
+                params![
+                    new.as_bytes().as_slice(),
+                    name,
+                    expected.as_bytes().as_slice()
+                ],
             )
             .map_err(|e| StorageError::Backend(format!("cas ref: {}", e)))?;
 
@@ -361,7 +371,10 @@ mod tests {
         store.put_commit(&commit).unwrap();
         let retrieved = store.get_commit(&commit.id).unwrap().unwrap();
         assert_eq!(retrieved.agent_id, "agent/test");
-        assert_eq!(retrieved.reasoning, Some("testing sqlite backend".to_string()));
+        assert_eq!(
+            retrieved.reasoning,
+            Some("testing sqlite backend".to_string())
+        );
         assert_eq!(retrieved.confidence, Some(0.9));
     }
 

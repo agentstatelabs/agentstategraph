@@ -6,8 +6,8 @@
 //! Run: cargo run --example schema_merge -p stategraph
 
 use agentstategraph::{CommitOptions, Repository};
+use agentstategraph_core::schema::{EnforcementMode, MergeHint, Schema};
 use agentstategraph_core::{IntentCategory, Object};
-use agentstategraph_core::schema::{Schema, EnforcementMode, MergeHint};
 use agentstategraph_storage::MemoryStorage;
 
 fn main() {
@@ -72,7 +72,11 @@ fn main() {
     });
 
     let result = schema.validate(&valid_state);
-    println!("  Valid state: {} (errors: {})", result.valid, result.errors.len());
+    println!(
+        "  Valid state: {} (errors: {})",
+        result.valid,
+        result.errors.len()
+    );
 
     let invalid_state = serde_json::json!({
         "nodes": [
@@ -82,7 +86,11 @@ fn main() {
     });
 
     let result = schema.validate(&invalid_state);
-    println!("  Invalid state: {} (errors: {})", result.valid, result.errors.len());
+    println!(
+        "  Invalid state: {} (errors: {})",
+        result.valid,
+        result.errors.len()
+    );
     for err in &result.errors {
         println!("    {}: {}", err.path, err.message);
     }
@@ -143,8 +151,12 @@ fn main() {
     .unwrap();
     println!("  ✓ Merged agent-b (storage/type) — no conflicts");
 
-    let dns = repo.get_json("main", "/cluster/network/dns").unwrap_or(serde_json::json!("1.1.1.1"));
-    let storage = repo.get_json("main", "/cluster/storage/type").unwrap_or(serde_json::json!("nfs"));
+    let dns = repo
+        .get_json("main", "/cluster/network/dns")
+        .unwrap_or(serde_json::json!("1.1.1.1"));
+    let storage = repo
+        .get_json("main", "/cluster/storage/type")
+        .unwrap_or(serde_json::json!("nfs"));
     println!("  Final: dns={}, storage={}", dns, storage);
 
     // ─── 4. Demonstrate conflict detection ────────────────────────
@@ -154,40 +166,44 @@ fn main() {
     let repo2 = Repository::new(Box::new(MemoryStorage::new()));
     repo2.init().unwrap();
 
-    repo2.set(
-        "main",
-        "/name",
-        &Object::string("base"),
-        CommitOptions::new("system", IntentCategory::Checkpoint, "Set name"),
-    )
-    .unwrap();
+    repo2
+        .set(
+            "main",
+            "/name",
+            &Object::string("base"),
+            CommitOptions::new("system", IntentCategory::Checkpoint, "Set name"),
+        )
+        .unwrap();
 
     repo2.branch("conflict-a", "main").unwrap();
     repo2.branch("conflict-b", "main").unwrap();
 
-    repo2.set(
-        "conflict-a",
-        "/name",
-        &Object::string("alpha"),
-        CommitOptions::new("agent/a", IntentCategory::Refine, "Rename to alpha"),
-    )
-    .unwrap();
+    repo2
+        .set(
+            "conflict-a",
+            "/name",
+            &Object::string("alpha"),
+            CommitOptions::new("agent/a", IntentCategory::Refine, "Rename to alpha"),
+        )
+        .unwrap();
 
-    repo2.set(
-        "conflict-b",
-        "/name",
-        &Object::string("beta"),
-        CommitOptions::new("agent/b", IntentCategory::Refine, "Rename to beta"),
-    )
-    .unwrap();
+    repo2
+        .set(
+            "conflict-b",
+            "/name",
+            &Object::string("beta"),
+            CommitOptions::new("agent/b", IntentCategory::Refine, "Rename to beta"),
+        )
+        .unwrap();
 
     // First merge succeeds (fast-forward)
-    repo2.merge(
-        "conflict-a",
-        "main",
-        CommitOptions::new("orchestrator", IntentCategory::Merge, "Merge alpha"),
-    )
-    .unwrap();
+    repo2
+        .merge(
+            "conflict-a",
+            "main",
+            CommitOptions::new("orchestrator", IntentCategory::Merge, "Merge alpha"),
+        )
+        .unwrap();
     println!("  ✓ Merged conflict-a (name='alpha')");
 
     // Second merge — same key, different value → conflict

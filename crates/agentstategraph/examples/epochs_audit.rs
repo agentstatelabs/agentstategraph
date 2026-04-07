@@ -35,9 +35,13 @@ fn main() {
             "nodes": 5,
             "storage": "nfs",
         }),
-        CommitOptions::new("agent/setup", IntentCategory::Checkpoint, "Initialize cluster")
-            .with_reasoning("Setting up 5-node cluster for distributed ML training")
-            .with_confidence(0.95),
+        CommitOptions::new(
+            "agent/setup",
+            IntentCategory::Checkpoint,
+            "Initialize cluster",
+        )
+        .with_reasoning("Setting up 5-node cluster for distributed ML training")
+        .with_confidence(0.95),
     )
     .unwrap();
     println!("  ✓ Cluster initialized");
@@ -46,8 +50,12 @@ fn main() {
         "main",
         "/cluster/network",
         &Object::string("10GbE-bonded"),
-        CommitOptions::new("agent/network", IntentCategory::Refine, "Configure network bonding")
-            .with_reasoning("10GbE bonding for inter-node communication during training"),
+        CommitOptions::new(
+            "agent/network",
+            IntentCategory::Refine,
+            "Configure network bonding",
+        )
+        .with_reasoning("10GbE bonding for inter-node communication during training"),
     )
     .unwrap();
     println!("  ✓ Network configured");
@@ -56,8 +64,12 @@ fn main() {
         "main",
         "/cluster/gpu_scheduling",
         &Object::string("memory-aware"),
-        CommitOptions::new("agent/gpu", IntentCategory::Refine, "Set GPU scheduling policy")
-            .with_reasoning("Memory-aware scheduling allocates workloads based on available VRAM"),
+        CommitOptions::new(
+            "agent/gpu",
+            IntentCategory::Refine,
+            "Set GPU scheduling policy",
+        )
+        .with_reasoning("Memory-aware scheduling allocates workloads based on available VRAM"),
     )
     .unwrap();
     println!("  ✓ GPU scheduling configured");
@@ -96,7 +108,10 @@ fn main() {
         println!("  Status:      {:?}", epoch.status);
         println!("  Agents:      {:?}", epoch.agents);
         if let Some(sealed_at) = epoch.sealed_at {
-            println!("  Sealed at:   {}", sealed_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            println!(
+                "  Sealed at:   {}",
+                sealed_at.format("%Y-%m-%d %H:%M:%S UTC")
+            );
         }
         if let Some(ref hash) = epoch.seal_hash {
             println!("  Seal hash:   {}", hash.short());
@@ -116,9 +131,13 @@ fn main() {
         "main",
         "/cluster/incidents/node3",
         &Object::string("GPU memory test failed — investigating"),
-        CommitOptions::new("agent/health-monitor", IntentCategory::Fix, "Node-3 GPU fault detected")
-            .with_reasoning("CUDA memory test failed on node-3 GPU. Initiating investigation.")
-            .with_confidence(0.7),
+        CommitOptions::new(
+            "agent/health-monitor",
+            IntentCategory::Fix,
+            "Node-3 GPU fault detected",
+        )
+        .with_reasoning("CUDA memory test failed on node-3 GPU. Initiating investigation.")
+        .with_confidence(0.7),
     )
     .unwrap();
     println!("✓ New epoch 'incident-node3' started");
@@ -128,7 +147,12 @@ fn main() {
     let all_epochs = repo.list_epochs().unwrap();
     println!("--- All epochs ---\n");
     for epoch in &all_epochs {
-        println!("  {} [{}] — {}", epoch.id, format!("{:?}", epoch.status), epoch.description);
+        println!(
+            "  {} [{}] — {}",
+            epoch.id,
+            format!("{:?}", epoch.status),
+            epoch.description
+        );
     }
 
     // ─── 8. Blame: trace any value to its origin ──────────────────

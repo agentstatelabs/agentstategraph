@@ -11,8 +11,8 @@
 //! so creating one is essentially free. Discarding one just drops the handle.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use agentstategraph_core::{DiffOp, Object, ObjectId, ObjectResolver};
 use agentstategraph_storage::ObjectStore;
@@ -100,12 +100,7 @@ impl SpeculationManager {
     }
 
     /// Create a new speculation forked from a state root.
-    pub fn create(
-        &self,
-        base_ref: &str,
-        base_root: ObjectId,
-        label: Option<String>,
-    ) -> SpecHandle {
+    pub fn create(&self, base_ref: &str, base_root: ObjectId, label: Option<String>) -> SpecHandle {
         let handle = SpecHandle(NEXT_SPEC_ID.fetch_add(1, Ordering::Relaxed));
         let spec = Speculation {
             label,
@@ -137,7 +132,11 @@ impl SpeculationManager {
         let _root = resolver
             .resolve_to_object(&spec.current_root)
             .ok_or_else(|| TreeError::PathNotFound("root not found".to_string()))?;
-        Ok(tree::tree_get(&OverlayObjectStore(&resolver), &spec.current_root, &state_path)?)
+        Ok(tree::tree_get(
+            &OverlayObjectStore(&resolver),
+            &spec.current_root,
+            &state_path,
+        )?)
     }
 
     /// Set a value within a speculation.
@@ -217,9 +216,7 @@ impl SpeculationManager {
     /// The speculation is consumed (removed from the manager).
     pub fn commit(&self, handle: SpecHandle) -> Result<(ObjectId, String), SpecError> {
         let mut specs = self.specs.write().unwrap();
-        let spec = specs
-            .remove(&handle)
-            .ok_or(SpecError::NotFound(handle))?;
+        let spec = specs.remove(&handle).ok_or(SpecError::NotFound(handle))?;
         Ok((spec.current_root, spec.base_ref))
     }
 
@@ -227,9 +224,7 @@ impl SpeculationManager {
     /// Since we use structural sharing, this is essentially free.
     pub fn discard(&self, handle: SpecHandle) -> Result<(), SpecError> {
         let mut specs = self.specs.write().unwrap();
-        specs
-            .remove(&handle)
-            .ok_or(SpecError::NotFound(handle))?;
+        specs.remove(&handle).ok_or(SpecError::NotFound(handle))?;
         Ok(())
     }
 
@@ -283,7 +278,10 @@ impl<'a> OverlayResolver<'a> {
 struct OverlayObjectStore<'a>(&'a OverlayResolver<'a>);
 
 impl<'a> ObjectStore for OverlayObjectStore<'a> {
-    fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, agentstategraph_storage::StorageError> {
+    fn get_object(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<Object>, agentstategraph_storage::StorageError> {
         Ok(self.0.resolve_to_object(id))
     }
 
@@ -293,8 +291,7 @@ impl<'a> ObjectStore for OverlayObjectStore<'a> {
     }
 
     fn has_object(&self, id: &ObjectId) -> Result<bool, agentstategraph_storage::StorageError> {
-        Ok(self.0.overlay.contains_key(id)
-            || self.0.store.has_object(id).unwrap_or(false))
+        Ok(self.0.overlay.contains_key(id) || self.0.store.has_object(id).unwrap_or(false))
     }
 }
 
@@ -346,7 +343,8 @@ mod tests {
         let mgr = SpeculationManager::new();
 
         let h = mgr.create("main", root_id, None);
-        mgr.set(h, &store, "/storage/type", &Object::string("nfs")).unwrap();
+        mgr.set(h, &store, "/storage/type", &Object::string("nfs"))
+            .unwrap();
 
         // Speculation has the new value
         let obj = mgr.get(h, &store, "/storage/type").unwrap();
@@ -370,11 +368,20 @@ mod tests {
         let nfs = mgr.create("main", root_id, Some("NFS approach".to_string()));
         let ceph = mgr.create("main", root_id, Some("Ceph approach".to_string()));
 
-        mgr.set(nfs, &store, "/storage/type", &Object::string("nfs")).unwrap();
-        mgr.set(nfs, &store, "/storage/mount", &Object::string("/shared/nfs")).unwrap();
+        mgr.set(nfs, &store, "/storage/type", &Object::string("nfs"))
+            .unwrap();
+        mgr.set(
+            nfs,
+            &store,
+            "/storage/mount",
+            &Object::string("/shared/nfs"),
+        )
+        .unwrap();
 
-        mgr.set(ceph, &store, "/storage/type", &Object::string("ceph")).unwrap();
-        mgr.set(ceph, &store, "/storage/replicas", &Object::int(3)).unwrap();
+        mgr.set(ceph, &store, "/storage/type", &Object::string("ceph"))
+            .unwrap();
+        mgr.set(ceph, &store, "/storage/replicas", &Object::int(3))
+            .unwrap();
 
         // Each speculation has its own state
         assert_eq!(
@@ -397,8 +404,10 @@ mod tests {
         let nfs = mgr.create("main", root_id, Some("NFS".to_string()));
         let ceph = mgr.create("main", root_id, Some("Ceph".to_string()));
 
-        mgr.set(nfs, &store, "/storage/type", &Object::string("nfs")).unwrap();
-        mgr.set(ceph, &store, "/storage/type", &Object::string("ceph")).unwrap();
+        mgr.set(nfs, &store, "/storage/type", &Object::string("nfs"))
+            .unwrap();
+        mgr.set(ceph, &store, "/storage/type", &Object::string("ceph"))
+            .unwrap();
 
         let comparison = mgr.compare(&[nfs, ceph], &store).unwrap();
         assert_eq!(comparison.entries.len(), 2);
@@ -417,11 +426,15 @@ mod tests {
         let mgr = SpeculationManager::new();
 
         let h = mgr.create("main", root_id, Some("winner".to_string()));
-        mgr.set(h, &store, "/storage/type", &Object::string("nfs")).unwrap();
+        mgr.set(h, &store, "/storage/type", &Object::string("nfs"))
+            .unwrap();
 
         let (committed_root, base_ref) = mgr.commit(h).unwrap();
         assert_eq!(base_ref, "main");
-        assert_ne!(committed_root, root_id, "committed root should differ from base");
+        assert_ne!(
+            committed_root, root_id,
+            "committed root should differ from base"
+        );
 
         // Speculation is consumed
         assert_eq!(mgr.count(), 0);

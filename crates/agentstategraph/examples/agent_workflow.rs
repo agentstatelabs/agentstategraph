@@ -31,7 +31,11 @@ fn main() {
             "storage": {"type": "none"},
             "network": {"subnet": "10.0.0.0/24"}
         }),
-        CommitOptions::new("system", IntentCategory::Checkpoint, "Initialize cluster state"),
+        CommitOptions::new(
+            "system",
+            IntentCategory::Checkpoint,
+            "Initialize cluster state",
+        ),
     )
     .unwrap();
 
@@ -55,8 +59,12 @@ fn main() {
         .unwrap();
     repo.spec_set(nfs, "/cluster/storage/server", &Object::string("jetson-01"))
         .unwrap();
-    repo.spec_set(nfs, "/cluster/storage/mount", &Object::string("/shared/models"))
-        .unwrap();
+    repo.spec_set(
+        nfs,
+        "/cluster/storage/mount",
+        &Object::string("/shared/models"),
+    )
+    .unwrap();
 
     // Ceph approach
     repo.spec_set(ceph, "/cluster/storage/type", &Object::string("ceph"))
@@ -67,10 +75,18 @@ fn main() {
         .unwrap();
 
     // Local SSD approach
-    repo.spec_set(local, "/cluster/storage/type", &Object::string("local-nvme"))
-        .unwrap();
-    repo.spec_set(local, "/cluster/storage/path", &Object::string("/dev/nvme0n1"))
-        .unwrap();
+    repo.spec_set(
+        local,
+        "/cluster/storage/type",
+        &Object::string("local-nvme"),
+    )
+    .unwrap();
+    repo.spec_set(
+        local,
+        "/cluster/storage/path",
+        &Object::string("/dev/nvme0n1"),
+    )
+    .unwrap();
 
     // 4. Compare all three
     println!("--- Comparing speculations ---\n");
@@ -125,7 +141,11 @@ fn main() {
     println!("\n--- Commit log ---\n");
     let log = repo.log("main", 10).unwrap();
     for commit in log.iter().rev() {
-        println!("  {} [{}]", commit.id.short(), format!("{:?}", commit.intent.category));
+        println!(
+            "  {} [{}]",
+            commit.id.short(),
+            format!("{:?}", commit.intent.category)
+        );
         println!("    agent: {}", commit.agent_id);
         println!("    intent: {}", commit.intent.description);
         if !commit.intent.tags.is_empty() {
@@ -148,9 +168,13 @@ fn main() {
         "hotfix/node3",
         "/cluster/nodes/2/status",
         &Object::string("draining"),
-        CommitOptions::new("agent/health-monitor", IntentCategory::Fix, "Drain node-3 due to GPU fault")
-            .with_reasoning("Node-3 GPU health check failed — CUDA memory test error")
-            .with_confidence(0.95),
+        CommitOptions::new(
+            "agent/health-monitor",
+            IntentCategory::Fix,
+            "Drain node-3 due to GPU fault",
+        )
+        .with_reasoning("Node-3 GPU health check failed — CUDA memory test error")
+        .with_confidence(0.95),
     )
     .unwrap();
 
@@ -164,7 +188,11 @@ fn main() {
     repo.merge(
         "hotfix/node3",
         "main",
-        CommitOptions::new("agent/health-monitor", IntentCategory::Fix, "Apply node-3 drain hotfix"),
+        CommitOptions::new(
+            "agent/health-monitor",
+            IntentCategory::Fix,
+            "Apply node-3 drain hotfix",
+        ),
     )
     .unwrap();
 

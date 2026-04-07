@@ -111,10 +111,7 @@ impl Schema {
 }
 
 /// Extract x-stategraph-merge hints from a JSON Schema document.
-fn extract_merge_hints(
-    schema: &serde_json::Value,
-    path: &str,
-) -> HashMap<String, MergeHint> {
+fn extract_merge_hints(schema: &serde_json::Value, path: &str) -> HashMap<String, MergeHint> {
     let mut hints = HashMap::new();
 
     if let Some(hint_str) = schema.get("x-stategraph-merge").and_then(|v| v.as_str()) {
@@ -282,7 +279,10 @@ mod tests {
             Some(&MergeHint::UnionById("node_id".to_string()))
         );
         assert_eq!(s.merge_hint_for("/request_count"), Some(&MergeHint::Sum));
-        assert_eq!(s.merge_hint_for("/config"), Some(&MergeHint::LastWriterWins));
+        assert_eq!(
+            s.merge_hint_for("/config"),
+            Some(&MergeHint::LastWriterWins)
+        );
     }
 
     #[test]

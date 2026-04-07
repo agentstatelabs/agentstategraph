@@ -6,9 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use agentstategraph_core::{
-    Atom, Node, Object, ObjectId, PathComponent, StatePath,
-};
+use agentstategraph_core::{Atom, Node, Object, ObjectId, PathComponent, StatePath};
 use agentstategraph_storage::{ObjectStore, StorageError};
 
 /// Read a value from the state tree at the given path.
@@ -89,10 +87,7 @@ pub fn tree_delete(
 
 /// Convert an Object to a serde_json::Value for user-facing output.
 /// Recursively resolves all ObjectId references.
-pub fn tree_to_json(
-    store: &dyn ObjectStore,
-    obj: &Object,
-) -> Result<serde_json::Value, TreeError> {
+pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json::Value, TreeError> {
     match obj {
         Object::Atom(atom) => Ok(atom_to_json(atom)),
         Object::Node(node) => match node {
@@ -162,30 +157,24 @@ fn navigate(
                 .ok_or_else(|| TreeError::ObjectNotFound(*child_id))
         }
         (Object::Node(Node::List(items)), PathComponent::Index(idx)) => {
-            let child_id = items
-                .get(*idx)
-                .ok_or_else(|| TreeError::IndexOutOfBounds {
-                    index: *idx,
-                    length: items.len(),
-                })?;
+            let child_id = items.get(*idx).ok_or_else(|| TreeError::IndexOutOfBounds {
+                index: *idx,
+                length: items.len(),
+            })?;
             store
                 .get_object(child_id)?
                 .ok_or_else(|| TreeError::ObjectNotFound(*child_id))
         }
-        (Object::Node(Node::Map(_)), PathComponent::Index(_)) => {
-            Err(TreeError::TypeMismatch {
-                path: path.to_string(),
-                expected: "list".to_string(),
-                found: "map".to_string(),
-            })
-        }
-        (Object::Node(Node::List(_)), PathComponent::Key(_)) => {
-            Err(TreeError::TypeMismatch {
-                path: path.to_string(),
-                expected: "map".to_string(),
-                found: "list".to_string(),
-            })
-        }
+        (Object::Node(Node::Map(_)), PathComponent::Index(_)) => Err(TreeError::TypeMismatch {
+            path: path.to_string(),
+            expected: "list".to_string(),
+            found: "map".to_string(),
+        }),
+        (Object::Node(Node::List(_)), PathComponent::Key(_)) => Err(TreeError::TypeMismatch {
+            path: path.to_string(),
+            expected: "map".to_string(),
+            found: "list".to_string(),
+        }),
         (Object::Atom(_), _) => Err(TreeError::CannotNavigateAtom(path.to_string())),
         _ => Err(TreeError::PathNotFound(path.to_string())),
     }
@@ -350,10 +339,7 @@ fn atom_to_json(atom: &Atom) -> serde_json::Value {
     }
 }
 
-fn json_to_object(
-    store: &dyn ObjectStore,
-    value: &serde_json::Value,
-) -> Result<Object, TreeError> {
+fn json_to_object(store: &dyn ObjectStore, value: &serde_json::Value) -> Result<Object, TreeError> {
     match value {
         serde_json::Value::Null => Ok(Object::null()),
         serde_json::Value::Bool(b) => Ok(Object::bool(*b)),
@@ -363,7 +349,9 @@ fn json_to_object(
             } else if let Some(f) = n.as_f64() {
                 Ok(Object::float(f))
             } else {
-                Err(TreeError::InvalidJson("unsupported number type".to_string()))
+                Err(TreeError::InvalidJson(
+                    "unsupported number type".to_string(),
+                ))
             }
         }
         serde_json::Value::String(s) => Ok(Object::string(s.clone())),
@@ -636,6 +624,9 @@ mod tests {
         let new_root_id = json_to_tree(&store, &json).unwrap();
 
         // Same content should produce same ObjectId
-        assert_eq!(root_id, new_root_id, "JSON roundtrip should produce same ObjectId");
+        assert_eq!(
+            root_id, new_root_id,
+            "JSON roundtrip should produce same ObjectId"
+        );
     }
 }

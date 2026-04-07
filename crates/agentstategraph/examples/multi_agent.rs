@@ -32,7 +32,11 @@ fn main() {
             "storage": {"configured": false},
             "scheduling": {"configured": false},
         }),
-        CommitOptions::new("agent/orchestrator", IntentCategory::Checkpoint, "Initialize cluster state"),
+        CommitOptions::new(
+            "agent/orchestrator",
+            IntentCategory::Checkpoint,
+            "Initialize cluster state",
+        ),
     )
     .unwrap();
     println!("✓ Orchestrator initialized cluster state\n");
@@ -83,12 +87,22 @@ fn main() {
         Some("agent/orchestrator".to_string()),
         Some("/cluster/scheduling".to_string()),
     );
-    repo.branch("agents/gpu-scheduler/workspace", "main").unwrap();
+    repo.branch("agents/gpu-scheduler/workspace", "main")
+        .unwrap();
 
     println!("✓ Sub-agent sessions created:");
-    println!("  Network agent:      {} (scope: /cluster/network)", net_session.id);
-    println!("  Storage agent:      {} (scope: /cluster/storage)", storage_session.id);
-    println!("  GPU scheduler:      {} (scope: /cluster/scheduling)", gpu_session.id);
+    println!(
+        "  Network agent:      {} (scope: /cluster/network)",
+        net_session.id
+    );
+    println!(
+        "  Storage agent:      {} (scope: /cluster/storage)",
+        storage_session.id
+    );
+    println!(
+        "  GPU scheduler:      {} (scope: /cluster/scheduling)",
+        gpu_session.id
+    );
 
     // ─── 3. Sub-agents work in parallel on their branches ─────────
     println!("\n--- Sub-agents working in parallel ---\n");
@@ -103,9 +117,13 @@ fn main() {
             "bonding": "10GbE",
             "dns": "1.1.1.1"
         }),
-        CommitOptions::new("agent/network", IntentCategory::Refine, "Configure 10GbE network with bonding")
-            .with_reasoning("10GbE bonding provides redundancy and bandwidth for distributed training")
-            .with_confidence(0.92),
+        CommitOptions::new(
+            "agent/network",
+            IntentCategory::Refine,
+            "Configure 10GbE network with bonding",
+        )
+        .with_reasoning("10GbE bonding provides redundancy and bandwidth for distributed training")
+        .with_confidence(0.92),
     )
     .unwrap();
     println!("  ✓ Network agent: configured 10GbE bonding");
@@ -176,14 +194,20 @@ fn main() {
                 IntentCategory::Merge,
                 &format!("Merge {} agent work", name.to_lowercase()),
             )
-            .with_reasoning(&format!("{} agent completed successfully, merging to main", name)),
+            .with_reasoning(&format!(
+                "{} agent completed successfully, merging to main",
+                name
+            )),
         ) {
             Ok(_) => println!("  ✓ Merged {} into main", name),
             Err(agentstategraph::RepoError::MergeConflicts(_)) => {
                 // Conflict on deeply nested structures — apply changes directly.
                 // In production, schema merge hints (union-by-id, sum, etc.) would
                 // auto-resolve this. Here we demonstrate the fallback pattern.
-                println!("  ✓ Applied {} changes directly (schema hints would auto-resolve)", name);
+                println!(
+                    "  ✓ Applied {} changes directly (schema hints would auto-resolve)",
+                    name
+                );
             }
             Err(e) => println!("  ⚠ {} error: {}", name, e),
         }
@@ -207,7 +231,11 @@ fn main() {
     println!("\n--- Session hierarchy ---\n");
     let all_sessions = repo.sessions().list(None);
     for s in &all_sessions {
-        let indent = if s.parent_session.is_some() { "    " } else { "  " };
+        let indent = if s.parent_session.is_some() {
+            "    "
+        } else {
+            "  "
+        };
         println!(
             "{}[{}] agent={}, branch={}, scope={:?}",
             indent,

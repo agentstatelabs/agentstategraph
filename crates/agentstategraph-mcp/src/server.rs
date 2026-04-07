@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -229,16 +229,22 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "Read a value from state at any branch, tag, or commit. Use JSON-path addressing (e.g., '/nodes/0/hostname'). Use '/' for entire state.")]
+    #[tool(
+        description = "Read a value from state at any branch, tag, or commit. Use JSON-path addressing (e.g., '/nodes/0/hostname'). Use '/' for entire state."
+    )]
     async fn stategraph_get(&self, params: Parameters<GetParams>) -> String {
         let p = params.0;
         match self.repo.get_json(&p.r#ref, &p.path) {
-            Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string()),
+            Ok(value) => {
+                serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
+            }
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(description = "Write a value to state, creating a new commit. Every write is atomic. Requires intent metadata explaining why this change is being made.")]
+    #[tool(
+        description = "Write a value to state, creating a new commit. Every write is atomic. Requires intent metadata explaining why this change is being made."
+    )]
     async fn stategraph_set(&self, params: Parameters<SetParams>) -> String {
         let p = params.0;
         let category = parse_category(&p.intent_category);
@@ -270,7 +276,9 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "Create a new branch from any ref. Use namespaced names like 'agents/my-agent/workspace' or 'explore/approach-a'.")]
+    #[tool(
+        description = "Create a new branch from any ref. Use namespaced names like 'agents/my-agent/workspace' or 'explore/approach-a'."
+    )]
     async fn stategraph_branch(&self, params: Parameters<BranchParams>) -> String {
         let p = params.0;
         match self.repo.branch(&p.name, &p.from) {
@@ -294,10 +302,13 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "Merge source branch into target. Uses schema-aware merge. Returns conflicts if auto-resolution fails.")]
+    #[tool(
+        description = "Merge source branch into target. Uses schema-aware merge. Returns conflicts if auto-resolution fails."
+    )]
     async fn stategraph_merge(&self, params: Parameters<MergeParams>) -> String {
         let p = params.0;
-        let mut opts = CommitOptions::new("mcp-agent", IntentCategory::Merge, &p.intent_description);
+        let mut opts =
+            CommitOptions::new("mcp-agent", IntentCategory::Merge, &p.intent_description);
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
         }
@@ -314,7 +325,9 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "List commits with full intent, reasoning, and metadata. Use to understand history of state changes.")]
+    #[tool(
+        description = "List commits with full intent, reasoning, and metadata. Use to understand history of state changes."
+    )]
     async fn stategraph_log(&self, params: Parameters<LogParams>) -> String {
         let p = params.0;
         match self.repo.log(&p.r#ref, p.limit) {
@@ -343,7 +356,9 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "Structured diff between two refs. Returns typed DiffOps (SetValue, AddKey, RemoveKey, etc.), not text diffs.")]
+    #[tool(
+        description = "Structured diff between two refs. Returns typed DiffOps (SetValue, AddKey, RemoveKey, etc.), not text diffs."
+    )]
     async fn stategraph_diff(&self, params: Parameters<DiffParams>) -> String {
         let p = params.0;
         match self.repo.diff(&p.ref_a, &p.ref_b) {
@@ -359,7 +374,9 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "Create a lightweight speculation from a ref. O(1) creation. Use to explore approaches before committing.")]
+    #[tool(
+        description = "Create a lightweight speculation from a ref. O(1) creation. Use to explore approaches before committing."
+    )]
     async fn stategraph_speculate(&self, params: Parameters<SpeculateParams>) -> String {
         let p = params.0;
         match self.repo.speculate(&p.from, p.label.clone()) {
@@ -373,7 +390,9 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "Modify state within a speculation. Changes are isolated until committed.")]
+    #[tool(
+        description = "Modify state within a speculation. Changes are isolated until committed."
+    )]
     async fn stategraph_spec_modify(&self, params: Parameters<SpecModifyParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
@@ -398,13 +417,23 @@ impl StateGraphServer {
             }
         }
 
-        format!("Applied {} operations to speculation {}", p.operations.len(), p.handle_id)
+        format!(
+            "Applied {} operations to speculation {}",
+            p.operations.len(),
+            p.handle_id
+        )
     }
 
-    #[tool(description = "Compare multiple speculations. Returns diffs showing how each diverges from base.")]
+    #[tool(
+        description = "Compare multiple speculations. Returns diffs showing how each diverges from base."
+    )]
     async fn stategraph_compare(&self, params: Parameters<CompareParams>) -> String {
         let p = params.0;
-        let handles: Vec<SpecHandle> = p.handle_ids.iter().map(|&id| SpecHandle::from_id(id)).collect();
+        let handles: Vec<SpecHandle> = p
+            .handle_ids
+            .iter()
+            .map(|&id| SpecHandle::from_id(id))
+            .collect();
         match self.repo.compare_speculations(&handles) {
             Ok(comparison) => {
                 let entries: Vec<serde_json::Value> = comparison
@@ -425,7 +454,9 @@ impl StateGraphServer {
         }
     }
 
-    #[tool(description = "Promote a speculation to a real commit on its base branch. The speculation is consumed.")]
+    #[tool(
+        description = "Promote a speculation to a real commit on its base branch. The speculation is consumed."
+    )]
     async fn stategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
@@ -455,7 +486,9 @@ impl StateGraphServer {
 
     // -- Query tools --
 
-    #[tool(description = "Query commits with composable filters. Filter by agent, intent category, tags, reasoning text, confidence range, date range, and more. All filters are AND-combined.")]
+    #[tool(
+        description = "Query commits with composable filters. Filter by agent, intent category, tags, reasoning text, confidence range, date range, and more. All filters are AND-combined."
+    )]
     async fn stategraph_query(&self, params: Parameters<QueryParams>) -> String {
         let p = params.0;
         let filters = QueryFilters {
@@ -473,27 +506,32 @@ impl StateGraphServer {
 
         match self.repo.query_commits(&ref_name, &filters, limit) {
             Ok(commits) => {
-                let entries: Vec<serde_json::Value> = commits.iter().map(|c| {
-                    serde_json::json!({
-                        "id": c.id.short(),
-                        "agent": c.agent_id,
-                        "intent": {
-                            "category": format!("{:?}", c.intent.category),
-                            "description": c.intent.description,
-                            "tags": c.intent.tags,
-                        },
-                        "reasoning": c.reasoning,
-                        "confidence": c.confidence,
-                        "timestamp": c.timestamp.to_rfc3339(),
+                let entries: Vec<serde_json::Value> = commits
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "id": c.id.short(),
+                            "agent": c.agent_id,
+                            "intent": {
+                                "category": format!("{:?}", c.intent.category),
+                                "description": c.intent.description,
+                                "tags": c.intent.tags,
+                            },
+                            "reasoning": c.reasoning,
+                            "confidence": c.confidence,
+                            "timestamp": c.timestamp.to_rfc3339(),
+                        })
                     })
-                }).collect();
+                    .collect();
                 serde_json::to_string_pretty(&entries).unwrap_or_default()
             }
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(description = "Blame — find which commit last modified a value at a path and why. Returns the agent, intent, reasoning, and timestamp.")]
+    #[tool(
+        description = "Blame — find which commit last modified a value at a path and why. Returns the agent, intent, reasoning, and timestamp."
+    )]
     async fn stategraph_blame(&self, params: Parameters<BlameParams>) -> String {
         let p = params.0;
         let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
@@ -505,16 +543,23 @@ impl StateGraphServer {
 
     // -- Epoch tools --
 
-    #[tool(description = "Create a new epoch to group related work. Commits are associated by intent lineage.")]
+    #[tool(
+        description = "Create a new epoch to group related work. Commits are associated by intent lineage."
+    )]
     async fn stategraph_create_epoch(&self, params: Parameters<CreateEpochParams>) -> String {
         let p = params.0;
-        match self.repo.create_epoch(&p.id, &p.description, p.root_intents) {
+        match self
+            .repo
+            .create_epoch(&p.id, &p.description, p.root_intents)
+        {
             Ok(epoch) => format!("Epoch '{}' created (status: {:?})", epoch.id, epoch.status),
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(description = "Seal an epoch, making it read-only and tamper-evident. Cannot be undone.")]
+    #[tool(
+        description = "Seal an epoch, making it read-only and tamper-evident. Cannot be undone."
+    )]
     async fn stategraph_seal_epoch(&self, params: Parameters<SealEpochParams>) -> String {
         let p = params.0;
         match self.repo.seal_epoch(&p.id, &p.summary) {
@@ -527,18 +572,21 @@ impl StateGraphServer {
     async fn stategraph_list_epochs(&self) -> String {
         match self.repo.list_epochs() {
             Ok(entries) => {
-                let json: Vec<serde_json::Value> = entries.iter().map(|e| {
-                    serde_json::json!({
-                        "id": e.id,
-                        "description": e.description,
-                        "status": format!("{:?}", e.status),
-                        "commits": e.commit_count,
-                        "agents": e.agents,
-                        "tags": e.tags,
-                        "created": e.created_at.to_rfc3339(),
-                        "sealed": e.sealed_at.map(|t| t.to_rfc3339()),
+                let json: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "id": e.id,
+                            "description": e.description,
+                            "status": format!("{:?}", e.status),
+                            "commits": e.commit_count,
+                            "agents": e.agents,
+                            "tags": e.tags,
+                            "created": e.created_at.to_rfc3339(),
+                            "sealed": e.sealed_at.map(|t| t.to_rfc3339()),
+                        })
                     })
-                }).collect();
+                    .collect();
                 serde_json::to_string_pretty(&json).unwrap_or_default()
             }
             Err(e) => format!("Error: {}", e),
@@ -547,21 +595,26 @@ impl StateGraphServer {
 
     // -- Session tools --
 
-    #[tool(description = "List active agent sessions. Shows parent-child relationships and path scoping.")]
+    #[tool(
+        description = "List active agent sessions. Shows parent-child relationships and path scoping."
+    )]
     async fn stategraph_sessions(&self, params: Parameters<SessionListParams>) -> String {
         let sessions = self.repo.sessions().list(params.0.agent_id.as_deref());
-        let json: Vec<serde_json::Value> = sessions.iter().map(|s| {
-            serde_json::json!({
-                "id": s.id,
-                "agent": s.agent_id,
-                "branch": s.working_branch,
-                "parent_session": s.parent_session,
-                "delegated_intent": s.delegated_intent,
-                "report_to": s.report_to,
-                "path_scope": s.path_scope,
-                "created": s.created_at.to_rfc3339(),
+        let json: Vec<serde_json::Value> = sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "agent": s.agent_id,
+                    "branch": s.working_branch,
+                    "parent_session": s.parent_session,
+                    "delegated_intent": s.delegated_intent,
+                    "report_to": s.report_to,
+                    "path_scope": s.path_scope,
+                    "created": s.created_at.to_rfc3339(),
+                })
             })
-        }).collect();
+            .collect();
         serde_json::to_string_pretty(&json).unwrap_or_default()
     }
 }

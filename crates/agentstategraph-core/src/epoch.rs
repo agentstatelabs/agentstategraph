@@ -192,17 +192,27 @@ mod tests {
         assert_eq!(epoch.status, EpochStatus::Active);
 
         // Add commits while active
-        epoch.add_commit(ObjectId::hash(b"c1"), "agent/test").unwrap();
-        epoch.add_commit(ObjectId::hash(b"c2"), "agent/test").unwrap();
+        epoch
+            .add_commit(ObjectId::hash(b"c1"), "agent/test")
+            .unwrap();
+        epoch
+            .add_commit(ObjectId::hash(b"c2"), "agent/test")
+            .unwrap();
         assert_eq!(epoch.commits.len(), 2);
 
         // Seal
-        epoch.seal("All done".to_string(), ObjectId::hash(b"seal")).unwrap();
+        epoch
+            .seal("All done".to_string(), ObjectId::hash(b"seal"))
+            .unwrap();
         assert_eq!(epoch.status, EpochStatus::Sealed);
         assert!(epoch.sealed_at.is_some());
 
         // Can't add commits after seal
-        assert!(epoch.add_commit(ObjectId::hash(b"c3"), "agent/test").is_err());
+        assert!(
+            epoch
+                .add_commit(ObjectId::hash(b"c3"), "agent/test")
+                .is_err()
+        );
 
         // Archive
         epoch.archive().unwrap();
@@ -212,8 +222,14 @@ mod tests {
     #[test]
     fn test_cannot_seal_non_active() {
         let mut epoch = Epoch::new("test", "Test", vec![]);
-        epoch.seal("done".to_string(), ObjectId::hash(b"seal")).unwrap();
-        assert!(epoch.seal("again".to_string(), ObjectId::hash(b"seal2")).is_err());
+        epoch
+            .seal("done".to_string(), ObjectId::hash(b"seal"))
+            .unwrap();
+        assert!(
+            epoch
+                .seal("again".to_string(), ObjectId::hash(b"seal2"))
+                .is_err()
+        );
     }
 
     #[test]

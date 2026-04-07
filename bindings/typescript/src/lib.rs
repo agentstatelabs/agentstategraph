@@ -141,7 +141,10 @@ impl StateGraph {
     ) -> napi::Result<String> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let opts = make_opts(&description, category, agent, reasoning, confidence, tags);
-        let commit_id = self.repo.set_json(&ref_name, &path, &value, opts).map_err(err)?;
+        let commit_id = self
+            .repo
+            .set_json(&ref_name, &path, &value, opts)
+            .map_err(err)?;
         Ok(commit_id.to_string())
     }
 
@@ -220,7 +223,11 @@ impl StateGraph {
 
     /// Commit log from a ref.
     #[napi]
-    pub fn log(&self, reference: Option<String>, limit: Option<u32>) -> napi::Result<Vec<serde_json::Value>> {
+    pub fn log(
+        &self,
+        reference: Option<String>,
+        limit: Option<u32>,
+    ) -> napi::Result<Vec<serde_json::Value>> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let max = limit.unwrap_or(10) as usize;
         let commits = self.repo.log(&ref_name, max).map_err(err)?;
@@ -266,7 +273,9 @@ impl StateGraph {
                 agentstategraph_core::Atom::Int(i) => Ok(serde_json::json!(i)),
                 agentstategraph_core::Atom::Float(f) => Ok(serde_json::json!(f)),
                 agentstategraph_core::Atom::String(s) => Ok(serde_json::json!(s)),
-                agentstategraph_core::Atom::Bytes(b) => Ok(serde_json::json!(format!("bytes:{}", b.len()))),
+                agentstategraph_core::Atom::Bytes(b) => {
+                    Ok(serde_json::json!(format!("bytes:{}", b.len())))
+                }
             },
             _ => Ok(serde_json::json!(format!("{:?}", obj))),
         }
@@ -274,7 +283,12 @@ impl StateGraph {
 
     /// Set a value within a speculation.
     #[napi]
-    pub fn spec_set(&self, handle_id: u32, path: String, value: serde_json::Value) -> napi::Result<()> {
+    pub fn spec_set(
+        &self,
+        handle_id: u32,
+        path: String,
+        value: serde_json::Value,
+    ) -> napi::Result<()> {
         let handle = SpecHandle::from_id(handle_id as u64);
         let obj = js_to_object(&value);
         self.repo.spec_set(handle, &path, &obj).map_err(err)
@@ -330,26 +344,36 @@ impl StateGraph {
             has_deviations,
             ..Default::default()
         };
-        let commits = self.repo.query_commits(&ref_name, &filters, max).map_err(err)?;
-        Ok(commits.iter().map(|c| {
-            serde_json::json!({
-                "id": c.id.short(),
-                "agent": c.agent_id,
-                "intent": {
-                    "category": format!("{:?}", c.intent.category),
-                    "description": c.intent.description,
-                    "tags": c.intent.tags,
-                },
-                "reasoning": c.reasoning,
-                "confidence": c.confidence,
-                "timestamp": c.timestamp.to_rfc3339(),
+        let commits = self
+            .repo
+            .query_commits(&ref_name, &filters, max)
+            .map_err(err)?;
+        Ok(commits
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.short(),
+                    "agent": c.agent_id,
+                    "intent": {
+                        "category": format!("{:?}", c.intent.category),
+                        "description": c.intent.description,
+                        "tags": c.intent.tags,
+                    },
+                    "reasoning": c.reasoning,
+                    "confidence": c.confidence,
+                    "timestamp": c.timestamp.to_rfc3339(),
+                })
             })
-        }).collect())
+            .collect())
     }
 
     /// Blame — who last modified a value at a path and why.
     #[napi]
-    pub fn blame(&self, path: String, reference: Option<String>) -> napi::Result<serde_json::Value> {
+    pub fn blame(
+        &self,
+        path: String,
+        reference: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let entry = self.repo.blame(&ref_name, &path).map_err(err)?;
         serde_json::to_value(&entry).map_err(err)
@@ -359,8 +383,14 @@ impl StateGraph {
 
     /// Create a new epoch.
     #[napi]
-    pub fn create_epoch(&self, id: String, description: String, root_intents: Vec<String>) -> napi::Result<String> {
-        self.repo.create_epoch(&id, &description, root_intents)
+    pub fn create_epoch(
+        &self,
+        id: String,
+        description: String,
+        root_intents: Vec<String>,
+    ) -> napi::Result<String> {
+        self.repo
+            .create_epoch(&id, &description, root_intents)
             .map(|e| format!("Epoch '{}' created", e.id))
             .map_err(err)
     }
@@ -375,30 +405,36 @@ impl StateGraph {
     #[napi]
     pub fn list_epochs(&self) -> napi::Result<Vec<serde_json::Value>> {
         let entries = self.repo.list_epochs().map_err(err)?;
-        Ok(entries.iter().map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "description": e.description,
-                "status": format!("{:?}", e.status),
-                "commits": e.commit_count,
-                "agents": e.agents,
-                "tags": e.tags,
+        Ok(entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "description": e.description,
+                    "status": format!("{:?}", e.status),
+                    "commits": e.commit_count,
+                    "agents": e.agents,
+                    "tags": e.tags,
+                })
             })
-        }).collect())
+            .collect())
     }
 
     /// List active sessions.
     #[napi]
     pub fn sessions(&self, agent_id: Option<String>) -> napi::Result<Vec<serde_json::Value>> {
         let sessions = self.repo.sessions().list(agent_id.as_deref());
-        Ok(sessions.iter().map(|s| {
-            serde_json::json!({
-                "id": s.id,
-                "agent": s.agent_id,
-                "branch": s.working_branch,
-                "parent_session": s.parent_session,
-                "path_scope": s.path_scope,
+        Ok(sessions
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "agent": s.agent_id,
+                    "branch": s.working_branch,
+                    "parent_session": s.parent_session,
+                    "path_scope": s.path_scope,
+                })
             })
-        }).collect())
+            .collect())
     }
 }
