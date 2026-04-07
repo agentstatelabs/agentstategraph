@@ -12,7 +12,7 @@ description: Use StateGraph from Go via C FFI bindings.
 ## Build the FFI Library
 
 ```bash
-cd /path/to/StateGraph
+cd /path/to/AgentStateGraph
 cargo build --release -p agentstategraph-ffi
 ```
 

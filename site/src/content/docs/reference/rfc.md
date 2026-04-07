@@ -3,7 +3,7 @@ title: RFC Specification
 description: Overview of the StateGraph RFC-0001 specification and what each section covers.
 ---
 
-The full specification lives at [`spec/STATEGRAPH-RFC.md`](https://github.com/agentstatelabs/StateGraph/blob/main/spec/STATEGRAPH-RFC.md) in the repository.
+The full specification lives at [`spec/STATEGRAPH-RFC.md`](https://github.com/agentstatelabs/AgentStateGraph/blob/main/spec/STATEGRAPH-RFC.md) in the repository.
 
 **Status:** Draft
 **Authors:** Craig Brown

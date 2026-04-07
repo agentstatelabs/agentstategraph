@@ -6,8 +6,8 @@ description: Get StateGraph running in under 5 minutes.
 ## Option 1: MCP Server (connect to Claude, GPT, any agent)
 
 ```bash
-git clone https://github.com/agentstatelabs/StateGraph.git
-cd StateGraph
+git clone https://github.com/agentstatelabs/AgentStateGraph.git
+cd AgentStateGraph
 cargo build --release -p agentstategraph-mcp
 cargo run --release -p agentstategraph-mcp
 ```
@@ -17,7 +17,7 @@ Add to Claude Code config:
 {
   "mcpServers": {
     "stategraph": {
-      "command": "/path/to/StateGraph/target/release/agentstategraph-mcp"
+      "command": "/path/to/AgentStateGraph/target/release/agentstategraph-mcp"
     }
   }
 }

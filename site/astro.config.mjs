@@ -3,8 +3,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-	site: 'https://agentstatelabs.github.io',
-	base: '/StateGraph',
+	site: 'https://agentstategraph.dev',
 	integrations: [
 		starlight({
 			title: 'StateGraph',

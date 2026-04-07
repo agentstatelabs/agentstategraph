@@ -10,7 +10,7 @@ description: Run StateGraph in the browser, Deno, or serverless/edge runtimes vi
 cargo install wasm-pack
 
 # Build the WASM package
-cd /path/to/StateGraph
+cd /path/to/AgentStateGraph
 wasm-pack build crates/agentstategraph-wasm --target web --out-dir pkg
 ```
 

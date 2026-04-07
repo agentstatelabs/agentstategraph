@@ -132,7 +132,7 @@ sg.set("/name", "prod", "init", category="Checkpoint")
 
 20 MCP tools. 137 tests. 6 reference implementations. Full RFC specification.
 
-**GitHub**: [github.com/agentstatelabs/StateGraph](https://github.com/agentstatelabs/StateGraph)
+**GitHub**: [github.com/agentstatelabs/AgentStateGraph](https://github.com/agentstatelabs/AgentStateGraph)
 
 ## What's Next
 
@@ -144,4 +144,4 @@ StateGraph is one of the missing infrastructure primitives for the intent-based 
 
 ---
 
-*Craig Brown -- [GitHub](https://github.com/agentstatelabs/StateGraph)*
+*Craig Brown -- [GitHub](https://github.com/agentstatelabs/AgentStateGraph)*
