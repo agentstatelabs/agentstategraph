@@ -1,163 +1,160 @@
-# StateGraph
+# AgentStateGraph
 
 **AI-native versioned state store for intent-based systems.**
 
-StateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for the next era of computing. It captures not just *what* changed, but *why*, *who authorized it*, *what alternatives were considered*, and *who was informed*.
+AgentStateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for the next era of computing. It captures not just *what* changed, but *why*, *who authorized it*, *what alternatives were considered*, and *who was informed*.
 
-## Why StateGraph?
+**Website:** [agentstategraph.dev](https://agentstategraph.dev)
+**Demo app:** [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — AI chat with branchable conversations, powered by AgentStateGraph
+
+## Why AgentStateGraph?
 
 | Era | Unit of Work | Key Primitives |
 |-----|-------------|----------------|
 | Monolithic | Function call | OS, filesystem, local DB |
 | Batch / Request-Response | Request → Response | HTTP, REST, SQL, queues |
 | Streaming | Event | Kafka, Flink, event stores, CQRS |
-| **Intent-based** | **Intent → Outcome** | **StateGraph** |
+| **Intent-based** | **Intent → Outcome** | **AgentStateGraph** |
 
-Agents don't execute linear scripts — they explore state spaces. They need a primitive that supports speculative branching, comparison, and merge with full reasoning history. Git is text-oriented. Databases lack branching. Event sourcing is append-only. StateGraph fills the gap.
+Agents don't execute linear scripts — they explore state spaces. They need a primitive that supports speculative branching, comparison, and merge with full reasoning history. Git is text-oriented. Databases lack branching. Event sourcing is append-only. AgentStateGraph fills the gap.
 
 ## Quick Start
 
 ### As an MCP Server (connect to Claude Code, GPT, any MCP agent)
 
 ```bash
-# Clone and build
-git clone <repo-url> && cd stategraph
-cargo build -p agentstategraph-mcp
-
-# Run the MCP server
-cargo run -p agentstategraph-mcp
-# → Creates ./stategraph.db, waits for MCP client connection
+git clone https://github.com/agentstatelabs/AgentStateGraph.git
+cd AgentStateGraph
+cargo build --release -p agentstategraph-mcp
+cargo run --release -p agentstategraph-mcp
 ```
 
-Add to your Claude Code MCP config (`~/.claude.json` or project `.mcp.json`):
+Add to your Claude Code MCP config:
 ```json
 {
   "mcpServers": {
     "stategraph": {
-      "command": "cargo",
-      "args": ["run", "-p", "agentstategraph-mcp", "--manifest-path", "/path/to/stategraph/Cargo.toml"]
+      "command": "/path/to/AgentStateGraph/target/release/agentstategraph-mcp"
     }
   }
 }
 ```
 
-Then in Claude Code, you can:
-```
-> Set the cluster name to "prod" with intent "Checkpoint"
-> Branch to "explore/new-config" and try a different network setup
-> Compare the two branches
-> Merge the winner back to main
-```
-
 ### As a Rust Library
 
 ```rust
-use stategraph::{Repository, CommitOptions};
+use agentstategraph::{Repository, CommitOptions};
 use agentstategraph_storage::SqliteStorage;
 use agentstategraph_core::{IntentCategory, Object};
 
-// Create a repo with durable SQLite storage
-let storage = SqliteStorage::open("./my-state.db").unwrap();
+let storage = SqliteStorage::open("./state.db").unwrap();
 let repo = Repository::new(Box::new(storage));
 repo.init().unwrap();
 
-// Set state — every write is an atomic commit with intent
-repo.set(
-    "main",
-    "/cluster/name",
-    &Object::string("prod"),
-    CommitOptions::new("agent/setup", IntentCategory::Checkpoint, "Initialize cluster name"),
-).unwrap();
+// Every write is an atomic commit with intent
+repo.set("main", "/cluster/name", &Object::string("prod"),
+    CommitOptions::new("agent/setup", IntentCategory::Checkpoint, "init")
+        .with_reasoning("Production cluster for ML training")
+        .with_confidence(0.95));
 
-// Branch to explore alternatives
+// Branch, explore, merge
 repo.branch("explore/new-network", "main").unwrap();
-repo.set_json(
-    "explore/new-network",
-    "/cluster/network",
-    &serde_json::json!({"subnet": "192.168.0.0/16", "dns": "1.1.1.1"}),
-    CommitOptions::new("agent/planner", IntentCategory::Explore, "Try new subnet layout")
-        .with_reasoning("Current /24 is too small for planned expansion")
-        .with_confidence(0.8),
-).unwrap();
-
-// Diff branches
-let changes = repo.diff("main", "explore/new-network").unwrap();
-println!("{} changes", changes.len());
-
-// Merge when ready
-repo.merge(
-    "explore/new-network",
-    "main",
-    CommitOptions::new("agent/planner", IntentCategory::Merge, "Adopt new network layout"),
-).unwrap();
+repo.diff("main", "explore/new-network").unwrap();
+repo.merge("explore/new-network", "main",
+    CommitOptions::new("agent/planner", IntentCategory::Merge, "Adopt new layout")).unwrap();
 
 // Full audit trail
-let log = repo.log("main", 10).unwrap();
-for commit in &log {
-    println!("{}: {} (by {}, confidence: {:?})",
-        commit.id.short(),
-        commit.intent.description,
-        commit.agent_id,
-        commit.confidence,
-    );
-}
+repo.log("main", 10).unwrap();
+repo.blame("main", "/cluster/name").unwrap();
 ```
 
-## MCP Tools
+### From Python
 
-13 tools available when connected as an MCP server:
+```python
+from agentstategraph_py import StateGraph
 
-| Tool | Description |
-|------|-------------|
-| `stategraph_get` | Read state at any branch/path |
-| `stategraph_set` | Write with intent, reasoning, confidence |
-| `stategraph_delete` | Remove with intent |
-| `stategraph_branch` | Create namespaced branches |
-| `stategraph_list_branches` | List branches by namespace |
-| `stategraph_merge` | Schema-aware three-way merge |
-| `stategraph_log` | Commit history with full provenance |
-| `stategraph_diff` | Structured typed diffs (not text) |
-| `stategraph_speculate` | Create lightweight speculation |
-| `stategraph_spec_modify` | Modify within speculation |
-| `stategraph_compare` | Compare speculations side-by-side |
-| `stategraph_commit_spec` | Commit winning speculation |
-| `stategraph_discard` | Discard losing speculation |
+sg = StateGraph("state.db")
+sg.set("/name", "prod", "init", category="Checkpoint")
+sg.branch("feature")
+sg.merge("feature", description="Adopt feature")
+sg.blame("/name")  # who changed it and why
+```
 
-## What Makes StateGraph Different
+### From TypeScript, Go, or WASM — all supported.
 
-Every commit captures the **full provenance chain**:
+## Features
+
+- **20 MCP tools** — any agent can connect immediately
+- **6 language bindings** — Rust, Python, TypeScript, Go, WASM, C FFI
+- **3 storage backends** — Memory, SQLite, IndexedDB (browser)
+- **137 tests** across 6 crates
+- **Content-addressed Merkle DAG** — immutable, deduplicated history
+- **Structured intent metadata** — category, description, tags, reasoning, confidence
+- **Authority & delegation chains** — who authorized what, with full chain
+- **Schema-aware merge** — CRDT-inspired conflict resolution (sum, max, union-by-id)
+- **Speculative execution** — O(1) branching, instant discard
+- **Multi-agent orchestration** — scoped sessions, delegation, intent trees
+- **Epochs** — sealable, tamper-evident audit bundles
+- **Unified query** — composable filters across commits, intents, agents
+- **Blame** — who changed what, when, and why
+- **Watch/subscribe** — reactive notifications on state changes
+
+## What Makes Every Commit Different from Git
 
 | Field | Question it answers |
 |-------|-------------------|
 | `state_root` | What changed? |
-| `intent` | Why? (structured, queryable category + description + tags) |
+| `intent` | Why? (structured, queryable) |
 | `reasoning` | How did the agent decide? |
 | `confidence` | How sure was it? (0.0-1.0) |
 | `agent_id` | Who did it? |
 | `authority` | Who authorized it? (with delegation chain) |
+| `resolution` | What was accomplished? Any deviations? |
+| `notification` | Who was informed? |
 | `tool_calls` | What actions produced this? |
 
 ## Architecture
 
 ```
-stategraph/
-├── agentstategraph-core        # Types, diff, merge — zero I/O deps
-├── agentstategraph-storage     # Pluggable backends (memory, SQLite)
-├── stategraph             # High-level Repository API
-└── agentstategraph-mcp         # MCP server (13 tools over stdio)
+AgentStateGraph/
+├── crates/
+│   ├── agentstategraph-core/     # Types, diff, merge, schema — zero I/O
+│   ├── agentstategraph-storage/  # Pluggable backends (memory, SQLite, IndexedDB)
+│   ├── agentstategraph/          # High-level Repository API
+│   ├── agentstategraph-mcp/      # MCP server (20 tools over stdio)
+│   ├── agentstategraph-ffi/      # C ABI for language bindings
+│   └── agentstategraph-wasm/     # Browser/Deno WASM build
+├── bindings/
+│   ├── python/                   # PyO3 + maturin
+│   ├── typescript/               # napi-rs
+│   └── go/                       # CGo via FFI
+├── spec/
+│   └── STATEGRAPH-RFC.md         # Full specification (~2200 lines)
+├── examples/                     # 9 reference implementations
+└── site/                         # agentstategraph.dev (Astro Starlight)
+```
+
+## Reference Implementations
+
+```bash
+cargo run --example getting_started -p agentstategraph    # Basic ops
+cargo run --example agent_workflow -p agentstategraph     # Speculate, compare, pick winner
+cargo run --example multi_agent -p agentstategraph        # Orchestrator + sub-agents
+cargo run --example schema_merge -p agentstategraph       # Schema validation + merge
+cargo run --example epochs_audit -p agentstategraph       # Epochs, blame, query
+python3 examples/python_agent.py                          # Python workflow
+node examples/typescript_agent.ts                         # TypeScript workflow
 ```
 
 ## Specification
 
-See [spec/STATEGRAPH-RFC.md](spec/STATEGRAPH-RFC.md) for the complete RFC covering:
-- Core data model with content-addressed Merkle DAG
-- Intent lifecycle (Proposed → Authorized → InProgress → Completed/Failed)
-- Authority and delegation chains
-- Resolution reporting (the "report back" to whoever authorized the work)
-- Sub-agent orchestration
-- Schema-aware merge with CRDT-inspired annotations
-- Epoch-based lifecycle management
-- Unified query interface
+See [spec/STATEGRAPH-RFC.md](spec/STATEGRAPH-RFC.md) for the complete RFC covering core data model, intent lifecycle, authority/delegation, resolution reporting, sub-agent orchestration, schema system, epochs/registry, MCP interface, and architecture.
+
+## Links
+
+- **Website**: [agentstategraph.dev](https://agentstategraph.dev)
+- **Demo app**: [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — branchable AI chat
+- **RFC Spec**: [STATEGRAPH-RFC.md](spec/STATEGRAPH-RFC.md)
 
 ## License
 
