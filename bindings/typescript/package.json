@@ -1,6 +1,6 @@
 {
   "name": "stategraph",
-  "version": "0.1.0",
+  "version": "0.3.0-beta.1",
   "description": "AI-native versioned state store for intent-based systems",
   "main": "index.js",
   "types": "index.d.ts",
