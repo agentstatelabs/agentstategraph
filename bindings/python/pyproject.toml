@@ -7,7 +7,7 @@ name = "agentstategraph"
 version = "0.3.5b2"
 description = "AI-native versioned state store for intent-based systems"
 readme = "../../README.md"
-license = {text = "MIT OR Apache-2.0"}
+license = {text = "BSL-1.1"}
 requires-python = ">=3.8"
 
 [tool.maturin]

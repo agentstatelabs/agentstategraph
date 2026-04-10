@@ -8,7 +8,7 @@
     "name": "agentstategraph",
     "triples": {}
   },
-  "license": "MIT OR Apache-2.0",
+  "license": "BSL-1.1",
   "devDependencies": {
     "@napi-rs/cli": "^3"
   },

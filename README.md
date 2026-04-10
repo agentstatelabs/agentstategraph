@@ -166,4 +166,6 @@ See [spec/AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md) for the complete 
 
 ## License
 
-MIT OR Apache-2.0
+[Business Source License 1.1](LICENSE) — Use AgentStateGraph freely in production, modify it, embed it, ship it. The only restriction: you cannot offer AgentStateGraph itself as a competing commercial managed service. Every version automatically converts to [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) four years after release.
+
+See [LICENSING.md](LICENSING.md) for the full plain-English explanation.
