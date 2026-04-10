@@ -164,8 +164,18 @@ See [spec/AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md) for the complete 
 - **Demo app**: [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — branchable AI chat
 - **RFC Spec**: [AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md)
 
-## License
+## License — Why BSL 1.1?
 
-[Business Source License 1.1](LICENSE) — Use AgentStateGraph freely in production, modify it, embed it, ship it. The only restriction: you cannot offer AgentStateGraph itself as a competing commercial managed service. Every version automatically converts to [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) four years after release.
+AgentStateGraph is a state primitive designed to become infrastructure. Infrastructure primitives are strip-mining targets: cloud providers offer them as managed services, capture the value, and contribute nothing back. BSL 1.1 closes that gap.
 
-See [LICENSING.md](LICENSING.md) for the full plain-English explanation.
+**What this means in practice:**
+
+- **Individuals, startups, and enterprises** using AgentStateGraph internally — including in production — are **unaffected**.
+- The restriction covers **one specific case**: offering AgentStateGraph as a hosted or managed service to third parties without a commercial agreement.
+- After **four years**, each version converts to **Apache 2.0 permanently**, with no conditions. This is a binding commitment, not a marketing promise.
+
+**Why not MIT from day one?** Because the project wouldn't survive it. An MIT-licensed infrastructure primitive that gains traction gets absorbed by a hyperscaler within 18 months. BSL 1.1 lets the project grow, stay independent, and convert to a fully permissive license once it's established enough that strip-mining is no longer an existential threat.
+
+This is the same reasoning MongoDB, Elastic, and MariaDB used — with one difference: we committed to the conversion date upfront.
+
+See [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md) for the full terms and plain-English FAQ.
