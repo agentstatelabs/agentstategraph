@@ -35,9 +35,9 @@ fn py_to_object(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Object> {
         // For complex types, serialize via JSON
         let json_mod = py.import("json")?;
         let json_str: String = json_mod.call_method1("dumps", (value,))?.extract()?;
-        let json_val: serde_json::Value = serde_json::from_str(&json_str)
+        let _json_val: serde_json::Value = serde_json::from_str(&json_str)
             .map_err(|e| PyRuntimeError::new_err(format!("JSON parse error: {}", e)))?;
-        // Store as string representation for now
+        // Store as string representation for now (TODO: convert complex types)
         Ok(Object::string(json_str))
     }
 }
@@ -486,13 +486,13 @@ impl AgentStateGraph {
             "prefix" => agentstategraph::PathPattern::Prefix(pattern.unwrap_or_default()),
             _ => agentstategraph::PathPattern::All,
         };
-        let sub_id = self.repo.watches().subscribe(pat);
+        let _sub_id = self.repo.watches().subscribe(pat);
         // Return the raw inner value — SubscriptionId is opaque
         Ok(0) // placeholder — need to expose SubscriptionId
     }
 
     /// Get pending events for a watch subscription.
-    fn watch_events(&self, py: Python<'_>, subscription_id: u64) -> PyResult<PyObject> {
+    fn watch_events(&self, py: Python<'_>, _subscription_id: u64) -> PyResult<PyObject> {
         // Simplified: return empty for now until SubscriptionId is properly exposed
         json_to_py(py, &serde_json::json!([]))
     }

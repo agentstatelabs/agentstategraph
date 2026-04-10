@@ -7,7 +7,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::commit::Commit;
-use crate::intent::{IntentCategory, IntentStatus, Outcome};
 
 /// What to query — the primary dimension.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

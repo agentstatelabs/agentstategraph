@@ -11,7 +11,7 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_core::IntentCategory;
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 
 /// Opaque handle to a Repository.

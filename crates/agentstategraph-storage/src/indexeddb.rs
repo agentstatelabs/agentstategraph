@@ -14,7 +14,6 @@
 //! - All writes go to both memory and IndexedDB (durability)
 //! - On construction, the full store is loaded from IndexedDB into memory
 
-use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use crate::memory::MemoryStorage;
@@ -59,7 +58,7 @@ impl IndexedDbStorage {
 
     /// Load objects from a JSON dump (called from JS after reading IndexedDB).
     pub fn load_objects(&self, json_pairs: &[(String, String)]) -> Result<(), StorageError> {
-        for (hex_id, json) in json_pairs {
+        for (_hex_id, json) in json_pairs {
             let obj: Object = serde_json::from_str(json)
                 .map_err(|e| StorageError::Serialization(e.to_string()))?;
             self.memory.put_object(&obj)?;

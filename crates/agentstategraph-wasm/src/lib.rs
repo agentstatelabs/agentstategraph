@@ -64,7 +64,7 @@ impl WasmAgentStateGraph {
     #[wasm_bindgen(constructor)]
     pub fn new(db_name: Option<String>) -> Result<WasmAgentStateGraph, JsValue> {
         let name = db_name.unwrap_or_else(|| "agentstategraph".to_string());
-        let storage = std::sync::Arc::new(IndexedDbStorage::new(&name));
+        let _storage = std::sync::Arc::new(IndexedDbStorage::new(&name));
         let repo = Repository::new(Box::new(IndexedDbStorage::new(&name)));
         repo.init()
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
