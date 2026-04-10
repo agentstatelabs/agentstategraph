@@ -1,6 +1,6 @@
 [package]
 name = "agentstategraph-napi"
-version = "0.3.0-beta.1"
+version = "0.3.5-beta.2"
 edition = "2024"
 description = "TypeScript/Node.js bindings for AgentStateGraph via napi-rs"
 license = "MIT OR Apache-2.0"

@@ -5,6 +5,32 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.3.5-beta.2] — 2026-04-09
+
+### Changed
+- **Naming hygiene pass.** Every standalone "StateGraph" reference replaced with the full "AgentStateGraph" across prose, identifiers, symbols, and packages. Eliminates collision surface with LangGraph's `StateGraph` class (the primary primitive LangChain developers use) and Terrateam's Stategraph Terraform backend.
+  - Rust: `StateGraphServer` → `AgentStateGraphServer`; MCP tool method names `stategraph_*` → `agentstategraph_*` (all 20 tools); `WasmStateGraph` → `WasmAgentStateGraph`
+  - C FFI: all 12 extern symbols renamed (`agentstategraph_new_memory`, `agentstategraph_get`, etc.)
+  - Python: class `StateGraph` → `AgentStateGraph`
+  - TypeScript: class `StateGraph` → `AgentStateGraph`; npm package `stategraph` → `agentstategraph`
+  - Go: package `stategraph` → `agentstategraph`; struct and files renamed; module path `github.com/agentstatelabs/AgentStateGraph/bindings/go`
+  - JSON Schema extensions: `x-stategraph-*` → `x-agentstategraph-*`
+  - URI scheme: `stategraph://` → `agentstategraph://` (spec)
+  - MCP server key in config examples: `"stategraph"` → `"agentstategraph"`
+  - Default SQLite path: `./stategraph.db` → `./agentstategraph.db`
+  - Default WASM IndexedDB name: `"stategraph"` → `"agentstategraph"`
+  - Spec file: `spec/STATEGRAPH-RFC.md` → `spec/AGENTSTATEGRAPH-RFC.md`
+  - Repository URL in `Cargo.toml` points to `github.com/agentstatelabs/AgentStateGraph`
+
+### Added
+- **Sharpened positioning.** README and landing page now lead with the one-sentence Git-analogy framing: *"AgentStateGraph is to agent state what Git was to source code — a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor."* Followed by an explicit "what it is not" paragraph: not a Terraform replacement (wrong actor model), not a LangGraph helper (different layer of the stack), but a state primitive on which next-generation IaC, GitOps, and agent-native ops tooling can all be built.
+- **Disambiguation page** at `site/src/content/docs/compare.md` — "AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph." Three-column comparison table covering actor model, data model, branching, intent/reasoning, blame, audit surface, language bindings, primary interface, storage backends, and closest analogy. Linked from site nav (Getting Started) and the README.
+- **Landing page rework:** hero tagline carries the verbatim Git-analogy framing; new "The vision" and "What it is not" sections above the cards; compare link in the hero actions.
+- **CONTRIBUTING.md Naming section** stating the hygiene rule for future contributors, including the no-ASG convention (collides with AWS Auto Scaling Groups).
+
+### Fixed
+- **Previously leaked short forms** in: MCP server key shown in README config example (visible on-screen as `mcp__stategraph__…` during recorded demos), Rust struct names, crate descriptions, doc comments across all six crates, spec file, Python/TypeScript/Go/Rust/WASM examples, browser demo, blog post, and all site guides.
+
 ## [0.3.0-beta.1] — 2026-04-09
 
 ### Status
