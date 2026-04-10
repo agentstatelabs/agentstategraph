@@ -1,0 +1,497 @@
+---
+// Custom landing page — overrides Starlight splash for agentstategraph.dev
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentStateGraph — The State Primitive for Agent-Driven Operations</title>
+  <meta name="description" content="Content-addressed, branchable, blameable state for AI agents. What Git was to source code, AgentStateGraph is to agent state." />
+  <meta property="og:title" content="AgentStateGraph" />
+  <meta property="og:description" content="The state primitive for agent-driven operations." />
+  <meta property="og:url" content="https://agentstategraph.dev" />
+  <link rel="icon" href="/favicon.svg" />
+  <style>
+    :root {
+      --accent: #06b6d4;
+      --accent-glow: #06b6d433;
+      --accent-subtle: #06b6d418;
+      --cyan: #38bdf8;
+      --bg-primary: #0a0f1a;
+      --bg-secondary: #111827;
+      --bg-tertiary: #1e293b;
+      --border: #1e3a5f;
+      --text-primary: #e0e0e0;
+      --text-secondary: #999;
+      --text-muted: #666;
+      --success: #00ff88;
+      --warning: #f59e0b;
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.6; overflow-x: hidden; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { filter: brightness(1.2); }
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+    code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 0.9em; }
+
+    /* Nav */
+    .nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; height: 56px; display: flex; align-items: center; justify-content: center; background: rgba(15,15,26,0.85); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); opacity: 0; transform: translateY(-100%); transition: opacity 0.3s, transform 0.3s; pointer-events: none; }
+    .nav.visible { opacity: 1; transform: translateY(0); pointer-events: all; }
+    .nav-inner { display: flex; align-items: center; justify-content: space-between; max-width: 1100px; width: 100%; padding: 0 24px; }
+    .nav-logo { font-size: 16px; font-weight: 700; background: linear-gradient(135deg, #3b82f6, #06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .nav-links { display: flex; gap: 24px; }
+    .nav-links a { color: var(--text-secondary); font-size: 13px; font-weight: 500; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--accent); filter: none; }
+
+    /* Hero */
+    .hero { position: relative; text-align: center; padding: 120px 24px 80px; overflow: hidden; }
+    .hero::before { content: ''; position: absolute; inset: 0; z-index: 0; background: radial-gradient(ellipse at 30% 50%, rgba(6,182,212,0.15), transparent 60%), radial-gradient(ellipse at 70% 50%, rgba(59,130,246,0.1), transparent 60%); background-size: 200% 200%; animation: gradientShift 8s ease infinite; }
+    .hero > * { position: relative; z-index: 1; }
+    .hero h1 { font-size: 52px; font-weight: 800; letter-spacing: -1px; margin-bottom: 8px; background: linear-gradient(135deg, #3b82f6, #06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .hero .tagline { font-size: 18px; color: var(--text-secondary); max-width: 700px; margin: 0 auto 8px; line-height: 1.6; }
+    .hero .tagline em { color: var(--text-primary); font-style: normal; font-weight: 600; }
+    .hero .subtitle { font-size: 14px; color: var(--text-muted); margin-bottom: 28px; font-family: 'SF Mono', Menlo, Consolas, monospace; }
+    .badge { display: inline-block; font-size: 11px; color: var(--accent); background: var(--accent-subtle); border: 1px solid var(--accent); padding: 3px 10px; border-radius: 20px; font-weight: 600; letter-spacing: 0.5px; margin-bottom: 20px; }
+    .cta-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: var(--radius-sm); font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.2s; border: none; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { filter: brightness(1.15); transform: translateY(-2px); box-shadow: 0 4px 16px var(--accent-glow); }
+    .btn-secondary { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
+    .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Sections */
+    .section { padding: 80px 24px; }
+    .section-label { font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 2px; font-weight: 700; margin-bottom: 8px; text-align: center; }
+    .section-title { font-size: 32px; font-weight: 700; text-align: center; margin-bottom: 16px; }
+    .section-subtitle { font-size: 16px; color: var(--text-secondary); text-align: center; max-width: 640px; margin: 0 auto 48px; line-height: 1.6; }
+
+    /* Story blocks */
+    .story { max-width: 960px; margin: 0 auto 80px; display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; }
+    .story.reverse { direction: rtl; }
+    .story.reverse > * { direction: ltr; }
+    .story-text h3 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    .story-text .story-context { font-size: 13px; color: var(--accent); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+    .story-text p { font-size: 15px; color: var(--text-secondary); line-height: 1.7; margin-bottom: 12px; }
+    .story-text .punchline { color: var(--text-primary); font-weight: 600; }
+
+    /* Mockup panels */
+    .mockup { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.3); max-width: 440px; }
+    .mockup-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+    .mockup-header .icon { font-size: 16px; }
+    .mockup-header .title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+    .mockup-header .badge-sm { font-size: 9px; color: var(--accent); background: var(--accent-subtle); padding: 1px 6px; border-radius: 10px; margin-left: auto; }
+
+    /* Blame output mockup */
+    .blame-output { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 11px; line-height: 1.8; }
+    .blame-output .label { color: var(--text-muted); }
+    .blame-output .value { color: var(--text-primary); }
+    .blame-output .agent { color: var(--accent); }
+    .blame-output .conf { color: var(--success); }
+    .blame-output .time { color: var(--cyan); }
+    .blame-output .reason { color: var(--warning); font-style: italic; }
+
+    /* Query mockup */
+    .query-line { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 11px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; margin-bottom: 8px; color: var(--cyan); }
+    .query-result { font-size: 12px; color: var(--text-secondary); padding: 6px 0; border-bottom: 1px solid var(--border); }
+    .query-result:last-child { border-bottom: none; }
+    .query-result .qr-cat { font-size: 9px; font-weight: 700; color: var(--accent); background: var(--accent-subtle); padding: 1px 5px; border-radius: 3px; text-transform: uppercase; }
+    .query-result .qr-agent { font-size: 10px; color: var(--text-muted); }
+    .query-result .qr-conf { font-size: 10px; color: var(--success); font-weight: 600; }
+    .query-result .qr-desc { margin-top: 2px; font-size: 11px; color: var(--text-primary); }
+
+    /* Speculation mockup */
+    .spec-branches { display: flex; gap: 8px; margin-bottom: 8px; }
+    .spec-branch { flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; border-top: 2px solid var(--accent); }
+    .spec-branch.winner { border-top-color: var(--success); box-shadow: 0 0 12px rgba(0,255,136,0.1); }
+    .spec-branch.discarded { opacity: 0.5; border-top-color: var(--text-muted); }
+    .spec-branch .spec-label { font-size: 10px; font-weight: 700; color: var(--accent); text-transform: uppercase; margin-bottom: 4px; }
+    .spec-branch.winner .spec-label { color: var(--success); }
+    .spec-branch.discarded .spec-label { color: var(--text-muted); }
+    .spec-branch .spec-desc { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+    .spec-branch .spec-conf { font-size: 10px; font-weight: 600; }
+    .spec-branch.winner .spec-conf { color: var(--success); }
+    .spec-outcome { font-size: 11px; color: var(--text-muted); text-align: center; padding: 6px; background: var(--bg-tertiary); border-radius: var(--radius-sm); }
+    .spec-outcome .winner-badge { color: var(--success); font-weight: 700; }
+
+    /* Vision section */
+    .vision-text { max-width: 720px; margin: 0 auto; font-size: 18px; color: var(--text-secondary); line-height: 1.8; text-align: center; font-style: italic; }
+    .vision-text strong { color: var(--text-primary); font-style: normal; }
+
+    /* Commit anatomy */
+    .commit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; max-width: 800px; margin: 0 auto; }
+    .commit-field { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; text-align: center; transition: border-color 0.2s; }
+    .commit-field:hover { border-color: var(--accent); }
+    .commit-field .cf-name { font-size: 13px; font-weight: 700; color: var(--accent); font-family: 'SF Mono', Menlo, Consolas, monospace; margin-bottom: 4px; }
+    .commit-field .cf-q { font-size: 12px; color: var(--text-secondary); }
+
+    /* Languages strip */
+    .lang-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 32px; }
+    .lang-pill { padding: 8px 18px; border-radius: 20px; font-size: 13px; font-weight: 600; border: 1px solid var(--border); color: var(--text-secondary); transition: all 0.2s; }
+    .lang-pill:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Terminal */
+    .terminal { max-width: 640px; margin: 0 auto; border-radius: var(--radius); background: var(--bg-primary); border: 1px solid var(--border); overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+    .terminal-bar { padding: 10px 14px; display: flex; align-items: center; gap: 8px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+    .terminal-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .terminal-dot.red { background: #ff5f57; } .terminal-dot.yellow { background: #febc2e; } .terminal-dot.green { background: #28c840; }
+    .terminal-title { font-size: 11px; color: var(--text-muted); margin-left: 8px; }
+    .terminal-body { padding: 16px; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; line-height: 1.7; min-height: 160px; }
+    .terminal-body .prompt { color: var(--success); }
+    .terminal-body .cmd { color: var(--cyan); }
+    .terminal-body .output { color: var(--text-muted); }
+    .terminal-body .cursor { display: inline-block; width: 8px; height: 16px; background: var(--text-primary); vertical-align: text-bottom; animation: blink 1s step-end infinite; }
+
+    /* Footer */
+    .footer { background: var(--bg-secondary); border-top: 1px solid var(--border); padding: 48px 24px 24px; }
+    .footer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 32px; max-width: 800px; margin: 0 auto 32px; }
+    .footer-col h4 { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+    .footer-col a { display: block; color: var(--text-secondary); font-size: 13px; padding: 3px 0; transition: color 0.2s; }
+    .footer-col a:hover { color: var(--accent); filter: none; }
+    .footer-bottom { text-align: center; font-size: 12px; color: var(--text-muted); padding-top: 24px; border-top: 1px solid var(--border); }
+
+    /* Scroll reveal */
+    [data-reveal] { opacity: 0; transform: translateY(40px); transition: opacity 0.6s cubic-bezier(0.25,0.46,0.45,0.94), transform 0.6s cubic-bezier(0.25,0.46,0.45,0.94); }
+    [data-reveal="left"] { transform: translateX(-40px); }
+    [data-reveal="right"] { transform: translateX(40px); }
+    [data-reveal].revealed { opacity: 1; transform: none; }
+
+    @keyframes gradientShift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    @media (max-width: 900px) {
+      .story { grid-template-columns: 1fr; gap: 24px; }
+      .story.reverse { direction: ltr; }
+      .commit-grid { grid-template-columns: 1fr; max-width: 360px; }
+      .footer-grid { grid-template-columns: 1fr; gap: 24px; }
+    }
+    @media (max-width: 600px) {
+      .hero h1 { font-size: 32px; }
+      .hero .tagline { font-size: 15px; }
+      .section-title { font-size: 24px; }
+      .cta-row { flex-direction: column; align-items: center; }
+      .spec-branches { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="nav">
+  <div class="nav-inner">
+    <span class="nav-logo">AgentStateGraph</span>
+    <div class="nav-links">
+      <a href="#stories">Why</a>
+      <a href="#anatomy">How</a>
+      <a href="#start">Get Started</a>
+      <a href="/guides/introduction/">Docs</a>
+      <a href="https://github.com/agentstatelabs/AgentStateGraph" target="_blank">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <span class="badge">v0.3.5-beta.2 &middot; BSL 1.1</span>
+  <h1>AgentStateGraph</h1>
+  <p class="tagline"><em>What Git was to source code, AgentStateGraph is to agent state</em> &mdash; a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor.</p>
+  <p class="subtitle">Rust core &middot; 6 language bindings &middot; 20 MCP tools &middot; 131 tests</p>
+  <div class="cta-row">
+    <a class="btn btn-primary" href="https://github.com/agentstatelabs/AgentStateGraph" target="_blank">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+      View on GitHub
+    </a>
+    <a class="btn btn-secondary" href="/guides/quickstart/">Quick Start</a>
+    <a class="btn btn-secondary" href="/compare/">Compare</a>
+  </div>
+</section>
+
+<!-- Vision -->
+<section class="section" data-reveal>
+  <div class="container">
+    <p class="vision-text">A future where AI is responsible for an entire infrastructure &mdash; rollouts, tracing, observability, alerts, reports &mdash; and is <strong>accountable for it mechanically rather than socially</strong>. Every change carries why, who authorized it, what alternatives existed, and what the agent expected vs. observed, across every branch, forever.</p>
+  </div>
+</section>
+
+<!-- Stories -->
+<section class="section" id="stories">
+  <div class="container">
+    <p class="section-label">Why this matters</p>
+    <h2 class="section-title">Three moments that change everything</h2>
+    <p class="section-subtitle">These aren't hypotheticals. They're the conversations happening right now in every company deploying AI agents.</p>
+
+    <!-- Story 1: The 2 AM incident -->
+    <div class="story" data-reveal>
+      <div class="story-text">
+        <div class="story-context">Story 1 &mdash; The 2 AM incident</div>
+        <h3>"What happened overnight?"</h3>
+        <p>An agent managing your production cluster detects a node failure at 2 AM. It reroutes traffic with 73% confidence. At 8 AM, the CTO walks in and asks what happened.</p>
+        <p>With logs: two hours reconstructing events from CloudWatch, Slack threads, and guesswork.</p>
+        <p class="punchline">With AgentStateGraph: <code>blame /cluster/node-3/status</code> &mdash; full chain in three minutes. Who detected it, what alternatives were considered, why this approach was chosen, what confidence level, what happened next.</p>
+      </div>
+      <div class="mockup">
+        <div class="mockup-header">
+          <span class="icon">&#128269;</span>
+          <span class="title">blame /cluster/node-3/status</span>
+        </div>
+        <div class="blame-output">
+          <div><span class="label">agent:</span> <span class="agent">agent/monitor</span></div>
+          <div><span class="label">time:</span> <span class="time">2026-04-10 02:14:07 UTC</span></div>
+          <div><span class="label">intent:</span> <span class="value">Fix &mdash; Reroute traffic from failed node</span></div>
+          <div><span class="label">confidence:</span> <span class="conf">0.73</span></div>
+          <div><span class="label">reasoning:</span> <span class="reason">"Node-3 health check failed 3x in 60s. Rerouting to node-1 and node-4. Not restarting &mdash; disk I/O errors suggest hardware."</span></div>
+          <div><span class="label">alternatives:</span> <span class="value">restart (rejected, 0.21), ignore (rejected, 0.06)</span></div>
+          <div><span class="label">authority:</span> <span class="value">ops-policy/auto-failover</span></div>
+          <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)"><span class="label">previous:</span> <span class="agent">agent/setup</span> <span class="time">2026-04-09 14:00</span></div>
+          <div><span class="label">intent:</span> <span class="value">Checkpoint &mdash; Mark node-3 healthy after deploy</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Story 2: The audit -->
+    <div class="story reverse" data-reveal>
+      <div class="story-text">
+        <div class="story-context">Story 2 &mdash; The audit</div>
+        <h3>"Show me every agent change to billing in Q3"</h3>
+        <p>Your company deploys AI agents that touch the billing system. A regulator asks for a complete record of every change, who authorized it, and why.</p>
+        <p>With observability tools: a two-week log reconstruction project. Engineers dig through LangSmith traces, piece together timelines, and pray the retention policy hasn't expired.</p>
+        <p class="punchline">With AgentStateGraph: one query, one sealed epoch export, handed to the auditor. Tamper-evident, independently verifiable, done in 30 seconds.</p>
+      </div>
+      <div class="mockup">
+        <div class="mockup-header">
+          <span class="icon">&#128203;</span>
+          <span class="title">Audit export</span>
+          <span class="badge-sm">SEALED</span>
+        </div>
+        <div class="query-line">query --path "/billing/*" --after 2026-07 --before 2026-10</div>
+        <div class="query-result">
+          <div style="display:flex;gap:8px;align-items:center"><span class="qr-cat">Refine</span><span class="qr-agent">agent/billing</span><span class="qr-conf">94%</span></div>
+          <div class="qr-desc">Update pricing tier thresholds for enterprise plan</div>
+        </div>
+        <div class="query-result">
+          <div style="display:flex;gap:8px;align-items:center"><span class="qr-cat">Fix</span><span class="qr-agent">agent/billing</span><span class="qr-conf">88%</span></div>
+          <div class="qr-desc">Correct proration calculation for mid-cycle upgrades</div>
+        </div>
+        <div class="query-result">
+          <div style="display:flex;gap:8px;align-items:center"><span class="qr-cat">Checkpoint</span><span class="qr-agent">agent/compliance</span><span class="qr-conf">99%</span></div>
+          <div class="qr-desc">Seal Q3 billing epoch &mdash; 47 commits, 3 agents, 0 deviations</div>
+        </div>
+        <div style="text-align:center;margin-top:8px;font-size:10px;color:var(--success);font-weight:700">EPOCH SEALED &middot; hash: f5b2...17 &middot; tamper-evident</div>
+      </div>
+    </div>
+
+    <!-- Story 3: The speculation -->
+    <div class="story" data-reveal>
+      <div class="story-text">
+        <div class="story-context">Story 3 &mdash; The speculation</div>
+        <h3>"Try three approaches, pick the best one"</h3>
+        <p>A planning agent needs to decide how to migrate a database. Instead of picking one approach and hoping, it creates three speculations &mdash; O(1) branches that cost nothing to create and nothing to discard.</p>
+        <p>Each speculation runs independently. The agent compares outcomes side by side, commits the winner with full reasoning, and discards the rest.</p>
+        <p class="punchline">If the winner was wrong, the blame trail shows exactly what the agent expected vs. what happened, what alternatives it considered, and why it chose this one. Accountability by construction, not by accident.</p>
+      </div>
+      <div class="mockup">
+        <div class="mockup-header">
+          <span class="icon">&#9922;</span>
+          <span class="title">speculate &mdash; 3 approaches</span>
+        </div>
+        <div class="spec-branches">
+          <div class="spec-branch discarded">
+            <div class="spec-label">Approach A</div>
+            <div class="spec-desc">Live migration, zero downtime</div>
+            <div class="spec-conf" style="color:var(--text-muted)">conf: 0.45</div>
+          </div>
+          <div class="spec-branch winner">
+            <div class="spec-label">Approach B &#10003;</div>
+            <div class="spec-desc">Blue-green with staged cutover</div>
+            <div class="spec-conf">conf: 0.87</div>
+          </div>
+          <div class="spec-branch discarded">
+            <div class="spec-label">Approach C</div>
+            <div class="spec-desc">Dump and restore, 4h downtime</div>
+            <div class="spec-conf" style="color:var(--text-muted)">conf: 0.32</div>
+          </div>
+        </div>
+        <div class="spec-outcome"><span class="winner-badge">Committed:</span> Approach B &mdash; "Blue-green minimizes risk while keeping rollback path open"</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Commit anatomy -->
+<section class="section" id="anatomy" data-reveal>
+  <div class="container">
+    <p class="section-label">How it works</p>
+    <h2 class="section-title">Every commit answers nine questions</h2>
+    <p class="section-subtitle">Git commits answer "what changed." AgentStateGraph commits answer everything else too.</p>
+    <div class="commit-grid">
+      <div class="commit-field"><div class="cf-name">state_root</div><div class="cf-q">What changed?</div></div>
+      <div class="commit-field"><div class="cf-name">intent</div><div class="cf-q">Why?</div></div>
+      <div class="commit-field"><div class="cf-name">reasoning</div><div class="cf-q">How did it decide?</div></div>
+      <div class="commit-field"><div class="cf-name">confidence</div><div class="cf-q">How sure was it?</div></div>
+      <div class="commit-field"><div class="cf-name">agent_id</div><div class="cf-q">Who did it?</div></div>
+      <div class="commit-field"><div class="cf-name">authority</div><div class="cf-q">Who authorized it?</div></div>
+      <div class="commit-field"><div class="cf-name">resolution</div><div class="cf-q">What was accomplished?</div></div>
+      <div class="commit-field"><div class="cf-name">tool_calls</div><div class="cf-q">What actions produced this?</div></div>
+      <div class="commit-field"><div class="cf-name">alternatives</div><div class="cf-q">What else was considered?</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Languages -->
+<section class="section" data-reveal>
+  <div class="container" style="text-align:center">
+    <p class="section-label">Use It From Anywhere</p>
+    <h2 class="section-title">One primitive, every language</h2>
+    <div class="lang-grid">
+      <span class="lang-pill">Rust (core)</span>
+      <span class="lang-pill">Python</span>
+      <span class="lang-pill">TypeScript / Node</span>
+      <span class="lang-pill">Go</span>
+      <span class="lang-pill">WASM / Browser</span>
+      <span class="lang-pill">C FFI</span>
+      <span class="lang-pill">MCP (20 tools)</span>
+    </div>
+  </div>
+</section>
+
+<!-- Get Started -->
+<section class="section" id="start">
+  <div class="container">
+    <p class="section-label">Get Started</p>
+    <h2 class="section-title" data-reveal>Connect an agent in 60 seconds</h2>
+    <div data-reveal>
+      <div class="terminal">
+        <div class="terminal-bar">
+          <div class="terminal-dot red"></div>
+          <div class="terminal-dot yellow"></div>
+          <div class="terminal-dot green"></div>
+          <span class="terminal-title">terminal</span>
+        </div>
+        <pre class="terminal-body" id="terminal-body"></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Not section -->
+<section class="section" data-reveal>
+  <div class="container" style="text-align:center">
+    <p class="section-label">What it is not</p>
+    <h2 class="section-title">Clear on scope</h2>
+    <p class="section-subtitle" style="margin-bottom:24px">AgentStateGraph is a <strong style="color:var(--text-primary)">state primitive</strong>. It is the layer on which a next-generation IaC tool, a next-generation GitOps tool, and agent-native ops tooling can all be built.</p>
+    <div style="display:flex;gap:24px;justify-content:center;flex-wrap:wrap;max-width:700px;margin:0 auto">
+      <div style="flex:1;min-width:200px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:16px;text-align:left">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;font-weight:600">NOT a Terraform replacement</div>
+        <div style="font-size:13px;color:var(--text-secondary)">Wrong actor model. Terraform assumes humans writing HCL. AgentStateGraph assumes agents making low-confidence decisions at scale.</div>
+      </div>
+      <div style="flex:1;min-width:200px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:16px;text-align:left">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;font-weight:600">NOT a LangGraph helper</div>
+        <div style="font-size:13px;color:var(--text-secondary)">Different layer. LangGraph's StateGraph is an in-process Python dict. AgentStateGraph is a persistent substrate used <em>between and above</em> agents.</div>
+      </div>
+    </div>
+    <div style="margin-top:20px"><a class="btn btn-secondary" href="/compare/">Read the full comparison</a></div>
+  </div>
+</section>
+
+<!-- Demo app -->
+<section class="section" data-reveal>
+  <div class="container" style="text-align:center">
+    <p class="section-label">See it in action</p>
+    <h2 class="section-title">ThreadWeaver &mdash; the reference app</h2>
+    <p class="section-subtitle">AI chat with branchable conversations, multimodal, tool calling, MCP integration. Every feature powered by AgentStateGraph.</p>
+    <a class="btn btn-primary" href="https://threadweaver.org" target="_blank">Visit threadweaver.org</a>
+    <a class="btn btn-secondary" href="https://github.com/agentstatelabs/ThreadWeaver" target="_blank" style="margin-left:12px">GitHub</a>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <div class="footer-grid">
+    <div class="footer-col">
+      <h4>Product</h4>
+      <a href="https://github.com/agentstatelabs/AgentStateGraph" target="_blank">GitHub</a>
+      <a href="/guides/quickstart/">Quick Start</a>
+      <a href="https://github.com/agentstatelabs/AgentStateGraph/blob/main/CHANGELOG.md" target="_blank">Changelog</a>
+    </div>
+    <div class="footer-col">
+      <h4>Resources</h4>
+      <a href="/guides/introduction/">Documentation</a>
+      <a href="/reference/mcp-tools/">MCP Tools Reference</a>
+      <a href="/compare/">Compare</a>
+      <a href="/reference/rfc/">RFC Specification</a>
+    </div>
+    <div class="footer-col">
+      <h4>Ecosystem</h4>
+      <a href="https://threadweaver.org" target="_blank">ThreadWeaver</a>
+      <a href="https://github.com/agentstatelabs/AgentStateGraph/blob/main/CONTRIBUTING.md" target="_blank">Contributing</a>
+      <a href="mailto:info@agentstatelabs.com">Contact</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    AgentStateGraph v0.3.5-beta.2 &middot; <a href="https://github.com/agentstatelabs/AgentStateGraph/blob/main/LICENSE" target="_blank">BSL 1.1</a> &middot; Rust core, 6 bindings, 20 MCP tools, 131 tests
+  </div>
+</footer>
+
+<script>
+(function() {
+  'use strict';
+  // Scroll reveals
+  var els = document.querySelectorAll('[data-reveal]');
+  if (els.length) {
+    var obs = new IntersectionObserver(function(entries) {
+      entries.forEach(function(e) { if (e.isIntersecting) { e.target.classList.add('revealed'); obs.unobserve(e.target); } });
+    }, { threshold: 0.15 });
+    els.forEach(function(el) { obs.observe(el); });
+  }
+  // Nav
+  var nav = document.querySelector('.nav'), hero = document.querySelector('.hero');
+  if (nav && hero) {
+    var hb = hero.offsetTop + hero.offsetHeight;
+    window.addEventListener('scroll', function() { nav.classList.toggle('visible', window.scrollY > hb - 60); }, { passive: true });
+  }
+  // Terminal typing
+  var tb = document.getElementById('terminal-body');
+  if (tb) {
+    var played = false;
+    var cmds = [
+      {p:'$ ',t:'git clone https://github.com/agentstatelabs/AgentStateGraph',d:25},
+      {p:'$ ',t:'cd AgentStateGraph && cargo build --release -p agentstategraph-mcp',d:20},
+      {p:'$ ',t:'cargo run --release -p agentstategraph-mcp',d:25},
+      {o:'AgentStateGraph MCP Server v0.3.5-beta.2\nStorage: ./agentstategraph.db\nRepository initialized. Waiting for MCP client...',w:400},
+      {p:'# ',t:'Connect Claude Code, GPT, or any MCP agent',d:35},
+    ];
+    function type() {
+      if (played) return; played = true; tb.textContent = '';
+      var delay = 0;
+      cmds.forEach(function(c) {
+        if (c.o) {
+          delay += c.w||300;
+          var d=delay;
+          setTimeout(function() { var s=document.createElement('span'); s.className='output'; s.textContent=c.o+'\n'; tb.appendChild(s); }, d);
+          delay += 100;
+        } else {
+          var pd=delay;
+          setTimeout(function() { var s=document.createElement('span'); s.className='prompt'; s.textContent=c.p; tb.appendChild(s); }, pd);
+          delay += 50;
+          c.t.split('').forEach(function(ch,i) {
+            var cd=delay+i*(c.d||30);
+            setTimeout(function() { var s=document.createElement('span'); s.className='cmd'; s.textContent=ch; tb.appendChild(s); }, cd);
+          });
+          delay += c.t.length*(c.d||30)+200;
+          var nd=delay;
+          setTimeout(function() { tb.appendChild(document.createTextNode('\n')); }, nd);
+          delay += 50;
+        }
+      });
+      setTimeout(function() { var cur=document.createElement('span'); cur.className='cursor'; cur.textContent='\u00A0'; tb.appendChild(cur); }, delay+100);
+    }
+    var to = new IntersectionObserver(function(e) { if(e[0].isIntersecting){type();to.disconnect();} }, {threshold:0.4});
+    to.observe(tb);
+  }
+})();
+</script>
+</body>
+</html>
