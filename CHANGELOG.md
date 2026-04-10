@@ -26,7 +26,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - Path addressing (JSON-path style)
 - Structured diff engine (typed DiffOps, not text)
 - Three-way merge engine with conflict detection
-- Schema system with x-stategraph-merge hints (CRDT-inspired)
+- Schema system with x-agentstategraph-merge hints (CRDT-inspired)
 - Intent lifecycle state machine
 - Composable query interface
 - Blame operation (who changed what and why)
@@ -53,13 +53,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - 20 MCP tools exposing the full API over stdio
 - Tools: get, set, delete, branch, merge, diff, log, blame, query, speculate, compare, commit_speculation, discard_speculation, create_epoch, seal_epoch, list_epochs, sessions, etc.
 - Connect from any MCP-compatible agent (Claude, GPT, etc.)
-- CLI: `stategraph-mcp` binary
+- CLI: `agentstategraph-mcp` binary
 
 #### Language Bindings
 - **Rust**: native crate (137 tests)
 - **Python** (`agentstategraph_py`): PyO3 bindings via maturin
 - **TypeScript/Node** (`agentstategraph`): napi-rs bindings
-- **Go**: CGo bindings via stategraph-ffi
+- **Go**: CGo bindings via agentstategraph-ffi
 - **C ABI** (`agentstategraph-ffi`): cdylib + staticlib
 - **WASM** (`agentstategraph-wasm`): wasm-bindgen for browser/Deno/Node
 

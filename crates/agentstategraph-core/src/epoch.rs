@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::intent::IntentId;
 use crate::object::ObjectId;
 
-/// A bounded segment of work within a StateGraph instance.
+/// A bounded segment of work within a AgentStateGraph instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Epoch {
     /// Unique identifier for this epoch.
@@ -78,7 +78,7 @@ pub enum CrossRefType {
 /// The registry — a master index of all epochs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
-    /// All epochs in this StateGraph instance.
+    /// All epochs in this AgentStateGraph instance.
     pub epochs: Vec<EpochEntry>,
     /// Cross-references between epochs.
     pub cross_references: Vec<CrossReference>,

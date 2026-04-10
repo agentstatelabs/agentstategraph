@@ -1,6 +1,6 @@
 //! Complete agent workflow example: speculate, compare, pick winner.
 //!
-//! This demonstrates the core StateGraph value proposition:
+//! This demonstrates the core AgentStateGraph value proposition:
 //! an agent exploring multiple approaches to a problem, comparing
 //! outcomes, and committing the winner with full provenance.
 //!
@@ -11,7 +11,7 @@ use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_storage::MemoryStorage;
 
 fn main() {
-    println!("=== StateGraph Agent Workflow Demo ===\n");
+    println!("=== AgentStateGraph Agent Workflow Demo ===\n");
 
     // 1. Create a repository
     let repo = Repository::new(Box::new(MemoryStorage::new()));

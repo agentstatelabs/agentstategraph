@@ -1,15 +1,15 @@
-//! Python bindings for StateGraph via PyO3.
+//! Python bindings for AgentStateGraph via PyO3.
 //!
 //! Usage:
-//!   from stategraph import StateGraph
-//!   sg = StateGraph()                    # in-memory
-//!   sg = StateGraph("./state.db")        # SQLite
+//!   from agentstategraph_py import AgentStateGraph
+//!   asg = AgentStateGraph()                    # in-memory
+//!   asg = AgentStateGraph("./state.db")        # SQLite
 //!
-//!   sg.set("/name", "my-cluster", category="Checkpoint", description="init")
-//!   sg.get("/name")  # → "my-cluster"
-//!   sg.branch("feature", "main")
-//!   sg.diff("main", "feature")
-//!   sg.merge("feature", "main", description="merge feature")
+//!   asg.set("/name", "my-cluster", category="Checkpoint", description="init")
+//!   asg.get("/name")  # → "my-cluster"
+//!   asg.branch("feature", "main")
+//!   asg.diff("main", "feature")
+//!   asg.merge("feature", "main", description="merge feature")
 
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -19,7 +19,7 @@ use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 
-/// Convert a Python JSON-compatible value to a StateGraph Object.
+/// Convert a Python JSON-compatible value to a AgentStateGraph Object.
 fn py_to_object(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Object> {
     if value.is_none() {
         Ok(Object::null())
@@ -78,18 +78,18 @@ fn make_opts(
     opts
 }
 
-/// StateGraph — AI-native versioned state store.
+/// AgentStateGraph — AI-native versioned state store.
 ///
 /// Every write is an atomic commit with intent metadata.
 /// Supports branching, merging, diffing, and speculative execution.
 #[pyclass]
-struct StateGraph {
+struct AgentStateGraph {
     repo: Repository,
 }
 
 #[pymethods]
-impl StateGraph {
-    /// Create a new StateGraph.
+impl AgentStateGraph {
+    /// Create a new AgentStateGraph.
     /// Pass a path for SQLite (durable), or None for in-memory (ephemeral).
     #[new]
     #[pyo3(signature = (path=None))]
@@ -510,6 +510,6 @@ fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
 /// Python module definition.
 #[pymodule]
 fn agentstategraph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<StateGraph>()?;
+    m.add_class::<AgentStateGraph>()?;
     Ok(())
 }

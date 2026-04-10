@@ -1,4 +1,4 @@
-//! agentstategraph-storage — Pluggable storage backends for StateGraph.
+//! agentstategraph-storage — Pluggable storage backends for AgentStateGraph.
 //!
 //! Provides the storage trait definitions and built-in backends:
 //! - `MemoryStorage` — fast, ephemeral, for testing and speculation

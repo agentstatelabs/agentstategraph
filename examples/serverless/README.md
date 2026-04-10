@@ -1,6 +1,6 @@
-# StateGraph in Serverless/Edge Functions
+# AgentStateGraph in Serverless/Edge Functions
 
-StateGraph compiles to WASM, which means it runs anywhere WASM runs:
+AgentStateGraph compiles to WASM, which means it runs anywhere WASM runs:
 - **Cloudflare Workers** — edge functions worldwide
 - **Deno Deploy** — serverless TypeScript
 - **AWS Lambda** (with WASM runtime)
@@ -9,13 +9,13 @@ StateGraph compiles to WASM, which means it runs anywhere WASM runs:
 
 ## Why This Matters
 
-An AI agent running as a serverless function can use StateGraph to:
+An AI agent running as a serverless function can use AgentStateGraph to:
 1. **Track its work** — every state change has intent, reasoning, and provenance
 2. **Branch and explore** — speculate on approaches without committing
 3. **Report back** — structured resolution with deviations
 4. **Audit trail** — every function invocation is traceable through the state graph
 
-Traditional serverless functions are stateless. StateGraph gives them **structured, versioned, intent-aware state** without an external database.
+Traditional serverless functions are stateless. AgentStateGraph gives them **structured, versioned, intent-aware state** without an external database.
 
 ## Architecture
 
@@ -24,7 +24,7 @@ User Request
     ↓
 Edge Function (Cloudflare Worker / Deno Deploy)
     ↓
-StateGraph (WASM, ~1MB)
+AgentStateGraph (WASM, ~1MB)
     ├── In-memory state (fast, per-invocation)
     ├── IndexedDB (browser persistence)
     └── Or external KV store for cross-invocation persistence
@@ -35,12 +35,12 @@ StateGraph (WASM, ~1MB)
 ```typescript
 // deno run --allow-net serverless_agent.ts
 
-import init, { WasmStateGraph } from "./agentstategraph_wasm.js";
+import init, { WasmAgentStateGraph } from "./agentstategraph_wasm.js";
 
 await init();
 
-// Create a StateGraph instance (in-memory for serverless)
-const sg = new WasmStateGraph();
+// Create a AgentStateGraph instance (in-memory for serverless)
+const sg = new WasmAgentStateGraph();
 
 // Simulate an agent processing a request
 function handleRequest(request: { intent: string; params: any }) {
@@ -87,7 +87,7 @@ console.log("Response:", JSON.stringify(response, null, 2));
 //   [build]
 //   command = "wasm-pack build --target bundler"
 
-import init, { WasmStateGraph } from "./agentstategraph_wasm.js";
+import init, { WasmAgentStateGraph } from "./agentstategraph_wasm.js";
 
 let initialized = false;
 
@@ -98,7 +98,7 @@ export default {
       initialized = true;
     }
 
-    const sg = new WasmStateGraph();
+    const sg = new WasmAgentStateGraph();
     const url = new URL(request.url);
 
     // Agent processes the request with full provenance
@@ -112,7 +112,7 @@ export default {
     // Return response with audit trail
     const log = JSON.parse(sg.log());
     return new Response(JSON.stringify({
-      message: "Processed with StateGraph provenance",
+      message: "Processed with AgentStateGraph provenance",
       audit: log.length + " state transitions tracked",
     }), {
       headers: { "Content-Type": "application/json" },
@@ -123,7 +123,7 @@ export default {
 
 ## Key Benefits for Serverless
 
-| Traditional Serverless | With StateGraph |
+| Traditional Serverless | With AgentStateGraph |
 |---|---|
 | Stateless — no memory between invocations | Structured state with history |
 | Logging via console.log | Intent-aware provenance trail |

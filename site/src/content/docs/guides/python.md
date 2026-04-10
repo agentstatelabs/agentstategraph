@@ -14,13 +14,13 @@ pip install maturin && maturin develop --release
 ## Create a Store
 
 ```python
-from agentstategraph_py import StateGraph
+from agentstategraph_py import AgentStateGraph
 
 # In-memory (ephemeral)
-sg = StateGraph()
+sg = AgentStateGraph()
 
 # SQLite (durable)
-sg = StateGraph("state.db")
+sg = AgentStateGraph("state.db")
 ```
 
 ## Basic CRUD

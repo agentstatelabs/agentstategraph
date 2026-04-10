@@ -1,4 +1,4 @@
-//! Repository — the high-level API for StateGraph.
+//! Repository — the high-level API for AgentStateGraph.
 //!
 //! A Repository wraps a Storage backend and provides the primary
 //! user-facing operations: get, set, delete, branch, merge, log.
@@ -15,7 +15,7 @@ use agentstategraph_storage::{Storage, StorageError};
 use crate::speculation::{SpecComparison, SpecError, SpecHandle, SpeculationManager};
 use crate::tree::{self, TreeError};
 
-/// The primary API for interacting with a StateGraph state store.
+/// The primary API for interacting with an AgentStateGraph state store.
 pub struct Repository {
     storage: Box<dyn Storage>,
     specs: SpeculationManager,

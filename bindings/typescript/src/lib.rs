@@ -1,12 +1,12 @@
-//! TypeScript/Node.js bindings for StateGraph via napi-rs.
+//! TypeScript/Node.js bindings for AgentStateGraph via napi-rs.
 //!
 //! Usage:
-//!   const { StateGraph } = require('stategraph')
-//!   const sg = new StateGraph()           // in-memory
-//!   const sg = new StateGraph("state.db") // SQLite
+//!   const { AgentStateGraph } = require('agentstategraph')
+//!   const asg = new AgentStateGraph()           // in-memory
+//!   const asg = new AgentStateGraph("state.db") // SQLite
 //!
-//!   sg.set("/name", "my-cluster", { category: "Checkpoint", description: "init" })
-//!   sg.get("/name")  // → "my-cluster"
+//!   asg.set("/name", "my-cluster", { category: "Checkpoint", description: "init" })
+//!   asg.get("/name")  // → "my-cluster"
 
 #[macro_use]
 extern crate napi_derive;
@@ -72,15 +72,15 @@ fn err(e: impl std::fmt::Display) -> napi::Error {
     napi::Error::from_reason(format!("{}", e))
 }
 
-/// StateGraph — AI-native versioned state store.
+/// AgentStateGraph — AI-native versioned state store.
 #[napi]
-pub struct StateGraph {
+pub struct AgentStateGraph {
     repo: Repository,
 }
 
 #[napi]
-impl StateGraph {
-    /// Create a new StateGraph.
+impl AgentStateGraph {
+    /// Create a new AgentStateGraph.
     /// Pass a path for SQLite (durable), or omit for in-memory (ephemeral).
     #[napi(constructor)]
     pub fn new(path: Option<String>) -> napi::Result<Self> {

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Pluggable storage backends for StateGraph"
+description = "Pluggable storage backends for AgentStateGraph"
 
 [features]
 default = ["sqlite"]

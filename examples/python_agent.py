@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Python Agent Reference Implementation — StateGraph in a Python AI workflow.
+Python Agent Reference Implementation — AgentStateGraph in a Python AI workflow.
 
 This shows how a Python agent (e.g., LangChain, CrewAI, or standalone)
-uses StateGraph for structured state management with full provenance.
+uses AgentStateGraph for structured state management with full provenance.
 
 Setup:
     cd bindings/python
@@ -14,15 +14,15 @@ Run:
     python3 examples/python_agent.py
 """
 
-from agentstategraph_py import StateGraph
+from agentstategraph_py import AgentStateGraph
 
 
 def main():
     print("=== Python Agent Reference Implementation ===\n")
 
     # ─── 1. Create a repository ────────────────────────────────────
-    # In-memory for demo. Use StateGraph("state.db") for SQLite persistence.
-    sg = StateGraph()
+    # In-memory for demo. Use AgentStateGraph("state.db") for SQLite persistence.
+    sg = AgentStateGraph()
     print("✓ Repository initialized (in-memory)\n")
 
     # ─── 2. Set initial state with intent ──────────────────────────

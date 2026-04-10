@@ -1,11 +1,11 @@
-//! WASM bindings for StateGraph — runs in browsers, Deno, and Node.
+//! WASM bindings for AgentStateGraph — runs in browsers, Deno, and Node.
 //!
 //! Usage (browser/Deno):
-//!   import init, { WasmStateGraph } from './agentstategraph_wasm.js'
+//!   import init, { WasmAgentStateGraph } from './agentstategraph_wasm.js'
 //!   await init()
-//!   const sg = new WasmStateGraph()
-//!   sg.set("/name", "my-cluster", "Checkpoint", "init")
-//!   sg.get("/name")  // → '"my-cluster"'
+//!   const asg = new WasmAgentStateGraph()
+//!   asg.set("/name", "my-cluster", "Checkpoint", "init")
+//!   asg.get("/name")  // → '"my-cluster"'
 
 use wasm_bindgen::prelude::*;
 
@@ -44,7 +44,7 @@ fn make_opts(
     opts
 }
 
-/// StateGraph for WASM — uses IndexedDB for persistent browser storage.
+/// AgentStateGraph for WASM — uses IndexedDB for persistent browser storage.
 ///
 /// Architecture: in-memory cache with write-through to IndexedDB.
 /// - All reads are instant (from memory)
@@ -52,18 +52,18 @@ fn make_opts(
 /// - Call `drain_pending()` from JS to get queued writes, then persist to IndexedDB
 /// - Call `load_data()` on startup to hydrate from IndexedDB
 #[wasm_bindgen]
-pub struct WasmStateGraph {
+pub struct WasmAgentStateGraph {
     repo: Repository,
     storage: std::sync::Arc<IndexedDbStorage>,
 }
 
 #[wasm_bindgen]
-impl WasmStateGraph {
-    /// Create a new StateGraph with IndexedDB-backed storage.
+impl WasmAgentStateGraph {
+    /// Create a new AgentStateGraph with IndexedDB-backed storage.
     /// After construction, call `load_data()` with data from IndexedDB to restore state.
     #[wasm_bindgen(constructor)]
-    pub fn new(db_name: Option<String>) -> Result<WasmStateGraph, JsValue> {
-        let name = db_name.unwrap_or_else(|| "stategraph".to_string());
+    pub fn new(db_name: Option<String>) -> Result<WasmAgentStateGraph, JsValue> {
+        let name = db_name.unwrap_or_else(|| "agentstategraph".to_string());
         let storage = std::sync::Arc::new(IndexedDbStorage::new(&name));
         let repo = Repository::new(Box::new(IndexedDbStorage::new(&name)));
         repo.init()

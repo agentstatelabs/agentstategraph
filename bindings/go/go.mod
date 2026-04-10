@@ -1,3 +1,3 @@
-module github.com/agentstatelabs/stategraph/bindings/go
+module github.com/agentstatelabs/AgentStateGraph/bindings/go
 
 go 1.24.2

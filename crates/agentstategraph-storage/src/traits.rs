@@ -1,6 +1,6 @@
 //! Storage trait definitions — the pluggable backend contract.
 //!
-//! Any backend that implements these traits can be used with StateGraph.
+//! Any backend that implements these traits can be used with AgentStateGraph.
 //! The in-memory and SQLite backends are provided; custom backends
 //! can be added by implementing these traits.
 

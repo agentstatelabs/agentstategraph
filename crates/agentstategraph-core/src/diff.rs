@@ -1,6 +1,6 @@
 //! Structured diff engine — schema-aware, typed diffs between state trees.
 //!
-//! Unlike git's line-based text diffs, StateGraph diffs operate on typed
+//! Unlike git's line-based text diffs, AgentStateGraph diffs operate on typed
 //! structured data. Each DiffOp describes a specific change (SetValue,
 //! AddKey, RemoveKey, etc.) at an exact path in the state tree.
 

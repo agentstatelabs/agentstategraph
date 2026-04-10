@@ -123,8 +123,8 @@ repo.set("main", "/cluster/name", &Object::string("prod"),
 
 **From Python**:
 ```python
-from agentstategraph_py import StateGraph
-sg = StateGraph("state.db")
+from agentstategraph_py import AgentStateGraph
+sg = AgentStateGraph("state.db")
 sg.set("/name", "prod", "init", category="Checkpoint")
 ```
 
@@ -136,7 +136,7 @@ sg.set("/name", "prod", "init", category="Checkpoint")
 
 ## What's Next
 
-- **StateGraph Chat**: An LLM-agnostic chat app with branchable conversations, built on AgentStateGraph. The visual proof-of-concept.
+- **AgentStateGraph Chat**: An LLM-agnostic chat app with branchable conversations, built on AgentStateGraph. The visual proof-of-concept.
 - **Schema merge in the engine**: Wire the CRDT-inspired merge hints into the merge engine for fully automatic conflict resolution.
 - **Conformance test suite**: Any implementation that passes the suite is spec-compliant.
 

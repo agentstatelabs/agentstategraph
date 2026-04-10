@@ -1,6 +1,6 @@
 //! Schema system — optional JSON Schema validation with merge hints.
 //!
-//! Schemas use x-stategraph-merge annotations to tell the merge engine
+//! Schemas use x-agentstategraph-merge annotations to tell the merge engine
 //! how to handle each field. This enables CRDT-inspired auto-resolution
 //! of concurrent changes.
 
@@ -79,7 +79,7 @@ pub struct ValidationError {
 
 impl Schema {
     /// Create a new schema from a JSON Schema document.
-    /// Extracts x-stategraph-merge hints from the schema.
+    /// Extracts x-agentstategraph-merge hints from the schema.
     pub fn from_json_schema(schema: serde_json::Value, enforcement: EnforcementMode) -> Self {
         let merge_hints = extract_merge_hints(&schema, "");
         Self {
@@ -110,13 +110,13 @@ impl Schema {
     }
 }
 
-/// Extract x-stategraph-merge hints from a JSON Schema document.
+/// Extract x-agentstategraph-merge hints from a JSON Schema document.
 fn extract_merge_hints(schema: &serde_json::Value, path: &str) -> HashMap<String, MergeHint> {
     let mut hints = HashMap::new();
 
-    if let Some(hint_str) = schema.get("x-stategraph-merge").and_then(|v| v.as_str()) {
+    if let Some(hint_str) = schema.get("x-agentstategraph-merge").and_then(|v| v.as_str()) {
         let id_field = schema
-            .get("x-stategraph-id-field")
+            .get("x-agentstategraph-id-field")
             .and_then(|v| v.as_str())
             .unwrap_or("id")
             .to_string();
@@ -259,16 +259,16 @@ mod tests {
             "properties": {
                 "nodes": {
                     "type": "array",
-                    "x-stategraph-merge": "union-by-id",
-                    "x-stategraph-id-field": "node_id"
+                    "x-agentstategraph-merge": "union-by-id",
+                    "x-agentstategraph-id-field": "node_id"
                 },
                 "request_count": {
                     "type": "integer",
-                    "x-stategraph-merge": "sum"
+                    "x-agentstategraph-merge": "sum"
                 },
                 "config": {
                     "type": "object",
-                    "x-stategraph-merge": "last-writer-wins"
+                    "x-agentstategraph-merge": "last-writer-wins"
                 }
             }
         });

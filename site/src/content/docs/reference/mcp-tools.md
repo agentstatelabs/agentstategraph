@@ -5,7 +5,7 @@ description: Complete reference for all 20 AgentStateGraph MCP tools with parame
 
 ## State Operations
 
-### stategraph_get
+### agentstategraph_get
 
 Read a value from state at any branch, tag, or commit.
 
@@ -28,7 +28,7 @@ Read a value from state at any branch, tag, or commit.
 
 ---
 
-### stategraph_set
+### agentstategraph_set
 
 Write a value to state, creating a new atomic commit with intent metadata.
 
@@ -65,7 +65,7 @@ Committed: a1b2c3d4
 
 ---
 
-### stategraph_delete
+### agentstategraph_delete
 
 Remove a value from state, creating a new commit.
 
@@ -96,7 +96,7 @@ Deleted and committed: e5f6g7h8
 
 ## Branch Operations
 
-### stategraph_branch
+### agentstategraph_branch
 
 Create a new branch from any ref. Supports namespaced names.
 
@@ -119,7 +119,7 @@ Branch 'agents/planner/workspace' created at a1b2c3d4
 
 ---
 
-### stategraph_list_branches
+### agentstategraph_list_branches
 
 List all branches, optionally filtered by namespace prefix.
 
@@ -143,7 +143,7 @@ List all branches, optionally filtered by namespace prefix.
 
 ---
 
-### stategraph_merge
+### agentstategraph_merge
 
 Merge source branch into target. Uses schema-aware merge. Returns conflicts if auto-resolution fails.
 
@@ -186,7 +186,7 @@ CONFLICTS (1):
 
 ---
 
-### stategraph_diff
+### agentstategraph_diff
 
 Structured diff between two refs. Returns typed DiffOps, not text diffs.
 
@@ -215,7 +215,7 @@ Structured diff between two refs. Returns typed DiffOps, not text diffs.
 
 ## Speculation
 
-### stategraph_speculate
+### agentstategraph_speculate
 
 Create a lightweight speculation from a ref. O(1) creation.
 
@@ -238,7 +238,7 @@ Speculation created: handle_id=1 (from 'main', label: "try-ceph-storage")
 
 ---
 
-### stategraph_spec_modify
+### agentstategraph_spec_modify
 
 Modify state within a speculation. Changes are isolated until committed.
 
@@ -273,7 +273,7 @@ Applied 3 operations to speculation 1
 
 ---
 
-### stategraph_compare
+### agentstategraph_compare
 
 Compare multiple speculations. Returns diffs showing how each diverges from base.
 
@@ -313,7 +313,7 @@ Compare multiple speculations. Returns diffs showing how each diverges from base
 
 ---
 
-### stategraph_commit_spec
+### agentstategraph_commit_spec
 
 Promote a speculation to a real commit on its base branch. The speculation is consumed.
 
@@ -345,7 +345,7 @@ Speculation committed: m3n4o5p6
 
 ---
 
-### stategraph_discard
+### agentstategraph_discard
 
 Discard a speculation. All changes freed immediately.
 
@@ -369,7 +369,7 @@ Speculation 1 discarded
 
 ## Query and Audit
 
-### stategraph_log
+### agentstategraph_log
 
 List commits with full intent, reasoning, and metadata.
 
@@ -406,7 +406,7 @@ List commits with full intent, reasoning, and metadata.
 
 ---
 
-### stategraph_query
+### agentstategraph_query
 
 Query commits with composable filters. All filters are AND-combined.
 
@@ -455,7 +455,7 @@ Query commits with composable filters. All filters are AND-combined.
 
 ---
 
-### stategraph_blame
+### agentstategraph_blame
 
 Find which commit last modified a value at a path and why.
 
@@ -490,7 +490,7 @@ Find which commit last modified a value at a path and why.
 
 ## Epochs
 
-### stategraph_create_epoch
+### agentstategraph_create_epoch
 
 Create a new epoch to group related work.
 
@@ -518,7 +518,7 @@ Epoch '2026-04-incident-node3' created (status: Open)
 
 ---
 
-### stategraph_seal_epoch
+### agentstategraph_seal_epoch
 
 Seal an epoch, making it read-only and tamper-evident. Cannot be undone.
 
@@ -544,7 +544,7 @@ Epoch '2026-04-incident-node3' sealed
 
 ---
 
-### stategraph_list_epochs
+### agentstategraph_list_epochs
 
 List all epochs with their status, dates, and commit counts.
 
@@ -570,7 +570,7 @@ List all epochs with their status, dates, and commit counts.
 
 ## Sessions
 
-### stategraph_sessions
+### agentstategraph_sessions
 
 List active agent sessions with parent-child relationships and path scoping.
 

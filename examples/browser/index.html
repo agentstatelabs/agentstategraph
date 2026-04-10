@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>StateGraph Browser Demo</title>
+    <title>AgentStateGraph Browser Demo</title>
     <style>
         body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; background: #1a1a2e; color: #e0e0e0; }
         h1 { color: #00d4ff; }
@@ -17,7 +17,7 @@
     </style>
 </head>
 <body>
-    <h1>StateGraph Browser Demo</h1>
+    <h1>AgentStateGraph Browser Demo</h1>
     <p>AI-native versioned state store running in your browser via WASM + IndexedDB.</p>
 
     <div>
@@ -30,9 +30,9 @@
 
     <script type="module">
         // NOTE: In production, import from the wasm-pack output:
-        // import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js';
+        // import init, { WasmAgentStateGraph } from './pkg/agentstategraph_wasm.js';
 
-        // For this demo, we simulate the StateGraph API to show the concept.
+        // For this demo, we simulate the AgentStateGraph API to show the concept.
         // Build the real WASM with: wasm-pack build crates/agentstategraph-wasm --target web
 
         const log = document.getElementById('log');
@@ -63,7 +63,7 @@
             }
 
             async flushPending(sg) {
-                // Get pending writes from StateGraph
+                // Get pending writes from AgentStateGraph
                 const objects = JSON.parse(sg.drain_pending_objects());
                 const commits = JSON.parse(sg.drain_pending_commits());
                 const refs = JSON.parse(sg.drain_pending_refs());
@@ -110,16 +110,16 @@
 
         window.runDemo = async function() {
             clearLog();
-            print('=== StateGraph Browser Demo ===', 'info');
+            print('=== AgentStateGraph Browser Demo ===', 'info');
             print('');
-            print('This demonstrates StateGraph running in your browser via WASM.');
+            print('This demonstrates AgentStateGraph running in your browser via WASM.');
             print('State persists in IndexedDB — survives page refreshes.');
             print('');
 
             // In production, this would use the real WASM module:
-            // import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js';
+            // import init, { WasmAgentStateGraph } from './pkg/agentstategraph_wasm.js';
             // await init();
-            // const sg = new WasmStateGraph("my-app");
+            // const sg = new WasmAgentStateGraph("my-app");
 
             print('--- Simulated Agent Workflow ---', 'info');
             print('');
@@ -158,7 +158,7 @@
             print('--- Why This Matters ---', 'info');
             print('');
             print('Traditional browser apps lose state on refresh.');
-            print('StateGraph + IndexedDB gives you:');
+            print('AgentStateGraph + IndexedDB gives you:');
             print('  ✓ Full version history in the browser');
             print('  ✓ Branch/merge for collaborative editing');
             print('  ✓ Every AI action has intent + reasoning');
@@ -166,7 +166,7 @@
             print('  ✓ ~1MB WASM binary, instant startup');
             print('');
             print('Build the WASM module:', 'info');
-            print('  cd stategraph && wasm-pack build crates/agentstategraph-wasm --target web');
+            print('  cd agentstategraph && wasm-pack build crates/agentstategraph-wasm --target web');
             print('');
             print('=== Demo complete ===', 'info');
         };

@@ -16,7 +16,7 @@ Add to Claude Code config:
 ```json
 {
   "mcpServers": {
-    "stategraph": {
+    "agentstategraph": {
       "command": "/path/to/AgentStateGraph/target/release/agentstategraph-mcp"
     }
   }
@@ -28,11 +28,11 @@ Then ask your agent to use AgentStateGraph tools.
 ## Option 2: Rust Library
 
 ```bash
-cargo add stategraph agentstategraph-core agentstategraph-storage
+cargo add agentstategraph agentstategraph-core agentstategraph-storage
 ```
 
 ```rust
-use stategraph::{Repository, CommitOptions};
+use agentstategraph::{Repository, CommitOptions};
 use agentstategraph_storage::SqliteStorage;
 use agentstategraph_core::{IntentCategory, Object};
 
@@ -65,9 +65,9 @@ pip install maturin && maturin develop --release
 ```
 
 ```python
-from agentstategraph_py import StateGraph
+from agentstategraph_py import AgentStateGraph
 
-sg = StateGraph("state.db")  # SQLite, or StateGraph() for in-memory
+sg = AgentStateGraph("state.db")  # SQLite, or AgentStateGraph() for in-memory
 sg.set("/name", "my-project", "Init", category="Checkpoint")
 sg.branch("feature")
 sg.set("/version", "2.0", "Try v2", ref="feature", category="Explore")
@@ -82,8 +82,8 @@ npm install && npm run build
 ```
 
 ```typescript
-const { StateGraph } = require('stategraph')
-const sg = new StateGraph()  // or new StateGraph("state.db")
+const { AgentStateGraph } = require('agentstategraph')
+const sg = new AgentStateGraph()  // or new AgentStateGraph("state.db")
 sg.set("/name", "my-project", "Init", undefined, "Checkpoint")
 sg.branch("feature")
 sg.set("/version", "2.0", "Try v2", "feature", "Explore")
@@ -93,7 +93,7 @@ sg.merge("feature", undefined, "Adopt v2")
 ## Run an Example
 
 ```bash
-cargo run --example getting_started -p stategraph
-cargo run --example agent_workflow -p stategraph
-cargo run --example multi_agent -p stategraph
+cargo run --example getting_started -p agentstategraph
+cargo run --example agent_workflow -p agentstategraph
+cargo run --example multi_agent -p agentstategraph
 ```

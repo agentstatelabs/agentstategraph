@@ -35,10 +35,10 @@ wasm-pack build crates/agentstategraph-wasm --target nodejs --out-dir pkg
 
 ```html
 <script type="module">
-import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js'
+import init, { WasmAgentStateGraph } from './pkg/agentstategraph_wasm.js'
 
 await init()
-const sg = new WasmStateGraph()
+const sg = new WasmAgentStateGraph()
 
 // Set a value
 sg.set("/app/name", '"my-app"', "Checkpoint", "Init")
@@ -65,7 +65,7 @@ The WASM build uses an in-memory store with write-through queuing to IndexedDB. 
 ### Startup: Load from IndexedDB
 
 ```javascript
-const sg = new WasmStateGraph("my-app-state")
+const sg = new WasmAgentStateGraph("my-app-state")
 
 // Load persisted data from IndexedDB on startup
 const db = await openIndexedDB(sg.dbName())
@@ -165,11 +165,11 @@ AgentStateGraph WASM works in any runtime that supports `WebAssembly`:
 
 **Cloudflare Workers:**
 ```javascript
-import { WasmStateGraph } from './pkg/agentstategraph_wasm.js'
+import { WasmAgentStateGraph } from './pkg/agentstategraph_wasm.js'
 
 export default {
   async fetch(request) {
-    const sg = new WasmStateGraph()
+    const sg = new WasmAgentStateGraph()
     sg.set("/request/path", JSON.stringify(new URL(request.url).pathname),
       "Checkpoint", "Log request")
     return new Response(sg.get("/request/path"))
@@ -179,14 +179,14 @@ export default {
 
 **Deno:**
 ```typescript
-import init, { WasmStateGraph } from './pkg/agentstategraph_wasm.js'
+import init, { WasmAgentStateGraph } from './pkg/agentstategraph_wasm.js'
 await init()
-const sg = new WasmStateGraph()
+const sg = new WasmAgentStateGraph()
 sg.set("/name", '"deno-app"', "Checkpoint", "init")
 ```
 
 **Vercel Edge Functions / Netlify Edge:**
-Same pattern as Cloudflare Workers. Import the WASM module and use `WasmStateGraph` directly.
+Same pattern as Cloudflare Workers. Import the WASM module and use `WasmAgentStateGraph` directly.
 
 For persistence in serverless, pair with Durable Objects (Cloudflare) or an external store. The in-memory state is ephemeral per invocation unless you hydrate from storage on startup.
 
@@ -194,7 +194,7 @@ For persistence in serverless, pair with Durable Objects (Cloudflare) or an exte
 
 | Method | Description |
 |--------|-------------|
-| `new WasmStateGraph(dbName?)` | Create store (optional IndexedDB name) |
+| `new WasmAgentStateGraph(dbName?)` | Create store (optional IndexedDB name) |
 | `get(path, ref?)` | Read JSON string at path |
 | `set(path, json, category, description, ref?, reasoning?, confidence?)` | Write with intent |
 | `delete(path, category, description, ref?)` | Delete with intent |

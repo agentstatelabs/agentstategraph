@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 authors.workspace = true
 license.workspace = true
-description = "C ABI for StateGraph — enables Go, Ruby, Java, C# bindings"
+description = "C ABI for AgentStateGraph — enables Go, Ruby, Java, C# bindings"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]

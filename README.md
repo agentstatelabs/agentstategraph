@@ -1,22 +1,16 @@
 # AgentStateGraph
 
-**AI-native versioned state store for intent-based systems.**
-
-AgentStateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for the next era of computing. It captures not just *what* changed, but *why*, *who authorized it*, *what alternatives were considered*, and *who was informed*.
+> **AgentStateGraph is to agent state what Git was to source code — a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor.**
 
 **Website:** [agentstategraph.dev](https://agentstategraph.dev)
 **Demo app:** [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — AI chat with branchable conversations, powered by AgentStateGraph
+**Disambiguation:** [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](site/src/content/docs/compare.md)
 
-## Why AgentStateGraph?
+## What AgentStateGraph is (and isn't)
 
-| Era | Unit of Work | Key Primitives |
-|-----|-------------|----------------|
-| Monolithic | Function call | OS, filesystem, local DB |
-| Batch / Request-Response | Request → Response | HTTP, REST, SQL, queues |
-| Streaming | Event | Kafka, Flink, event stores, CQRS |
-| **Intent-based** | **Intent → Outcome** | **AgentStateGraph** |
+AgentStateGraph is **not** a Terraform replacement. The Terraform-replacement space is crowded with evolutionary players, and the actor model is wrong — Terraform assumes humans writing HCL and opening PRs, while AgentStateGraph assumes agents making low-confidence decisions at scale and needing to be held mechanically accountable. AgentStateGraph is **not** a LangGraph helper. LangGraph's `StateGraph` is an in-process Python dict used inside a single agent's execution; AgentStateGraph is a persistent, content-addressed substrate used *between and above* agents. AgentStateGraph is a **state primitive** — the layer on which a next-generation IaC tool, a next-generation GitOps tool, and agent-native ops tooling can all be built. Every change it records carries *why*, *who authorized it*, *what alternatives existed*, and *what the agent expected vs. observed*, across every branch, forever.
 
-Agents don't execute linear scripts — they explore state spaces. They need a primitive that supports speculative branching, comparison, and merge with full reasoning history. Git is text-oriented. Databases lack branching. Event sourcing is append-only. AgentStateGraph fills the gap.
+This is what the substrate has to look like when the primary actor touching production systems is no longer a human who can be governed socially (via PRs, code review, Slack threads) but a fleet of agents that must be governed mechanically.
 
 ## Quick Start
 
@@ -33,7 +27,7 @@ Add to your Claude Code MCP config:
 ```json
 {
   "mcpServers": {
-    "stategraph": {
+    "agentstategraph": {
       "command": "/path/to/AgentStateGraph/target/release/agentstategraph-mcp"
     }
   }
@@ -71,13 +65,13 @@ repo.blame("main", "/cluster/name").unwrap();
 ### From Python
 
 ```python
-from agentstategraph_py import StateGraph
+from agentstategraph_py import AgentStateGraph
 
-sg = StateGraph("state.db")
-sg.set("/name", "prod", "init", category="Checkpoint")
-sg.branch("feature")
-sg.merge("feature", description="Adopt feature")
-sg.blame("/name")  # who changed it and why
+asg = AgentStateGraph("state.db")
+asg.set("/name", "prod", "init", category="Checkpoint")
+asg.branch("feature")
+asg.merge("feature", description="Adopt feature")
+asg.blame("/name")  # who changed it and why
 ```
 
 ### From TypeScript, Go, or WASM — all supported.
@@ -106,12 +100,25 @@ sg.blame("/name")  # who changed it and why
 | `state_root` | What changed? |
 | `intent` | Why? (structured, queryable) |
 | `reasoning` | How did the agent decide? |
-| `confidence` | How sure was it? (0.0-1.0) |
+| `confidence` | How sure was it? (0.0–1.0) |
 | `agent_id` | Who did it? |
 | `authority` | Who authorized it? (with delegation chain) |
 | `resolution` | What was accomplished? Any deviations? |
 | `notification` | Who was informed? |
 | `tool_calls` | What actions produced this? |
+
+## Architecture Eras
+
+AgentStateGraph sits at the bottom of a new architecture era. Prior eras had their own primitives; this one needs its own too.
+
+| Era | Unit of Work | Key Primitives |
+|-----|-------------|----------------|
+| Monolithic | Function call | OS, filesystem, local DB |
+| Batch / Request-Response | Request → Response | HTTP, REST, SQL, queues |
+| Streaming | Event | Kafka, Flink, event stores, CQRS |
+| **Intent-based** | **Intent → Outcome** | **AgentStateGraph** |
+
+Agents don't execute linear scripts — they explore state spaces. They need a primitive that supports speculative branching, comparison, and merge with full reasoning history. Git is text-oriented. Databases lack branching. Event sourcing is append-only. AgentStateGraph fills the gap.
 
 ## Architecture
 
@@ -129,7 +136,7 @@ AgentStateGraph/
 │   ├── typescript/               # napi-rs
 │   └── go/                       # CGo via FFI
 ├── spec/
-│   └── STATEGRAPH-RFC.md         # Full specification (~2200 lines)
+│   └── AGENTSTATEGRAPH-RFC.md    # Full specification (~2300 lines)
 ├── examples/                     # 9 reference implementations
 └── site/                         # agentstategraph.dev (Astro Starlight)
 ```
@@ -148,13 +155,14 @@ node examples/typescript_agent.ts                         # TypeScript workflow
 
 ## Specification
 
-See [spec/STATEGRAPH-RFC.md](spec/STATEGRAPH-RFC.md) for the complete RFC covering core data model, intent lifecycle, authority/delegation, resolution reporting, sub-agent orchestration, schema system, epochs/registry, MCP interface, and architecture.
+See [spec/AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md) for the complete RFC covering core data model, intent lifecycle, authority/delegation, resolution reporting, sub-agent orchestration, schema system, epochs/registry, MCP interface, and architecture.
 
 ## Links
 
 - **Website**: [agentstategraph.dev](https://agentstategraph.dev)
+- **Disambiguation**: [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](site/src/content/docs/compare.md)
 - **Demo app**: [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — branchable AI chat
-- **RFC Spec**: [STATEGRAPH-RFC.md](spec/STATEGRAPH-RFC.md)
+- **RFC Spec**: [AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md)
 
 ## License
 

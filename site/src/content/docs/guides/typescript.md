@@ -15,13 +15,13 @@ This produces a native `.node` binary for your platform.
 ## Create a Store
 
 ```typescript
-const { StateGraph } = require('stategraph')
+const { AgentStateGraph } = require('agentstategraph')
 
 // In-memory (ephemeral)
-const sg = new StateGraph()
+const sg = new AgentStateGraph()
 
 // SQLite (durable)
-const sg = new StateGraph("state.db")
+const sg = new AgentStateGraph("state.db")
 ```
 
 ## Basic CRUD

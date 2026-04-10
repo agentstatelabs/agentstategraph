@@ -1,4 +1,4 @@
-package stategraph
+package agentstategraph
 
 import (
 	"encoding/json"
@@ -7,23 +7,23 @@ import (
 )
 
 func TestNewMemory(t *testing.T) {
-	sg, err := NewMemory()
+	asg, err := NewMemory()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sg.Close()
+	defer asg.Close()
 }
 
 func TestSetAndGet(t *testing.T) {
-	sg, _ := NewMemory()
-	defer sg.Close()
+	asg, _ := NewMemory()
+	defer asg.Close()
 
-	_, err := sg.Set("/name", `"my-cluster"`, "Checkpoint", "init")
+	_, err := asg.Set("/name", `"my-cluster"`, "Checkpoint", "init")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	val, err := sg.Get("/name")
+	val, err := asg.Get("/name")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,19 +33,19 @@ func TestSetAndGet(t *testing.T) {
 }
 
 func TestSetJSON(t *testing.T) {
-	sg, _ := NewMemory()
-	defer sg.Close()
+	asg, _ := NewMemory()
+	defer asg.Close()
 
 	config := map[string]interface{}{
 		"nodes": 3,
 		"gpu":   true,
 	}
-	_, err := sg.SetJSON("/config", config, "Checkpoint", "set config")
+	_, err := asg.SetJSON("/config", config, "Checkpoint", "set config")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	val, err := sg.Get("/config")
+	val, err := asg.Get("/config")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,14 +58,14 @@ func TestSetJSON(t *testing.T) {
 }
 
 func TestBranchAndDiff(t *testing.T) {
-	sg, _ := NewMemory()
-	defer sg.Close()
+	asg, _ := NewMemory()
+	defer asg.Close()
 
-	sg.Set("/x", "1", "Checkpoint", "init")
-	sg.Branch("feature", "main")
-	sg.Set("/x", "2", "Explore", "try new value", "feature")
+	asg.Set("/x", "1", "Checkpoint", "init")
+	asg.Branch("feature", "main")
+	asg.Set("/x", "2", "Explore", "try new value", "feature")
 
-	diff, err := sg.Diff("main", "feature")
+	diff, err := asg.Diff("main", "feature")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,23 +75,23 @@ func TestBranchAndDiff(t *testing.T) {
 }
 
 func TestMerge(t *testing.T) {
-	sg, _ := NewMemory()
-	defer sg.Close()
+	asg, _ := NewMemory()
+	defer asg.Close()
 
-	sg.Set("/a", "1", "Checkpoint", "init a")
-	sg.Set("/b", "2", "Checkpoint", "init b")
-	sg.Branch("feature", "main")
+	asg.Set("/a", "1", "Checkpoint", "init a")
+	asg.Set("/b", "2", "Checkpoint", "init b")
+	asg.Branch("feature", "main")
 
-	sg.Set("/a", "10", "Refine", "update a on main")
-	sg.Set("/b", "20", "Refine", "update b on feature", "feature")
+	asg.Set("/a", "10", "Refine", "update a on main")
+	asg.Set("/b", "20", "Refine", "update b on feature", "feature")
 
-	_, err := sg.Merge("feature", "main", "merge feature")
+	_, err := asg.Merge("feature", "main", "merge feature")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	a, _ := sg.Get("/a")
-	b, _ := sg.Get("/b")
+	a, _ := asg.Get("/a")
+	b, _ := asg.Get("/b")
 	if a != "10" {
 		t.Fatalf("expected a=10, got %s", a)
 	}
@@ -101,13 +101,13 @@ func TestMerge(t *testing.T) {
 }
 
 func TestLog(t *testing.T) {
-	sg, _ := NewMemory()
-	defer sg.Close()
+	asg, _ := NewMemory()
+	defer asg.Close()
 
-	sg.Set("/a", "1", "Checkpoint", "first")
-	sg.Set("/b", "2", "Checkpoint", "second")
+	asg.Set("/a", "1", "Checkpoint", "first")
+	asg.Set("/b", "2", "Checkpoint", "second")
 
-	log, err := sg.Log(10)
+	log, err := asg.Log(10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,12 +117,12 @@ func TestLog(t *testing.T) {
 }
 
 func TestBlame(t *testing.T) {
-	sg, _ := NewMemory()
-	defer sg.Close()
+	asg, _ := NewMemory()
+	defer asg.Close()
 
-	sg.Set("/status", `"healthy"`, "Fix", "mark healthy")
+	asg.Set("/status", `"healthy"`, "Fix", "mark healthy")
 
-	blame, err := sg.Blame("/status")
+	blame, err := asg.Blame("/status")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,13 +132,13 @@ func TestBlame(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	sg, _ := NewMemory()
-	defer sg.Close()
+	asg, _ := NewMemory()
+	defer asg.Close()
 
-	sg.Set("/temp", `"value"`, "Checkpoint", "add")
-	sg.Delete("/temp", "Fix", "remove temp")
+	asg.Set("/temp", `"value"`, "Checkpoint", "add")
+	asg.Delete("/temp", "Fix", "remove temp")
 
-	_, err := sg.Get("/temp")
+	_, err := asg.Get("/temp")
 	if err == nil {
 		t.Fatal("expected error getting deleted path")
 	}

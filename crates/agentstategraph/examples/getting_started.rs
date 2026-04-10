@@ -1,9 +1,9 @@
-//! Getting Started — your first 5 minutes with StateGraph.
+//! Getting Started — your first 5 minutes with AgentStateGraph.
 //!
-//! This is the canonical "hello world" for StateGraph. Copy this
+//! This is the canonical "hello world" for AgentStateGraph. Copy this
 //! as your starting point.
 //!
-//! Run: cargo run --example getting_started -p stategraph
+//! Run: cargo run --example getting_started -p agentstategraph
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};

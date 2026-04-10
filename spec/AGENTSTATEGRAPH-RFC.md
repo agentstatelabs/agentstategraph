@@ -1,8 +1,8 @@
-# StateGraph RFC-0001: AI-Native Versioned State Store
+# AgentStateGraph RFC-0001: AI-Native Versioned State Store
 
 ```
 RFC:         0001
-Title:       StateGraph — AI-Native Versioned State Store
+Title:       AgentStateGraph — AI-Native Versioned State Store
 Status:      Draft
 Created:     2026-04-04
 Authors:     Craig Brown
@@ -12,9 +12,9 @@ Authors:     Craig Brown
 
 ## Abstract
 
-StateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems. It provides AI agents and AI-native applications with a git-like state management layer that captures not just *what* changed, but *why*, *who authorized it*, *what alternatives were considered*, and *who was informed* — making every state transition auditable, reversible, and explainable.
+AgentStateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems. It provides AI agents and AI-native applications with a git-like state management layer that captures not just *what* changed, but *why*, *who authorized it*, *what alternatives were considered*, and *who was informed* — making every state transition auditable, reversible, and explainable.
 
-StateGraph is implemented as an embeddable Rust library with language bindings for Python, TypeScript, and Go, and exposed as a Model Context Protocol (MCP) server for direct agent integration.
+AgentStateGraph is implemented as an embeddable Rust library with language bindings for Python, TypeScript, and Go, and exposed as a Model Context Protocol (MCP) server for direct agent integration.
 
 ---
 
@@ -55,7 +55,7 @@ This is changing fast. The emerging pattern is the **orchestrator model**: a lea
 | **Emerging** | Orchestrator + specialist sub-agents | Scoped branches, parallel work, structured reporting, intent decomposition |
 | **Future** | Agent networks across orgs and systems | Distributed state, cross-boundary authority delegation, federated merge |
 
-Most current infrastructure (including MCP, agent frameworks, and git-based state) is designed for the single-agent phase. StateGraph is designed for the orchestrator phase and forward — its data model natively represents intent decomposition, agent hierarchies, scoped delegation, parallel sub-agent execution with safe merge, and structured reporting up the chain.
+Most current infrastructure (including MCP, agent frameworks, and git-based state) is designed for the single-agent phase. AgentStateGraph is designed for the orchestrator phase and forward — its data model natively represents intent decomposition, agent hierarchies, scoped delegation, parallel sub-agent execution with safe merge, and structured reporting up the chain.
 
 The fan-out problem is significant. An orchestrator delegates to sub-agents, each of which may call multiple tools, MCP servers, and even spawn their own sub-agents. A single user intent can spider out into dozens of agent sessions, hundreds of tool calls, and multiple MCP server interactions across layers:
 
@@ -65,7 +65,7 @@ User intent: "Set up the cluster for ML training"
        ├─ Network sub-agent
        │    ├─ tool: kubectl apply (configure CNI)
        │    ├─ MCP: cloud-provider/vpc (verify subnets)
-       │    └─ tool: stategraph_set (commit network state)
+       │    └─ tool: agentstategraph_set (commit network state)
        ├─ Storage sub-agent
        │    ├─ MCP: cloud-provider/storage (provision volumes)
        │    ├─ tool: kubectl apply (deploy NFS server)
@@ -74,7 +74,7 @@ User intent: "Set up the cluster for ML training"
        │         └─ MCP: monitoring/prometheus (verify IOPS)
        └─ GPU scheduling sub-agent
             ├─ MCP: nvidia/dcgm (query GPU health)
-            ├─ tool: stategraph_set (commit schedule)
+            ├─ tool: agentstategraph_set (commit schedule)
             └─ Sub-sub-agent: benchmarker
                  ├─ tool: kubectl apply (run benchmark pod)
                  └─ MCP: monitoring/prometheus (collect metrics)
@@ -82,9 +82,9 @@ User intent: "Set up the cluster for ML training"
 
 Today, each branch of this tree is a separate conversation context that evaporates when it completes. The orchestrator gets back a text summary — maybe. There is no unified record of what happened, what was tried, what failed, who authorized what at each level, or how the decisions connect across the tree.
 
-StateGraph captures the entire execution tree: intent decomposition, delegation chains, per-agent branches with scoped state changes, tool call provenance at every level, and structured resolutions reporting back up the chain. When something goes wrong three layers deep, you trace it from root intent through every decision to the specific tool call that failed.
+AgentStateGraph captures the entire execution tree: intent decomposition, delegation chains, per-agent branches with scoped state changes, tool call provenance at every level, and structured resolutions reporting back up the chain. When something goes wrong three layers deep, you trace it from root intent through every decision to the specific tool call that failed.
 
-Building for the orchestrator pattern now means teams adopting StateGraph are ready for the architecture that is already arriving, rather than retrofitting single-agent tooling when it breaks under multi-agent coordination.
+Building for the orchestrator pattern now means teams adopting AgentStateGraph are ready for the architecture that is already arriving, rather than retrofitting single-agent tooling when it breaks under multi-agent coordination.
 
 ### 1.4 What Exists Today and Why It Falls Short
 
@@ -97,9 +97,9 @@ Building for the orchestrator pattern now means teams adopting StateGraph are re
 | **CRDTs** | Conflict-free concurrent editing | No history; no intent tracking; designed for real-time collaboration, not agent exploration; limited to specific data types |
 | **Kubernetes** | Declarative desired state, reconciliation | Domain-specific (containers); no reasoning trace; no branching exploration; no general-purpose state model |
 
-### 1.5 What StateGraph Provides
+### 1.5 What AgentStateGraph Provides
 
-StateGraph combines the missing pieces into a single primitive:
+AgentStateGraph combines the missing pieces into a single primitive:
 
 - **Content-addressed Merkle DAG** for immutable, deduplicated state history (from git)
 - **Structured, typed state** with schema-aware operations (from databases)
@@ -147,7 +147,7 @@ Precise definitions for all terms used in this specification. Agents and humans 
 
 ### 3.1 Objects
 
-All state in StateGraph is composed of Objects. Every Object is individually content-addressed via BLAKE3 hash of its canonical serialization.
+All state in AgentStateGraph is composed of Objects. Every Object is individually content-addressed via BLAKE3 hash of its canonical serialization.
 
 #### 3.1.1 Atoms (Leaf Values)
 
@@ -337,13 +337,13 @@ Urgency    = Routine | Priority | Critical
 FormatHint = Summary | Detailed | DiffOnly
 ```
 
-StateGraph does not deliver notifications directly. The notification policy is stored as part of the provenance record and emitted as a structured event that integration layers (Slack bots, email systems, dashboards) can subscribe to and act on.
+AgentStateGraph does not deliver notifications directly. The notification policy is stored as part of the provenance record and emitted as a structured event that integration layers (Slack bots, email systems, dashboards) can subscribe to and act on.
 
 #### 3.2.6 ToolCall
 
 ```
 ToolCall {
-  tool_name:  String              // "kubectl_apply", "stategraph_set", etc.
+  tool_name:  String              // "kubectl_apply", "agentstategraph_set", etc.
   arguments:  Map<String, Value>  // input arguments
   result:     Option<String>      // summary of result (not full output)
   timestamp:  DateTime<Utc>
@@ -495,7 +495,7 @@ DiffOp = SetValue    { path: Path, old: Value, new: Value }
 
 ### 4.4 Unified Query Interface
 
-StateGraph stores rich, multi-dimensional data: state values, commit history, intent metadata, authority chains, reasoning traces, agent sessions, and epoch records. Rather than requiring agents to learn many specialized query operations, StateGraph provides a **single unified query interface** that can answer questions across all dimensions.
+AgentStateGraph stores rich, multi-dimensional data: state values, commit history, intent metadata, authority chains, reasoning traces, agent sessions, and epoch records. Rather than requiring agents to learn many specialized query operations, AgentStateGraph provides a **single unified query interface** that can answer questions across all dimensions.
 
 #### 4.4.1 Design Principles
 
@@ -558,7 +558,7 @@ query(
   "filters": { "path": "/nodes/*/status" } }
 
 // Cross-branch: compare a value across branches
-// (run two queries and diff, or use stategraph_diff)
+// (run two queries and diff, or use agentstategraph_diff)
 ```
 
 **Commit queries** — "What happened?"
@@ -759,7 +759,7 @@ PathPattern = Exact("/nodes/0/status")
 
 ### 5.1 Concurrency Model
 
-StateGraph uses **optimistic concurrency** with compare-and-swap (CAS) on refs as the atomic primitive.
+AgentStateGraph uses **optimistic concurrency** with compare-and-swap (CAS) on refs as the atomic primitive.
 
 ```
 cas_ref(branch: String, expected: ObjectId, new: ObjectId) → Result<bool>
@@ -831,7 +831,7 @@ Multiple sessions can be active simultaneously. Each session has its own HEAD, s
 
 ### 5.4 Sub-Agent Orchestration
 
-StateGraph natively models the parent-child agent relationship. When a lead agent decomposes an intent into sub-tasks, the sub-agent hierarchy, branch isolation, authority scoping, and reporting all flow through StateGraph — not through external orchestration.
+AgentStateGraph natively models the parent-child agent relationship. When a lead agent decomposes an intent into sub-tasks, the sub-agent hierarchy, branch isolation, authority scoping, and reporting all flow through AgentStateGraph — not through external orchestration.
 
 #### 5.4.1 Why This Matters
 
@@ -842,7 +842,7 @@ Consider a lead agent tasked with "set up a 5-node cluster for ML training." It 
 
 With git, these three agents would be working on the same files, creating branches, merging, and generating conflicts constantly. Coordinating them requires external orchestration logic, and there is no structured way for sub-agents to report back or for the lead agent to understand what happened across all sub-tasks.
 
-With StateGraph, the orchestration is built into the state store:
+With AgentStateGraph, the orchestration is built into the state store:
 
 ```
 main
@@ -979,7 +979,7 @@ The same scenario in git requires:
 - No authority scoping — any agent with repo access can push anywhere
 - Coordinating 3+ agents merging into a shared branch is fragile and error-prone
 
-StateGraph makes this safe by design: scoped branches, schema-aware auto-merge, structured delegation and reporting, and a queryable intent tree.
+AgentStateGraph makes this safe by design: scoped branches, schema-aware auto-merge, structured delegation and reporting, and a queryable intent tree.
 
 ### 5.5 Conflict Resolution
 
@@ -1007,7 +1007,7 @@ When conflicts occur, the `Conflict` object includes a `suggested_resolution` fi
 
 ### 6.1 Overview
 
-Schemas are optional. StateGraph functions without schemas (schema-free mode). When present, schemas provide:
+Schemas are optional. AgentStateGraph functions without schemas (schema-free mode). When present, schemas provide:
 
 - Validation of state changes before commit
 - Merge hints that enable automatic conflict resolution
@@ -1015,32 +1015,32 @@ Schemas are optional. StateGraph functions without schemas (schema-free mode). W
 
 ### 6.2 Schema Format
 
-Schemas use JSON Schema 2020-12 with StateGraph-specific extensions prefixed `x-stategraph-`.
+Schemas use JSON Schema 2020-12 with AgentStateGraph-specific extensions prefixed `x-agentstategraph-`.
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "stategraph://schema/cluster-state",
+  "$id": "agentstategraph://schema/cluster-state",
   "type": "object",
   "properties": {
     "nodes": {
       "type": "array",
       "items": { "$ref": "#/$defs/Node" },
-      "x-stategraph-merge": "union-by-id",
-      "x-stategraph-id-field": "node_id"
+      "x-agentstategraph-merge": "union-by-id",
+      "x-agentstategraph-id-field": "node_id"
     },
     "request_count": {
       "type": "integer",
-      "x-stategraph-merge": "sum"
+      "x-agentstategraph-merge": "sum"
     },
     "config": {
       "type": "object",
-      "x-stategraph-merge": "last-writer-wins"
+      "x-agentstategraph-merge": "last-writer-wins"
     },
     "active_alerts": {
       "type": "array",
       "uniqueItems": true,
-      "x-stategraph-merge": "union"
+      "x-agentstategraph-merge": "union"
     }
   },
   "$defs": {
@@ -1055,7 +1055,7 @@ Schemas use JSON Schema 2020-12 with StateGraph-specific extensions prefixed `x-
         },
         "gpu_memory_mb": {
           "type": "integer",
-          "x-stategraph-merge": "last-writer-wins"
+          "x-agentstategraph-merge": "last-writer-wins"
         }
       },
       "required": ["node_id", "hostname", "status"]
@@ -1108,16 +1108,16 @@ Schema changes are themselves versioned as commits with intent category `Migrate
 
 ## 7. MCP Interface
 
-StateGraph exposes its operations as a Model Context Protocol server, allowing any MCP-compatible agent to interact with state stores directly.
+AgentStateGraph exposes its operations as a Model Context Protocol server, allowing any MCP-compatible agent to interact with state stores directly.
 
 ### 7.1 Tools
 
 #### 7.1.1 State Tools
 
-**stategraph_get**
+**agentstategraph_get**
 ```json
 {
-  "name": "stategraph_get",
+  "name": "agentstategraph_get",
   "description": "Read a value from state at any branch, tag, or commit reference. Use JSON-path-style addressing to reach nested values.",
   "inputSchema": {
     "type": "object",
@@ -1130,10 +1130,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_set**
+**agentstategraph_set**
 ```json
 {
-  "name": "stategraph_set",
+  "name": "agentstategraph_set",
   "description": "Write a value to state, creating a new commit. Every write is atomic. Requires an intent describing why this change is being made.",
   "inputSchema": {
     "type": "object",
@@ -1152,10 +1152,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_delete**
+**agentstategraph_delete**
 ```json
 {
-  "name": "stategraph_delete",
+  "name": "agentstategraph_delete",
   "description": "Remove a value from state at the given path, creating a new commit.",
   "inputSchema": {
     "type": "object",
@@ -1170,10 +1170,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_query**
+**agentstategraph_query**
 ```json
 {
-  "name": "stategraph_query",
+  "name": "agentstategraph_query",
   "description": "Query state using JSONPath expressions. Returns all matching values.",
   "inputSchema": {
     "type": "object",
@@ -1188,10 +1188,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 
 #### 7.1.2 Branch Tools
 
-**stategraph_branch**
+**agentstategraph_branch**
 ```json
 {
-  "name": "stategraph_branch",
+  "name": "agentstategraph_branch",
   "description": "Create a new branch from any ref. Use namespaced names like 'agents/my-agent/workspace' or 'explore/approach-a'.",
   "inputSchema": {
     "type": "object",
@@ -1204,10 +1204,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_merge**
+**agentstategraph_merge**
 ```json
 {
-  "name": "stategraph_merge",
+  "name": "agentstategraph_merge",
   "description": "Merge changes from source ref into target branch. Uses schema-aware merge when schemas are defined. Returns conflicts if auto-resolution is not possible.",
   "inputSchema": {
     "type": "object",
@@ -1221,10 +1221,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_list_branches**
+**agentstategraph_list_branches**
 ```json
 {
-  "name": "stategraph_list_branches",
+  "name": "agentstategraph_list_branches",
   "description": "List all branches, optionally filtered by namespace prefix.",
   "inputSchema": {
     "type": "object",
@@ -1237,11 +1237,11 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 
 #### 7.1.3 Query and History Tools
 
-**stategraph_query**
+**agentstategraph_query**
 ```json
 {
-  "name": "stategraph_query",
-  "description": "Unified query interface for StateGraph. Query state values, commits, intents, agents, or epochs with composable filters. All filters are optional and combined with AND. This is the primary tool for asking questions about state, history, and metadata.",
+  "name": "agentstategraph_query",
+  "description": "Unified query interface for AgentStateGraph. Query state values, commits, intents, agents, or epochs with composable filters. All filters are optional and combined with AND. This is the primary tool for asking questions about state, history, and metadata.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -1281,10 +1281,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_diff**
+**agentstategraph_diff**
 ```json
 {
-  "name": "stategraph_diff",
+  "name": "agentstategraph_diff",
   "description": "Compute a structured diff between two refs. Returns typed DiffOps (SetValue, AddKey, RemoveKey, etc.), not text diffs. Use this to see exactly what changed between two branches, tags, or commits.",
   "inputSchema": {
     "type": "object",
@@ -1297,11 +1297,11 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_bisect**
+**agentstategraph_bisect**
 ```json
 {
-  "name": "stategraph_bisect",
-  "description": "Binary search the commit DAG to find exactly where a condition changed. Provide a 'good' ref (where condition is true) and 'bad' ref (where it is false). StateGraph efficiently narrows down to the responsible commit.",
+  "name": "agentstategraph_bisect",
+  "description": "Binary search the commit DAG to find exactly where a condition changed. Provide a 'good' ref (where condition is true) and 'bad' ref (where it is false). AgentStateGraph efficiently narrows down to the responsible commit.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -1315,10 +1315,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_blame**
+**agentstategraph_blame**
 ```json
 {
-  "name": "stategraph_blame",
+  "name": "agentstategraph_blame",
   "description": "For each field at a path, show which commit last modified it, which agent, what intent, and what reasoning. Like git blame but with full provenance — not just who, but why.",
   "inputSchema": {
     "type": "object",
@@ -1333,10 +1333,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 
 #### 7.1.4 Speculative Execution Tools
 
-**stategraph_speculate**
+**agentstategraph_speculate**
 ```json
 {
-  "name": "stategraph_speculate",
+  "name": "agentstategraph_speculate",
   "description": "Create a lightweight speculation from a ref. Speculations are cheap (O(1) creation) and disposable. Use them to explore approaches before committing.",
   "inputSchema": {
     "type": "object",
@@ -1349,15 +1349,15 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_spec_modify**
+**agentstategraph_spec_modify**
 ```json
 {
-  "name": "stategraph_spec_modify",
+  "name": "agentstategraph_spec_modify",
   "description": "Modify state within a speculation. Changes are isolated until committed.",
   "inputSchema": {
     "type": "object",
     "properties": {
-      "handle": { "type": "string", "description": "Speculation handle from stategraph_speculate" },
+      "handle": { "type": "string", "description": "Speculation handle from agentstategraph_speculate" },
       "operations": {
         "type": "array",
         "items": {
@@ -1376,10 +1376,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_compare**
+**agentstategraph_compare**
 ```json
 {
-  "name": "stategraph_compare",
+  "name": "agentstategraph_compare",
   "description": "Compare state across multiple speculations. Returns structured diffs showing how each speculation diverges from the base and from each other.",
   "inputSchema": {
     "type": "object",
@@ -1391,10 +1391,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_commit_spec**
+**agentstategraph_commit_spec**
 ```json
 {
-  "name": "stategraph_commit_spec",
+  "name": "agentstategraph_commit_spec",
   "description": "Promote a speculation to a real commit on a branch. The speculation is consumed.",
   "inputSchema": {
     "type": "object",
@@ -1410,10 +1410,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_discard**
+**agentstategraph_discard**
 ```json
 {
-  "name": "stategraph_discard",
+  "name": "agentstategraph_discard",
   "description": "Discard a speculation. All associated state is freed immediately.",
   "inputSchema": {
     "type": "object",
@@ -1427,10 +1427,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 
 #### 7.1.5 Sub-Agent Orchestration Tools
 
-**stategraph_delegate**
+**agentstategraph_delegate**
 ```json
 {
-  "name": "stategraph_delegate",
+  "name": "agentstategraph_delegate",
   "description": "Delegate a sub-intent to a sub-agent. Creates a scoped session with its own branch, narrowed authority, and path restrictions. The sub-agent reports back to the delegating agent when done.",
   "inputSchema": {
     "type": "object",
@@ -1453,10 +1453,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_intent_tree**
+**agentstategraph_intent_tree**
 ```json
 {
-  "name": "stategraph_intent_tree",
+  "name": "agentstategraph_intent_tree",
   "description": "Return the full intent decomposition tree for a given intent. Shows all sub-intents, their status, assigned agents, resolutions, and deviations. Use this to understand the complete picture of a complex multi-agent task.",
   "inputSchema": {
     "type": "object",
@@ -1468,10 +1468,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_collect_reports**
+**agentstategraph_collect_reports**
 ```json
 {
-  "name": "stategraph_collect_reports",
+  "name": "agentstategraph_collect_reports",
   "description": "Gather resolution reports from all sub-agents under the current session. Returns the summary, deviations, outcome, and confidence from each sub-agent's completed work.",
   "inputSchema": {
     "type": "object",
@@ -1486,10 +1486,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 
 #### 7.1.6 Collaboration Tools
 
-**stategraph_propose_merge**
+**agentstategraph_propose_merge**
 ```json
 {
-  "name": "stategraph_propose_merge",
+  "name": "agentstategraph_propose_merge",
   "description": "Create a merge proposal for review. Includes intent resolution (summary of what was done, any deviations from plan).",
   "inputSchema": {
     "type": "object",
@@ -1521,10 +1521,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_review**
+**agentstategraph_review**
 ```json
 {
-  "name": "stategraph_review",
+  "name": "agentstategraph_review",
   "description": "Review and act on a merge proposal. Approve to merge, reject to decline.",
   "inputSchema": {
     "type": "object",
@@ -1538,10 +1538,10 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 }
 ```
 
-**stategraph_sessions**
+**agentstategraph_sessions**
 ```json
 {
-  "name": "stategraph_sessions",
+  "name": "agentstategraph_sessions",
   "description": "List active agent sessions on this state store.",
   "inputSchema": {
     "type": "object",
@@ -1554,23 +1554,23 @@ StateGraph exposes its operations as a Model Context Protocol server, allowing a
 
 ### 7.2 Resources
 
-StateGraph exposes state as MCP resources with the `stategraph://` URI scheme.
+AgentStateGraph exposes state as MCP resources with the `agentstategraph://` URI scheme.
 
 | URI Pattern | Description |
 |-------------|-------------|
-| `stategraph://state/{ref}` | Full state tree at a ref |
-| `stategraph://state/{ref}/{path}` | Value at a specific path |
-| `stategraph://diff/{ref_a}..{ref_b}` | Structured diff between two refs |
-| `stategraph://log/{ref}` | Commit log (supports query params for filtering) |
-| `stategraph://branches` | List of all branches |
-| `stategraph://tags` | List of all tags |
-| `stategraph://schema` | Current schema (if defined) |
-| `stategraph://proposals` | Open merge proposals |
-| `stategraph://sessions` | Active agent sessions |
+| `agentstategraph://state/{ref}` | Full state tree at a ref |
+| `agentstategraph://state/{ref}/{path}` | Value at a specific path |
+| `agentstategraph://diff/{ref_a}..{ref_b}` | Structured diff between two refs |
+| `agentstategraph://log/{ref}` | Commit log (supports query params for filtering) |
+| `agentstategraph://branches` | List of all branches |
+| `agentstategraph://tags` | List of all tags |
+| `agentstategraph://schema` | Current schema (if defined) |
+| `agentstategraph://proposals` | Open merge proposals |
+| `agentstategraph://sessions` | Active agent sessions |
 
 ### 7.3 Events
 
-StateGraph emits structured events that MCP clients can subscribe to:
+AgentStateGraph emits structured events that MCP clients can subscribe to:
 
 | Event | Payload | Use Case |
 |-------|---------|----------|
@@ -1588,7 +1588,7 @@ StateGraph emits structured events that MCP clients can subscribe to:
 ### 8.1 Crate Structure
 
 ```
-stategraph/
+AgentStateGraph/
 ├── crates/
 │   ├── agentstategraph-core/        # Object model, types, DAG, diff, merge, schema
 │   │                           # Zero I/O dependencies. Pure logic.
@@ -1599,7 +1599,7 @@ stategraph/
 │   │   ├── sqlite.rs           # SQLite backend
 │   │   └── file.rs             # File-based backend
 │   │
-│   ├── stategraph/             # High-level API
+│   ├── agentstategraph/        # High-level API
 │   │   ├── repo.rs             # Repository handle
 │   │   ├── session.rs          # Agent sessions
 │   │   ├── speculation.rs      # Speculative execution
@@ -1672,8 +1672,8 @@ trait SessionStore: Send + Sync {
 
 | Language | Technology | Distribution |
 |----------|-----------|-------------|
-| **Python** | PyO3 + maturin | `pip install stategraph` |
-| **TypeScript/Node** | napi-rs | `npm install stategraph` |
+| **Python** | PyO3 + maturin | `pip install agentstategraph` |
+| **TypeScript/Node** | napi-rs | `npm install agentstategraph` |
 | **Go** | CGo wrapping agentstategraph-ffi | `go get stategraph` |
 | **Browser/Deno** | wasm-bindgen (agentstategraph-wasm) | npm or direct WASM import |
 | **Any (C ABI)** | agentstategraph-ffi | Shared library (.so/.dylib/.dll) |
@@ -1724,7 +1724,7 @@ A web interface powered by the WASM build would provide:
 
 Organizations adopting agentic AI face a fundamental tension: agents are most valuable when given autonomy, but autonomy without visibility is unacceptable to compliance teams, security teams, and leadership. The typical result is that organizations either don't adopt agents or adopt them without adequate oversight.
 
-StateGraph resolves this by making **visibility scale with autonomy**. As agents are given more freedom, the provenance record becomes richer, not sparser. The authority and delegation model supports a graduated trust progression:
+AgentStateGraph resolves this by making **visibility scale with autonomy**. As agents are given more freedom, the provenance record becomes richer, not sparser. The authority and delegation model supports a graduated trust progression:
 
 **Level 1 — Propose only (full guardrails)**
 - Agent works on its own branch
@@ -1760,7 +1760,7 @@ Organizations can start at Level 1 with zero risk and progress to Level 3 as tru
 
 ### 10.1 The Growth Problem
 
-A long-lived StateGraph instance accumulates history fast. A production cluster managed by multiple agents over weeks generates thousands of commits, hundreds of intents, and dozens of agent sessions. Without lifecycle management, the store becomes:
+A long-lived AgentStateGraph instance accumulates history fast. A production cluster managed by multiple agents over weeks generates thousands of commits, hundreds of intents, and dozens of agent sessions. Without lifecycle management, the store becomes:
 
 - **Unwieldy to query** — searching all history for a specific incident means scanning everything
 - **Expensive to load** — agents pulling context don't need last quarter's migration history
@@ -1769,7 +1769,7 @@ A long-lived StateGraph instance accumulates history fast. A production cluster 
 
 ### 10.2 Epochs
 
-An **Epoch** is a bounded, sealable segment of work within a StateGraph instance. It groups related commits, intents, agent sessions, and resolutions into a coherent unit that can be managed as a whole.
+An **Epoch** is a bounded, sealable segment of work within a AgentStateGraph instance. It groups related commits, intents, agent sessions, and resolutions into a coherent unit that can be managed as a whole.
 
 ```
 Epoch {
@@ -1843,7 +1843,7 @@ An `EpochBundle` contains:
 - The seal hash for independent verification
 - A manifest listing all contents with their hashes
 
-This bundle is independently verifiable: anyone with the bundle can recompute the Merkle tree and confirm it matches the seal hash. No access to the live StateGraph instance is needed.
+This bundle is independently verifiable: anyone with the bundle can recompute the Merkle tree and confirm it matches the seal hash. No access to the live AgentStateGraph instance is needed.
 
 Use cases for exported bundles:
 - **Compliance audits**: hand the bundle to auditors as a tamper-evident record
@@ -1856,7 +1856,7 @@ Use cases for exported bundles:
 Sealed epochs can be **archived** — moved to cold storage while keeping a lightweight index entry:
 
 ```
-archive_epoch(id: "2026-Q1-storage-migration", destination: "s3://audits/stategraph/")
+archive_epoch(id: "2026-Q1-storage-migration", destination: "s3://audits/agentstategraph/")
 ```
 
 Archiving:
@@ -1867,7 +1867,7 @@ Archiving:
 
 ### 10.3 The Registry
 
-The **Registry** is a lightweight master index stored at `/__registry__` in the state tree. It provides a navigable overview of all work in the StateGraph instance without requiring agents or humans to scan the full commit history.
+The **Registry** is a lightweight master index stored at `/__registry__` in the state tree. It provides a navigable overview of all work in the AgentStateGraph instance without requiring agents or humans to scan the full commit history.
 
 ```
 Registry {
@@ -1936,10 +1936,10 @@ An auditor or agent can follow this chain from the original optimization request
 
 ### 10.4 MCP Tools for Lifecycle Management
 
-**stategraph_create_epoch**
+**agentstategraph_create_epoch**
 ```json
 {
-  "name": "stategraph_create_epoch",
+  "name": "agentstategraph_create_epoch",
   "description": "Create a new epoch to group related work. Commits are automatically included based on intent lineage from the root intents.",
   "inputSchema": {
     "type": "object",
@@ -1954,10 +1954,10 @@ An auditor or agent can follow this chain from the original optimization request
 }
 ```
 
-**stategraph_seal_epoch**
+**agentstategraph_seal_epoch**
 ```json
 {
-  "name": "stategraph_seal_epoch",
+  "name": "agentstategraph_seal_epoch",
   "description": "Seal an epoch, making it read-only and tamper-evident. Computes a Merkle root over all contents. Cannot be undone.",
   "inputSchema": {
     "type": "object",
@@ -1971,10 +1971,10 @@ An auditor or agent can follow this chain from the original optimization request
 }
 ```
 
-**stategraph_export_epoch**
+**agentstategraph_export_epoch**
 ```json
 {
-  "name": "stategraph_export_epoch",
+  "name": "agentstategraph_export_epoch",
   "description": "Export a sealed epoch as a self-contained, independently verifiable audit bundle.",
   "inputSchema": {
     "type": "object",
@@ -1988,11 +1988,11 @@ An auditor or agent can follow this chain from the original optimization request
 }
 ```
 
-**stategraph_list_epochs**
+**agentstategraph_list_epochs**
 ```json
 {
-  "name": "stategraph_list_epochs",
-  "description": "List epochs in the registry with optional filters. Use this to understand the history of work in the StateGraph instance.",
+  "name": "agentstategraph_list_epochs",
+  "description": "List epochs in the registry with optional filters. Use this to understand the history of work in the AgentStateGraph instance.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -2006,10 +2006,10 @@ An auditor or agent can follow this chain from the original optimization request
 }
 ```
 
-**stategraph_epoch_references**
+**agentstategraph_epoch_references**
 ```json
 {
-  "name": "stategraph_epoch_references",
+  "name": "agentstategraph_epoch_references",
   "description": "Get cross-references between epochs. Shows how work in one epoch led to follow-up work in other epochs.",
   "inputSchema": {
     "type": "object",
@@ -2035,15 +2035,15 @@ The specification is only valuable if it can be implemented and used easily — 
 3. **Zero config to start** — The default configuration should work out of the box. SQLite storage (durable, single file), no schema, single agent. Add complexity only when needed.
 4. **Spec-faithful** — The reference implementation must match the spec exactly. It is the canonical proof that the spec is implementable and coherent.
 
-### 11.2 Rust Reference Library (`stategraph`)
+### 11.2 Rust Reference Library (`agentstategraph`)
 
-The core library, implemented in Rust, provides the complete StateGraph API as described in this spec.
+The core library, implemented in Rust, provides the complete AgentStateGraph API as described in this spec.
 
 **Distribution:**
-- Rust: `cargo add stategraph`
-- Python: `pip install stategraph`
-- TypeScript/Node: `npm install stategraph`
-- Go: `go get stategraph`
+- Rust: `cargo add agentstategraph`
+- Python: `pip install agentstategraph`
+- TypeScript/Node: `npm install agentstategraph`
+- Go: `go get github.com/agentstatelabs/AgentStateGraph/bindings/go`
 
 **Implementation layers** (each layer builds on the previous and is independently shippable):
 
@@ -2080,14 +2080,14 @@ agentstategraph-mcp
 ./agentstategraph-mcp
 
 # Docker
-docker run -p 3000:3000 stategraph/mcp-server
+docker run -p 3000:3000 agentstategraph/mcp-server
 ```
 
 **Configuration:**
 ```json
 {
   "storage": "sqlite",
-  "path": "./stategraph.db",
+  "path": "./agentstategraph.db",
   "transport": "stdio"
 }
 ```
@@ -2098,7 +2098,7 @@ That's the default — durable SQLite storage in a single file, zero external de
 ```json
 {
   "mcpServers": {
-    "stategraph": {
+    "agentstategraph": {
       "command": "npx",
       "args": ["agentstategraph-mcp"]
     }
@@ -2110,32 +2110,32 @@ An agent connecting for the first time discovers all available tools via the MCP
 
 ### 11.4 Getting Started Example
 
-A complete example that demonstrates the core workflow, suitable for inclusion in the README and as an agent's first interaction with StateGraph:
+A complete example that demonstrates the core workflow, suitable for inclusion in the README and as an agent's first interaction with AgentStateGraph:
 
 ```
 # Agent connects to agentstategraph-mcp and runs:
 
 # 1. Set initial state
-stategraph_set(ref="main", path="/app/name", value="my-project",
+agentstategraph_set(ref="main", path="/app/name", value="my-project",
   intent_category="Checkpoint", intent_description="Initialize project state")
 
 # 2. Create a branch to try something
-stategraph_branch(name="explore/new-feature", from="main")
+agentstategraph_branch(name="explore/new-feature", from="main")
 
 # 3. Make changes on the branch
-stategraph_set(ref="explore/new-feature", path="/app/feature_flags/dark_mode", value=true,
+agentstategraph_set(ref="explore/new-feature", path="/app/feature_flags/dark_mode", value=true,
   intent_category="Explore", intent_description="Try enabling dark mode",
   reasoning="User requested dark mode support. Adding feature flag first to test.")
 
 # 4. Compare with main
-stategraph_diff(ref_a="main", ref_b="explore/new-feature")
+agentstategraph_diff(ref_a="main", ref_b="explore/new-feature")
 # Returns: [{ op: "AddKey", path: "/app/feature_flags", key: "dark_mode", value: true }]
 
 # 5. Merge if happy
-stategraph_merge(source="explore/new-feature", target="main")
+agentstategraph_merge(source="explore/new-feature", target="main")
 
 # 6. Check history
-stategraph_log(ref="main", limit=5)
+agentstategraph_log(ref="main", limit=5)
 # Returns commits with full intent, reasoning, and metadata
 ```
 
@@ -2173,23 +2173,23 @@ These questions are deferred for resolution during implementation or future RFCs
 
 3. **Commit signing**: Should commits support Ed25519 signatures for cryptographic agent identity verification? This would enable trustless verification of the delegation chain.
 
-4. **Remote sync protocol**: How do distributed StateGraph instances synchronize? A protocol similar to git's pack-based transfer but operating on structured objects rather than files.
+4. **Remote sync protocol**: How do distributed AgentStateGraph instances synchronize? A protocol similar to git's pack-based transfer but operating on structured objects rather than files.
 
 5. **Time-travel queries**: Should `query_at(ref, path, timestamp)` be supported natively? This requires temporal indexing and has storage cost implications.
 
-6. **History compaction**: For long-running agents generating thousands of commits, should StateGraph support squashing or pruning history while preserving key checkpoints?
+6. **History compaction**: For long-running agents generating thousands of commits, should AgentStateGraph support squashing or pruning history while preserving key checkpoints?
 
 7. **Access control**: For multi-tenant deployments, should per-branch or per-path permissions be enforced at the storage layer?
 
-8. **Event sourcing bridge**: Should StateGraph emit events compatible with existing event sourcing infrastructure (Kafka, EventStore), enabling integration with streaming architectures?
+8. **Event sourcing bridge**: Should AgentStateGraph emit events compatible with existing event sourcing infrastructure (Kafka, EventStore), enabling integration with streaming architectures?
 
-9. **Relationship to app-state systems**: StateGraph targets agent workflows. A companion project (exploratory-state-system, Swift) targets AI-native creative applications with simpler versioning semantics. Should there be a shared specification for the overlapping subset?
+9. **Relationship to app-state systems**: AgentStateGraph targets agent workflows. A companion project (exploratory-state-system, Swift) targets AI-native creative applications with simpler versioning semantics. Should there be a shared specification for the overlapping subset?
 
 ---
 
 ## Appendix A: Comparison with Git Object Model
 
-| Concept | Git | StateGraph |
+| Concept | Git | AgentStateGraph |
 |---------|-----|-----------|
 | Content addressing | SHA-1 (migrating to SHA-256) | BLAKE3 |
 | Blob | Untyped byte sequence | Typed Atom (null, bool, int, float, string, bytes) |
@@ -2289,7 +2289,7 @@ These questions are deferred for resolution during implementation or future RFCs
       "timestamp": "2026-04-04T14:15:00Z"
     },
     {
-      "tool_name": "stategraph_set",
+      "tool_name": "agentstategraph_set",
       "arguments": { "ref": "main", "path": "/scheduling/gpu_policy", "value": "memory-aware" },
       "result": "committed",
       "timestamp": "2026-04-04T14:28:00Z"
@@ -2300,4 +2300,4 @@ These questions are deferred for resolution during implementation or future RFCs
 
 ---
 
-*StateGraph RFC-0001 — Draft, 2026-04-04*
+*AgentStateGraph RFC-0001 — Draft, 2026-04-04*

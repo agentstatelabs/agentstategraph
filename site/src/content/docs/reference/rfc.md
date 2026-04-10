@@ -15,7 +15,7 @@ The full specification lives at [`spec/STATEGRAPH-RFC.md`](https://github.com/ag
 
 ### 1. Motivation
 
-Why AgentStateGraph exists. Covers the four architecture eras (monolithic, batch, streaming, intent-based), the provenance gap in AI systems, the shift from single-agent to orchestrator patterns, what existing tools lack, and what StateGraph provides.
+Why AgentStateGraph exists. Covers the four architecture eras (monolithic, batch, streaming, intent-based), the provenance gap in AI systems, the shift from single-agent to orchestrator patterns, what existing tools lack, and what AgentStateGraph provides.
 
 ### 2. Glossary
 
@@ -63,7 +63,7 @@ Optional schema annotations for validation and merge behavior.
 
 ### 7. MCP Interface
 
-How StateGraph exposes itself as an MCP server.
+How AgentStateGraph exposes itself as an MCP server.
 
 - **7.1 Tools** -- All 20 tools with full parameter schemas, descriptions, and example inputs/outputs.
 - **7.2 Resources** -- MCP resource endpoints for state at paths.
@@ -73,7 +73,7 @@ How StateGraph exposes itself as an MCP server.
 
 Implementation structure.
 
-- **8.1 Crate Structure** -- `agentstategraph-core` (types, diff, merge), `agentstategraph-storage` (pluggable backends), `stategraph` (high-level API), `agentstategraph-mcp` (MCP server).
+- **8.1 Crate Structure** -- `agentstategraph-core` (types, diff, merge), `agentstategraph-storage` (pluggable backends), `agentstategraph` (high-level API), `agentstategraph-mcp` (MCP server).
 - **8.2 Storage Traits** -- The `Storage` trait interface for pluggable backends (Memory, SQLite, IndexedDB).
 - **8.3 Performance Design** -- Content-addressed deduplication, O(1) branch creation, copy-on-write speculation.
 - **8.4 Language Bindings** -- Python (PyO3), TypeScript (napi-rs), Go (C FFI), WASM (wasm-bindgen).
@@ -102,7 +102,7 @@ Managing state growth over time.
 Implementation details and test coverage.
 
 - **11.1 Principles** -- Correctness over performance, content-addressed everything, zero unsafe.
-- **11.2 Rust Reference Library** -- The `stategraph` crate with Repository API.
+- **11.2 Rust Reference Library** -- The `agentstategraph` crate with Repository API.
 - **11.3 MCP Server** -- The `agentstategraph-mcp` crate with all 20 tools.
 - **11.4 Getting Started Example** -- End-to-end code walkthrough.
 - **11.5 Implementation Test Suite** -- 137 tests covering all operations.

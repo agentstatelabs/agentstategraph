@@ -1,6 +1,6 @@
 //! Content-addressed objects — the fundamental unit of state storage.
 //!
-//! All state in StateGraph is composed of Objects. Every Object is individually
+//! All state in AgentStateGraph is composed of Objects. Every Object is individually
 //! content-addressed via BLAKE3 hash of its canonical serialization.
 //!
 //! Two objects with identical content always produce the same ObjectId,
@@ -81,7 +81,7 @@ pub enum Node {
 }
 
 /// An Object is either an Atom (leaf) or a Node (container).
-/// This is the fundamental unit of state storage in StateGraph.
+/// This is the fundamental unit of state storage in AgentStateGraph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Object {

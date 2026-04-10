@@ -1,5 +1,5 @@
 //! Intent and Authority types — the provenance metadata that makes
-//! StateGraph different from git.
+//! AgentStateGraph different from git.
 //!
 //! Every commit carries structured metadata about:
 //! - Why the change was made (Intent)
@@ -168,7 +168,7 @@ pub enum Outcome {
 /// Declares who should be informed about an intent's resolution,
 /// at what urgency, and in what format.
 ///
-/// StateGraph does not deliver notifications directly — this is stored
+/// AgentStateGraph does not deliver notifications directly — this is stored
 /// as part of the provenance record and emitted as a structured event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotificationPolicy {

@@ -1,4 +1,4 @@
-//! agentstategraph-core — Core types and algorithms for StateGraph.
+//! agentstategraph-core — Core types and algorithms for AgentStateGraph.
 //!
 //! This crate contains the foundational types with zero I/O dependencies:
 //! - Objects (Atom, Node) with content-addressing via BLAKE3

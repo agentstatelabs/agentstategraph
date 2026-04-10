@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "MCP server for StateGraph — AI-native versioned state store"
+description = "MCP server for AgentStateGraph — AI-native versioned state store"
 
 [[bin]]
 name = "agentstategraph-mcp"

@@ -1,9 +1,9 @@
 //! Schema & Merge — schema validation and merge hint demo.
 //!
-//! Shows how x-stategraph-merge annotations enable CRDT-inspired
+//! Shows how x-agentstategraph-merge annotations enable CRDT-inspired
 //! auto-resolution of concurrent changes.
 //!
-//! Run: cargo run --example schema_merge -p stategraph
+//! Run: cargo run --example schema_merge -p agentstategraph
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::schema::{EnforcementMode, MergeHint, Schema};
@@ -32,21 +32,21 @@ fn main() {
                     },
                     "required": ["node_id", "hostname", "status"]
                 },
-                "x-stategraph-merge": "union-by-id",
-                "x-stategraph-id-field": "node_id"
+                "x-agentstategraph-merge": "union-by-id",
+                "x-agentstategraph-id-field": "node_id"
             },
             "request_count": {
                 "type": "integer",
-                "x-stategraph-merge": "sum"
+                "x-agentstategraph-merge": "sum"
             },
             "config": {
                 "type": "object",
-                "x-stategraph-merge": "last-writer-wins"
+                "x-agentstategraph-merge": "last-writer-wins"
             },
             "active_alerts": {
                 "type": "array",
                 "uniqueItems": true,
-                "x-stategraph-merge": "union"
+                "x-agentstategraph-merge": "union"
             }
         }
     });

@@ -1,7 +1,7 @@
-//! C ABI for StateGraph — opaque handle-based API.
+//! C ABI for AgentStateGraph — opaque handle-based API.
 //!
 //! All functions use opaque pointers and C strings.
-//! The caller is responsible for freeing returned strings with stategraph_free_string.
+//! The caller is responsible for freeing returned strings with agentstategraph_free_string.
 //!
 //! This crate produces a shared library (.so/.dylib/.dll) and static library (.a)
 //! that any language with C FFI can call.
@@ -19,9 +19,9 @@ pub struct SgRepo {
     inner: Repository,
 }
 
-/// Create a new in-memory StateGraph repository.
+/// Create a new in-memory AgentStateGraph repository.
 #[no_mangle]
-pub extern "C" fn stategraph_new_memory() -> *mut SgRepo {
+pub extern "C" fn agentstategraph_new_memory() -> *mut SgRepo {
     let repo = Repository::new(Box::new(MemoryStorage::new()));
     if let Err(_) = repo.init() {
         return ptr::null_mut();
@@ -29,9 +29,9 @@ pub extern "C" fn stategraph_new_memory() -> *mut SgRepo {
     Box::into_raw(Box::new(SgRepo { inner: repo }))
 }
 
-/// Create a new SQLite-backed StateGraph repository.
+/// Create a new SQLite-backed AgentStateGraph repository.
 #[no_mangle]
-pub extern "C" fn stategraph_new_sqlite(path: *const c_char) -> *mut SgRepo {
+pub extern "C" fn agentstategraph_new_sqlite(path: *const c_char) -> *mut SgRepo {
     let path = unsafe {
         if path.is_null() {
             return ptr::null_mut();
@@ -54,7 +54,7 @@ pub extern "C" fn stategraph_new_sqlite(path: *const c_char) -> *mut SgRepo {
 
 /// Free a repository handle.
 #[no_mangle]
-pub extern "C" fn stategraph_free(repo: *mut SgRepo) {
+pub extern "C" fn agentstategraph_free(repo: *mut SgRepo) {
     if !repo.is_null() {
         unsafe {
             drop(Box::from_raw(repo));
@@ -62,9 +62,9 @@ pub extern "C" fn stategraph_free(repo: *mut SgRepo) {
     }
 }
 
-/// Free a string returned by StateGraph functions.
+/// Free a string returned by AgentStateGraph functions.
 #[no_mangle]
-pub extern "C" fn stategraph_free_string(s: *mut c_char) {
+pub extern "C" fn agentstategraph_free_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe {
             drop(CString::from_raw(s));
@@ -74,7 +74,7 @@ pub extern "C" fn stategraph_free_string(s: *mut c_char) {
 
 /// Get a JSON value at a path. Returns a JSON string (caller must free).
 #[no_mangle]
-pub extern "C" fn stategraph_get(
+pub extern "C" fn agentstategraph_get(
     repo: *const SgRepo,
     ref_name: *const c_char,
     path: *const c_char,
@@ -91,7 +91,7 @@ pub extern "C" fn stategraph_get(
 
 /// Set a JSON value at a path. Returns commit ID string (caller must free).
 #[no_mangle]
-pub extern "C" fn stategraph_set(
+pub extern "C" fn agentstategraph_set(
     repo: *const SgRepo,
     ref_name: *const c_char,
     path: *const c_char,
@@ -123,7 +123,7 @@ pub extern "C" fn stategraph_set(
 
 /// Delete a value at a path. Returns commit ID string.
 #[no_mangle]
-pub extern "C" fn stategraph_delete(
+pub extern "C" fn agentstategraph_delete(
     repo: *const SgRepo,
     ref_name: *const c_char,
     path: *const c_char,
@@ -147,7 +147,7 @@ pub extern "C" fn stategraph_delete(
 
 /// Create a branch. Returns commit ID string.
 #[no_mangle]
-pub extern "C" fn stategraph_branch(
+pub extern "C" fn agentstategraph_branch(
     repo: *const SgRepo,
     name: *const c_char,
     from: *const c_char,
@@ -168,7 +168,7 @@ pub extern "C" fn stategraph_branch(
 
 /// Diff two refs. Returns JSON string of DiffOps.
 #[no_mangle]
-pub extern "C" fn stategraph_diff(
+pub extern "C" fn agentstategraph_diff(
     repo: *const SgRepo,
     ref_a: *const c_char,
     ref_b: *const c_char,
@@ -189,7 +189,7 @@ pub extern "C" fn stategraph_diff(
 
 /// Merge source into target. Returns commit ID or error JSON.
 #[no_mangle]
-pub extern "C" fn stategraph_merge(
+pub extern "C" fn agentstategraph_merge(
     repo: *const SgRepo,
     source: *const c_char,
     target: *const c_char,
@@ -213,7 +213,7 @@ pub extern "C" fn stategraph_merge(
 
 /// Get commit log as JSON. Returns JSON array string.
 #[no_mangle]
-pub extern "C" fn stategraph_log(
+pub extern "C" fn agentstategraph_log(
     repo: *const SgRepo,
     ref_name: *const c_char,
     limit: u32,
@@ -248,7 +248,7 @@ pub extern "C" fn stategraph_log(
 
 /// Blame — returns JSON string with blame entry.
 #[no_mangle]
-pub extern "C" fn stategraph_blame(
+pub extern "C" fn agentstategraph_blame(
     repo: *const SgRepo,
     ref_name: *const c_char,
     path: *const c_char,

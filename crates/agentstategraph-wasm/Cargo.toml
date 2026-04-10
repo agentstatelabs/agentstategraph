@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2021"
 authors.workspace = true
 license.workspace = true
-description = "WASM bindings for StateGraph — browser, Deno, Node"
+description = "WASM bindings for AgentStateGraph — browser, Deno, Node"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

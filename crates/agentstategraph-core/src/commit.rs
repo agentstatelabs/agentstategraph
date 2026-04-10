@@ -1,6 +1,6 @@
 //! Commit — an immutable record linking a state tree to its history and metadata.
 //!
-//! This is where StateGraph diverges most from git. Beyond the standard state-root
+//! This is where AgentStateGraph diverges most from git. Beyond the standard state-root
 //! and parents, a commit carries: agent identity, authority, structured intent,
 //! reasoning, confidence, and tool call provenance.
 

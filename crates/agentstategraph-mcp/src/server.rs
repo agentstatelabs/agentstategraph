@@ -1,4 +1,4 @@
-//! StateGraph MCP Server — exposes StateGraph operations as MCP tools.
+//! AgentStateGraph MCP Server — exposes AgentStateGraph operations as MCP tools.
 
 use std::sync::Arc;
 
@@ -12,9 +12,9 @@ use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object, QueryFilters};
 
-/// The StateGraph MCP server.
+/// The AgentStateGraph MCP server.
 #[derive(Clone)]
-pub struct StateGraphServer {
+pub struct AgentStateGraphServer {
     repo: Arc<Repository>,
     tool_router: ToolRouter<Self>,
 }
@@ -221,7 +221,7 @@ fn default_limit() -> usize {
 // -- Tool implementations --
 
 #[tool_router]
-impl StateGraphServer {
+impl AgentStateGraphServer {
     pub fn new(repo: Arc<Repository>) -> Self {
         Self {
             repo,
@@ -232,7 +232,7 @@ impl StateGraphServer {
     #[tool(
         description = "Read a value from state at any branch, tag, or commit. Use JSON-path addressing (e.g., '/nodes/0/hostname'). Use '/' for entire state."
     )]
-    async fn stategraph_get(&self, params: Parameters<GetParams>) -> String {
+    async fn agentstategraph_get(&self, params: Parameters<GetParams>) -> String {
         let p = params.0;
         match self.repo.get_json(&p.r#ref, &p.path) {
             Ok(value) => {
@@ -245,7 +245,7 @@ impl StateGraphServer {
     #[tool(
         description = "Write a value to state, creating a new commit. Every write is atomic. Requires intent metadata explaining why this change is being made."
     )]
-    async fn stategraph_set(&self, params: Parameters<SetParams>) -> String {
+    async fn agentstategraph_set(&self, params: Parameters<SetParams>) -> String {
         let p = params.0;
         let category = parse_category(&p.intent_category);
         let mut opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
@@ -266,7 +266,7 @@ impl StateGraphServer {
     }
 
     #[tool(description = "Remove a value from state, creating a new commit.")]
-    async fn stategraph_delete(&self, params: Parameters<DeleteParams>) -> String {
+    async fn agentstategraph_delete(&self, params: Parameters<DeleteParams>) -> String {
         let p = params.0;
         let category = parse_category(&p.intent_category);
         let opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
@@ -279,7 +279,7 @@ impl StateGraphServer {
     #[tool(
         description = "Create a new branch from any ref. Use namespaced names like 'agents/my-agent/workspace' or 'explore/approach-a'."
     )]
-    async fn stategraph_branch(&self, params: Parameters<BranchParams>) -> String {
+    async fn agentstategraph_branch(&self, params: Parameters<BranchParams>) -> String {
         let p = params.0;
         match self.repo.branch(&p.name, &p.from) {
             Ok(id) => format!("Branch '{}' created at {}", p.name, id.short()),
@@ -288,7 +288,7 @@ impl StateGraphServer {
     }
 
     #[tool(description = "List all branches, optionally filtered by namespace prefix.")]
-    async fn stategraph_list_branches(&self, params: Parameters<ListBranchesParams>) -> String {
+    async fn agentstategraph_list_branches(&self, params: Parameters<ListBranchesParams>) -> String {
         let p = params.0;
         match self.repo.list_branches(p.prefix.as_deref()) {
             Ok(branches) => {
@@ -305,7 +305,7 @@ impl StateGraphServer {
     #[tool(
         description = "Merge source branch into target. Uses schema-aware merge. Returns conflicts if auto-resolution fails."
     )]
-    async fn stategraph_merge(&self, params: Parameters<MergeParams>) -> String {
+    async fn agentstategraph_merge(&self, params: Parameters<MergeParams>) -> String {
         let p = params.0;
         let mut opts =
             CommitOptions::new("mcp-agent", IntentCategory::Merge, &p.intent_description);
@@ -328,7 +328,7 @@ impl StateGraphServer {
     #[tool(
         description = "List commits with full intent, reasoning, and metadata. Use to understand history of state changes."
     )]
-    async fn stategraph_log(&self, params: Parameters<LogParams>) -> String {
+    async fn agentstategraph_log(&self, params: Parameters<LogParams>) -> String {
         let p = params.0;
         match self.repo.log(&p.r#ref, p.limit) {
             Ok(commits) => {
@@ -359,7 +359,7 @@ impl StateGraphServer {
     #[tool(
         description = "Structured diff between two refs. Returns typed DiffOps (SetValue, AddKey, RemoveKey, etc.), not text diffs."
     )]
-    async fn stategraph_diff(&self, params: Parameters<DiffParams>) -> String {
+    async fn agentstategraph_diff(&self, params: Parameters<DiffParams>) -> String {
         let p = params.0;
         match self.repo.diff(&p.ref_a, &p.ref_b) {
             Ok(ops) if ops.is_empty() => "No differences.".to_string(),
@@ -377,7 +377,7 @@ impl StateGraphServer {
     #[tool(
         description = "Create a lightweight speculation from a ref. O(1) creation. Use to explore approaches before committing."
     )]
-    async fn stategraph_speculate(&self, params: Parameters<SpeculateParams>) -> String {
+    async fn agentstategraph_speculate(&self, params: Parameters<SpeculateParams>) -> String {
         let p = params.0;
         match self.repo.speculate(&p.from, p.label.clone()) {
             Ok(handle) => format!(
@@ -393,7 +393,7 @@ impl StateGraphServer {
     #[tool(
         description = "Modify state within a speculation. Changes are isolated until committed."
     )]
-    async fn stategraph_spec_modify(&self, params: Parameters<SpecModifyParams>) -> String {
+    async fn agentstategraph_spec_modify(&self, params: Parameters<SpecModifyParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
 
@@ -427,7 +427,7 @@ impl StateGraphServer {
     #[tool(
         description = "Compare multiple speculations. Returns diffs showing how each diverges from base."
     )]
-    async fn stategraph_compare(&self, params: Parameters<CompareParams>) -> String {
+    async fn agentstategraph_compare(&self, params: Parameters<CompareParams>) -> String {
         let p = params.0;
         let handles: Vec<SpecHandle> = p
             .handle_ids
@@ -457,7 +457,7 @@ impl StateGraphServer {
     #[tool(
         description = "Promote a speculation to a real commit on its base branch. The speculation is consumed."
     )]
-    async fn stategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
+    async fn agentstategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
         let category = parse_category(&p.intent_category);
@@ -475,7 +475,7 @@ impl StateGraphServer {
     }
 
     #[tool(description = "Discard a speculation. All changes freed immediately.")]
-    async fn stategraph_discard(&self, params: Parameters<DiscardParams>) -> String {
+    async fn agentstategraph_discard(&self, params: Parameters<DiscardParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
         match self.repo.discard_speculation(handle) {
@@ -489,7 +489,7 @@ impl StateGraphServer {
     #[tool(
         description = "Query commits with composable filters. Filter by agent, intent category, tags, reasoning text, confidence range, date range, and more. All filters are AND-combined."
     )]
-    async fn stategraph_query(&self, params: Parameters<QueryParams>) -> String {
+    async fn agentstategraph_query(&self, params: Parameters<QueryParams>) -> String {
         let p = params.0;
         let filters = QueryFilters {
             agent_id: p.agent_id,
@@ -532,7 +532,7 @@ impl StateGraphServer {
     #[tool(
         description = "Blame — find which commit last modified a value at a path and why. Returns the agent, intent, reasoning, and timestamp."
     )]
-    async fn stategraph_blame(&self, params: Parameters<BlameParams>) -> String {
+    async fn agentstategraph_blame(&self, params: Parameters<BlameParams>) -> String {
         let p = params.0;
         let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
         match self.repo.blame(&ref_name, &p.path) {
@@ -546,7 +546,7 @@ impl StateGraphServer {
     #[tool(
         description = "Create a new epoch to group related work. Commits are associated by intent lineage."
     )]
-    async fn stategraph_create_epoch(&self, params: Parameters<CreateEpochParams>) -> String {
+    async fn agentstategraph_create_epoch(&self, params: Parameters<CreateEpochParams>) -> String {
         let p = params.0;
         match self
             .repo
@@ -560,7 +560,7 @@ impl StateGraphServer {
     #[tool(
         description = "Seal an epoch, making it read-only and tamper-evident. Cannot be undone."
     )]
-    async fn stategraph_seal_epoch(&self, params: Parameters<SealEpochParams>) -> String {
+    async fn agentstategraph_seal_epoch(&self, params: Parameters<SealEpochParams>) -> String {
         let p = params.0;
         match self.repo.seal_epoch(&p.id, &p.summary) {
             Ok(()) => format!("Epoch '{}' sealed", p.id),
@@ -569,7 +569,7 @@ impl StateGraphServer {
     }
 
     #[tool(description = "List all epochs with their status, dates, and commit counts.")]
-    async fn stategraph_list_epochs(&self) -> String {
+    async fn agentstategraph_list_epochs(&self) -> String {
         match self.repo.list_epochs() {
             Ok(entries) => {
                 let json: Vec<serde_json::Value> = entries
@@ -598,7 +598,7 @@ impl StateGraphServer {
     #[tool(
         description = "List active agent sessions. Shows parent-child relationships and path scoping."
     )]
-    async fn stategraph_sessions(&self, params: Parameters<SessionListParams>) -> String {
+    async fn agentstategraph_sessions(&self, params: Parameters<SessionListParams>) -> String {
         let sessions = self.repo.sessions().list(params.0.agent_id.as_deref());
         let json: Vec<serde_json::Value> = sessions
             .iter()
@@ -620,7 +620,7 @@ impl StateGraphServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for StateGraphServer {}
+impl ServerHandler for AgentStateGraphServer {}
 
 // -- Helpers --
 

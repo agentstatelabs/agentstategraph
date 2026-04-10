@@ -1,12 +1,12 @@
 //! Schema-aware merge engine.
 //!
-//! StateGraph's merge operates on structured data, not text lines.
+//! AgentStateGraph's merge operates on structured data, not text lines.
 //! Many concurrent changes auto-resolve based on type:
 //!   - Different keys modified → union both changes
 //!   - Identical changes from both sides → deduplicate
 //!   - Same scalar modified differently → conflict
 //!
-//! Future: schema annotations (x-stategraph-merge) will enable
+//! Future: schema annotations (x-agentstategraph-merge) will enable
 //! CRDT-inspired resolution (sum, max, union-by-id, etc.)
 
 use serde::{Deserialize, Serialize};

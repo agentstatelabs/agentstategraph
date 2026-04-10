@@ -1,11 +1,11 @@
 {
-  "name": "stategraph",
+  "name": "agentstategraph",
   "version": "0.3.0-beta.1",
   "description": "AI-native versioned state store for intent-based systems",
   "main": "index.js",
   "types": "index.d.ts",
   "napi": {
-    "name": "stategraph",
+    "name": "agentstategraph",
     "triples": {}
   },
   "license": "MIT OR Apache-2.0",

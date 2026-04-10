@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * TypeScript Agent Reference Implementation — StateGraph in a Node.js AI workflow.
+ * TypeScript Agent Reference Implementation — AgentStateGraph in a Node.js AI workflow.
  *
- * This shows how a TypeScript agent uses StateGraph for structured state
+ * This shows how a TypeScript agent uses AgentStateGraph for structured state
  * management with full provenance.
  *
  * Setup:
@@ -12,13 +12,13 @@
  *   cd bindings/typescript && node ../../examples/typescript_agent.ts
  */
 
-const { StateGraph } = require("../bindings/typescript/index");
+const { AgentStateGraph } = require("../bindings/typescript/index");
 
 function main() {
   console.log("=== TypeScript Agent Reference Implementation ===\n");
 
   // ─── 1. Create a repository ──────────────────────────────────
-  const sg = new StateGraph(); // in-memory. Use new StateGraph("state.db") for SQLite.
+  const sg = new AgentStateGraph(); // in-memory. Use new AgentStateGraph("state.db") for SQLite.
   console.log("✓ Repository initialized\n");
 
   // ─── 2. Set initial state ────────────────────────────────────

@@ -1,4 +1,4 @@
-# Publishing StateGraph
+# Publishing AgentStateGraph
 
 ## crates.io (Rust)
 
@@ -9,7 +9,7 @@
 cargo login <your-token>
 cargo publish -p agentstategraph-core
 cargo publish -p agentstategraph-storage
-cargo publish -p stategraph
+cargo publish -p agentstategraph
 cargo publish -p agentstategraph-mcp
 ```
 
@@ -26,7 +26,7 @@ source .venv/bin/activate
 maturin publish --username __token__ --password <your-token>
 ```
 
-This builds and uploads the wheel. Users install with: `pip install stategraph`
+This builds and uploads the wheel. Users install with: `pip install agentstategraph`
 
 ## npm (TypeScript/Node)
 
@@ -38,7 +38,7 @@ npm login
 npm publish
 ```
 
-Users install with: `npm install stategraph`
+Users install with: `npm install agentstategraph`
 
 ## WASM (npm)
 
@@ -52,7 +52,7 @@ npm publish
 
 Users import with:
 ```js
-import init, { WasmStateGraph } from 'agentstategraph-wasm';
+import init, { WasmAgentStateGraph } from 'agentstategraph-wasm';
 await init();
-const sg = new WasmStateGraph();
+const asg = new WasmAgentStateGraph();
 ```

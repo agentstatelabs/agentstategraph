@@ -1,13 +1,16 @@
 ---
 title: AgentStateGraph
-description: AI-native versioned state store for intent-based systems.
+description: A content-addressed, branchable, blameable state primitive — built for AI agents as the primary actor.
 template: splash
 hero:
-  tagline: The missing infrastructure primitive for the AI agent era. Every state change captures what changed, why, who authorized it, and what alternatives were considered.
+  tagline: AgentStateGraph is to agent state what Git was to source code — a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor.
   actions:
     - text: Get Started
       link: /guides/quickstart/
       icon: right-arrow
+    - text: AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph
+      link: /compare/
+      variant: secondary
     - text: View on GitHub
       link: https://github.com/agentstatelabs/AgentStateGraph
       variant: minimal
@@ -15,6 +18,20 @@ hero:
 ---
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## The vision
+
+A future where AI is responsible for an entire infrastructure — rollouts, tracing, observability, alerts, reports — and is **accountable for it mechanically rather than socially**. Every change carries why, who authorized it, what alternatives existed, and what the agent expected vs. observed, across every branch, forever.
+
+This is what the substrate has to look like when the primary actor touching production systems is no longer a human who can be governed through PRs, code review, and Slack threads, but a fleet of agents that must be governed through data-model-enforced intent, confidence, authority, and blame. AgentStateGraph is that substrate.
+
+## What it is not
+
+AgentStateGraph is **not a Terraform replacement**. The Terraform-replacement space is crowded with evolutionary players, and the actor model is wrong: Terraform assumes humans writing HCL and opening PRs, while AgentStateGraph assumes agents making low-confidence decisions at scale and needing to be held mechanically accountable.
+
+AgentStateGraph is **not a LangGraph helper**. LangGraph's `StateGraph` is an in-process Python dict with reducer functions, used inside a single agent's execution. AgentStateGraph is a persistent, content-addressed, branchable, blameable substrate used *between and above* agents.
+
+AgentStateGraph is a **state primitive** — the layer on which a next-generation IaC tool, a next-generation GitOps tool, and agent-native ops tooling can all be built. *(If you landed here confused by the names, see the [comparison page](/compare/).)*
 
 ## Why AgentStateGraph?
 
@@ -33,15 +50,6 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 	</Card>
 </CardGrid>
 
-## The Four Architecture Eras
-
-| Era | Unit of Work | Key Primitives |
-|-----|-------------|----------------|
-| Monolithic | Function call | OS, filesystem, local DB |
-| Batch / Request-Response | Request → Response | HTTP, REST, SQL, queues |
-| Streaming | Event | Kafka, Flink, event stores, CQRS |
-| **Intent-based** | **Intent → Outcome** | **AgentStateGraph** |
-
 ## Use It From Anywhere
 
 - **MCP Server** — 20 tools, any MCP-compatible agent
@@ -50,3 +58,16 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 - **TypeScript/Node** — napi-rs bindings
 - **Go** — CGo via C FFI
 - **WASM** — 997KB, runs in any browser
+
+## The Four Architecture Eras
+
+AgentStateGraph sits at the bottom of a new architecture era. Each prior era needed its own primitives; this one does too.
+
+| Era | Unit of Work | Key Primitives |
+|-----|-------------|----------------|
+| Monolithic | Function call | OS, filesystem, local DB |
+| Batch / Request-Response | Request → Response | HTTP, REST, SQL, queues |
+| Streaming | Event | Kafka, Flink, event stores, CQRS |
+| **Intent-based** | **Intent → Outcome** | **AgentStateGraph** |
+
+Agents don't execute linear scripts — they explore state spaces. They need a primitive that supports speculative branching, comparison, and merge with full reasoning history. Git is text-oriented. Databases lack branching. Event sourcing is append-only. AgentStateGraph fills the gap.

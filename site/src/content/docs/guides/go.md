@@ -22,7 +22,7 @@ This produces `target/release/libagentstategraph_ffi.a` (static) and `libagentst
 
 The Go bindings live in `bindings/go/`. Copy or symlink the package into your project, or use a Go workspace.
 
-The CGo directive in `stategraph.go` expects the library at `../../target/release/`:
+The CGo directive in `agentstategraph.go` expects the library at `../../target/release/`:
 
 ```go
 // #cgo LDFLAGS: -L${SRCDIR}/../../target/release -lagentstategraph_ffi
@@ -37,19 +37,19 @@ package main
 
 import (
     "fmt"
-    "stategraph"
+    "agentstategraph"
 )
 
 func main() {
     // In-memory (ephemeral)
-    sg, err := stategraph.NewMemory()
+    sg, err := agentstategraph.NewMemory()
     if err != nil {
         panic(err)
     }
     defer sg.Close()
 
     // Or SQLite (durable)
-    // sg, err := stategraph.NewSQLite("state.db")
+    // sg, err := agentstategraph.NewSQLite("state.db")
 
     // Set a value — every write is an atomic commit with intent
     sg.Set("/cluster/name", `"prod"`, "Checkpoint", "Initialize cluster")

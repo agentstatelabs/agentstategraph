@@ -16,6 +16,7 @@ export default defineConfig({
 						{ label: 'Introduction', slug: 'guides/introduction' },
 						{ label: 'Quick Start', slug: 'guides/quickstart' },
 						{ label: 'Core Concepts', slug: 'guides/concepts' },
+						{ label: 'Compare: Stategraph vs. StateGraph vs. AgentStateGraph', slug: 'compare' },
 					],
 				},
 				{
