@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentStateGraph Explorer</title>
+  <meta name="description" content="Browse, search, and visualize AgentStateGraph data — commits, state tree, branches, epochs, and intent decomposition." />
+  <link rel="icon" href="/favicon.svg" />
+  <link rel="stylesheet" href="explorer.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <div class="header">
+    <span class="header-logo">AgentStateGraph Explorer</span>
+    <span class="header-badge">26 MCP Tools</span>
+    <span class="header-mode">Demo Mode</span>
+    <a class="header-link" href="https://agentstategraph.dev">Docs</a>
+    <a class="header-link" href="https://github.com/agentstatelabs/AgentStateGraph" target="_blank">GitHub</a>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-panel="dashboard"><span class="tab-icon">📊</span>Dashboard</button>
+    <button class="tab" data-panel="state"><span class="tab-icon">🌳</span>State</button>
+    <button class="tab" data-panel="timeline"><span class="tab-icon">📜</span>Timeline</button>
+    <button class="tab" data-panel="search"><span class="tab-icon">🔍</span>Search</button>
+    <button class="tab" data-panel="branches"><span class="tab-icon">⑂</span>Branches</button>
+    <button class="tab" data-panel="epochs"><span class="tab-icon">🔒</span>Epochs</button>
+    <button class="tab" data-panel="intents"><span class="tab-icon">🌲</span>Intents</button>
+  </div>
+
+  <!-- Panels -->
+  <div class="panels">
+
+    <!-- Dashboard -->
+    <div class="panel active" id="panel-dashboard">
+      <div class="dash-grid">
+        <div class="dash-card"><div class="dc-value" id="dash-commits">—</div><div class="dc-label">Commits</div></div>
+        <div class="dash-card"><div class="dc-value" id="dash-branches">—</div><div class="dc-label">Branches</div></div>
+        <div class="dash-card"><div class="dc-value" id="dash-paths">—</div><div class="dc-label">State Paths</div></div>
+        <div class="dash-card"><div class="dc-value" id="dash-epochs">—</div><div class="dc-label">Epochs</div></div>
+      </div>
+
+      <div class="dash-section-title">Agents</div>
+      <div id="dash-agents"></div>
+
+      <div class="dash-section-title">Intent Categories</div>
+      <div id="dash-categories"></div>
+
+      <div class="dash-section-title">Latest Commit</div>
+      <div class="detail-card" id="dash-latest"></div>
+    </div>
+
+    <!-- State Explorer -->
+    <div class="panel" id="panel-state">
+      <div class="tree-layout">
+        <div class="tree-sidebar" id="state-tree"></div>
+        <div class="tree-detail" id="state-detail">
+          <div class="empty">
+            <div class="empty-icon">🌳</div>
+            <p>Select a path to view its value and blame history</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="panel" id="panel-timeline">
+      <div class="timeline" id="timeline-list"></div>
+    </div>
+
+    <!-- Search -->
+    <div class="panel" id="panel-search">
+      <div class="search-bar">
+        <input class="search-input" type="text" id="search-query" placeholder="Search state values, paths, and commits..." onkeydown="if(event.key==='Enter')doSearch()" />
+        <button class="search-btn" onclick="doSearch()">Search</button>
+      </div>
+      <div id="search-results">
+        <div class="empty">
+          <div class="empty-icon">🔍</div>
+          <p>Search across all state values, key names, and commit descriptions</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Branches -->
+    <div class="panel" id="panel-branches">
+      <div class="branch-list" id="branch-list"></div>
+    </div>
+
+    <!-- Epochs -->
+    <div class="panel" id="panel-epochs">
+      <div id="epoch-list"></div>
+    </div>
+
+    <!-- Intent Tree -->
+    <div class="panel" id="panel-intents">
+      <div id="intent-tree"></div>
+    </div>
+
+  </div>
+</div>
+
+<script src="demo-data.js"></script>
+<script src="explorer.js"></script>
+</body>
+</html>
