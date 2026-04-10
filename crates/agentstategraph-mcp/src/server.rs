@@ -211,11 +211,76 @@ pub struct SessionListParams {
     pub agent_id: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ListPathsParams {
+    /// Branch or ref (default: "main").
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Path prefix to list under (default: "/").
+    #[serde(default = "default_root")]
+    pub prefix: String,
+    /// Max tree depth to traverse (default: 50).
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetTreeParams {
+    /// Branch or ref (default: "main").
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Path prefix to get subtree for (default: "/").
+    #[serde(default = "default_root")]
+    pub prefix: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchValuesParams {
+    /// Branch or ref (default: "main").
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Search query string (case-insensitive, matches values and key names).
+    pub query: String,
+    /// Max results (default: 50).
+    pub max_results: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct StatsParams {
+    /// Branch or ref (default: "main").
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CommitGraphParams {
+    /// Branch or ref (default: "main").
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Max commits to include (default: 50).
+    #[serde(default = "default_graph_depth")]
+    pub depth: usize,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct IntentTreeParams {
+    /// Branch or ref (default: "main").
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Optional root commit ID to start from.
+    pub root_commit_id: Option<String>,
+}
+
 fn default_ref() -> String {
     "main".to_string()
 }
+fn default_root() -> String {
+    "/".to_string()
+}
 fn default_limit() -> usize {
     10
+}
+fn default_graph_depth() -> usize {
+    50
 }
 
 // -- Tool implementations --
@@ -619,6 +684,87 @@ impl AgentStateGraphServer {
             })
             .collect();
         serde_json::to_string_pretty(&json).unwrap_or_default()
+    }
+
+    // -- Explorer tools (0.4.0) --
+
+    #[tool(
+        description = "List all paths in the state tree under a prefix. Use to explore what data exists. Returns leaf paths (values, not intermediate maps)."
+    )]
+    async fn agentstategraph_list_paths(&self, params: Parameters<ListPathsParams>) -> String {
+        let p = params.0;
+        match self.repo.list_paths(&p.r#ref, &p.prefix, p.max_depth) {
+            Ok(paths) => format!("{} paths:\n{}", paths.len(), paths.join("\n")),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Get an entire subtree as nested JSON. Efficient batch alternative to reading individual paths."
+    )]
+    async fn agentstategraph_get_tree(&self, params: Parameters<GetTreeParams>) -> String {
+        let p = params.0;
+        match self.repo.get_tree(&p.r#ref, &p.prefix) {
+            Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Search state values and key names for a query string. Case-insensitive. Returns matching paths and values."
+    )]
+    async fn agentstategraph_search(&self, params: Parameters<SearchValuesParams>) -> String {
+        let p = params.0;
+        match self.repo.search_values(&p.r#ref, &p.query, p.max_results) {
+            Ok(results) if results.is_empty() => "No matches found.".to_string(),
+            Ok(results) => {
+                let entries: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|(path, value)| serde_json::json!({"path": path, "value": value}))
+                    .collect();
+                serde_json::to_string_pretty(&entries).unwrap_or_default()
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Get summary statistics: commit count, branch count, path count, epoch count, agent list, and latest commit."
+    )]
+    async fn agentstategraph_stats(&self, params: Parameters<StatsParams>) -> String {
+        let p = params.0;
+        match self.repo.stats(&p.r#ref) {
+            Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Get the commit DAG for visualization. Returns nodes with parents, agent, category, and timestamps."
+    )]
+    async fn agentstategraph_commit_graph(
+        &self,
+        params: Parameters<CommitGraphParams>,
+    ) -> String {
+        let p = params.0;
+        match self.repo.commit_graph(&p.r#ref, p.depth) {
+            Ok(nodes) => serde_json::to_string_pretty(&nodes).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Get the intent decomposition tree. Shows how intents are broken down into sub-tasks across agents."
+    )]
+    async fn agentstategraph_intent_tree(
+        &self,
+        params: Parameters<IntentTreeParams>,
+    ) -> String {
+        let p = params.0;
+        match self.repo.intent_tree(&p.r#ref, p.root_commit_id.as_deref()) {
+            Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
     }
 }
 

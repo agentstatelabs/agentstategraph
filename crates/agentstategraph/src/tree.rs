@@ -125,6 +125,157 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
     }
 }
 
+/// List all paths in the state tree under a given prefix.
+/// Returns leaf paths (paths that point to atoms/values, not intermediate maps).
+pub fn tree_list_paths(
+    store: &dyn ObjectStore,
+    root: &ObjectId,
+    prefix: &str,
+    max_depth: usize,
+) -> Result<Vec<String>, TreeError> {
+    let root_obj = store
+        .get_object(root)?
+        .ok_or_else(|| TreeError::ObjectNotFound(*root))?;
+
+    // If prefix is non-empty, navigate to the subtree first
+    let (start_obj, base_path) = if prefix.is_empty() || prefix == "/" {
+        (root_obj, String::new())
+    } else {
+        let path = StatePath::parse(prefix)
+            .map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let obj = tree_get(store, root, &path)?;
+        (obj, prefix.to_string())
+    };
+
+    let mut paths = Vec::new();
+    collect_paths(store, &start_obj, &base_path, max_depth, 0, &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_paths(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    current_path: &str,
+    max_depth: usize,
+    depth: usize,
+    paths: &mut Vec<String>,
+) -> Result<(), TreeError> {
+    if depth > max_depth {
+        return Ok(());
+    }
+
+    match obj {
+        Object::Atom(_) => {
+            let path = if current_path.is_empty() { "/".to_string() } else { current_path.to_string() };
+            paths.push(path);
+        }
+        Object::Node(node) => match node {
+            Node::Map(entries) => {
+                if entries.is_empty() {
+                    let path = if current_path.is_empty() { "/".to_string() } else { current_path.to_string() };
+                    paths.push(path);
+                } else {
+                    for (key, child_id) in entries {
+                        let child_path = format!("{}/{}", current_path, key);
+                        let child = store.get_object(child_id)?
+                            .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                        collect_paths(store, &child, &child_path, max_depth, depth + 1, paths)?;
+                    }
+                }
+            }
+            Node::List(items) => {
+                for (i, child_id) in items.iter().enumerate() {
+                    let child_path = format!("{}/{}", current_path, i);
+                    let child = store.get_object(child_id)?
+                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    collect_paths(store, &child, &child_path, max_depth, depth + 1, paths)?;
+                }
+            }
+            Node::Set(items) => {
+                for (i, child_id) in items.iter().enumerate() {
+                    let child_path = format!("{}/{}", current_path, i);
+                    let child = store.get_object(child_id)?
+                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    collect_paths(store, &child, &child_path, max_depth, depth + 1, paths)?;
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+/// Search state values for a query string. Returns matching paths + values.
+pub fn tree_search_values(
+    store: &dyn ObjectStore,
+    root: &ObjectId,
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<(String, String)>, TreeError> {
+    let root_obj = store
+        .get_object(root)?
+        .ok_or_else(|| TreeError::ObjectNotFound(*root))?;
+
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+    search_recursive(store, &root_obj, "", &query_lower, max_results, &mut results)?;
+    Ok(results)
+}
+
+fn search_recursive(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    current_path: &str,
+    query: &str,
+    max_results: usize,
+    results: &mut Vec<(String, String)>,
+) -> Result<(), TreeError> {
+    if results.len() >= max_results {
+        return Ok(());
+    }
+
+    match obj {
+        Object::Atom(atom) => {
+            let value_str = match atom {
+                Atom::String(s) => s.clone(),
+                Atom::Int(i) => i.to_string(),
+                Atom::Float(f) => f.to_string(),
+                Atom::Bool(b) => b.to_string(),
+                _ => return Ok(()),
+            };
+            if value_str.to_lowercase().contains(query) {
+                let path = if current_path.is_empty() { "/".to_string() } else { current_path.to_string() };
+                results.push((path, value_str));
+            }
+        }
+        Object::Node(node) => match node {
+            Node::Map(entries) => {
+                for (key, child_id) in entries {
+                    if results.len() >= max_results { break; }
+                    // Also match on key names
+                    if key.to_lowercase().contains(query) {
+                        let path = format!("{}/{}", current_path, key);
+                        results.push((path.clone(), format!("[key match: {}]", key)));
+                    }
+                    let child = store.get_object(child_id)?
+                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    let child_path = format!("{}/{}", current_path, key);
+                    search_recursive(store, &child, &child_path, query, max_results, results)?;
+                }
+            }
+            Node::List(items) | Node::Set(items) => {
+                for (i, child_id) in items.iter().enumerate() {
+                    if results.len() >= max_results { break; }
+                    let child = store.get_object(child_id)?
+                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    let child_path = format!("{}/{}", current_path, i);
+                    search_recursive(store, &child, &child_path, query, max_results, results)?;
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
 /// Convert a serde_json::Value to Objects and store them.
 /// Returns the root ObjectId.
 pub fn json_to_tree(

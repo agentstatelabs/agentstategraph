@@ -465,16 +465,27 @@ impl Repository {
     // Query operations
     // -----------------------------------------------------------------------
 
-    /// Query commits with composable filters.
+    /// Query commits with composable filters. Supports offset for pagination.
     pub fn query_commits(
         &self,
         ref_name: &str,
         filters: &agentstategraph_core::QueryFilters,
         limit: usize,
     ) -> Result<Vec<Commit>, RepoError> {
-        let all_commits = self.log(ref_name, 1000)?; // get a large window
+        self.query_commits_paged(ref_name, filters, limit, 0)
+    }
+
+    /// Query commits with pagination (offset + limit).
+    pub fn query_commits_paged(
+        &self,
+        ref_name: &str,
+        filters: &agentstategraph_core::QueryFilters,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Commit>, RepoError> {
+        let all_commits = self.log(ref_name, 10000)?;
         let filtered = agentstategraph_core::filter_commits(&all_commits, filters);
-        Ok(filtered.into_iter().take(limit).collect())
+        Ok(filtered.into_iter().skip(offset).take(limit).collect())
     }
 
     /// Blame — for a path, find which commit last modified it and why.
@@ -628,6 +639,182 @@ impl Repository {
             .find(|e| e.id == id)
             .cloned()
             .ok_or_else(|| RepoError::RefNotFound(format!("epoch not found: {}", id)))
+    }
+
+    // -----------------------------------------------------------------------
+    // Explorer / viewer APIs (0.4.0)
+    // -----------------------------------------------------------------------
+
+    /// List all leaf paths in the state tree under a prefix.
+    /// Use "/" or "" for all paths. max_depth limits recursion (default 50).
+    pub fn list_paths(
+        &self,
+        ref_name: &str,
+        prefix: &str,
+        max_depth: Option<usize>,
+    ) -> Result<Vec<String>, RepoError> {
+        let commit_id = self.resolve_ref(ref_name)?;
+        let commit = self
+            .storage
+            .get_commit(&commit_id)?
+            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+        let depth = max_depth.unwrap_or(50);
+        Ok(tree::tree_list_paths(
+            self.storage.as_ref(),
+            &commit.state_root,
+            prefix,
+            depth,
+        )?)
+    }
+
+    /// Get an entire subtree as nested JSON. Batch alternative to N×get calls.
+    pub fn get_tree(
+        &self,
+        ref_name: &str,
+        prefix: &str,
+    ) -> Result<serde_json::Value, RepoError> {
+        // get_json already handles this — just delegate with the prefix as path
+        let path = if prefix.is_empty() { "/" } else { prefix };
+        self.get_json(ref_name, path)
+    }
+
+    /// Search state values for a query string. Returns matching (path, value) pairs.
+    pub fn search_values(
+        &self,
+        ref_name: &str,
+        query: &str,
+        max_results: Option<usize>,
+    ) -> Result<Vec<(String, String)>, RepoError> {
+        let commit_id = self.resolve_ref(ref_name)?;
+        let commit = self
+            .storage
+            .get_commit(&commit_id)?
+            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+        let limit = max_results.unwrap_or(50);
+        Ok(tree::tree_search_values(
+            self.storage.as_ref(),
+            &commit.state_root,
+            query,
+            limit,
+        )?)
+    }
+
+    /// Get summary statistics for a ref.
+    pub fn stats(&self, ref_name: &str) -> Result<serde_json::Value, RepoError> {
+        let commits = self.log(ref_name, 10000)?;
+        let branches = self.list_branches(None)?;
+        let paths = self.list_paths(ref_name, "/", Some(100))?;
+        let epochs = self.list_epochs()?;
+
+        // Collect unique agent IDs
+        let mut agents: Vec<String> = commits
+            .iter()
+            .map(|c| c.agent_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        agents.sort();
+
+        // Collect unique intent categories
+        let mut categories: Vec<String> = commits
+            .iter()
+            .map(|c| format!("{:?}", c.intent.category))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        categories.sort();
+
+        Ok(serde_json::json!({
+            "commit_count": commits.len(),
+            "branch_count": branches.len(),
+            "path_count": paths.len(),
+            "epoch_count": epochs.len(),
+            "agents": agents,
+            "categories": categories,
+            "latest_commit": commits.first().map(|c| serde_json::json!({
+                "id": c.id.short(),
+                "agent": c.agent_id,
+                "intent": c.intent.description,
+                "timestamp": c.timestamp.to_rfc3339(),
+            })),
+        }))
+    }
+
+    /// Get commit graph (DAG) for visualization.
+    /// Returns commit nodes with their parents and metadata.
+    pub fn commit_graph(
+        &self,
+        ref_name: &str,
+        depth: usize,
+    ) -> Result<Vec<serde_json::Value>, RepoError> {
+        let commits = self.log(ref_name, depth)?;
+        let nodes: Vec<serde_json::Value> = commits
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.short(),
+                    "full_id": c.id.to_string(),
+                    "parents": c.parents.iter().map(|p| p.short()).collect::<Vec<_>>(),
+                    "agent": c.agent_id,
+                    "category": format!("{:?}", c.intent.category),
+                    "description": c.intent.description,
+                    "confidence": c.confidence,
+                    "timestamp": c.timestamp.to_rfc3339(),
+                    "is_merge": c.parents.len() > 1,
+                })
+            })
+            .collect();
+        Ok(nodes)
+    }
+
+    /// Get intent decomposition tree starting from a root commit.
+    /// Walks the parent_intent chain to build the hierarchy.
+    pub fn intent_tree(
+        &self,
+        ref_name: &str,
+        root_commit_id: Option<&str>,
+    ) -> Result<serde_json::Value, RepoError> {
+        let commits = self.log(ref_name, 10000)?;
+
+        // Find root commits (those with no parent_intent, or the specified root)
+        let roots: Vec<&Commit> = if let Some(root_id) = root_commit_id {
+            commits.iter().filter(|c| c.id.short() == root_id).collect()
+        } else {
+            commits.iter().filter(|c| c.parents.is_empty()).collect()
+        };
+
+        fn build_intent_node(
+            commit: &Commit,
+            all_commits: &[Commit],
+        ) -> serde_json::Value {
+            // Find children: commits whose first parent is this commit
+            let children: Vec<serde_json::Value> = all_commits
+                .iter()
+                .filter(|c| c.parents.first() == Some(&commit.id))
+                .map(|child| build_intent_node(child, all_commits))
+                .collect();
+
+            serde_json::json!({
+                "id": commit.id.short(),
+                "agent": commit.agent_id,
+                "category": format!("{:?}", commit.intent.category),
+                "description": commit.intent.description,
+                "reasoning": commit.reasoning,
+                "confidence": commit.confidence,
+                "timestamp": commit.timestamp.to_rfc3339(),
+                "children": children,
+            })
+        }
+
+        let tree: Vec<serde_json::Value> = roots
+            .iter()
+            .map(|c| build_intent_node(c, &commits))
+            .collect();
+
+        Ok(serde_json::json!({
+            "roots": tree,
+            "total_commits": commits.len(),
+        }))
     }
 
     // -----------------------------------------------------------------------
