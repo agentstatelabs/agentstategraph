@@ -288,7 +288,10 @@ impl AgentStateGraphServer {
     }
 
     #[tool(description = "List all branches, optionally filtered by namespace prefix.")]
-    async fn agentstategraph_list_branches(&self, params: Parameters<ListBranchesParams>) -> String {
+    async fn agentstategraph_list_branches(
+        &self,
+        params: Parameters<ListBranchesParams>,
+    ) -> String {
         let p = params.0;
         match self.repo.list_branches(p.prefix.as_deref()) {
             Ok(branches) => {

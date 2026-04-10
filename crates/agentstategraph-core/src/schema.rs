@@ -114,7 +114,10 @@ impl Schema {
 fn extract_merge_hints(schema: &serde_json::Value, path: &str) -> HashMap<String, MergeHint> {
     let mut hints = HashMap::new();
 
-    if let Some(hint_str) = schema.get("x-agentstategraph-merge").and_then(|v| v.as_str()) {
+    if let Some(hint_str) = schema
+        .get("x-agentstategraph-merge")
+        .and_then(|v| v.as_str())
+    {
         let id_field = schema
             .get("x-agentstategraph-id-field")
             .and_then(|v| v.as_str())
