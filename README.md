@@ -34,6 +34,21 @@ Add to your Claude Code MCP config:
 }
 ```
 
+### As an HTTP REST API
+
+```bash
+cargo run --release -p agentstategraph-mcp -- --http --port 3001
+```
+
+```bash
+curl http://localhost:3001/api/health
+curl http://localhost:3001/api/stats/main
+curl http://localhost:3001/api/state/main?path=/
+curl "http://localhost:3001/api/blame/main?path=/cluster/name"
+```
+
+19 REST endpoints with CORS enabled — connect from browsers, scripts, or any HTTP client. See `--help` for the full endpoint list.
+
 ### As a Rust Library
 
 ```rust
@@ -78,10 +93,12 @@ asg.blame("/name")  # who changed it and why
 
 ## Features
 
-- **20 MCP tools** — any agent can connect immediately
+- **26 MCP tools** — any agent can connect immediately
+- **19 HTTP REST endpoints** — `--http` mode with CORS for browsers and scripts
+- **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **6 language bindings** — Rust, Python, TypeScript, Go, WASM, C FFI
 - **3 storage backends** — Memory, SQLite, IndexedDB (browser)
-- **137 tests** across 6 crates
+- **131 tests** across 6 crates
 - **Content-addressed Merkle DAG** — immutable, deduplicated history
 - **Structured intent metadata** — category, description, tags, reasoning, confidence
 - **Authority & delegation chains** — who authorized what, with full chain
@@ -160,7 +177,8 @@ See [spec/AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md) for the complete 
 ## Links
 
 - **Website**: [agentstategraph.dev](https://agentstategraph.dev)
-- **Disambiguation**: [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](site/src/content/docs/compare.md)
+- **Explorer**: [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/) — interactive data viewer
+- **Disambiguation**: [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](https://agentstategraph.dev/compare/)
 - **Demo app**: [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — branchable AI chat
 - **RFC Spec**: [AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md)
 
