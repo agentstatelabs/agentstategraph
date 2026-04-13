@@ -1,6 +1,10 @@
 //! HTTP REST API for AgentStateGraph.
 //!
 //! Exposes the same operations as the MCP tools over HTTP.
+//! Supports two modes:
+//!   - Single-tenant (default): no auth, one repo
+//!   - Multi-tenant: API key auth, per-tenant isolation
+//!
 //! Start with: agentstategraph-mcp --http --port 3001
 
 use std::sync::Arc;
@@ -9,6 +13,7 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -18,53 +23,131 @@ use tower_http::cors::{Any, CorsLayer};
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
+use crate::auth::{self, TenantManager};
+
 pub type AppState = Arc<Repository>;
 
+/// Create a single-tenant router (no auth, backward compatible).
 pub fn router(repo: Arc<Repository>) -> Router {
+    let tenant_mgr = TenantManager::single_tenant(repo.clone());
+    build_router(repo, tenant_mgr)
+}
+
+/// Create a multi-tenant router with API key authentication.
+pub fn router_multi_tenant(repo: Arc<Repository>, keys_file: Option<&str>) -> Router {
+    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), keys_file);
+    build_router(repo, tenant_mgr)
+}
+
+fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    Router::new()
+    // API routes that go through auth middleware
+    let api_routes = Router::new()
         // State operations
-        .route("/api/state/{ref_name}", get(get_state))
-        .route("/api/state/{ref_name}/paths", get(list_paths))
-        .route("/api/state/{ref_name}/search", get(search_values))
-        .route("/api/state/{ref_name}/set", post(set_value))
-        .route("/api/state/{ref_name}/delete", post(delete_value))
+        .route("/state/{ref_name}", get(get_state))
+        .route("/state/{ref_name}/paths", get(list_paths))
+        .route("/state/{ref_name}/search", get(search_values))
+        .route("/state/{ref_name}/set", post(set_value))
+        .route("/state/{ref_name}/delete", post(delete_value))
         // History
-        .route("/api/log/{ref_name}", get(get_log))
-        .route("/api/blame/{ref_name}", get(blame))
-        .route("/api/diff", get(diff))
-        .route("/api/query/{ref_name}", post(query_commits))
-        .route("/api/graph/{ref_name}", get(commit_graph))
+        .route("/log/{ref_name}", get(get_log))
+        .route("/blame/{ref_name}", get(blame))
+        .route("/diff", get(diff))
+        .route("/query/{ref_name}", post(query_commits))
+        .route("/graph/{ref_name}", get(commit_graph))
         // Branches
-        .route("/api/branches", get(list_branches))
-        .route("/api/branches", post(create_branch))
-        .route("/api/merge", post(merge_branches))
+        .route("/branches", get(list_branches))
+        .route("/branches", post(create_branch))
+        .route("/merge", post(merge_branches))
         // Epochs
-        .route("/api/epochs", get(list_epochs))
-        .route("/api/epochs", post(create_epoch))
-        .route("/api/epochs/seal", post(seal_epoch))
+        .route("/epochs", get(list_epochs))
+        .route("/epochs", post(create_epoch))
+        .route("/epochs/seal", post(seal_epoch))
         // Stats & meta
-        .route("/api/stats/{ref_name}", get(stats))
-        .route("/api/intents/{ref_name}", get(intent_tree))
-        // Health
-        .route("/api/health", get(health))
-        .with_state(repo)
+        .route("/stats/{ref_name}", get(stats))
+        .route("/intents/{ref_name}", get(intent_tree))
+        .route_layer(middleware::from_fn_with_state(
+            tenant_mgr.clone(),
+            auth::auth_middleware,
+        ))
+        .with_state(repo);
+
+    // Admin routes (key management) + health (no auth)
+    let admin_routes = Router::new()
+        .route("/api/health", get(health_with_mgr))
+        .route("/api/admin/keys", get(list_keys))
+        .route("/api/admin/keys", post(create_key))
+        .route("/api/admin/keys/revoke", post(revoke_key))
+        .with_state(tenant_mgr);
+
+    Router::new()
+        .nest("/api", api_routes)
+        .merge(admin_routes)
         .layer(cors)
 }
 
 // ─── Health ─────────────────────────────────────────────────
 
-async fn health(State(repo): State<AppState>) -> Json<serde_json::Value> {
+async fn health_with_mgr(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Value> {
+    // Get repo via manager (no auth needed for health)
+    let repo = mgr.get_repo(None).unwrap_or_else(|_| {
+        // If auth is enabled, health still works — just report status
+        return mgr.get_repo(None).unwrap_or_else(|_| Arc::new(Repository::new(
+            Box::new(agentstategraph_storage::MemoryStorage::new()),
+        )));
+    });
     let branches = repo.list_branches(None).unwrap_or_default();
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "branches": branches.len(),
     }))
+}
+
+// ─── Admin: Key Management ──────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateKeyRequest {
+    tenant_id: String,
+    name: String,
+    plan: Option<String>,
+}
+
+async fn list_keys(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "keys": mgr.list_keys() }))
+}
+
+async fn create_key(
+    State(mgr): State<Arc<TenantManager>>,
+    Json(req): Json<CreateKeyRequest>,
+) -> Json<serde_json::Value> {
+    let plan = req.plan.unwrap_or_else(|| "free".to_string());
+    let key = mgr.create_key(&req.tenant_id, &req.name, &plan);
+    // Return the full key ONCE — it won't be shown again
+    Json(serde_json::json!({
+        "key": key.key,
+        "tenant_id": key.tenant_id,
+        "name": key.name,
+        "plan": key.plan,
+        "message": "Save this key — it will not be shown again."
+    }))
+}
+
+#[derive(Deserialize)]
+struct RevokeKeyRequest {
+    key_prefix: String,
+}
+
+async fn revoke_key(
+    State(mgr): State<Arc<TenantManager>>,
+    Json(req): Json<RevokeKeyRequest>,
+) -> Json<serde_json::Value> {
+    let revoked = mgr.revoke_key(&req.key_prefix);
+    Json(serde_json::json!({ "revoked": revoked }))
 }
 
 // ─── State operations ───────────────────────────────────────

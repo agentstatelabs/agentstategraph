@@ -6,6 +6,7 @@
 //! Options:                    cargo run -p agentstategraph-mcp -- --storage memory
 //!                             cargo run -p agentstategraph-mcp -- --path /data/state.db
 
+mod auth;
 mod http;
 mod server;
 
@@ -24,6 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tenant_id = "default".to_string();
     let mut http_mode = false;
     let mut http_port: u16 = 3001;
+    let mut auth_enabled = false;
+    let mut keys_file = String::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -58,6 +61,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--http" => {
                 http_mode = true;
+            }
+            "--auth" => {
+                auth_enabled = true;
+            }
+            "--keys-file" => {
+                i += 1;
+                if i < args.len() {
+                    keys_file = args[i].clone();
+                    auth_enabled = true;
+                }
             }
             "--port" => {
                 i += 1;
@@ -149,6 +162,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     repo.init()?;
 
     if http_mode {
+        if auth_enabled {
+            eprintln!("Auth: enabled (keys file: {})", if keys_file.is_empty() { "none" } else { &keys_file });
+        } else {
+            eprintln!("Auth: disabled (single-tenant mode)");
+        }
         eprintln!("HTTP API listening on http://0.0.0.0:{}", http_port);
         eprintln!("Try: curl http://localhost:{}/api/health", http_port);
 
@@ -156,7 +174,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let app = http::router(repo);
+                let app = if auth_enabled {
+                    let kf = if keys_file.is_empty() { None } else { Some(keys_file.as_str()) };
+                    http::router_multi_tenant(repo, kf)
+                } else {
+                    http::router(repo)
+                };
                 let addr = format!("0.0.0.0:{}", http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 axum::serve(listener, app).await?;
