@@ -20,6 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut storage_type = "sqlite";
     let mut db_path = "./agentstategraph.db".to_string();
+    let mut database_url = String::new();
+    let mut tenant_id = "default".to_string();
     let mut http_mode = false;
     let mut http_port: u16 = 3001;
 
@@ -29,10 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--storage" | "-s" => {
                 i += 1;
                 if i < args.len() {
-                    storage_type = if args[i] == "memory" {
-                        "memory"
-                    } else {
-                        "sqlite"
+                    storage_type = match args[i].as_str() {
+                        "memory" => "memory",
+                        "postgres" | "pg" => "postgres",
+                        _ => "sqlite",
                     };
                 }
             }
@@ -40,6 +42,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     db_path = args[i].clone();
+                }
+            }
+            "--database-url" => {
+                i += 1;
+                if i < args.len() {
+                    database_url = args[i].clone();
+                }
+            }
+            "--tenant" => {
+                i += 1;
+                if i < args.len() {
+                    tenant_id = args[i].clone();
                 }
             }
             "--http" => {
@@ -62,10 +76,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("  --http                HTTP REST API server");
                 eprintln!();
                 eprintln!("OPTIONS:");
-                eprintln!("  -s, --storage <TYPE>  Storage backend: sqlite (default) or memory");
+                eprintln!("  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres");
                 eprintln!(
                     "  -p, --path <PATH>     SQLite database path (default: ./agentstategraph.db)"
                 );
+                eprintln!("      --database-url <URL>  Postgres connection URL (required for --storage postgres)");
+                eprintln!("      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")");
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -96,10 +112,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
 
+    // Check for DATABASE_URL env var as fallback for postgres
+    if database_url.is_empty() {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            database_url = url;
+            if storage_type == "sqlite" {
+                storage_type = "postgres";
+            }
+        }
+    }
+
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
             eprintln!("Storage: in-memory (ephemeral)");
             Arc::new(Repository::new(Box::new(MemoryStorage::new())))
+        }
+        "postgres" => {
+            if database_url.is_empty() {
+                eprintln!("Error: --database-url or DATABASE_URL required for postgres storage");
+                std::process::exit(1);
+            }
+            eprintln!("Storage: postgres (tenant: {})", tenant_id);
+            let rt = tokio::runtime::Runtime::new()?;
+            let storage = rt.block_on(async {
+                agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id).await
+            })?;
+            Arc::new(Repository::new(Box::new(storage)))
         }
         _ => {
             eprintln!("Storage: {}", db_path);

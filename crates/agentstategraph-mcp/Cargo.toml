@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 agentstategraph = { path = "../agentstategraph" }
 agentstategraph-core = { path = "../agentstategraph-core" }
-agentstategraph-storage = { path = "../agentstategraph-storage" }
+agentstategraph-storage = { path = "../agentstategraph-storage", features = ["postgres"] }
 rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 serde = { workspace = true }
