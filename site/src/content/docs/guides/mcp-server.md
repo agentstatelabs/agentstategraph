@@ -40,7 +40,47 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 20 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 26 AgentStateGraph tools appear automatically.
+
+## HTTP REST API
+
+The same binary also supports HTTP mode — 19 REST endpoints with CORS enabled:
+
+```bash
+cargo run --release -p agentstategraph-mcp -- --http --port 3001
+```
+
+```bash
+curl http://localhost:3001/api/health
+curl http://localhost:3001/api/stats/main
+curl http://localhost:3001/api/state/main?path=/cluster/name
+curl "http://localhost:3001/api/blame/main?path=/cluster/name"
+curl "http://localhost:3001/api/state/main/search?query=mesh"
+```
+
+Full endpoint list:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Health check |
+| GET | `/api/stats/:ref` | Summary statistics |
+| GET | `/api/state/:ref?path=/x` | Read state value |
+| GET | `/api/state/:ref/paths` | List all paths |
+| GET | `/api/state/:ref/search?query=x` | Full-text search values |
+| POST | `/api/state/:ref/set` | Write value with intent |
+| POST | `/api/state/:ref/delete` | Delete value with intent |
+| GET | `/api/log/:ref` | Commit log |
+| GET | `/api/blame/:ref?path=/x` | Blame a path |
+| GET | `/api/diff?ref_a=x&ref_b=y` | Diff two refs |
+| POST | `/api/query/:ref` | Query with composable filters |
+| GET | `/api/graph/:ref` | Commit DAG |
+| GET | `/api/branches` | List branches |
+| POST | `/api/branches` | Create branch |
+| POST | `/api/merge` | Merge branches |
+| GET | `/api/epochs` | List epochs |
+| POST | `/api/epochs` | Create epoch |
+| POST | `/api/epochs/seal` | Seal epoch |
+| GET | `/api/intents/:ref` | Intent decomposition tree |
 
 ## Connect to Other MCP Clients
 
@@ -48,9 +88,18 @@ Any MCP client that supports stdio transport works. Point it at the `agentstateg
 
 ## Configuration
 
-The server creates `agentstategraph.db` in the current working directory. To change the path, set the working directory when launching the binary.
+```bash
+agentstategraph-mcp [OPTIONS]
 
-## Available Tools (20)
+OPTIONS:
+  -s, --storage <TYPE>  Storage backend: sqlite (default) or memory
+  -p, --path <PATH>     SQLite database path (default: ./agentstategraph.db)
+      --http            Run as HTTP REST API instead of MCP stdio
+      --port <PORT>     HTTP port (default: 3001, requires --http)
+  -h, --help            Print help with full endpoint list
+```
+
+## Available Tools (26)
 
 ### State Operations
 
@@ -100,6 +149,17 @@ The server creates `agentstategraph.db` in the current working directory. To cha
 | Tool | Description |
 |------|-------------|
 | `agentstategraph_sessions` | List active agent sessions with parent-child relationships. |
+
+### Explorer & Viewer
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_list_paths` | List all leaf paths in the state tree under a prefix. |
+| `agentstategraph_get_tree` | Get entire subtree as nested JSON (batch read). |
+| `agentstategraph_search` | Full-text search across state values and key names. |
+| `agentstategraph_stats` | Summary statistics: commits, branches, paths, epochs, agents. |
+| `agentstategraph_commit_graph` | Commit DAG with parents, agents, categories for visualization. |
+| `agentstategraph_intent_tree` | Intent decomposition hierarchy across agents. |
 
 ## Example Conversation
 

@@ -1,7 +1,9 @@
 ---
 title: MCP Tools Reference
-description: Complete reference for all 20 AgentStateGraph MCP tools with parameters and examples.
+description: Complete reference for all 26 AgentStateGraph MCP tools with parameters and examples.
 ---
+
+> **26 tools** — 3 state operations, 3 branching, 1 merge, 3 history, 5 speculation, 3 epochs, 1 sessions, 1 query, 6 explorer/viewer tools. Also available as [19 HTTP REST endpoints](/guides/mcp-server/#http-rest-api) via `--http` mode.
 
 ## State Operations
 
@@ -599,4 +601,185 @@ List active agent sessions with parent-child relationships and path scoping.
     "created": "2026-04-06T12:00:00Z"
   }
 ]
+```
+
+## Explorer & Viewer Tools
+
+### agentstategraph_list_paths
+
+List all leaf paths in the state tree under a prefix. Use to explore what data exists.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ref` | string | no | `"main"` | Branch or ref |
+| `prefix` | string | no | `"/"` | Path prefix to list under |
+| `max_depth` | number | no | `50` | Max tree depth to traverse |
+
+**Example input:**
+```json
+{ "ref": "main", "prefix": "/cluster" }
+```
+
+**Example output:**
+```
+6 paths:
+/cluster/name
+/cluster/region
+/cluster/nodes/0/hostname
+/cluster/nodes/0/status
+/cluster/network/topology
+/cluster/config/log_level
+```
+
+---
+
+### agentstategraph_get_tree
+
+Get an entire subtree as nested JSON. Efficient batch alternative to reading individual paths.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ref` | string | no | `"main"` | Branch or ref |
+| `prefix` | string | no | `"/"` | Path prefix to get subtree for |
+
+**Example input:**
+```json
+{ "ref": "main", "prefix": "/cluster/network" }
+```
+
+**Example output:**
+```json
+{
+  "topology": "mesh",
+  "subnet": "10.0.0.0/24",
+  "dns": "1.1.1.1"
+}
+```
+
+---
+
+### agentstategraph_search
+
+Search state values and key names for a query string. Case-insensitive.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ref` | string | no | `"main"` | Branch or ref |
+| `query` | string | yes | | Search query (matches values and key names) |
+| `max_results` | number | no | `50` | Max results to return |
+
+**Example input:**
+```json
+{ "query": "mesh" }
+```
+
+**Example output:**
+```json
+[
+  { "path": "/cluster/network/topology", "value": "mesh" }
+]
+```
+
+---
+
+### agentstategraph_stats
+
+Get summary statistics for a ref. Useful for dashboard displays.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ref` | string | no | `"main"` | Branch or ref |
+
+**Example output:**
+```json
+{
+  "commit_count": 47,
+  "branch_count": 5,
+  "path_count": 23,
+  "epoch_count": 2,
+  "agents": ["agent/monitor", "agent/planner", "agent/setup"],
+  "categories": ["Checkpoint", "Explore", "Fix", "Merge", "Refine"],
+  "latest_commit": {
+    "id": "sg_f5b2..17",
+    "agent": "agent/compliance",
+    "intent": "Seal Q1 epoch",
+    "timestamp": "2026-04-10T14:33:00Z"
+  }
+}
+```
+
+---
+
+### agentstategraph_commit_graph
+
+Get the commit DAG for visualization. Returns nodes with parents, agent, category, and timestamps.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ref` | string | no | `"main"` | Branch or ref |
+| `depth` | number | no | `50` | Max commits to include |
+
+**Example output:**
+```json
+[
+  {
+    "id": "sg_f5b2..17",
+    "full_id": "sg_f5b2c39e...",
+    "parents": ["sg_d1e8..9a"],
+    "agent": "agent/compliance",
+    "category": "Checkpoint",
+    "description": "Seal Q1 epoch",
+    "confidence": 0.99,
+    "timestamp": "2026-04-10T14:33:00Z",
+    "is_merge": false
+  }
+]
+```
+
+---
+
+### agentstategraph_intent_tree
+
+Get the intent decomposition tree. Shows how intents are broken down into sub-tasks across agents.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ref` | string | no | `"main"` | Branch or ref |
+| `root_commit_id` | string | no | | Optional root commit ID to start from |
+
+**Example output:**
+```json
+{
+  "roots": [
+    {
+      "id": "sg_6c0d..78",
+      "agent": "agent/setup",
+      "category": "Checkpoint",
+      "description": "Initialize cluster",
+      "confidence": 0.99,
+      "children": [
+        {
+          "id": "sg_7d1c..56",
+          "agent": "agent/setup",
+          "category": "Checkpoint",
+          "description": "Add node-1 as worker",
+          "children": []
+        }
+      ]
+    }
+  ],
+  "total_commits": 47
+}
 ```

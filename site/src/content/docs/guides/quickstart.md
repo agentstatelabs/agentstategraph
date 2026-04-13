@@ -25,7 +25,39 @@ Add to Claude Code config:
 
 Then ask your agent to use AgentStateGraph tools.
 
-## Option 2: Rust Library
+## Option 2: HTTP REST API
+
+Same binary, add `--http`:
+
+```bash
+cargo run --release -p agentstategraph-mcp -- --http --port 3001
+```
+
+```bash
+# Health check
+curl http://localhost:3001/api/health
+
+# Set a value with intent
+curl -X POST http://localhost:3001/api/state/main/set \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/app/name","value":"my-project","intent_category":"Checkpoint","intent_description":"Init"}'
+
+# Read it back
+curl http://localhost:3001/api/state/main?path=/app/name
+
+# Blame — who changed it and why
+curl "http://localhost:3001/api/blame/main?path=/app/name"
+
+# Search across all values
+curl "http://localhost:3001/api/state/main/search?query=project"
+
+# Stats dashboard
+curl http://localhost:3001/api/stats/main
+```
+
+19 endpoints with CORS enabled — see the [MCP Server guide](/guides/mcp-server/#http-rest-api) for the full list.
+
+## Option 3: Rust Library (embed in your own app)
 
 ```bash
 cargo add agentstategraph agentstategraph-core agentstategraph-storage
@@ -56,7 +88,7 @@ repo.merge("feature", "main",
     CommitOptions::new("developer", IntentCategory::Merge, "Adopt v2"));
 ```
 
-## Option 3: Python
+## Option 4: Python
 
 ```bash
 cd bindings/python
@@ -74,7 +106,7 @@ sg.set("/version", "2.0", "Try v2", ref="feature", category="Explore")
 sg.merge("feature", description="Adopt v2")
 ```
 
-## Option 4: TypeScript
+## Option 5: TypeScript
 
 ```bash
 cd bindings/typescript
