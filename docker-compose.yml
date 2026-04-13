@@ -1,0 +1,24 @@
+# AgentStateGraph — quick start with Docker Compose
+#
+# Usage:
+#   docker compose up -d
+#   curl http://localhost:3001/api/health
+#   open https://agentstategraph.dev/explorer/
+
+services:
+  agentstategraph:
+    build: .
+    ports:
+      - "3001:3001"
+    volumes:
+      - agentstategraph-data:/data
+    command: ["--http", "--port", "3001", "--path", "/data/agentstategraph.db"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  agentstategraph-data:

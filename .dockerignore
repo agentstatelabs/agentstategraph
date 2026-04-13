@@ -1,0 +1,7 @@
+target/
+site/node_modules/
+site/dist/
+site/.astro/
+bindings/python/.venv/
+*.db
+.git/

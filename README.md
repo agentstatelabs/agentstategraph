@@ -14,9 +14,34 @@ This is what the substrate has to look like when the primary actor touching prod
 
 ## Quick Start
 
+### One-line install (Mac / Linux)
+
+```bash
+curl -sSL https://agentstategraph.dev/install.sh | sh
+```
+
+Detects your platform, downloads the prebuilt binary, installs to `~/.local/bin`. Then:
+
+```bash
+agentstategraph-mcp --http --port 3001
+curl http://localhost:3001/api/health
+```
+
+### Docker
+
+```bash
+docker run -p 3001:3001 ghcr.io/agentstatelabs/agentstategraph --http
+# Or with persistent storage:
+docker compose up -d
+```
+
 ### As an MCP Server (connect to Claude Code, GPT, any MCP agent)
 
 ```bash
+# If installed via the install script:
+agentstategraph-mcp
+
+# Or build from source:
 git clone https://github.com/agentstatelabs/AgentStateGraph.git
 cd AgentStateGraph
 cargo build --release -p agentstategraph-mcp
