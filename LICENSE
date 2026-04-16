@@ -2,22 +2,43 @@ Business Source License 1.1
 
 Parameters
 
-Licensor:             Craig Brown
-Licensed Work:        AgentStateGraph 0.3.5-beta.2
-                      The Licensed Work is (c) 2026 Craig Brown.
-Additional Use Grant: You may make production use of the Licensed Work,
-                      provided your use does not include offering the
-                      Licensed Work to third parties as a commercial
-                      managed service where the service provides users
-                      with access to any substantial set of the features
-                      or functionality of the Licensed Work.
+Licensor:             AgentStateLabs, LLC
+                      (Placeholder: legal entity not yet formed. Upon
+                      incorporation, this license will be reassigned
+                      from Craig Brown to AgentStateLabs, LLC via IP
+                      assignment agreement.)
+Licensed Work:        AgentStateGraph 0.4.0-beta.1
+                      The Licensed Work is (c) 2026 AgentStateLabs, LLC.
+Additional Use Grant: You may make production use of the Licensed Work
+                      for your own internal business purposes, provided
+                      that such use does not include any of the
+                      following:
+
+                      (a) offering the Licensed Work, or any derivative
+                      of it, to third parties as a commercial managed
+                      service where the service provides users with
+                      access to any substantial set of the features or
+                      functionality of the Licensed Work; or
+
+                      (b) embedding, bundling, distributing, or
+                      sublicensing the Licensed Work, or any derivative
+                      of it, as part of a product or service that you
+                      sell, license, or otherwise distribute to third
+                      parties.
+
+                      For clarity, "internal business purposes" includes
+                      use by your employees, contractors, and
+                      subsidiaries in the operation of your own
+                      business, but does not include making the
+                      Licensed Work available to third parties whether
+                      directly or as part of another offering.
 Change Date:          Four years from the date the Licensed Work is
                       published. Each version of the Licensed Work has
                       its own Change Date.
 Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed
-Work, please contact: info@agentstatelabs.com
+Work, please contact: licensing@agentstatelabs.com
 
 Notice
 
