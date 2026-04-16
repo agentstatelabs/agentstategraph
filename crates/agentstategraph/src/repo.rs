@@ -400,6 +400,23 @@ impl Repository {
             .map_err(|e| RepoError::Speculation(e))
     }
 
+    /// Set a value from JSON in a speculation's state. Convenience wrapper
+    /// around `spec_set` that mirrors `set_json` — converts the JSON value
+    /// into an Object tree before applying.
+    pub fn spec_set_json(
+        &self,
+        handle: SpecHandle,
+        path: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), RepoError> {
+        let root_id = tree::json_to_tree(self.storage.as_ref(), value)?;
+        let obj = self
+            .storage
+            .get_object(&root_id)?
+            .ok_or_else(|| RepoError::RefNotFound("value".to_string()))?;
+        self.spec_set(handle, path, &obj)
+    }
+
     /// Delete a value in a speculation's state.
     pub fn spec_delete(&self, handle: SpecHandle, path: &str) -> Result<(), RepoError> {
         self.specs

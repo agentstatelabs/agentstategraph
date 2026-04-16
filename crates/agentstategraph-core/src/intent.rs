@@ -61,6 +61,10 @@ pub enum IntentCategory {
     Merge,
     /// Schema or structural change.
     Migrate,
+    /// A change to a plan or task — creation, transition, proof attachment,
+    /// abandonment. Used by the `agentstategraph-tasks` crate and its
+    /// consumers so plan activity is natively filterable in log/blame queries.
+    Plan,
     /// Application-defined category.
     Custom(String),
 }

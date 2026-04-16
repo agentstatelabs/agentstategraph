@@ -535,6 +535,7 @@ fn parse_category(s: &str) -> IntentCategory {
         "checkpoint" => IntentCategory::Checkpoint,
         "merge" => IntentCategory::Merge,
         "migrate" => IntentCategory::Migrate,
+        "plan" => IntentCategory::Plan,
         other => IntentCategory::Custom(other.to_string()),
     }
 }

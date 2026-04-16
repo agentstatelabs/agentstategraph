@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentstategraph"
-version = "0.3.5-beta.2"
+version = "0.4.0-beta.1"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "0.3.5-beta.2"
+version = "0.4.0-beta.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-ffi"
-version = "0.3.5-beta.2"
+version = "0.4.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-mcp"
-version = "0.3.5-beta.2"
+version = "0.4.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "0.3.5-beta.2"
+version = "0.4.0-beta.1"
 dependencies = [
  "agentstategraph-core",
  "deadpool-postgres",
@@ -94,8 +94,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentstategraph-tasks"
+version = "0.4.0-beta.1"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "agentstategraph-wasm"
-version = "0.3.5-beta.2"
+version = "0.4.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
