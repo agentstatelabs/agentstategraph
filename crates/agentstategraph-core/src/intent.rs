@@ -323,3 +323,60 @@ impl Authority {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_variant_serializes_as_native() {
+        let c = IntentCategory::Plan;
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, "\"Plan\"");
+    }
+
+    #[test]
+    fn plan_variant_deserializes_from_native_form() {
+        let c: IntentCategory = serde_json::from_str("\"Plan\"").unwrap();
+        assert_eq!(c, IntentCategory::Plan);
+    }
+
+    /// The `Plan` variant is additive — pre-existing data written as
+    /// `Custom("Plan")` must continue to deserialize as the Custom
+    /// variant, not silently collapse into the new native one. This
+    /// preserves on-disk round-trip for any consumer who wrote
+    /// `Custom("Plan")` to storage before 0.4.0.
+    ///
+    /// **Caveat for consumers**: the two forms are now distinct. A
+    /// filter on `IntentCategory::Plan` will NOT match old
+    /// `Custom("Plan")` commits. If you have such data and want to
+    /// unify it, normalise at read time.
+    #[test]
+    fn custom_plan_string_still_round_trips_as_custom() {
+        let c = IntentCategory::Custom("Plan".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, "{\"Custom\":\"Plan\"}");
+
+        let back: IntentCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, IntentCategory::Custom("Plan".to_string()));
+        assert_ne!(back, IntentCategory::Plan);
+    }
+
+    #[test]
+    fn all_native_variants_round_trip() {
+        for c in [
+            IntentCategory::Explore,
+            IntentCategory::Refine,
+            IntentCategory::Fix,
+            IntentCategory::Rollback,
+            IntentCategory::Checkpoint,
+            IntentCategory::Merge,
+            IntentCategory::Migrate,
+            IntentCategory::Plan,
+        ] {
+            let json = serde_json::to_string(&c).unwrap();
+            let back: IntentCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(c, back, "round-trip failed for {:?}", c);
+        }
+    }
+}

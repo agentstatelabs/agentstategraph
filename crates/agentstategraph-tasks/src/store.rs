@@ -221,7 +221,39 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// List every task in a plan. Ordered by task id.
+    /// List every task id in a plan, cheaply — this walks tree paths
+    /// without deserializing task bodies. Use this when you only need
+    /// to know which tasks exist (e.g. picking the next task number,
+    /// checking blocker existence). Prefer `list_tasks` when you need
+    /// task data.
+    pub fn task_ids(&self, ref_name: &str, plan: &str) -> Result<Vec<TaskId>, TaskStoreError> {
+        let root_path = paths::plan_root(&self.prefix, plan);
+        let leaves = match self.repo.list_paths(ref_name, &root_path, None) {
+            Ok(v) => v,
+            Err(e) if is_path_not_found(&e) => {
+                return Err(TaskStoreError::PlanNotFound(plan.to_string()))
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let prefix_with_slash = format!("{}/", root_path);
+        let mut ids: std::collections::BTreeSet<TaskId> = std::collections::BTreeSet::new();
+        for leaf in leaves {
+            let Some(suffix) = leaf.strip_prefix(&prefix_with_slash) else {
+                continue;
+            };
+            let first = suffix.split('/').next().unwrap_or("");
+            if first.is_empty() || first == paths::META_KEY {
+                continue;
+            }
+            ids.insert(TaskId(first.to_string()));
+        }
+        Ok(ids.into_iter().collect())
+    }
+
+    /// List every task in a plan. Ordered by task id. This fully
+    /// deserializes every task — O(n) in total field count. For id-only
+    /// operations prefer `task_ids`.
     pub fn list_tasks(&self, ref_name: &str, plan: &str) -> Result<Vec<Task>, TaskStoreError> {
         if !self.plan_exists(ref_name, plan)? {
             return Err(TaskStoreError::PlanNotFound(plan.to_string()));
@@ -263,7 +295,9 @@ impl TaskStore {
     }
 
     /// Transition `pending → in_progress`. Fails with `Blocked` if any
-    /// blocker is not `done`.
+    /// blocker is not `done`, or `BlockerNotFound` if any blocker id no
+    /// longer exists in the plan (e.g. because the plan was rebuilt
+    /// after a delete).
     pub fn start_task(
         &self,
         ref_name: &str,
@@ -273,9 +307,13 @@ impl TaskStore {
         let mut task = self.get_task(ref_name, plan, id)?;
         check_transition(task.status, Transition::Start)?;
 
-        let unmet = self.unmet_blockers(ref_name, plan, &task.blocked_by)?;
-        if !unmet.is_empty() {
-            return Err(TaskStoreError::Blocked { blockers: unmet });
+        let BlockerCheck { missing, pending } =
+            self.classify_blockers(ref_name, plan, &task.blocked_by)?;
+        if !missing.is_empty() {
+            return Err(TaskStoreError::BlockerNotFound { blockers: missing });
+        }
+        if !pending.is_empty() {
+            return Err(TaskStoreError::Blocked { blockers: pending });
         }
 
         task.status = TaskStatus::InProgress;
@@ -305,16 +343,37 @@ impl TaskStore {
         task.completed_at = Some(Utc::now());
         task.completed_by = Some(self.agent_id.clone());
 
-        // Determine whether the plan is now fully settled.
+        self.commit_terminal_transition(
+            ref_name,
+            plan,
+            &task,
+            format!("Complete {}/{}", plan, id),
+        )?;
+        Ok(task)
+    }
+
+    /// Shared back-end for `complete_task` and `abandon_task` — writes
+    /// the task in its new terminal state and, if the plan's open-task
+    /// queue is now empty, promotes the plan's `_meta` to `Completed`
+    /// in the same commit.
+    fn commit_terminal_transition(
+        &self,
+        ref_name: &str,
+        plan: &str,
+        task: &Task,
+        desc: String,
+    ) -> Result<(), TaskStoreError> {
+        debug_assert!(task.status.is_terminal());
+
         let all_tasks = self.list_tasks(ref_name, plan)?;
-        let all_done = all_tasks
+        let all_terminal = all_tasks
             .iter()
             .filter(|t| t.id != task.id)
             .all(|t| t.status.is_terminal())
             && all_tasks.iter().any(|t| t.id == task.id);
 
         let mut plan_meta_update: Option<Plan> = None;
-        if all_done {
+        if all_terminal {
             let mut plan_meta = self.get_plan(ref_name, plan)?;
             if plan_meta.status == PlanStatus::Active {
                 plan_meta.status = PlanStatus::Completed;
@@ -322,10 +381,8 @@ impl TaskStore {
             }
         }
 
-        let task_path = paths::task(&self.prefix, plan, id);
-        let task_value = serde_json::to_value(&task)?;
-
-        let desc = format!("Complete {}/{}", plan, id);
+        let task_path = paths::task(&self.prefix, plan, &task.id);
+        let task_value = serde_json::to_value(task)?;
 
         if let Some(plan_meta) = plan_meta_update {
             let meta_path = paths::plan_meta(&self.prefix, plan);
@@ -340,11 +397,15 @@ impl TaskStore {
                 .set_json(ref_name, &task_path, &task_value, self.commit_opts(desc))?;
         }
 
-        Ok(task)
+        Ok(())
     }
 
     /// Transition to `abandoned`. Legal from both `pending` and
-    /// `in_progress`. Reason is required.
+    /// `in_progress`. Reason is required. If this is the last open
+    /// task in the plan, the plan's `_meta` is also promoted to
+    /// `Completed` in the same commit — mirroring `complete_task` so
+    /// the invariant "plan is `Completed` iff every task is terminal"
+    /// always holds.
     pub fn abandon_task(
         &self,
         ref_name: &str,
@@ -363,7 +424,12 @@ impl TaskStore {
         task.abandoned_at = Some(Utc::now());
         task.abandoned_reason = Some(reason.to_string());
 
-        self.write_task(ref_name, plan, &task, format!("Abandon {}/{}", plan, id))?;
+        self.commit_terminal_transition(
+            ref_name,
+            plan,
+            &task,
+            format!("Abandon {}/{}", plan, id),
+        )?;
         Ok(task)
     }
 
@@ -520,31 +586,35 @@ impl TaskStore {
     }
 
     fn next_task_number(&self, ref_name: &str, plan: &str) -> Result<u32, TaskStoreError> {
-        let tasks = self.list_tasks(ref_name, plan)?;
-        let max = tasks
+        let ids = self.task_ids(ref_name, plan)?;
+        let max = ids
             .iter()
-            .filter_map(|t| t.id.number().ok())
+            .filter_map(|id| id.number().ok())
             .max()
             .unwrap_or(0);
         Ok(max + 1)
     }
 
-    fn unmet_blockers(
+    fn classify_blockers(
         &self,
         ref_name: &str,
         plan: &str,
         blockers: &[TaskId],
-    ) -> Result<Vec<TaskId>, TaskStoreError> {
+    ) -> Result<BlockerCheck, TaskStoreError> {
         if blockers.is_empty() {
-            return Ok(Vec::new());
+            return Ok(BlockerCheck::default());
         }
         let tasks = self.list_tasks(ref_name, plan)?;
-        let unmet = blockers
-            .iter()
-            .filter(|b| !blocker_satisfied(&tasks, b))
-            .cloned()
-            .collect();
-        Ok(unmet)
+        let mut missing = Vec::new();
+        let mut pending = Vec::new();
+        for b in blockers {
+            match tasks.iter().find(|t| &t.id == b) {
+                None => missing.push(b.clone()),
+                Some(t) if t.status != TaskStatus::Done => pending.push(b.clone()),
+                _ => {}
+            }
+        }
+        Ok(BlockerCheck { missing, pending })
     }
 
     fn write_task(
@@ -567,13 +637,23 @@ impl TaskStore {
 }
 
 /// A blocker is satisfied iff it names a task in the same plan whose
-/// status is `Done`. Abandoned or missing blockers are NOT considered
-/// satisfied — an agent who abandons a blocker must explicitly re-open
-/// blockers on the dependent task (via `set_blockers`) before starting it.
+/// status is `Done`. Abandoned blockers are NOT considered satisfied —
+/// an agent who abandons a blocker must explicitly re-open the
+/// blockers on the dependent task (via `set_blockers`) before starting
+/// it. Missing blockers (the task no longer exists) are also not
+/// satisfied and surface as `BlockerNotFound` at `start_task` time.
 fn blocker_satisfied(tasks: &[Task], id: &TaskId) -> bool {
     tasks
         .iter()
         .any(|t| &t.id == id && t.status == TaskStatus::Done)
+}
+
+#[derive(Default, Debug)]
+struct BlockerCheck {
+    /// Blocker ids that are not currently `Done` but DO exist in the plan.
+    pending: Vec<TaskId>,
+    /// Blocker ids that no longer resolve to any task in the plan.
+    missing: Vec<TaskId>,
 }
 
 fn is_path_not_found(e: &agentstategraph::RepoError) -> bool {

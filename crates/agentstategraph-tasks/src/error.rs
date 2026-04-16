@@ -21,6 +21,9 @@ pub enum TaskStoreError {
     #[error("task is blocked by: {blockers:?}")]
     Blocked { blockers: Vec<TaskId> },
 
+    #[error("task references blocker(s) that no longer exist in the plan: {blockers:?}")]
+    BlockerNotFound { blockers: Vec<TaskId> },
+
     #[error("proof required for transition to done")]
     ProofRequired,
 

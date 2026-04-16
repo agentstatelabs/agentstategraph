@@ -80,6 +80,81 @@ fn intermediate_complete_does_not_promote_plan() {
     );
 }
 
+/// Prove the plan-and-task update is a SINGLE commit by reading state
+/// at the commit-before and the commit-after. A naïve two-`set_json`
+/// implementation would produce an intermediate state (task=Done,
+/// plan=Active) — this test fails if that intermediate is ever observable.
+#[test]
+fn final_complete_flip_is_observable_only_as_a_single_step() {
+    let (repo, store) = make_store("/plans");
+    store.create_plan("main", "p", None).unwrap();
+    let a = store
+        .add_task("main", "p", "a", Priority::Medium, None, vec![])
+        .unwrap();
+    store.start_task("main", "p", &a.id).unwrap();
+
+    // Snapshot the head right before the final complete.
+    let before_head = repo.log("main", 1).unwrap()[0].id;
+    // Point a throwaway branch at it so we can read state "before".
+    repo.branch("before", "main").unwrap();
+
+    store
+        .complete_task("main", "p", &a.id, Proof::commit("a"))
+        .unwrap();
+
+    // At "before": task InProgress, plan Active.
+    let task_before = store
+        .get_task("before", "p", &a.id)
+        .unwrap();
+    assert_eq!(task_before.status, TaskStatus::InProgress);
+    let plan_before = store.get_plan("before", "p").unwrap();
+    assert_eq!(plan_before.status, PlanStatus::Active);
+
+    // At main (after the single complete commit): task Done, plan Completed.
+    let task_after = store.get_task("main", "p", &a.id).unwrap();
+    assert_eq!(task_after.status, TaskStatus::Done);
+    let plan_after = store.get_plan("main", "p").unwrap();
+    assert_eq!(plan_after.status, PlanStatus::Completed);
+
+    // The head advanced by exactly one commit and its parent is the
+    // before snapshot — no intermediate commit was produced.
+    let head = repo.log("main", 1).unwrap()[0].clone();
+    assert_eq!(head.parents, vec![before_head]);
+}
+
+#[test]
+fn final_abandon_also_promotes_plan() {
+    let (_repo, store) = make_store("/plans");
+    store.create_plan("main", "p", None).unwrap();
+
+    let a = store
+        .add_task("main", "p", "a", Priority::Medium, None, vec![])
+        .unwrap();
+    let b = store
+        .add_task("main", "p", "b", Priority::Medium, None, vec![])
+        .unwrap();
+
+    store.start_task("main", "p", &a.id).unwrap();
+    store
+        .complete_task("main", "p", &a.id, Proof::commit("a"))
+        .unwrap();
+
+    // Plan still active — b is open.
+    assert_eq!(
+        store.get_plan("main", "p").unwrap().status,
+        PlanStatus::Active
+    );
+
+    // Abandoning the final open task must flip the plan to Completed
+    // so the invariant "plan Completed iff every task terminal" holds
+    // regardless of which transition closes the last task.
+    store.abandon_task("main", "p", &b.id, "scoped out").unwrap();
+    assert_eq!(
+        store.get_plan("main", "p").unwrap().status,
+        PlanStatus::Completed
+    );
+}
+
 #[test]
 fn plan_ops_use_intent_category_plan() {
     use agentstategraph_core::IntentCategory;

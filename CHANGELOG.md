@@ -9,7 +9,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Added
 - **New crate `agentstategraph-tasks`** — shared task-store primitives for plan-rot prevention. Provides `Plan`, `Task`, `TaskStore`, `Proof`, `Verifier` trait, and a full state machine (`pending → in_progress → done`, with proof and blocker enforcement). Multiple ASG consumers (CTXone, ThreadWeaver, future apps) share a single implementation instead of reimplementing task types independently. Establishes the pattern for opinionated-but-shared sibling crates in the workspace.
-- **`IntentCategory::Plan`** variant added to `agentstategraph-core` — plan/task operations are natively filterable in log and blame queries. Recognized in MCP, HTTP, FFI, and WASM parsers.
+- **`IntentCategory::Plan`** variant added to `agentstategraph-core` — plan/task operations are natively filterable in log and blame queries. Recognized in MCP, HTTP, FFI, and WASM parsers. **Consumer caveat**: the new native variant serializes as `"Plan"`; pre-existing data written as `{"Custom":"Plan"}` still deserializes as the `Custom` variant, so a filter on `IntentCategory::Plan` will NOT match legacy `Custom("Plan")` commits. Normalise at read time if you need unified filtering across the upgrade boundary.
 - **`Repository::spec_set_json`** convenience method on the high-level API — mirrors `set_json` for the speculation path, used by `agentstategraph-tasks` for atomic multi-path commits.
 
 ### Changed

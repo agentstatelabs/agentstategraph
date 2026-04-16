@@ -95,3 +95,47 @@ fn set_blockers_requires_existing_tasks() {
         .unwrap_err();
     assert!(matches!(err, TaskStoreError::TaskNotFound { .. }));
 }
+
+/// If a blocker is removed by some process outside `TaskStore` (e.g. a
+/// future `delete_task` op, or a direct `Repository::delete`), the
+/// dependent task's `start_task` must surface `BlockerNotFound` rather
+/// than `Blocked` — otherwise the task looks merely "pending more work"
+/// when it's actually referencing a phantom dependency.
+#[test]
+fn missing_blocker_produces_distinct_error() {
+    use agentstategraph::CommitOptions;
+    use agentstategraph_core::IntentCategory;
+
+    let (repo, store) = make_store("/plans");
+    store.create_plan("main", "p", None).unwrap();
+
+    let a = store
+        .add_task("main", "p", "blocker", Priority::Medium, None, vec![])
+        .unwrap();
+    let b = store
+        .add_task(
+            "main",
+            "p",
+            "dependent",
+            Priority::High,
+            None,
+            vec![a.id.clone()],
+        )
+        .unwrap();
+
+    // Bypass TaskStore and delete the blocker directly.
+    repo.delete(
+        "main",
+        "/plans/p/t-001",
+        CommitOptions::new("test", IntentCategory::Plan, "simulate lost blocker"),
+    )
+    .unwrap();
+
+    let err = store.start_task("main", "p", &b.id).unwrap_err();
+    match err {
+        TaskStoreError::BlockerNotFound { blockers } => {
+            assert_eq!(blockers, vec![a.id]);
+        }
+        e => panic!("expected BlockerNotFound, got {:?}", e),
+    }
+}
