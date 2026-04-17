@@ -163,6 +163,8 @@ impl TaskStore {
 
     /// Add a new task to a plan. Task ids are assigned monotonically —
     /// the next available `t-NNN` is picked by scanning existing entries.
+    /// `assigned_to` is optional — pass an agent id to record ownership.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_task(
         &self,
         ref_name: &str,
@@ -171,6 +173,7 @@ impl TaskStore {
         priority: Priority,
         parent_id: Option<TaskId>,
         blocked_by: Vec<TaskId>,
+        assigned_to: Option<String>,
     ) -> Result<Task, TaskStoreError> {
         if !self.plan_exists(ref_name, plan)? {
             return Err(TaskStoreError::PlanNotFound(plan.to_string()));
@@ -184,7 +187,6 @@ impl TaskStore {
         }
 
         for blocker in &blocked_by {
-            // Ensure every blocker actually exists in the plan.
             self.get_task(ref_name, plan, blocker)?;
         }
 
@@ -207,6 +209,7 @@ impl TaskStore {
             proof: None,
             abandoned_at: None,
             abandoned_reason: None,
+            assigned_to,
         };
 
         let task_path = paths::task(&self.prefix, plan, &id);
@@ -472,6 +475,43 @@ impl TaskStore {
         Ok(task)
     }
 
+    /// Set `assigned_to` on a task.
+    pub fn assign_task(
+        &self,
+        ref_name: &str,
+        plan: &str,
+        id: &TaskId,
+        agent: &str,
+    ) -> Result<Task, TaskStoreError> {
+        let mut task = self.get_task(ref_name, plan, id)?;
+        task.assigned_to = Some(agent.to_string());
+        self.write_task(
+            ref_name,
+            plan,
+            &task,
+            format!("Assign {}/{} to {}", plan, id, agent),
+        )?;
+        Ok(task)
+    }
+
+    /// Clear `assigned_to` on a task.
+    pub fn unassign_task(
+        &self,
+        ref_name: &str,
+        plan: &str,
+        id: &TaskId,
+    ) -> Result<Task, TaskStoreError> {
+        let mut task = self.get_task(ref_name, plan, id)?;
+        task.assigned_to = None;
+        self.write_task(
+            ref_name,
+            plan,
+            &task,
+            format!("Unassign {}/{}", plan, id),
+        )?;
+        Ok(task)
+    }
+
     // -----------------------------------------------------------------------
     // Query helpers
     // -----------------------------------------------------------------------
@@ -483,6 +523,24 @@ impl TaskStore {
         ref_name: &str,
         plan: &str,
     ) -> Result<Option<Task>, TaskStoreError> {
+        self.next_task_for(ref_name, plan, None, true)
+    }
+
+    /// Like `next_task`, but filter by assignment.
+    ///
+    /// - `assigned_to = None` → any pending unblocked task (same as
+    ///   `next_task`).
+    /// - `assigned_to = Some(agent)`, `include_unassigned = true` →
+    ///   tasks assigned to `agent` OR unassigned.
+    /// - `assigned_to = Some(agent)`, `include_unassigned = false` →
+    ///   only tasks explicitly assigned to `agent`.
+    pub fn next_task_for(
+        &self,
+        ref_name: &str,
+        plan: &str,
+        assigned_to: Option<&str>,
+        include_unassigned: bool,
+    ) -> Result<Option<Task>, TaskStoreError> {
         let tasks = self.list_tasks(ref_name, plan)?;
         let mut candidates: Vec<&Task> = tasks
             .iter()
@@ -492,9 +550,29 @@ impl TaskStore {
                     .iter()
                     .all(|b| blocker_satisfied(&tasks, b))
             })
+            .filter(|t| match assigned_to {
+                None => true,
+                Some(agent) => match &t.assigned_to {
+                    Some(a) => a == agent,
+                    None => include_unassigned,
+                },
+            })
             .collect();
         candidates.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.id.cmp(&b.id)));
         Ok(candidates.first().map(|t| (*t).clone()))
+    }
+
+    /// List plans filtered by status. `None` returns all plans.
+    pub fn list_plans_by_status(
+        &self,
+        ref_name: &str,
+        status: Option<PlanStatus>,
+    ) -> Result<Vec<Plan>, TaskStoreError> {
+        let plans = self.list_plans(ref_name)?;
+        match status {
+            None => Ok(plans),
+            Some(s) => Ok(plans.into_iter().filter(|p| p.status == s).collect()),
+        }
     }
 
     /// Compute the rollup status of a parent task from its direct

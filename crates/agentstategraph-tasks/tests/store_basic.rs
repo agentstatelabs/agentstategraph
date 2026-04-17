@@ -52,13 +52,13 @@ fn add_task_assigns_monotonic_ids() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let t1 = store
-        .add_task("main", "p", "A", Priority::Medium, None, vec![])
+        .add_task("main", "p", "A", Priority::Medium, None, vec![], None)
         .unwrap();
     let t2 = store
-        .add_task("main", "p", "B", Priority::Medium, None, vec![])
+        .add_task("main", "p", "B", Priority::Medium, None, vec![], None)
         .unwrap();
     let t3 = store
-        .add_task("main", "p", "C", Priority::Medium, None, vec![])
+        .add_task("main", "p", "C", Priority::Medium, None, vec![], None)
         .unwrap();
     assert_eq!(t1.id.as_str(), "t-001");
     assert_eq!(t2.id.as_str(), "t-002");
@@ -70,10 +70,10 @@ fn list_tasks_sorted_and_excludes_meta() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     store
-        .add_task("main", "p", "first", Priority::Low, None, vec![])
+        .add_task("main", "p", "first", Priority::Low, None, vec![], None)
         .unwrap();
     store
-        .add_task("main", "p", "second", Priority::High, None, vec![])
+        .add_task("main", "p", "second", Priority::High, None, vec![], None)
         .unwrap();
     let tasks = store.list_tasks("main", "p").unwrap();
     assert_eq!(tasks.len(), 2);
@@ -105,7 +105,7 @@ fn delete_plan_removes_tasks() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     store
-        .add_task("main", "p", "x", Priority::Medium, None, vec![])
+        .add_task("main", "p", "x", Priority::Medium, None, vec![], None)
         .unwrap();
     store.delete_plan("main", "p").unwrap();
     let err = store.get_plan("main", "p").unwrap_err();
@@ -116,7 +116,7 @@ fn delete_plan_removes_tasks() {
 fn add_task_to_missing_plan_errors() {
     let (_repo, store) = make_store("/plans");
     let err = store
-        .add_task("main", "nope", "x", Priority::Medium, None, vec![])
+        .add_task("main", "nope", "x", Priority::Medium, None, vec![], None)
         .unwrap_err();
     assert!(matches!(err, TaskStoreError::PlanNotFound(_)));
 }
@@ -126,7 +126,7 @@ fn set_priority_persists() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     store
         .set_priority("main", "p", &task.id, Priority::Critical)

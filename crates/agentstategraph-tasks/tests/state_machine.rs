@@ -9,7 +9,7 @@ fn pending_to_in_progress_to_done() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Medium, None, vec![])
+        .add_task("main", "p", "x", Priority::Medium, None, vec![], None)
         .unwrap();
     assert_eq!(task.status, TaskStatus::Pending);
 
@@ -32,7 +32,7 @@ fn abandon_from_pending() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     let task = store
         .abandon_task("main", "p", &task.id, "deprioritized")
@@ -46,7 +46,7 @@ fn abandon_from_in_progress() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     store.start_task("main", "p", &task.id).unwrap();
     let task = store
@@ -60,7 +60,7 @@ fn abandon_requires_reason() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     let err = store.abandon_task("main", "p", &task.id, "   ").unwrap_err();
     assert!(matches!(err, TaskStoreError::ReasonRequired));
@@ -71,7 +71,7 @@ fn cannot_complete_without_starting() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     let err = store
         .complete_task("main", "p", &task.id, Proof::text("ok"))
@@ -84,7 +84,7 @@ fn cannot_restart_done_task() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     store.start_task("main", "p", &task.id).unwrap();
     store
@@ -99,7 +99,7 @@ fn cannot_abandon_done_task() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let task = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     store.start_task("main", "p", &task.id).unwrap();
     store

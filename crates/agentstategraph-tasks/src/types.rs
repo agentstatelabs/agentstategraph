@@ -35,6 +35,8 @@ pub struct Task {
     pub proof: Option<Proof>,
     pub abandoned_at: Option<DateTime<Utc>>,
     pub abandoned_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -234,6 +236,7 @@ mod tests {
             proof: None,
             abandoned_at: None,
             abandoned_reason: None,
+            assigned_to: Some("codex".to_string()),
         };
         let json = serde_json::to_value(&task).unwrap();
         let back: Task = serde_json::from_value(json).unwrap();

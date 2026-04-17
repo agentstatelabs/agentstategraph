@@ -34,7 +34,7 @@ fn complete(
     proof: Proof,
 ) {
     let task = store
-        .add_task("main", plan, title, Priority::Medium, None, vec![])
+        .add_task("main", plan, title, Priority::Medium, None, vec![], None)
         .unwrap();
     store.start_task("main", plan, &task.id).unwrap();
     store
@@ -66,7 +66,7 @@ fn verify_plan_skips_non_done_tasks() {
     store.create_plan("main", "p", None).unwrap();
 
     let a = store
-        .add_task("main", "p", "a", Priority::Medium, None, vec![])
+        .add_task("main", "p", "a", Priority::Medium, None, vec![], None)
         .unwrap();
     store.start_task("main", "p", &a.id).unwrap();
     store
@@ -75,7 +75,7 @@ fn verify_plan_skips_non_done_tasks() {
 
     // Second task is pending; it should not appear in the report.
     store
-        .add_task("main", "p", "b", Priority::Medium, None, vec![])
+        .add_task("main", "p", "b", Priority::Medium, None, vec![], None)
         .unwrap();
 
     let report = store.verify_plan("main", "p", &TestVerifier).unwrap();

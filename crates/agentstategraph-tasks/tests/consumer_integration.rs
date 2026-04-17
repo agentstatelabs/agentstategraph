@@ -98,6 +98,7 @@ fn full_consumer_workflow() {
             Priority::Critical,
             None,
             vec![],
+            None,
         )
         .unwrap();
     let hero = store
@@ -108,6 +109,7 @@ fn full_consumer_workflow() {
             Priority::High,
             None,
             vec![design.id.clone()],
+            None,
         )
         .unwrap();
     let nav = store
@@ -118,6 +120,7 @@ fn full_consumer_workflow() {
             Priority::Medium,
             None,
             vec![],
+            None,
         )
         .unwrap();
 

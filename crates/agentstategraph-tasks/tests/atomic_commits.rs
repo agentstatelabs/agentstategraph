@@ -18,10 +18,10 @@ fn final_complete_promotes_plan_in_single_commit() {
     store.create_plan("main", "p", None).unwrap();
 
     let a = store
-        .add_task("main", "p", "a", Priority::Medium, None, vec![])
+        .add_task("main", "p", "a", Priority::Medium, None, vec![], None)
         .unwrap();
     let b = store
-        .add_task("main", "p", "b", Priority::Medium, None, vec![])
+        .add_task("main", "p", "b", Priority::Medium, None, vec![], None)
         .unwrap();
 
     store.start_task("main", "p", &a.id).unwrap();
@@ -63,10 +63,10 @@ fn intermediate_complete_does_not_promote_plan() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let a = store
-        .add_task("main", "p", "a", Priority::Medium, None, vec![])
+        .add_task("main", "p", "a", Priority::Medium, None, vec![], None)
         .unwrap();
     store
-        .add_task("main", "p", "b", Priority::Medium, None, vec![])
+        .add_task("main", "p", "b", Priority::Medium, None, vec![], None)
         .unwrap();
 
     store.start_task("main", "p", &a.id).unwrap();
@@ -89,7 +89,7 @@ fn final_complete_flip_is_observable_only_as_a_single_step() {
     let (repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let a = store
-        .add_task("main", "p", "a", Priority::Medium, None, vec![])
+        .add_task("main", "p", "a", Priority::Medium, None, vec![], None)
         .unwrap();
     store.start_task("main", "p", &a.id).unwrap();
 
@@ -128,10 +128,10 @@ fn final_abandon_also_promotes_plan() {
     store.create_plan("main", "p", None).unwrap();
 
     let a = store
-        .add_task("main", "p", "a", Priority::Medium, None, vec![])
+        .add_task("main", "p", "a", Priority::Medium, None, vec![], None)
         .unwrap();
     let b = store
-        .add_task("main", "p", "b", Priority::Medium, None, vec![])
+        .add_task("main", "p", "b", Priority::Medium, None, vec![], None)
         .unwrap();
 
     store.start_task("main", "p", &a.id).unwrap();
@@ -162,7 +162,7 @@ fn plan_ops_use_intent_category_plan() {
     let (repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     store
-        .add_task("main", "p", "x", Priority::Medium, None, vec![])
+        .add_task("main", "p", "x", Priority::Medium, None, vec![], None)
         .unwrap();
 
     let commits = repo.log("main", 10).unwrap();

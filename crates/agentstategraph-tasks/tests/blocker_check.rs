@@ -10,7 +10,7 @@ fn start_refused_while_blocker_pending() {
     store.create_plan("main", "p", None).unwrap();
 
     let a = store
-        .add_task("main", "p", "blocker", Priority::Medium, None, vec![])
+        .add_task("main", "p", "blocker", Priority::Medium, None, vec![], None)
         .unwrap();
     let b = store
         .add_task(
@@ -20,6 +20,7 @@ fn start_refused_while_blocker_pending() {
             Priority::High,
             None,
             vec![a.id.clone()],
+            None,
         )
         .unwrap();
 
@@ -38,7 +39,7 @@ fn start_allowed_after_blocker_done() {
     store.create_plan("main", "p", None).unwrap();
 
     let a = store
-        .add_task("main", "p", "blocker", Priority::Medium, None, vec![])
+        .add_task("main", "p", "blocker", Priority::Medium, None, vec![], None)
         .unwrap();
     let b = store
         .add_task(
@@ -48,6 +49,7 @@ fn start_allowed_after_blocker_done() {
             Priority::High,
             None,
             vec![a.id.clone()],
+            None,
         )
         .unwrap();
 
@@ -65,7 +67,7 @@ fn abandoned_blocker_does_not_unblock() {
     store.create_plan("main", "p", None).unwrap();
 
     let a = store
-        .add_task("main", "p", "blocker", Priority::Medium, None, vec![])
+        .add_task("main", "p", "blocker", Priority::Medium, None, vec![], None)
         .unwrap();
     let b = store
         .add_task(
@@ -75,6 +77,7 @@ fn abandoned_blocker_does_not_unblock() {
             Priority::High,
             None,
             vec![a.id.clone()],
+            None,
         )
         .unwrap();
 
@@ -88,7 +91,7 @@ fn set_blockers_requires_existing_tasks() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let a = store
-        .add_task("main", "p", "x", Priority::Low, None, vec![])
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
     let err = store
         .set_blockers("main", "p", &a.id, vec![TaskId::new(99)])
@@ -110,7 +113,7 @@ fn missing_blocker_produces_distinct_error() {
     store.create_plan("main", "p", None).unwrap();
 
     let a = store
-        .add_task("main", "p", "blocker", Priority::Medium, None, vec![])
+        .add_task("main", "p", "blocker", Priority::Medium, None, vec![], None)
         .unwrap();
     let b = store
         .add_task(
@@ -120,6 +123,7 @@ fn missing_blocker_produces_distinct_error() {
             Priority::High,
             None,
             vec![a.id.clone()],
+            None,
         )
         .unwrap();
 

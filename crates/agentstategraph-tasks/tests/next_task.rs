@@ -10,13 +10,13 @@ fn next_task_picks_highest_priority_unblocked() {
     store.create_plan("main", "p", None).unwrap();
 
     store
-        .add_task("main", "p", "low", Priority::Low, None, vec![])
+        .add_task("main", "p", "low", Priority::Low, None, vec![], None)
         .unwrap();
     let high = store
-        .add_task("main", "p", "high", Priority::High, None, vec![])
+        .add_task("main", "p", "high", Priority::High, None, vec![], None)
         .unwrap();
     store
-        .add_task("main", "p", "medium", Priority::Medium, None, vec![])
+        .add_task("main", "p", "medium", Priority::Medium, None, vec![], None)
         .unwrap();
 
     let next = store.next_task("main", "p").unwrap().unwrap();
@@ -29,7 +29,7 @@ fn next_task_skips_blocked() {
     store.create_plan("main", "p", None).unwrap();
 
     let blocker = store
-        .add_task("main", "p", "blocker", Priority::Low, None, vec![])
+        .add_task("main", "p", "blocker", Priority::Low, None, vec![], None)
         .unwrap();
     store
         .add_task(
@@ -39,6 +39,7 @@ fn next_task_skips_blocked() {
             Priority::Critical,
             None,
             vec![blocker.id.clone()],
+            None,
         )
         .unwrap();
 
@@ -52,7 +53,7 @@ fn next_task_none_when_all_done() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let a = store
-        .add_task("main", "p", "only", Priority::Medium, None, vec![])
+        .add_task("main", "p", "only", Priority::Medium, None, vec![], None)
         .unwrap();
     store.start_task("main", "p", &a.id).unwrap();
     store

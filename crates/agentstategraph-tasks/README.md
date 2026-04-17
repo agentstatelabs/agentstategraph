@@ -34,7 +34,7 @@ store.create_plan("main", "website-v2", Some("Brand pivot".into())).unwrap();
 
 let task = store.add_task(
     "main", "website-v2", "Rewrite hero",
-    Priority::High, None, vec![],
+    Priority::High, None, vec![], Some("claude-code".into()),
 ).unwrap();
 
 store.start_task("main", "website-v2", &task.id).unwrap();

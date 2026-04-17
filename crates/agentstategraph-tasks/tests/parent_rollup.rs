@@ -9,7 +9,7 @@ fn parent_with_no_subtasks_reports_own_status() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let parent = store
-        .add_task("main", "p", "parent", Priority::Medium, None, vec![])
+        .add_task("main", "p", "parent", Priority::Medium, None, vec![], None)
         .unwrap();
     let status = store.derived_status("main", "p", &parent.id).unwrap();
     assert_eq!(status, TaskStatus::Pending);
@@ -20,7 +20,7 @@ fn parent_all_subtasks_done() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let parent = store
-        .add_task("main", "p", "parent", Priority::Medium, None, vec![])
+        .add_task("main", "p", "parent", Priority::Medium, None, vec![], None)
         .unwrap();
     let a = store
         .add_task(
@@ -30,6 +30,7 @@ fn parent_all_subtasks_done() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
     let b = store
@@ -40,6 +41,7 @@ fn parent_all_subtasks_done() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
 
@@ -63,7 +65,7 @@ fn parent_any_in_progress_reports_in_progress() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let parent = store
-        .add_task("main", "p", "parent", Priority::Medium, None, vec![])
+        .add_task("main", "p", "parent", Priority::Medium, None, vec![], None)
         .unwrap();
     let a = store
         .add_task(
@@ -73,6 +75,7 @@ fn parent_any_in_progress_reports_in_progress() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
     store
@@ -83,6 +86,7 @@ fn parent_any_in_progress_reports_in_progress() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
 
@@ -98,7 +102,7 @@ fn parent_with_abandoned_and_done_reports_done() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let parent = store
-        .add_task("main", "p", "parent", Priority::Medium, None, vec![])
+        .add_task("main", "p", "parent", Priority::Medium, None, vec![], None)
         .unwrap();
     let a = store
         .add_task(
@@ -108,6 +112,7 @@ fn parent_with_abandoned_and_done_reports_done() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
     let b = store
@@ -118,6 +123,7 @@ fn parent_with_abandoned_and_done_reports_done() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
 
@@ -138,7 +144,7 @@ fn parent_with_all_abandoned_reports_pending() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let parent = store
-        .add_task("main", "p", "parent", Priority::Medium, None, vec![])
+        .add_task("main", "p", "parent", Priority::Medium, None, vec![], None)
         .unwrap();
     let a = store
         .add_task(
@@ -148,6 +154,7 @@ fn parent_with_all_abandoned_reports_pending() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
     store.abandon_task("main", "p", &a.id, "no").unwrap();
@@ -162,7 +169,7 @@ fn cannot_make_subtask_a_parent() {
     let (_repo, store) = make_store("/plans");
     store.create_plan("main", "p", None).unwrap();
     let parent = store
-        .add_task("main", "p", "parent", Priority::Medium, None, vec![])
+        .add_task("main", "p", "parent", Priority::Medium, None, vec![], None)
         .unwrap();
     let child = store
         .add_task(
@@ -172,6 +179,7 @@ fn cannot_make_subtask_a_parent() {
             Priority::Medium,
             Some(parent.id.clone()),
             vec![],
+            None,
         )
         .unwrap();
 
@@ -183,6 +191,7 @@ fn cannot_make_subtask_a_parent() {
             Priority::Medium,
             Some(child.id.clone()),
             vec![],
+            None,
         )
         .unwrap_err();
     assert!(matches!(err, TaskStoreError::ParentIsSubtask(_)));

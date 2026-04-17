@@ -30,6 +30,7 @@
 //!         Priority::High,
 //!         None,
 //!         vec![],
+//!         None,
 //!     )
 //!     .unwrap();
 //! store.start_task("main", "website-v2", &task.id).unwrap();
