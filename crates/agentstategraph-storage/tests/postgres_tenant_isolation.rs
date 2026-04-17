@@ -67,11 +67,11 @@ fn postgres_tenants_cannot_see_each_others_refs() {
         assert_ne!(a_sees, b_sees, "the two tenants must have distinct targets");
 
         // Neither tenant can read the other's object by id.
-        let cross_a =
-            <PostgresStorage as ObjectStore>::get_object(&tenant_a, &id_b).expect("get-object A<-B");
+        let cross_a = <PostgresStorage as ObjectStore>::get_object(&tenant_a, &id_b)
+            .expect("get-object A<-B");
         assert!(cross_a.is_none(), "tenant-a must NOT see tenant-b's object");
-        let cross_b =
-            <PostgresStorage as ObjectStore>::get_object(&tenant_b, &id_a).expect("get-object B<-A");
+        let cross_b = <PostgresStorage as ObjectStore>::get_object(&tenant_b, &id_a)
+            .expect("get-object B<-A");
         assert!(cross_b.is_none(), "tenant-b must NOT see tenant-a's object");
 
         // list_refs must not leak the other tenant's refs.

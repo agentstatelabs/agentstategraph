@@ -129,12 +129,13 @@ impl SessionManager {
     /// Check if a path is within a session's scope.
     pub fn check_scope(session: &Session, path: &str) -> Result<(), SessionError> {
         if let Some(ref scope) = session.path_scope
-            && !path.starts_with(scope) {
-                return Err(SessionError::OutOfScope {
-                    path: path.to_string(),
-                    scope: scope.clone(),
-                });
-            }
+            && !path.starts_with(scope)
+        {
+            return Err(SessionError::OutOfScope {
+                path: path.to_string(),
+                scope: scope.clone(),
+            });
+        }
         Ok(())
     }
 

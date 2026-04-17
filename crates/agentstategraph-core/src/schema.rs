@@ -42,8 +42,7 @@ pub enum MergeHint {
 }
 
 /// How strictly the schema is enforced.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum EnforcementMode {
     /// No validation. Schema is documentation only.
     #[default]
@@ -55,7 +54,6 @@ pub enum EnforcementMode {
     /// Apply automatic migrations when schema changes.
     Migrate,
 }
-
 
 /// Validation result for a state tree against a schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,50 +182,55 @@ fn validate_recursive(
 
     // Check required fields
     if let Some(required) = schema.get("required").and_then(|v| v.as_array())
-        && let Some(obj) = value.as_object() {
-            for req in required {
-                if let Some(key) = req.as_str()
-                    && !obj.contains_key(key) {
-                        errors.push(ValidationError {
-                            path: format!("{}/{}", path, key),
-                            message: format!("required field '{}' is missing", key),
-                            expected: Some("present".to_string()),
-                            actual: Some("missing".to_string()),
-                        });
-                    }
+        && let Some(obj) = value.as_object()
+    {
+        for req in required {
+            if let Some(key) = req.as_str()
+                && !obj.contains_key(key)
+            {
+                errors.push(ValidationError {
+                    path: format!("{}/{}", path, key),
+                    message: format!("required field '{}' is missing", key),
+                    expected: Some("present".to_string()),
+                    actual: Some("missing".to_string()),
+                });
             }
         }
+    }
 
     // Check enum values
     if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array())
-        && !enum_values.contains(value) {
-            errors.push(ValidationError {
-                path: path.to_string(),
-                message: format!("value not in allowed enum: {:?}", value),
-                expected: Some(format!("{:?}", enum_values)),
-                actual: Some(format!("{:?}", value)),
-            });
-        }
+        && !enum_values.contains(value)
+    {
+        errors.push(ValidationError {
+            path: path.to_string(),
+            message: format!("value not in allowed enum: {:?}", value),
+            expected: Some(format!("{:?}", enum_values)),
+            actual: Some(format!("{:?}", value)),
+        });
+    }
 
     // Recurse into properties
     if let Some(props) = schema.get("properties").and_then(|v| v.as_object())
-        && let Some(obj) = value.as_object() {
-            for (key, prop_schema) in props {
-                if let Some(prop_value) = obj.get(key) {
-                    let child_path = format!("{}/{}", path, key);
-                    validate_recursive(prop_schema, prop_value, &child_path, errors, warnings);
-                }
+        && let Some(obj) = value.as_object()
+    {
+        for (key, prop_schema) in props {
+            if let Some(prop_value) = obj.get(key) {
+                let child_path = format!("{}/{}", path, key);
+                validate_recursive(prop_schema, prop_value, &child_path, errors, warnings);
             }
         }
+    }
 
     // Recurse into array items
     if let Some(items_schema) = schema.get("items")
-        && let Some(arr) = value.as_array() {
-            for (i, item) in arr.iter().enumerate() {
-                let child_path = format!("{}/{}", path, i);
-                validate_recursive(items_schema, item, &child_path, errors, warnings);
-            }
+        && let Some(arr) = value.as_array()
+    {
+        for (i, item) in arr.iter().enumerate() {
+            let child_path = format!("{}/{}", path, i);
+            validate_recursive(items_schema, item, &child_path, errors, warnings);
         }
+    }
 }
 
 fn json_type_name(value: &serde_json::Value) -> &'static str {
