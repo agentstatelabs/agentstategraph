@@ -507,9 +507,92 @@ fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
     Ok(result.into())
 }
 
+/// Check the stored schema version against this binary's `SCHEMA_VERSION`.
+///
+/// Returns a dict with a `status` key — one of `"up_to_date"`,
+/// `"upgrade_available"`, `"downgrade"`, `"unversioned"`, `"corrupt"` —
+/// plus context fields. The `migrations` list (when present) names the
+/// shipped migrations that would run; apply them via the
+/// `agentstategraph-mcp migrate` CLI.
+///
+/// ```python
+/// r = asg.check_schema()
+/// if r["status"] == "downgrade":
+///     sys.exit(64)   # EX_USAGE — db newer than binary
+/// elif r["status"] == "upgrade_available":
+///     # migrate before opening listeners
+///     ...
+/// ```
+#[pymethods]
+impl AgentStateGraph {
+    #[pyo3(signature = (r#ref="main", target=None))]
+    fn check_schema(
+        &self,
+        py: Python<'_>,
+        r#ref: &str,
+        target: Option<String>,
+    ) -> PyResult<PyObject> {
+        use agentstategraph_migrate::{binary_version, check, CheckResult, Registry};
+
+        let target = match target {
+            Some(s) => semver::Version::parse(&s).map_err(|e| {
+                PyRuntimeError::new_err(format!("invalid target version {s:?}: {e}"))
+            })?,
+            None => binary_version(),
+        };
+        let registry = Registry::builtin();
+
+        let result = check(&self.repo, r#ref, &target, &registry)
+            .map_err(|e| PyRuntimeError::new_err(format!("check failed: {e}")))?;
+
+        let dict = pyo3::types::PyDict::new(py);
+        match result {
+            CheckResult::UpToDate { version } => {
+                dict.set_item("status", "up_to_date")?;
+                dict.set_item("version", version.to_string())?;
+            }
+            CheckResult::UpgradeAvailable { from, to, migrations } => {
+                dict.set_item("status", "upgrade_available")?;
+                dict.set_item("from", from.to_string())?;
+                dict.set_item("to", to.to_string())?;
+                dict.set_item("migrations", migrations)?;
+            }
+            CheckResult::Downgrade { db, binary } => {
+                dict.set_item("status", "downgrade")?;
+                dict.set_item("db", db.to_string())?;
+                dict.set_item("binary", binary.to_string())?;
+            }
+            CheckResult::Unversioned { implicit } => {
+                dict.set_item("status", "unversioned")?;
+                dict.set_item("implicit", implicit.to_string())?;
+            }
+            CheckResult::Corrupt(msg) => {
+                dict.set_item("status", "corrupt")?;
+                dict.set_item("message", msg)?;
+            }
+        }
+        Ok(dict.into())
+    }
+}
+
+/// Exit codes an app should use when surfacing `check_schema()` results.
+/// Mirrors `agentstategraph-migrate::exit` and `sysexits.h` conventions.
+#[pyfunction]
+fn exit_codes(py: Python<'_>) -> PyResult<PyObject> {
+    use agentstategraph_migrate::exit;
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("OK", exit::OK)?;
+    d.set_item("DOWNGRADE_REFUSED", exit::DOWNGRADE_REFUSED)?;
+    d.set_item("CORRUPT_META", exit::CORRUPT_META)?;
+    d.set_item("MIGRATION_FAILED", exit::MIGRATION_FAILED)?;
+    d.set_item("UPGRADE_REQUIRED", exit::UPGRADE_REQUIRED)?;
+    Ok(d.into())
+}
+
 /// Python module definition.
 #[pymodule]
 fn agentstategraph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AgentStateGraph>()?;
+    m.add_function(wrap_pyfunction!(exit_codes, m)?)?;
     Ok(())
 }
