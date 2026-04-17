@@ -65,7 +65,7 @@ Optional schema annotations for validation and merge behavior.
 
 How AgentStateGraph exposes itself as an MCP server.
 
-- **7.1 Tools** -- All 20 tools with full parameter schemas, descriptions, and example inputs/outputs.
+- **7.1 Tools** -- All 27 tools with full parameter schemas, descriptions, and example inputs/outputs.
 - **7.2 Resources** -- MCP resource endpoints for state at paths.
 - **7.3 Events** -- MCP event notifications for state changes.
 
@@ -73,7 +73,7 @@ How AgentStateGraph exposes itself as an MCP server.
 
 Implementation structure.
 
-- **8.1 Crate Structure** -- `agentstategraph-core` (types, diff, merge), `agentstategraph-storage` (pluggable backends), `agentstategraph` (high-level API), `agentstategraph-mcp` (MCP server).
+- **8.1 Crate Structure** -- `agentstategraph-core` (types, diff, merge), `agentstategraph-storage` (pluggable backends), `agentstategraph` (high-level API), `agentstategraph-mcp` (MCP server + migrate CLI), `agentstategraph-tasks` (shared Plan/Task primitive), `agentstategraph-migrate` (schema-evolution framework).
 - **8.2 Storage Traits** -- The `Storage` trait interface for pluggable backends (Memory, SQLite, IndexedDB).
 - **8.3 Performance Design** -- Content-addressed deduplication, O(1) branch creation, copy-on-write speculation.
 - **8.4 Language Bindings** -- Python (PyO3), TypeScript (napi-rs), Go (C FFI), WASM (wasm-bindgen).
@@ -103,9 +103,9 @@ Implementation details and test coverage.
 
 - **11.1 Principles** -- Correctness over performance, content-addressed everything, zero unsafe.
 - **11.2 Rust Reference Library** -- The `agentstategraph` crate with Repository API.
-- **11.3 MCP Server** -- The `agentstategraph-mcp` crate with all 20 tools.
+- **11.3 MCP Server** -- The `agentstategraph-mcp` crate with all 27 tools plus the `migrate` subcommand.
 - **11.4 Getting Started Example** -- End-to-end code walkthrough.
-- **11.5 Implementation Test Suite** -- 137 tests covering all operations.
+- **11.5 Implementation Test Suite** -- 220+ tests across 8 crates covering all operations.
 
 ### 12. Open Questions
 

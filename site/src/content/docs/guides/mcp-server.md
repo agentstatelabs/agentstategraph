@@ -40,11 +40,11 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 26 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 27 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
-The same binary also supports HTTP mode — 19 REST endpoints with CORS enabled:
+The same binary also supports HTTP mode — 22 REST endpoints with CORS enabled:
 
 ```bash
 cargo run --release -p agentstategraph-mcp -- --http --port 3001

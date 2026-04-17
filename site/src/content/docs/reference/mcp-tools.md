@@ -1,9 +1,9 @@
 ---
 title: MCP Tools Reference
-description: Complete reference for all 26 AgentStateGraph MCP tools with parameters and examples.
+description: Complete reference for all 27 AgentStateGraph MCP tools with parameters and examples.
 ---
 
-> **26 tools** — 3 state operations, 3 branching, 1 merge, 3 history, 5 speculation, 3 epochs, 1 sessions, 1 query, 6 explorer/viewer tools. Also available as [19 HTTP REST endpoints](/guides/mcp-server/#http-rest-api) via `--http` mode.
+> **27 tools** — 3 state operations, 3 branching, 1 merge, 3 history, 5 speculation, 3 epochs, 1 sessions, 1 query, 7 explorer/viewer tools. Also available as [22 HTTP REST endpoints](/guides/mcp-server/#http-rest-api) via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
 
 ## State Operations
 

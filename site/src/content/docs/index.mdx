@@ -48,16 +48,22 @@ AgentStateGraph is a **state primitive** — the layer on which a next-generatio
 	<Card title="Multi-Agent Native" icon="list-format">
 		Sub-agent orchestration with scoped sessions, path restrictions, and intent decomposition trees. Built for the orchestrator pattern.
 	</Card>
+	<Card title="Plans & Tasks" icon="list-format">
+		Shared `agentstategraph-tasks` primitive — plans, state machine (pending / in_progress / done), proofs, blockers, and agent assignment. Native `IntentCategory::Plan` for log and blame filtering.
+	</Card>
+	<Card title="Schema Migrations" icon="rocket">
+		`/_meta/schema_version` lives in-band so upgrade history shows up in `log` and `blame`. `agentstategraph-migrate` provides the registry and runner; `agentstategraph-mcp migrate` is a one-shot CLI with dry-run and sysexits-style codes.
+	</Card>
 </CardGrid>
 
 ## Use It From Anywhere
 
-- **MCP Server** — 20 tools, any MCP-compatible agent
-- **Rust** — native library, 137 tests
+- **MCP Server** — 27 tools, any MCP-compatible agent
+- **Rust** — native library, 220+ tests across 8 crates
 - **Python** — PyO3 bindings
 - **TypeScript/Node** — napi-rs bindings
 - **Go** — CGo via C FFI
-- **WASM** — 997KB, runs in any browser
+- **WASM** — runs in any browser
 
 ## The Four Architecture Eras
 

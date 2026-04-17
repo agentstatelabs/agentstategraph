@@ -27,7 +27,7 @@ They are not competitors to each other. They occupy different layers of the stac
 | **Blame** | SQL queries over state history | None | Per-path; surfaces who, why, when, and at what confidence |
 | **Audit surface** | Encrypted state at rest, RBAC, history | Optional thread checkpoints | Tamper-evident sealed epochs |
 | **Language / bindings** | Rust + Go, backs the Terraform CLI | Python only | Rust core with Python, TypeScript, Go, WASM, and C FFI bindings |
-| **Primary interface** | `terraform` / `opentofu` CLI | Python library imports | MCP server (20 tools), library calls, CLI |
+| **Primary interface** | `terraform` / `opentofu` CLI | Python library imports | MCP server (27 tools), library calls, migrate CLI |
 | **Storage backends** | PostgreSQL | Process memory (+ optional checkpointer) | Memory, SQLite, IndexedDB (browser) |
 | **Closest analogy** | A better database under Terraform | A state machine inside your agent | Git for agent-era state |
 
