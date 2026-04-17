@@ -145,3 +145,70 @@ fn missing_blocker_produces_distinct_error() {
         e => panic!("expected BlockerNotFound, got {:?}", e),
     }
 }
+
+/// Blocker ids that do not match the canonical `^t-\d{1,9}$` shape must be
+/// rejected at the substrate layer — BEFORE any tree lookup, so malformed
+/// inputs (path-traversal attempts, nonsense strings) never reach the walker.
+#[test]
+fn add_task_rejects_malformed_blocker_ids() {
+    let (_repo, store) = make_store("/plans");
+    store.create_plan("main", "p", None).unwrap();
+
+    for bad in &["nonsense", "t-", "t-xyz", "../../_meta", ""] {
+        let err = store
+            .add_task(
+                "main",
+                "p",
+                "dependent",
+                Priority::High,
+                None,
+                vec![TaskId((*bad).to_string())],
+                None,
+            )
+            .unwrap_err();
+        match err {
+            TaskStoreError::InvalidBlockerId(s) => assert_eq!(s, *bad),
+            other => panic!("expected InvalidBlockerId for {:?}, got {:?}", bad, other),
+        }
+    }
+}
+
+#[test]
+fn add_task_accepts_valid_blocker_id_shape() {
+    let (_repo, store) = make_store("/plans");
+    store.create_plan("main", "p", None).unwrap();
+    let a = store
+        .add_task("main", "p", "blocker", Priority::Medium, None, vec![], None)
+        .unwrap();
+    // `t-007` is shape-valid; the existence check then accepts it because
+    // TaskId::new(1) already serialized to "t-001". Reuse the real id.
+    assert_eq!(a.id.0, "t-001");
+    let _ = store
+        .add_task(
+            "main",
+            "p",
+            "dep",
+            Priority::High,
+            None,
+            vec![a.id.clone()],
+            None,
+        )
+        .unwrap();
+}
+
+#[test]
+fn set_blockers_rejects_malformed_ids() {
+    let (_repo, store) = make_store("/plans");
+    store.create_plan("main", "p", None).unwrap();
+    let a = store
+        .add_task("main", "p", "x", Priority::Low, None, vec![], None)
+        .unwrap();
+    let err = store
+        .set_blockers("main", "p", &a.id, vec![TaskId("../../_meta".to_string())])
+        .unwrap_err();
+    assert!(
+        matches!(err, TaskStoreError::InvalidBlockerId(_)),
+        "got {:?}",
+        err
+    );
+}

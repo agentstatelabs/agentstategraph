@@ -167,7 +167,7 @@ fn full_consumer_workflow() {
     let report = store.verify_plan("main", "website-v2", &verifier).unwrap();
     assert_eq!(report.results.len(), 2);
     assert_eq!(report.verified_count(), 2);
-    assert!(report.is_all_verified());
+    assert!(report.all_strongly_verified());
 
     // Decay the design proof and re-verify — we should see one Decayed.
     let verifier = StubGitFileVerifier {
@@ -180,7 +180,7 @@ fn full_consumer_workflow() {
     let report = store.verify_plan("main", "website-v2", &verifier).unwrap();
     assert_eq!(report.verified_count(), 1);
     assert_eq!(report.decayed_count(), 1);
-    assert!(!report.is_all_verified());
+    assert!(!report.all_strongly_verified());
 
     // --- Accountability: blame, log filter, watch events. ------------
     // Every commit on the plan path should carry IntentCategory::Plan.

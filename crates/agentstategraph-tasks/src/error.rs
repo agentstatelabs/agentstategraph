@@ -39,6 +39,9 @@ pub enum TaskStoreError {
     #[error("invalid task id format: {0}")]
     InvalidTaskId(String),
 
+    #[error("invalid blocker id {0:?}: blocker ids must match ^t-\\d{{1,9}}$ (e.g. \"t-007\")")]
+    InvalidBlockerId(String),
+
     #[error("repository error: {0}")]
     Repo(String),
 

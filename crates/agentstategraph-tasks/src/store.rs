@@ -12,6 +12,23 @@ use std::sync::Arc;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 use chrono::Utc;
+use once_cell::sync::Lazy;
+use regex::Regex;
+
+/// Canonical blocker id pattern: `t-` followed by 1..9 digits. Validated
+/// at the substrate layer so malformed blocker ids (path-traversal
+/// attempts, nonsense strings) never reach the tree walker.
+static BLOCKER_ID_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^t-\d{1,9}$").expect("static blocker-id regex must compile"));
+
+fn validate_blocker_ids(blockers: &[TaskId]) -> Result<(), TaskStoreError> {
+    for b in blockers {
+        if !BLOCKER_ID_RE.is_match(&b.0) {
+            return Err(TaskStoreError::InvalidBlockerId(b.0.clone()));
+        }
+    }
+    Ok(())
+}
 
 use crate::error::TaskStoreError;
 use crate::paths;
@@ -186,6 +203,7 @@ impl TaskStore {
             }
         }
 
+        validate_blocker_ids(&blocked_by)?;
         for blocker in &blocked_by {
             self.get_task(ref_name, plan, blocker)?;
         }
@@ -457,6 +475,7 @@ impl TaskStore {
         id: &TaskId,
         blockers: Vec<TaskId>,
     ) -> Result<Task, TaskStoreError> {
+        validate_blocker_ids(&blockers)?;
         for blocker in &blockers {
             self.get_task(ref_name, plan, blocker)?;
         }

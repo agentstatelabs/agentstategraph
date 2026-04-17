@@ -9,6 +9,16 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Maximum number of path components accepted by `StatePath::parse`.
+/// Prevents pathological deeply-nested user input from blowing the stack
+/// or causing quadratic work in tree walkers.
+pub const MAX_PATH_DEPTH: usize = 64;
+
+/// Maximum length (in bytes) of a single path segment accepted by
+/// `StatePath::parse`. Keys longer than this are almost always attacks
+/// or bugs — real keys are short identifiers.
+pub const MAX_SEGMENT_LEN: usize = 4096;
+
 /// A component of a path — either a map key or a list/set index.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PathComponent {
@@ -39,9 +49,15 @@ impl StatePath {
         let s = s.strip_prefix('/').ok_or(PathError::MustStartWithSlash)?;
         let components = s
             .split('/')
-            .map(|segment| {
+            .enumerate()
+            .map(|(i, segment)| {
                 if segment.is_empty() {
                     Err(PathError::EmptySegment)
+                } else if segment.len() > MAX_SEGMENT_LEN {
+                    Err(PathError::SegmentTooLong {
+                        index: i,
+                        len: segment.len(),
+                    })
                 } else if let Ok(index) = segment.parse::<usize>() {
                     Ok(PathComponent::Index(index))
                 } else {
@@ -49,6 +65,12 @@ impl StatePath {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        if components.len() > MAX_PATH_DEPTH {
+            return Err(PathError::TooDeep {
+                depth: components.len(),
+            });
+        }
 
         Ok(Self { components })
     }
@@ -122,6 +144,13 @@ pub enum PathError {
     MustStartWithSlash,
     #[error("path contains an empty segment")]
     EmptySegment,
+    #[error("path is too deep: {depth} components (max {})", MAX_PATH_DEPTH)]
+    TooDeep { depth: usize },
+    #[error(
+        "path segment at index {index} is too long: {len} bytes (max {})",
+        MAX_SEGMENT_LEN
+    )]
+    SegmentTooLong { index: usize, len: usize },
 }
 
 #[cfg(test)]
@@ -191,5 +220,46 @@ mod tests {
     #[test]
     fn test_error_empty_segment() {
         assert!(StatePath::parse("/nodes//hostname").is_err());
+    }
+
+    #[test]
+    fn test_error_too_deep() {
+        let mut s = String::new();
+        for i in 0..(MAX_PATH_DEPTH + 5) {
+            s.push_str(&format!("/k{}", i));
+        }
+        match StatePath::parse(&s) {
+            Err(PathError::TooDeep { depth }) => {
+                assert_eq!(depth, MAX_PATH_DEPTH + 5);
+            }
+            other => panic!("expected TooDeep, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_segment_too_long() {
+        let big = "x".repeat(MAX_SEGMENT_LEN + 1);
+        let s = format!("/a/{}", big);
+        match StatePath::parse(&s) {
+            Err(PathError::SegmentTooLong { index, len }) => {
+                assert_eq!(index, 1);
+                assert_eq!(len, MAX_SEGMENT_LEN + 1);
+            }
+            other => panic!("expected SegmentTooLong, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_caps_boundary_accepts() {
+        // Exactly at the cap should be accepted.
+        let seg = "x".repeat(MAX_SEGMENT_LEN);
+        let s = format!("/{}", seg);
+        assert!(StatePath::parse(&s).is_ok());
+
+        let mut deep = String::new();
+        for i in 0..MAX_PATH_DEPTH {
+            deep.push_str(&format!("/k{}", i));
+        }
+        assert!(StatePath::parse(&deep).is_ok());
     }
 }

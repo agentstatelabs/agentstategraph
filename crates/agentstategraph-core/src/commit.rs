@@ -10,6 +10,30 @@ use serde::{Deserialize, Serialize};
 use crate::intent::{AgentId, Authority, Intent, ToolCall};
 use crate::object::ObjectId;
 
+/// Maximum length (in `char`s) of `Intent::description` stored on a commit.
+/// Overlong values are silently truncated on `CommitBuilder::build` — this is
+/// advisory provenance, not identity, so rejecting would force the blame/log
+/// path into a failure mode callers don't expect.
+pub const MAX_DESCRIPTION_LEN: usize = 1024;
+
+/// Maximum length (in `char`s) of `Commit::reasoning`. Truncated silently.
+pub const MAX_REASONING_LEN: usize = 8192;
+
+/// Maximum length (in `char`s) of `Commit::agent_id`. Truncated silently.
+pub const MAX_AGENT_ID_LEN: usize = 128;
+
+/// Maximum number of tool calls recorded on a single commit. Excess tail is
+/// silently dropped on `CommitBuilder::build`.
+pub const MAX_TOOL_CALLS: usize = 256;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
 /// An immutable record that links a state tree to its history and provenance metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Commit {
@@ -108,8 +132,25 @@ impl CommitBuilder {
     }
 
     /// Build the commit, computing its content-addressed ID.
+    ///
+    /// Silently truncates overlong provenance fields to their caps —
+    /// `MAX_DESCRIPTION_LEN`, `MAX_REASONING_LEN`, `MAX_AGENT_ID_LEN`,
+    /// `MAX_TOOL_CALLS`. Truncation uses `chars()` so UTF-8 codepoints
+    /// are never split.
     pub fn build(self) -> Commit {
         let timestamp = Utc::now();
+
+        // Enforce length caps up front — see the module-level MAX_* constants.
+        let agent_id = truncate_chars(&self.agent_id, MAX_AGENT_ID_LEN);
+        let mut intent = self.intent;
+        intent.description = truncate_chars(&intent.description, MAX_DESCRIPTION_LEN);
+        let reasoning = self
+            .reasoning
+            .map(|r| truncate_chars(&r, MAX_REASONING_LEN));
+        let mut tool_calls = self.tool_calls;
+        if tool_calls.len() > MAX_TOOL_CALLS {
+            tool_calls.truncate(MAX_TOOL_CALLS);
+        }
 
         // Create the commit without the ID first
         let mut commit = Commit {
@@ -117,12 +158,12 @@ impl CommitBuilder {
             state_root: self.state_root,
             parents: self.parents,
             timestamp,
-            agent_id: self.agent_id,
+            agent_id,
             authority: self.authority,
-            intent: self.intent,
-            reasoning: self.reasoning,
+            intent,
+            reasoning,
             confidence: self.confidence,
-            tool_calls: self.tool_calls,
+            tool_calls,
         };
 
         // Compute the content-addressed ID from all fields
@@ -224,6 +265,86 @@ mod tests {
             .build();
 
         assert_eq!(commit.parents, vec![parent_id]);
+    }
+
+    #[test]
+    fn test_description_truncated() {
+        let state_root = ObjectId::hash(b"test");
+        let long = "x".repeat(MAX_DESCRIPTION_LEN + 500);
+        let commit = CommitBuilder::new(
+            state_root,
+            "agent/test",
+            test_authority(),
+            Intent::new(IntentCategory::Checkpoint, long),
+        )
+        .build();
+        assert_eq!(
+            commit.intent.description.chars().count(),
+            MAX_DESCRIPTION_LEN
+        );
+    }
+
+    #[test]
+    fn test_reasoning_truncated() {
+        let state_root = ObjectId::hash(b"test");
+        let long = "r".repeat(MAX_REASONING_LEN + 10);
+        let commit = CommitBuilder::new(state_root, "agent/test", test_authority(), test_intent())
+            .reasoning(long)
+            .build();
+        assert_eq!(
+            commit.reasoning.as_ref().unwrap().chars().count(),
+            MAX_REASONING_LEN
+        );
+    }
+
+    #[test]
+    fn test_agent_id_truncated() {
+        let state_root = ObjectId::hash(b"test");
+        let long = "a".repeat(MAX_AGENT_ID_LEN + 50);
+        let commit = CommitBuilder::new(state_root, long, test_authority(), test_intent()).build();
+        assert_eq!(commit.agent_id.chars().count(), MAX_AGENT_ID_LEN);
+    }
+
+    #[test]
+    fn test_tool_calls_truncated() {
+        let state_root = ObjectId::hash(b"test");
+        let calls: Vec<ToolCall> = (0..(MAX_TOOL_CALLS + 20))
+            .map(|i| ToolCall {
+                tool_name: format!("tool_{}", i),
+                arguments: serde_json::json!({}),
+                result: None,
+                timestamp: Utc::now(),
+            })
+            .collect();
+        let commit = CommitBuilder::new(state_root, "agent/test", test_authority(), test_intent())
+            .tool_calls(calls)
+            .build();
+        assert_eq!(commit.tool_calls.len(), MAX_TOOL_CALLS);
+    }
+
+    #[test]
+    fn test_truncation_preserves_utf8_boundaries() {
+        let state_root = ObjectId::hash(b"test");
+        // 4-byte UTF-8 emoji; chars().take() must not split them.
+        let emoji_flood = "🎉".repeat(MAX_DESCRIPTION_LEN + 10);
+        let commit = CommitBuilder::new(
+            state_root,
+            "agent/test",
+            test_authority(),
+            Intent::new(IntentCategory::Checkpoint, emoji_flood),
+        )
+        .build();
+        assert_eq!(
+            commit.intent.description.chars().count(),
+            MAX_DESCRIPTION_LEN
+        );
+        // If we'd split a codepoint, the String would not round-trip through char count equal to byte/4.
+        assert!(
+            commit
+                .intent
+                .description
+                .is_char_boundary(commit.intent.description.len())
+        );
     }
 
     #[test]

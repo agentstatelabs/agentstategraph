@@ -48,7 +48,7 @@ fn verify_plan_reports_per_task_result() {
     assert_eq!(report.verified_count(), 2);
     assert_eq!(report.decayed_count(), 1);
     assert_eq!(report.unverifiable_count(), 1);
-    assert!(!report.is_all_verified());
+    assert!(!report.all_strongly_verified());
 }
 
 #[test]

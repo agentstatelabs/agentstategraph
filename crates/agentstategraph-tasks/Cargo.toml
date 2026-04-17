@@ -13,6 +13,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+regex = "1"
+once_cell = "1"
 
 [dev-dependencies]
 agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false }

@@ -19,6 +19,15 @@ use crate::tree::{self, TreeError};
 /// prefix are only permitted on commits tagged `IntentCategory::Migrate`.
 pub const META_PATH_PREFIX: &str = "/_meta";
 
+/// Reserved sub-prefix for secret-bearing metadata. BOTH reads AND writes
+/// under `/_meta/_secret/*` are gated to `IntentCategory::Migrate`. The
+/// broader `/_meta/*` prefix only gates writes — the secret sub-prefix
+/// tightens this for values that must not be surfaced by casual
+/// `get`/`list_paths`/`search_values` callers.
+///
+/// See `spec/UPGRADE-PATH.md`.
+pub const META_SECRET_PREFIX: &str = "/_meta/_secret";
+
 /// Path to the schema version sentinel written by `Repository::init()`
 /// and bumped by migrations in the `agentstategraph-migrate` crate.
 pub const META_SCHEMA_VERSION_PATH: &str = "/_meta/schema_version";
@@ -37,8 +46,24 @@ fn path_is_reserved(path: &str) -> bool {
     path == META_PATH_PREFIX || path.starts_with(&format!("{}/", META_PATH_PREFIX))
 }
 
+/// True iff `path` is inside the `/_meta/_secret` sub-tree (or is the
+/// prefix itself). Used to gate READS on secret metadata.
+fn path_is_secret(path: &str) -> bool {
+    path == META_SECRET_PREFIX || path.starts_with(&format!("{}/", META_SECRET_PREFIX))
+}
+
 fn check_meta_guard(path: &str, intent: &Intent) -> Result<(), RepoError> {
     if path_is_reserved(path) && intent.category != IntentCategory::Migrate {
+        return Err(RepoError::ReservedPath(path.to_string()));
+    }
+    Ok(())
+}
+
+/// Gate reads of `/_meta/_secret/*` unless the caller's intent is
+/// `IntentCategory::Migrate`. Applied to every read surface
+/// (`get`, `get_json`, `list_paths`, `search_values`).
+fn check_secret_read_guard(path: &str, intent: &Intent) -> Result<(), RepoError> {
+    if path_is_secret(path) && intent.category != IntentCategory::Migrate {
         return Err(RepoError::ReservedPath(path.to_string()));
     }
     Ok(())
@@ -218,7 +243,14 @@ impl Repository {
     // -----------------------------------------------------------------------
 
     /// Get a value from state at the given ref and path.
+    ///
+    /// Reads under `/_meta/_secret/*` are rejected — use
+    /// [`Repository::get_with_intent`] with an
+    /// `IntentCategory::Migrate` intent to access them.
     pub fn get(&self, ref_name: &str, path: &str) -> Result<Object, RepoError> {
+        if path_is_secret(path) {
+            return Err(RepoError::ReservedPath(path.to_string()));
+        }
         let commit_id = self.resolve_ref(ref_name)?;
         let commit = self
             .storage
@@ -232,8 +264,45 @@ impl Repository {
     }
 
     /// Get a value as JSON.
+    ///
+    /// Reads under `/_meta/_secret/*` are rejected — use
+    /// [`Repository::get_json_with_intent`] with
+    /// `IntentCategory::Migrate` to access them.
     pub fn get_json(&self, ref_name: &str, path: &str) -> Result<serde_json::Value, RepoError> {
         let obj = self.get(ref_name, path)?;
+        let json = tree::tree_to_json(self.storage.as_ref(), &obj)?;
+        Ok(json)
+    }
+
+    /// Get a value with an explicit intent, permitting reads of
+    /// `/_meta/_secret/*` when the intent category is `Migrate`.
+    pub fn get_with_intent(
+        &self,
+        ref_name: &str,
+        path: &str,
+        intent: &Intent,
+    ) -> Result<Object, RepoError> {
+        check_secret_read_guard(path, intent)?;
+        let commit_id = self.resolve_ref(ref_name)?;
+        let commit = self
+            .storage
+            .get_commit(&commit_id)?
+            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let obj = tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path)?;
+        Ok(obj)
+    }
+
+    /// Like [`Repository::get_json`] but honors an explicit intent for
+    /// reading the `/_meta/_secret/*` sub-tree.
+    pub fn get_json_with_intent(
+        &self,
+        ref_name: &str,
+        path: &str,
+        intent: &Intent,
+    ) -> Result<serde_json::Value, RepoError> {
+        let obj = self.get_with_intent(ref_name, path, intent)?;
         let json = tree::tree_to_json(self.storage.as_ref(), &obj)?;
         Ok(json)
     }
@@ -520,10 +589,7 @@ impl Repository {
         handle: SpecHandle,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
-        let (state_root, base_ref) = self
-            .specs
-            .commit(handle)
-            .map_err(RepoError::Speculation)?;
+        let (state_root, base_ref) = self.specs.commit(handle).map_err(RepoError::Speculation)?;
 
         let parent_id = self.resolve_ref(&base_ref)?;
 
@@ -550,9 +616,7 @@ impl Repository {
 
     /// Discard a speculation — all changes lost. Instant.
     pub fn discard_speculation(&self, handle: SpecHandle) -> Result<(), RepoError> {
-        self.specs
-            .discard(handle)
-            .map_err(RepoError::Speculation)
+        self.specs.discard(handle).map_err(RepoError::Speculation)
     }
 
     /// List all active speculations.
@@ -628,40 +692,41 @@ impl Repository {
                     });
                 }
             } else if let Some(parent_id) = commit.parents.first()
-                && let Some(parent) = self.storage.get_commit(parent_id)? {
-                    let current_val =
-                        tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path);
-                    let parent_val =
-                        tree::tree_get(self.storage.as_ref(), &parent.state_root, &state_path);
+                && let Some(parent) = self.storage.get_commit(parent_id)?
+            {
+                let current_val =
+                    tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path);
+                let parent_val =
+                    tree::tree_get(self.storage.as_ref(), &parent.state_root, &state_path);
 
-                    // If the value is different (or didn't exist in parent), this commit is the blame target
-                    match (current_val.ok(), parent_val.ok()) {
-                        (Some(curr), Some(prev)) if curr != prev => {
-                            return Ok(agentstategraph_core::BlameEntry {
-                                path: path.to_string(),
-                                commit_id: commit.id.short(),
-                                agent_id: commit.agent_id.clone(),
-                                intent_category: format!("{:?}", commit.intent.category),
-                                intent_description: commit.intent.description.clone(),
-                                reasoning: commit.reasoning.clone(),
-                                timestamp: commit.timestamp,
-                            });
-                        }
-                        (Some(_), None) => {
-                            // Value was added in this commit
-                            return Ok(agentstategraph_core::BlameEntry {
-                                path: path.to_string(),
-                                commit_id: commit.id.short(),
-                                agent_id: commit.agent_id.clone(),
-                                intent_category: format!("{:?}", commit.intent.category),
-                                intent_description: commit.intent.description.clone(),
-                                reasoning: commit.reasoning.clone(),
-                                timestamp: commit.timestamp,
-                            });
-                        }
-                        _ => continue,
+                // If the value is different (or didn't exist in parent), this commit is the blame target
+                match (current_val.ok(), parent_val.ok()) {
+                    (Some(curr), Some(prev)) if curr != prev => {
+                        return Ok(agentstategraph_core::BlameEntry {
+                            path: path.to_string(),
+                            commit_id: commit.id.short(),
+                            agent_id: commit.agent_id.clone(),
+                            intent_category: format!("{:?}", commit.intent.category),
+                            intent_description: commit.intent.description.clone(),
+                            reasoning: commit.reasoning.clone(),
+                            timestamp: commit.timestamp,
+                        });
                     }
+                    (Some(_), None) => {
+                        // Value was added in this commit
+                        return Ok(agentstategraph_core::BlameEntry {
+                            path: path.to_string(),
+                            commit_id: commit.id.short(),
+                            agent_id: commit.agent_id.clone(),
+                            intent_category: format!("{:?}", commit.intent.category),
+                            intent_description: commit.intent.description.clone(),
+                            reasoning: commit.reasoning.clone(),
+                            timestamp: commit.timestamp,
+                        });
+                    }
+                    _ => continue,
                 }
+            }
         }
 
         Err(RepoError::RefNotFound(format!(
@@ -766,18 +831,21 @@ impl Repository {
         prefix: &str,
         max_depth: Option<usize>,
     ) -> Result<Vec<String>, RepoError> {
+        if path_is_secret(prefix) {
+            return Err(RepoError::ReservedPath(prefix.to_string()));
+        }
         let commit_id = self.resolve_ref(ref_name)?;
         let commit = self
             .storage
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
         let depth = max_depth.unwrap_or(50);
-        Ok(tree::tree_list_paths(
-            self.storage.as_ref(),
-            &commit.state_root,
-            prefix,
-            depth,
-        )?)
+        let mut paths =
+            tree::tree_list_paths(self.storage.as_ref(), &commit.state_root, prefix, depth)?;
+        // Filter out any results that land under the secret sub-prefix —
+        // a broader prefix like "/_meta" or "/" must not leak secret names.
+        paths.retain(|p| !path_is_secret(p));
+        Ok(paths)
     }
 
     /// Get an entire subtree as nested JSON. Batch alternative to N×get calls.
@@ -800,12 +868,11 @@ impl Repository {
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
         let limit = max_results.unwrap_or(50);
-        Ok(tree::tree_search_values(
-            self.storage.as_ref(),
-            &commit.state_root,
-            query,
-            limit,
-        )?)
+        let mut results =
+            tree::tree_search_values(self.storage.as_ref(), &commit.state_root, query, limit)?;
+        // Never surface values from the secret sub-prefix.
+        results.retain(|(path, _)| !path_is_secret(path));
+        Ok(results)
     }
 
     /// Get summary statistics for a ref.
@@ -1111,6 +1178,63 @@ mod tests {
             Object::Atom(agentstategraph_core::Atom::String(s)) => assert_eq!(s, "0.5.0"),
             other => panic!("unexpected {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_secret_read_guard_rejects_non_migrate_reads() {
+        let repo = test_repo();
+
+        // Seed a value under /_meta/_secret via a Migrate write.
+        let value = Object::Atom(agentstategraph_core::Atom::String("shh".into()));
+        let migrate_opts =
+            CommitOptions::new("agent/migrate", IntentCategory::Migrate, "seed secret");
+        repo.set("main", "/_meta/_secret/api_key", &value, migrate_opts)
+            .expect("migrate can write to /_meta/_secret");
+
+        // Default get() must reject.
+        let err = repo
+            .get("main", "/_meta/_secret/api_key")
+            .expect_err("non-migrate read of secret must fail");
+        assert!(matches!(err, RepoError::ReservedPath(_)), "got {:?}", err);
+
+        // list_paths over /_meta must NOT surface the secret subtree.
+        let paths = repo.list_paths("main", "/_meta", None).unwrap();
+        assert!(
+            paths.iter().all(|p| !p.starts_with("/_meta/_secret")),
+            "list_paths leaked secret paths: {:?}",
+            paths
+        );
+
+        // Directly listing the secret prefix is rejected outright.
+        let err = repo
+            .list_paths("main", "/_meta/_secret", None)
+            .expect_err("list_paths on secret prefix must fail");
+        assert!(matches!(err, RepoError::ReservedPath(_)), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_secret_read_guard_allows_migrate() {
+        let repo = test_repo();
+        let value = Object::Atom(agentstategraph_core::Atom::String("shh".into()));
+        let opts = CommitOptions::new("agent/migrate", IntentCategory::Migrate, "seed");
+        repo.set("main", "/_meta/_secret/token", &value, opts)
+            .unwrap();
+
+        let intent = Intent::new(IntentCategory::Migrate, "read secret for migration");
+        let got = repo
+            .get_with_intent("main", "/_meta/_secret/token", &intent)
+            .expect("migrate read should succeed");
+        match got {
+            Object::Atom(agentstategraph_core::Atom::String(s)) => assert_eq!(s, "shh"),
+            other => panic!("unexpected {:?}", other),
+        }
+
+        // Non-migrate intent, even via the explicit-intent method, must fail.
+        let bad_intent = Intent::new(IntentCategory::Checkpoint, "sneak a peek");
+        let err = repo
+            .get_with_intent("main", "/_meta/_secret/token", &bad_intent)
+            .unwrap_err();
+        assert!(matches!(err, RepoError::ReservedPath(_)), "got {:?}", err);
     }
 
     #[test]

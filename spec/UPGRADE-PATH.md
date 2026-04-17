@@ -12,6 +12,7 @@
 
 - Path: `/_meta/schema_version` — string value, SemVer (e.g. `"0.4.0"`).
 - The underscore prefix signals "reserved/internal"; consumer writes to `/_meta/*` should be rejected at the Repository layer (new guard). Parallel slot `/_meta/app_version` reserved for consumer metadata.
+- **Secret sub-prefix:** `/_meta/_secret/*` is further reserved for secret-bearing metadata. BOTH reads AND writes under this sub-tree are gated to `IntentCategory::Migrate`; the broader `/_meta/*` prefix only gates writes. Use `Repository::get_with_intent` / `get_json_with_intent` with a Migrate intent to access these values. `list_paths` and `search_values` silently filter out entries under `/_meta/_secret/*` so a broad `/` or `/_meta` walk cannot leak secret path names.
 - Written during `Repository::init()` at [crates/agentstategraph/src/repo.rs:119](../crates/agentstategraph/src/repo.rs). On an already-initialized repo that lacks `/_meta/schema_version` (i.e. pre-0.4), we treat the absence as an **implicit version**, not an error — see §3.
 - Bumped only by migrations, in the same commit as the migration's effects. Atomicity comes from the existing multi-path commit plumbing used by `agentstategraph-tasks` (`spec_set_json`).
 
