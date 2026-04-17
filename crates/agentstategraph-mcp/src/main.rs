@@ -6,8 +6,8 @@
 //! Options:                    cargo run -p agentstategraph-mcp -- --storage memory
 //!                             cargo run -p agentstategraph-mcp -- --path /data/state.db
 
-mod auth;
-mod http;
+use agentstategraph_mcp::http;
+
 mod migrate;
 mod server;
 
@@ -35,6 +35,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut http_port: u16 = 3001;
     let mut auth_enabled = false;
     let mut keys_file = String::new();
+    // Rate limit (requests/minute, per peer IP). CLI wins over env.
+    // 0 disables rate limiting entirely.
+    let mut rate_limit_rpm: u32 = std::env::var("ASG_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    let mut rate_limit_rpm_cli: Option<u32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -86,6 +93,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     http_port = args[i].parse().unwrap_or(3001);
                 }
             }
+            "--rate-limit-rpm" => {
+                i += 1;
+                if i < args.len()
+                    && let Ok(v) = args[i].parse()
+                {
+                    rate_limit_rpm_cli = Some(v);
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -113,6 +128,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
                 );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
+                eprintln!(
+                    "      --rate-limit-rpm <N>  Per-IP requests/minute (default: 600, 0 disables; env ASG_RATE_LIMIT_RPM)"
+                );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
                 eprintln!("HTTP API ENDPOINTS:");
@@ -144,12 +162,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check for DATABASE_URL env var as fallback for postgres
     if database_url.is_empty()
-        && let Ok(url) = std::env::var("DATABASE_URL") {
-            database_url = url;
-            if storage_type == "sqlite" {
-                storage_type = "postgres";
-            }
+        && let Ok(url) = std::env::var("DATABASE_URL")
+    {
+        database_url = url;
+        if storage_type == "sqlite" {
+            storage_type = "postgres";
         }
+    }
 
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
@@ -178,7 +197,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     repo.init()?;
 
+    if let Some(cli_rpm) = rate_limit_rpm_cli {
+        rate_limit_rpm = cli_rpm;
+    }
+
     if http_mode {
+        eprintln!(
+            "Rate limit: {} requests/minute per peer IP{}",
+            rate_limit_rpm,
+            if rate_limit_rpm == 0 {
+                " (DISABLED)"
+            } else {
+                ""
+            }
+        );
         if auth_enabled {
             eprintln!(
                 "Auth: enabled (keys file: {})",
@@ -204,13 +236,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         Some(keys_file.as_str())
                     };
-                    http::router_multi_tenant(repo, kf)
+                    http::router_multi_tenant_with_rate_limit(repo, kf, rate_limit_rpm)
                 } else {
-                    http::router(repo)
+                    http::router_with_rate_limit(repo, rate_limit_rpm)
                 };
                 let addr = format!("0.0.0.0:{}", http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
-                axum::serve(listener, app).await?;
+                // `into_make_service_with_connect_info::<SocketAddr>()`
+                // exposes the peer IP to tower_governor so per-IP keying
+                // works. Without this, the governor layer panics.
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await?;
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
     } else {

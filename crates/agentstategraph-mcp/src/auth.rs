@@ -29,6 +29,29 @@ pub struct ApiKey {
     pub plan: String, // "free", "standard", "enterprise"
     pub enabled: bool,
     pub created_at: String,
+    /// Optional authenticated agent identity bound to this key.
+    /// When set, commits via HTTP must use this as the `agent_id`,
+    /// ignoring any body-supplied `agent` field (§8 — authenticated
+    /// commit agent_id).
+    #[serde(default)]
+    pub commit_agent_id: Option<String>,
+    /// Whether this key is allowed to issue commits tagged
+    /// `IntentCategory::Migrate` (§10 — key-scoped migrate capability).
+    /// Defaults to false; only trusted keys should have it.
+    #[serde(default)]
+    pub can_migrate: bool,
+}
+
+/// Context resolved by the auth middleware for each request.
+/// Injected into `request.extensions_mut()` so handlers can reach it.
+#[derive(Debug, Clone, Default)]
+pub struct AuthContext {
+    /// Authenticated agent_id bound to the key, if any.
+    pub commit_agent_id: Option<String>,
+    /// Whether this request is allowed to commit with `IntentCategory::Migrate`.
+    pub can_migrate: bool,
+    /// Short prefix of the key (for logging), if any.
+    pub key_prefix: Option<String>,
 }
 
 /// Manages tenants, API keys, and per-tenant Repository instances.
@@ -64,11 +87,12 @@ impl TenantManager {
 
         if let Some(path) = keys_file
             && let Ok(data) = std::fs::read_to_string(path)
-                && let Ok(loaded) = serde_json::from_str::<Vec<ApiKey>>(&data) {
-                    for key in loaded {
-                        keys.insert(key.key.clone(), key);
-                    }
-                }
+            && let Ok(loaded) = serde_json::from_str::<Vec<ApiKey>>(&data)
+        {
+            for key in loaded {
+                keys.insert(key.key.clone(), key);
+            }
+        }
 
         Arc::new(Self {
             keys: RwLock::new(keys),
@@ -88,7 +112,21 @@ impl TenantManager {
     }
 
     /// Generate a new API key for a tenant.
+    #[allow(dead_code)]
     pub fn create_key(&self, tenant_id: &str, name: &str, plan: &str) -> ApiKey {
+        self.create_key_with(tenant_id, name, plan, None, false)
+    }
+
+    /// Generate a new API key with optional commit_agent_id binding and
+    /// migrate capability.
+    pub fn create_key_with(
+        &self,
+        tenant_id: &str,
+        name: &str,
+        plan: &str,
+        commit_agent_id: Option<String>,
+        can_migrate: bool,
+    ) -> ApiKey {
         let key = format!("asg_{}", uuid_v4());
         let api_key = ApiKey {
             key: key.clone(),
@@ -97,9 +135,41 @@ impl TenantManager {
             plan: plan.to_string(),
             enabled: true,
             created_at: chrono::Utc::now().to_rfc3339(),
+            commit_agent_id,
+            can_migrate,
         };
         self.register_key(api_key.clone());
         api_key
+    }
+
+    /// Look up the authenticated agent_id bound to an API key, if any.
+    pub fn get_agent_id(&self, api_key: &str) -> Option<String> {
+        let keys = self.keys.read().ok()?;
+        let k = keys.get(api_key)?;
+        if !k.enabled {
+            return None;
+        }
+        k.commit_agent_id.clone()
+    }
+
+    /// Whether the given API key may commit with `IntentCategory::Migrate`.
+    /// When auth is disabled (single-tenant mode), this returns true so
+    /// local dev and self-hosted deployments are unaffected.
+    pub fn can_migrate(&self, api_key: &str) -> bool {
+        if !self.auth_enabled {
+            return true;
+        }
+        let Ok(keys) = self.keys.read() else {
+            return false;
+        };
+        keys.get(api_key)
+            .map(|k| k.enabled && k.can_migrate)
+            .unwrap_or(false)
+    }
+
+    /// Whether auth is enabled on this manager.
+    pub fn auth_enabled(&self) -> bool {
+        self.auth_enabled
     }
 
     /// List all API keys (masked).
@@ -119,6 +189,8 @@ impl TenantManager {
                     "plan": k.plan,
                     "enabled": k.enabled,
                     "created_at": k.created_at,
+                    "commit_agent_id": k.commit_agent_id,
+                    "can_migrate": k.can_migrate,
                 })
             })
             .collect()
@@ -133,11 +205,12 @@ impl TenantManager {
                 .cloned()
                 .collect();
             if let Some(key) = matching.first()
-                && let Some(api_key) = keys.get_mut(key) {
-                    api_key.enabled = false;
-                    self.save_keys();
-                    return true;
-                }
+                && let Some(api_key) = keys.get_mut(key)
+            {
+                api_key.enabled = false;
+                self.save_keys();
+                return true;
+            }
         }
         false
     }
@@ -171,12 +244,13 @@ impl TenantManager {
 
     fn save_keys(&self) {
         if let Some(ref path) = self.keys_file
-            && let Ok(keys) = self.keys.read() {
-                let all: Vec<&ApiKey> = keys.values().collect();
-                if let Ok(data) = serde_json::to_string_pretty(&all) {
-                    let _ = std::fs::write(path, data);
-                }
+            && let Ok(keys) = self.keys.read()
+        {
+            let all: Vec<&ApiKey> = keys.values().collect();
+            if let Ok(data) = serde_json::to_string_pretty(&all) {
+                let _ = std::fs::write(path, data);
             }
+        }
     }
 }
 
@@ -210,8 +284,39 @@ pub async fn auth_middleware(
     let api_key = extract_api_key(&headers);
     let repo = tenant_mgr.get_repo(api_key.as_deref())?;
 
-    // Inject the resolved repo into request extensions so handlers can access it
+    // Build AuthContext for handlers: carries authenticated agent_id and
+    // migrate capability. When auth is disabled, `can_migrate` defaults
+    // to true (single-tenant dev) and `commit_agent_id` stays None.
+    let ctx = if tenant_mgr.auth_enabled() {
+        let commit_agent_id = api_key.as_deref().and_then(|k| tenant_mgr.get_agent_id(k));
+        let can_migrate = api_key
+            .as_deref()
+            .map(|k| tenant_mgr.can_migrate(k))
+            .unwrap_or(false);
+        let key_prefix = api_key.as_deref().map(|k| {
+            if k.len() > 8 {
+                k[..8].to_string()
+            } else {
+                k.to_string()
+            }
+        });
+        AuthContext {
+            commit_agent_id,
+            can_migrate,
+            key_prefix,
+        }
+    } else {
+        AuthContext {
+            commit_agent_id: None,
+            can_migrate: true,
+            key_prefix: None,
+        }
+    };
+
+    // Inject the resolved repo and auth context into request extensions
+    // so handlers can access them.
     request.extensions_mut().insert(repo);
+    request.extensions_mut().insert(ctx);
 
     Ok(next.run(request).await)
 }
@@ -220,21 +325,23 @@ pub async fn auth_middleware(
 fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     // Try Authorization: Bearer <key>
     if let Some(auth) = headers.get("authorization")
-        && let Ok(value) = auth.to_str() {
-            if let Some(key) = value.strip_prefix("Bearer ") {
-                return Some(key.trim().to_string());
-            }
-            // Also accept plain key without "Bearer"
-            if value.starts_with("asg_") {
-                return Some(value.trim().to_string());
-            }
+        && let Ok(value) = auth.to_str()
+    {
+        if let Some(key) = value.strip_prefix("Bearer ") {
+            return Some(key.trim().to_string());
         }
+        // Also accept plain key without "Bearer"
+        if value.starts_with("asg_") {
+            return Some(value.trim().to_string());
+        }
+    }
 
     // Try X-API-Key header
     if let Some(key) = headers.get("x-api-key")
-        && let Ok(value) = key.to_str() {
-            return Some(value.trim().to_string());
-        }
+        && let Ok(value) = key.to_str()
+    {
+        return Some(value.trim().to_string());
+    }
 
     None
 }

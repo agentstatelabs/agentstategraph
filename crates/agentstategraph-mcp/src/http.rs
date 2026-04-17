@@ -7,39 +7,113 @@
 //!
 //! Start with: agentstategraph-mcp --http --port 3001
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::IntoResponse,
     routing::{get, post},
 };
+use governor::middleware::NoOpMiddleware;
 use serde::Deserialize;
+use tower_governor::GovernorLayer;
+use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
+use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::{info, warn};
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, RepoError, Repository};
 use agentstategraph_core::IntentCategory;
 
-use crate::auth::{self, TenantManager};
+use crate::auth::{self, AuthContext, TenantManager};
+
+/// Compiled config for per-peer-IP governor.
+pub type PeerIpGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
+
+/// Fully-pinned GovernorLayer type.
+pub type PeerIpGovernorLayer = GovernorLayer<PeerIpKeyExtractor, NoOpMiddleware, axum::body::Body>;
+
+/// Build a per-peer-IP rate limit layer enforcing `rpm` requests/minute.
+/// Returns `None` when `rpm == 0` (disabled). The returned layer emits
+/// axum-native `429 Too Many Requests` responses on its own.
+pub fn build_governor_layer(rpm: u32) -> Option<PeerIpGovernorLayer> {
+    if rpm == 0 {
+        info!("ASG rate limiting disabled (rpm = 0)");
+        return None;
+    }
+    let period_ms = (60_000 / rpm.max(1)) as u64;
+    let burst = (rpm / 10).max(5);
+    let config: PeerIpGovernorConfig = GovernorConfigBuilder::default()
+        .period(std::time::Duration::from_millis(period_ms))
+        .burst_size(burst)
+        .finish()?;
+    info!(rpm, period_ms, burst, "ASG rate limiter configured");
+    Some(GovernorLayer::new(config))
+}
+
+/// Track per-key-prefix warning state so we only warn once per key when
+/// it falls back to the body-supplied agent field.
+static AGENT_FALLBACK_WARNED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+
+fn warn_agent_fallback_once(key_prefix: &Option<String>) {
+    let prefix = key_prefix.clone().unwrap_or_else(|| "<anon>".to_string());
+    let mut guard = AGENT_FALLBACK_WARNED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if set.insert(prefix.clone()) {
+        warn!(
+            key_prefix = %prefix,
+            "commit agent_id not bound to API key; falling back to body-supplied `agent` field (set `commit_agent_id` on the key to enforce authenticated agent identity)"
+        );
+    }
+}
 
 pub type AppState = Arc<Repository>;
 
 /// Create a single-tenant router (no auth, backward compatible).
+#[allow(dead_code)]
 pub fn router(repo: Arc<Repository>) -> Router {
+    router_with_rate_limit(repo, 0)
+}
+
+/// Create a single-tenant router with an explicit rate limit (rpm).
+pub fn router_with_rate_limit(repo: Arc<Repository>, rpm: u32) -> Router {
     let tenant_mgr = TenantManager::single_tenant(repo.clone());
-    build_router(repo, tenant_mgr)
+    build_router(repo, tenant_mgr, rpm)
 }
 
 /// Create a multi-tenant router with API key authentication.
+#[allow(dead_code)]
 pub fn router_multi_tenant(repo: Arc<Repository>, keys_file: Option<&str>) -> Router {
-    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), keys_file);
-    build_router(repo, tenant_mgr)
+    router_multi_tenant_with_rate_limit(repo, keys_file, 0)
 }
 
-fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>) -> Router {
+/// Create a multi-tenant router with an explicit rate limit (rpm).
+pub fn router_multi_tenant_with_rate_limit(
+    repo: Arc<Repository>,
+    keys_file: Option<&str>,
+    rpm: u32,
+) -> Router {
+    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), keys_file);
+    build_router(repo, tenant_mgr, rpm)
+}
+
+/// Test hook: build the router with a pre-constructed `TenantManager`
+/// so integration tests can seed specific API keys without spinning
+/// them through the admin HTTP endpoints.
+pub fn build_router_for_test(
+    repo: Arc<Repository>,
+    tenant_mgr: Arc<TenantManager>,
+    rpm: u32,
+) -> Router {
+    build_router(repo, tenant_mgr, rpm)
+}
+
+fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -84,10 +158,21 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>) -> Router
         .route("/api/admin/keys/revoke", post(revoke_key))
         .with_state(tenant_mgr);
 
-    Router::new()
+    let mut router = Router::new()
         .nest("/api", api_routes)
         .merge(admin_routes)
-        .layer(cors)
+        .layer(cors);
+
+    // Apply the governor layer LAST so it runs FIRST in the request
+    // lifecycle (tower layers execute in reverse insertion order).
+    // tower_governor's GovernorLayer emits axum-native 429 responses on
+    // its own — no HandleErrorLayer wrapping needed. When rpm=0, the
+    // layer is absent.
+    if let Some(layer) = build_governor_layer(rpm) {
+        router = router.layer(layer);
+    }
+
+    router
 }
 
 // ─── Health ─────────────────────────────────────────────────
@@ -117,6 +202,10 @@ struct CreateKeyRequest {
     tenant_id: String,
     name: String,
     plan: Option<String>,
+    #[serde(default)]
+    commit_agent_id: Option<String>,
+    #[serde(default)]
+    can_migrate: Option<bool>,
 }
 
 async fn list_keys(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Value> {
@@ -128,13 +217,22 @@ async fn create_key(
     Json(req): Json<CreateKeyRequest>,
 ) -> Json<serde_json::Value> {
     let plan = req.plan.unwrap_or_else(|| "free".to_string());
-    let key = mgr.create_key(&req.tenant_id, &req.name, &plan);
+    let can_migrate = req.can_migrate.unwrap_or(false);
+    let key = mgr.create_key_with(
+        &req.tenant_id,
+        &req.name,
+        &plan,
+        req.commit_agent_id,
+        can_migrate,
+    );
     // Return the full key ONCE — it won't be shown again
     Json(serde_json::json!({
         "key": key.key,
         "tenant_id": key.tenant_id,
         "name": key.name,
         "plan": key.plan,
+        "commit_agent_id": key.commit_agent_id,
+        "can_migrate": key.can_migrate,
         "message": "Save this key — it will not be shown again."
     }))
 }
@@ -219,11 +317,12 @@ struct SetRequest {
 
 async fn set_value(
     State(repo): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(ref_name): Path<String>,
     Json(req): Json<SetRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let category = parse_category(&req.intent_category);
-    let agent = req.agent.unwrap_or_else(|| "http".to_string());
+    let category = enforce_migrate_capability(parse_category(&req.intent_category), &ctx);
+    let agent = resolve_agent(&ctx, req.agent);
     let mut opts = CommitOptions::new(agent, category, &req.intent_description);
     if let Some(r) = req.reasoning {
         opts = opts.with_reasoning(r);
@@ -242,15 +341,19 @@ struct DeleteRequest {
     path: String,
     intent_category: String,
     intent_description: String,
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 async fn delete_value(
     State(repo): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(ref_name): Path<String>,
     Json(req): Json<DeleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let category = parse_category(&req.intent_category);
-    let opts = CommitOptions::new("http", category, &req.intent_description);
+    let category = enforce_migrate_capability(parse_category(&req.intent_category), &ctx);
+    let agent = resolve_agent(&ctx, req.agent);
+    let opts = CommitOptions::new(agent, category, &req.intent_description);
     let commit_id = repo.delete(&ref_name, &req.path, opts)?;
     Ok(Json(
         serde_json::json!({ "commit_id": commit_id.to_string() }),
@@ -427,14 +530,18 @@ struct MergeRequest {
     target: Option<String>,
     intent_description: String,
     reasoning: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 async fn merge_branches(
     State(repo): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let target = req.target.as_deref().unwrap_or("main");
-    let mut opts = CommitOptions::new("http", IntentCategory::Merge, &req.intent_description);
+    let agent = resolve_agent(&ctx, req.agent);
+    let mut opts = CommitOptions::new(agent, IntentCategory::Merge, &req.intent_description);
     if let Some(r) = req.reasoning {
         opts = opts.with_reasoning(r);
     }
@@ -443,7 +550,7 @@ async fn merge_branches(
         Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => Ok(Json(
             serde_json::json!({ "conflicts": conflicts.len(), "details": serde_json::to_value(&conflicts).unwrap_or_default() }),
         )),
-        Err(e) => Err(AppError(e.into())),
+        Err(e) => Err(AppError::from(e)),
     }
 }
 
@@ -524,25 +631,73 @@ async fn intent_tree(
 
 // ─── Error handling ─────────────────────────────────────────
 
-struct AppError(Box<dyn std::error::Error>);
+struct AppError {
+    status: StatusCode,
+    message: String,
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": self.0.to_string() })),
+            self.status,
+            Json(serde_json::json!({ "error": self.message })),
         )
             .into_response()
     }
 }
 
-impl<E: std::error::Error + 'static> From<E> for AppError {
-    fn from(err: E) -> Self {
-        AppError(Box::new(err))
+impl From<RepoError> for AppError {
+    fn from(err: RepoError) -> Self {
+        let status = match err {
+            // Writes to `/_meta/*` without `IntentCategory::Migrate` are
+            // a capability violation, not a server fault — surface 403.
+            RepoError::ReservedPath(_) => StatusCode::FORBIDDEN,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        AppError {
+            status,
+            message: err.to_string(),
+        }
+    }
+}
+
+// Generic fallback for non-RepoError error types produced by handlers.
+impl From<Box<dyn std::error::Error>> for AppError {
+    fn from(err: Box<dyn std::error::Error>) -> Self {
+        AppError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: err.to_string(),
+        }
     }
 }
 
 // ─── Helpers ────────────────────────────────────────────────
+
+/// Pick the `agent_id` for a commit: prefer the authenticated identity
+/// bound to the API key; fall back to the body-supplied `agent` (logging
+/// a one-time warning per key prefix); otherwise a safe default.
+fn resolve_agent(ctx: &AuthContext, body_agent: Option<String>) -> String {
+    if let Some(ref bound) = ctx.commit_agent_id {
+        return bound.clone();
+    }
+    warn_agent_fallback_once(&ctx.key_prefix);
+    body_agent.unwrap_or_else(|| "http".to_string())
+}
+
+/// Downgrade `IntentCategory::Migrate` to a custom category when the
+/// request's API key lacks the `can_migrate` capability. This lets the
+/// reserved-path guard in `Repository` naturally reject writes to
+/// `/_meta/*` from unprivileged keys.
+fn enforce_migrate_capability(category: IntentCategory, ctx: &AuthContext) -> IntentCategory {
+    if matches!(category, IntentCategory::Migrate) && !ctx.can_migrate {
+        warn!(
+            key_prefix = ?ctx.key_prefix,
+            "rejecting Migrate category from key without `can_migrate`; downgrading to Custom(\"Migrate-claimed\")"
+        );
+        return IntentCategory::Custom("Migrate-claimed".to_string());
+    }
+    category
+}
 
 fn parse_category(s: &str) -> IntentCategory {
     match s.to_lowercase().as_str() {

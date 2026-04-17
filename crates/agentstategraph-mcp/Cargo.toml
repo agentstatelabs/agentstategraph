@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 description = "MCP server for AgentStateGraph — AI-native versioned state store"
 
+[lib]
+name = "agentstategraph_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agentstategraph-mcp"
 path = "src/main.rs"
@@ -25,3 +29,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
+tower_governor = { version = "0.8", features = ["axum"] }
+governor = "0.10"
+tracing = "0.1"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
