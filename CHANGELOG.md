@@ -5,6 +5,19 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.4.0-beta.2] — 2026-04-17
+
+### Added
+- **New crate `agentstategraph-migrate`** — schema-evolution framework for ASG databases. Provides `Migration` trait, `Registry`, `check()` for startup introspection (returns `UpToDate` / `UpgradeAvailable` / `Downgrade` / `Unversioned` / `Corrupt`), and a `Runner` with `DryRun` and `Apply` modes. First shipped migration (`plan_assignments_sidecar_to_native`) walks legacy CTXone `/plan_assignments` entries onto native `Task.assigned_to` and bumps `/_meta/schema_version` atomically. Exit-code constants follow `sysexits.h` spirit (64 / 65 / 70 / 75) for ops tooling.
+- **`/_meta/*` reserved path guard** on `Repository::{set, set_json, spec_set, spec_set_json, delete}` and `commit_speculation`. Writes under `/_meta/*` now require `IntentCategory::Migrate` — a new `RepoError::ReservedPath` is returned otherwise. Protects schema metadata from accidental overwrites.
+- **`Repository::init()` stamps `/_meta/schema_version`** in its initial commit using a decoupled `SCHEMA_VERSION` constant. The schema version advances only when a migration runs, independent of the crate's release version.
+- **`agentstategraph-mcp migrate` subcommand** — one-shot maintenance CLI. Flags: `--db`, `--storage`, `--ref`, `--to`, `--dry-run`, `--yes`, `-h`. Refuses to start the MCP/HTTP surface. Prints per-step status, commit IDs, and final version.
+- **Upgrade-path design doc** at `spec/UPGRADE-PATH.md` covering versioning model, migration registry, consumer-side upgrade flow, the sidecar migration as worked example, CLI, and downgrade/rollback semantics.
+
+### Changed
+- Workspace version bumped from `0.4.0-beta.1` to `0.4.0-beta.2`.
+- `SCHEMA_VERSION` constant in `agentstategraph` is now a literal `"0.4.0"`, decoupled from `env!("CARGO_PKG_VERSION")`. Bump only when a migration advances the on-disk shape.
+
 ## [0.4.0-beta.1] — 2026-04-15
 
 ### Added

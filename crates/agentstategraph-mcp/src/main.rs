@@ -8,6 +8,7 @@
 
 mod auth;
 mod http;
+mod migrate;
 mod server;
 
 use std::sync::Arc;
@@ -18,6 +19,13 @@ use rmcp::ServiceExt;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+
+    // Subcommand dispatch: `agentstategraph-mcp migrate ...` is a
+    // one-shot maintenance command, not a server mode.
+    if args.get(1).map(String::as_str) == Some("migrate") {
+        let rest: Vec<String> = args.iter().skip(2).cloned().collect();
+        std::process::exit(migrate::run(&rest));
+    }
 
     let mut storage_type = "sqlite";
     let mut db_path = "./agentstategraph.db".to_string();
@@ -87,6 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("MODES:");
                 eprintln!("  (default)             MCP server over stdio");
                 eprintln!("  --http                HTTP REST API server");
+                eprintln!("  migrate [...]         One-shot schema migration (see `migrate --help`)");
                 eprintln!();
                 eprintln!("OPTIONS:");
                 eprintln!("  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres");

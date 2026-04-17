@@ -5,6 +5,7 @@ members = [
     "crates/agentstategraph-storage",
     "crates/agentstategraph",
     "crates/agentstategraph-tasks",
+    "crates/agentstategraph-migrate",
     "crates/agentstategraph-mcp",
     "crates/agentstategraph-ffi",
     "crates/agentstategraph-wasm",
@@ -13,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"

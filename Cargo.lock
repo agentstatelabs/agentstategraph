@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentstategraph"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 dependencies = [
  "blake3",
  "chrono",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-ffi"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -39,20 +39,36 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-mcp"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
+ "agentstategraph-migrate",
  "agentstategraph-storage",
  "axum",
  "chrono",
  "rmcp",
  "schemars",
+ "semver",
  "serde",
  "serde_json",
  "tokio",
  "tower-http",
  "uuid",
+]
+
+[[package]]
+name = "agentstategraph-migrate"
+version = "0.4.0-beta.2"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "agentstategraph-tasks",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -81,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 dependencies = [
  "agentstategraph-core",
  "deadpool-postgres",
@@ -95,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -108,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-wasm"
-version = "0.4.0-beta.1"
+version = "0.4.0-beta.2"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",

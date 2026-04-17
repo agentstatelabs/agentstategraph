@@ -15,6 +15,61 @@ use agentstategraph_storage::{Storage, StorageError};
 use crate::speculation::{SpecComparison, SpecError, SpecHandle, SpeculationManager};
 use crate::tree::{self, TreeError};
 
+/// Reserved state path prefix for schema metadata. Writes under this
+/// prefix are only permitted on commits tagged `IntentCategory::Migrate`.
+pub const META_PATH_PREFIX: &str = "/_meta";
+
+/// Path to the schema version sentinel written by `Repository::init()`
+/// and bumped by migrations in the `agentstategraph-migrate` crate.
+pub const META_SCHEMA_VERSION_PATH: &str = "/_meta/schema_version";
+
+/// Schema version stamped into new repositories by `init()`.
+///
+/// This is deliberately **decoupled from the crate version** — it tracks
+/// the last version at which the on-disk shape changed, not the release
+/// tag of the binary. A 0.4.0-beta.3 binary stamping `"0.4.0"` here
+/// reflects that the schema is compatible with any 0.4.x binary. Bump
+/// this constant only when you ship a migration that advances the DB
+/// shape. See `spec/UPGRADE-PATH.md` decision 5.
+pub const SCHEMA_VERSION: &str = "0.4.0";
+
+fn path_is_reserved(path: &str) -> bool {
+    path == META_PATH_PREFIX || path.starts_with(&format!("{}/", META_PATH_PREFIX))
+}
+
+fn check_meta_guard(path: &str, intent: &Intent) -> Result<(), RepoError> {
+    if path_is_reserved(path) && intent.category != IntentCategory::Migrate {
+        return Err(RepoError::ReservedPath(path.to_string()));
+    }
+    Ok(())
+}
+
+/// Walk a diff and return the first path under `/_meta/*` touched, if any.
+/// Used to enforce the meta guard on speculation commits.
+fn reserved_path_in_diff(diff: &[DiffOp]) -> Option<String> {
+    for op in diff {
+        let candidate = match op {
+            DiffOp::SetValue { path, .. } => path.clone(),
+            DiffOp::AddKey { path, key, .. } | DiffOp::RemoveKey { path, key, .. } => {
+                if path == "/" || path.is_empty() {
+                    format!("/{}", key)
+                } else {
+                    format!("{}/{}", path, key)
+                }
+            }
+            DiffOp::AddElement { path, .. }
+            | DiffOp::RemoveElement { path, .. }
+            | DiffOp::AddToSet { path, .. }
+            | DiffOp::RemoveFromSet { path, .. }
+            | DiffOp::ChangeType { path, .. } => path.clone(),
+        };
+        if path_is_reserved(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// The primary API for interacting with an AgentStateGraph state store.
 pub struct Repository {
     storage: Box<dyn Storage>,
@@ -89,6 +144,9 @@ pub enum RepoError {
     #[error("repository not initialized — call init() first")]
     NotInitialized,
 
+    #[error("path {0} is reserved for schema metadata; only IntentCategory::Migrate commits may write here")]
+    ReservedPath(String),
+
     #[error("merge conflicts: {0:?}")]
     MergeConflicts(Vec<Conflict>),
 
@@ -116,18 +174,31 @@ impl Repository {
 
     /// Initialize the repository with an empty state tree on "main".
     /// If "main" already exists, this is a no-op.
+    ///
+    /// The initial commit stamps `/_meta/schema_version` with the crate
+    /// version. See `spec/UPGRADE-PATH.md`.
     pub fn init(&self) -> Result<ObjectId, RepoError> {
         if let Some(id) = self.storage.get_ref("main")? {
             return Ok(id);
         }
 
-        // Create empty root state
         let empty_root = Object::empty_map();
-        let root_id = self.storage.put_object(&empty_root)?;
+        let empty_root_id = self.storage.put_object(&empty_root)?;
 
-        // Create initial commit
+        let version_path = StatePath::parse(META_SCHEMA_VERSION_PATH)
+            .map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let version_value = Object::Atom(agentstategraph_core::Atom::String(
+            SCHEMA_VERSION.to_string(),
+        ));
+        let stamped_root_id = tree::tree_set(
+            self.storage.as_ref(),
+            &empty_root_id,
+            &version_path,
+            &version_value,
+        )?;
+
         let commit = CommitBuilder::new(
-            root_id,
+            stamped_root_id,
             "system",
             Authority::simple("system"),
             Intent::new(IntentCategory::Checkpoint, "Initialize empty state"),
@@ -174,6 +245,7 @@ impl Repository {
         value: &Object,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
+        check_meta_guard(path, &options.intent)?;
         let commit_id = self.resolve_ref(ref_name)?;
         let commit = self
             .storage
@@ -218,6 +290,7 @@ impl Repository {
         path: &str,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
+        check_meta_guard(path, &options.intent)?;
         let commit_id = self.resolve_ref(ref_name)?;
         let commit = self
             .storage
@@ -435,6 +508,11 @@ impl Repository {
     }
 
     /// Commit a speculation — promotes it to a real commit on the base branch.
+    ///
+    /// If the speculation touched any `/_meta/*` path and the commit's
+    /// intent is not `IntentCategory::Migrate`, the commit is rejected
+    /// with `RepoError::ReservedPath`. This keeps the meta namespace
+    /// enforced for speculation writes the same as for direct writes.
     pub fn commit_speculation(
         &self,
         handle: SpecHandle,
@@ -446,6 +524,26 @@ impl Repository {
             .map_err(|e| RepoError::Speculation(e))?;
 
         let parent_id = self.resolve_ref(&base_ref)?;
+
+        // Gate /_meta/* writes on the commit's intent category.
+        if options.intent.category != IntentCategory::Migrate {
+            let parent_commit = self
+                .storage
+                .get_commit(&parent_id)?
+                .ok_or_else(|| RepoError::RefNotFound(base_ref.clone()))?;
+            let resolver = StorageResolver {
+                storage: self.storage.as_ref(),
+            };
+            let diff = agentstategraph_core::diff::diff(
+                &resolver,
+                &parent_commit.state_root,
+                &state_root,
+            );
+            if let Some(path) = reserved_path_in_diff(&diff) {
+                return Err(RepoError::ReservedPath(path));
+            }
+        }
+
         let commit = self.create_commit(state_root, vec![parent_id], options)?;
         self.storage.set_ref(&base_ref, commit.id)?;
         Ok(commit.id)
@@ -970,6 +1068,66 @@ mod tests {
         let branches = repo.list_branches(None).unwrap();
         assert_eq!(branches.len(), 1);
         assert_eq!(branches[0].0, "main");
+    }
+
+    #[test]
+    fn test_init_stamps_schema_version() {
+        let repo = test_repo();
+        let v = repo.get("main", META_SCHEMA_VERSION_PATH).unwrap();
+        match v {
+            Object::Atom(agentstategraph_core::Atom::String(s)) => {
+                assert_eq!(s, SCHEMA_VERSION);
+            }
+            other => panic!("expected string atom, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_meta_guard_rejects_non_migrate_writes() {
+        let repo = test_repo();
+        let value = Object::Atom(agentstategraph_core::Atom::String("hack".into()));
+        let err = repo
+            .set("main", META_SCHEMA_VERSION_PATH, &value, quick_opts("tamper"))
+            .unwrap_err();
+        assert!(matches!(err, RepoError::ReservedPath(_)), "got {:?}", err);
+
+        let err = repo
+            .set("main", "/_meta/custom", &value, quick_opts("tamper2"))
+            .unwrap_err();
+        assert!(matches!(err, RepoError::ReservedPath(_)), "got {:?}", err);
+
+        let err = repo
+            .delete("main", META_SCHEMA_VERSION_PATH, quick_opts("tamper3"))
+            .unwrap_err();
+        assert!(matches!(err, RepoError::ReservedPath(_)), "got {:?}", err);
+    }
+
+    #[test]
+    fn test_meta_guard_allows_migrate_writes() {
+        let repo = test_repo();
+        let value = Object::Atom(agentstategraph_core::Atom::String("0.5.0".into()));
+        let opts = CommitOptions::new(
+            "agent/migrate",
+            IntentCategory::Migrate,
+            "bump schema",
+        );
+        repo.set("main", META_SCHEMA_VERSION_PATH, &value, opts)
+            .expect("migrate intent should be allowed to write /_meta");
+
+        let got = repo.get("main", META_SCHEMA_VERSION_PATH).unwrap();
+        match got {
+            Object::Atom(agentstategraph_core::Atom::String(s)) => assert_eq!(s, "0.5.0"),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_meta_guard_does_not_match_user_paths_with_meta_substring() {
+        let repo = test_repo();
+        let value = Object::Atom(agentstategraph_core::Atom::Int(1));
+        // user-space path that happens to share the prefix substring
+        repo.set("main", "/_metadata_not_reserved", &value, quick_opts("ok"))
+            .expect("unrelated path must not trip the guard");
     }
 
     #[test]
