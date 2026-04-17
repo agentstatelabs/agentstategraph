@@ -72,7 +72,7 @@ curl http://localhost:3001/api/state/main?path=/
 curl "http://localhost:3001/api/blame/main?path=/cluster/name"
 ```
 
-19 REST endpoints with CORS enabled — connect from browsers, scripts, or any HTTP client. See `--help` for the full endpoint list.
+22 REST endpoints with CORS enabled — connect from browsers, scripts, or any HTTP client. See `--help` for the full endpoint list.
 
 ### As a Rust Library
 
@@ -118,18 +118,21 @@ asg.blame("/name")  # who changed it and why
 
 ## Features
 
-- **26 MCP tools** — any agent can connect immediately
-- **19 HTTP REST endpoints** — `--http` mode with CORS for browsers and scripts
+- **27 MCP tools** — any agent can connect immediately
+- **22 HTTP REST endpoints** — `--http` mode with CORS for browsers and scripts
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **6 language bindings** — Rust, Python, TypeScript, Go, WASM, C FFI
 - **3 storage backends** — Memory, SQLite, IndexedDB (browser)
-- **131 tests** across 6 crates
+- **220+ tests** across 8 crates
 - **Content-addressed Merkle DAG** — immutable, deduplicated history
 - **Structured intent metadata** — category, description, tags, reasoning, confidence
+- **8 intent categories** — Explore, Refine, Fix, Rollback, Checkpoint, Merge, Migrate, Plan
 - **Authority & delegation chains** — who authorized what, with full chain
 - **Schema-aware merge** — CRDT-inspired conflict resolution (sum, max, union-by-id)
 - **Speculative execution** — O(1) branching, instant discard
 - **Multi-agent orchestration** — scoped sessions, delegation, intent trees
+- **Plans & tasks** — shared `agentstategraph-tasks` primitive with state machine, proofs, blockers, agent assignment
+- **Schema-evolution framework** — `/_meta/schema_version` guard + `agentstategraph-migrate` crate + `agentstategraph-mcp migrate` CLI
 - **Epochs** — sealable, tamper-evident audit bundles
 - **Unified query** — composable filters across commits, intents, agents
 - **Blame** — who changed what, when, and why
@@ -170,7 +173,9 @@ AgentStateGraph/
 │   ├── agentstategraph-core/     # Types, diff, merge, schema — zero I/O
 │   ├── agentstategraph-storage/  # Pluggable backends (memory, SQLite, IndexedDB)
 │   ├── agentstategraph/          # High-level Repository API
-│   ├── agentstategraph-mcp/      # MCP server (20 tools over stdio)
+│   ├── agentstategraph-mcp/      # MCP server (27 tools over stdio) + HTTP + migrate CLI
+│   ├── agentstategraph-tasks/    # Shared Plan/Task store — state machine, proofs, assignment
+│   ├── agentstategraph-migrate/  # Schema-evolution framework + migration registry
 │   ├── agentstategraph-ffi/      # C ABI for language bindings
 │   └── agentstategraph-wasm/     # Browser/Deno WASM build
 ├── bindings/
@@ -178,10 +183,48 @@ AgentStateGraph/
 │   ├── typescript/               # napi-rs
 │   └── go/                       # CGo via FFI
 ├── spec/
-│   └── AGENTSTATEGRAPH-RFC.md    # Full specification (~2300 lines)
+│   ├── AGENTSTATEGRAPH-RFC.md    # Full specification (~2300 lines)
+│   ├── UPGRADE-PATH.md           # Schema versioning + migration design
+│   └── SECURITY-THREAT-MODEL.md
 ├── examples/                     # 9 reference implementations
 └── site/                         # agentstategraph.dev (Astro Starlight)
 ```
+
+## Plans & Tasks
+
+`agentstategraph-tasks` is an opinionated sibling crate that layers a shared plan / task model on top of the raw state graph so multiple consumers (CTXone, ThreadWeaver, future apps) don't each reimplement `Task` independently.
+
+- `Plan` → `Task[]` with a strict state machine: `pending → in_progress → done`.
+- `Task::assigned_to` for agent assignment, plus `TaskStore::assign_task`, `unassign_task`, `next_task_for(agent)`.
+- `list_plans_by_status(status)` for native status filtering.
+- `Proof` and `Verifier` trait — completion of a task must produce verifiable evidence before it can transition to `done`.
+- `Repository::spec_set_json` on the high-level API supports atomic multi-path plan/task commits.
+- Plan-related writes are natively filterable via `IntentCategory::Plan` in log and blame queries.
+
+The crate is optional — ignore it if your agents don't need a shared plan primitive. If they do, `use agentstategraph_tasks::*;` and you inherit the state machine.
+
+## Upgrade path
+
+ASG databases have a schema version that lives in-band at `/_meta/schema_version`. Migrations are regular commits on `main` with `IntentCategory::Migrate`, so upgrade history shows up in `log` and `blame` for free.
+
+- **Guarded reserved path:** `/_meta/*` writes require `IntentCategory::Migrate` — accidental overwrites from app code fail with `RepoError::ReservedPath`.
+- **`/_meta/_secret/*` sub-prefix** is additionally gated on reads via `Repository::get_with_intent`, and silently filtered out of `list_paths` / `search_values`.
+- **`Repository::init()` stamps the current schema version** on a new database. An older database missing the key is treated as implicit "version 0" and upgraded by the first migration that runs.
+- **`agentstategraph-migrate` crate** provides a `Migration` trait, a `Registry`, a `check()` function for startup introspection (`UpToDate` / `UpgradeAvailable` / `Downgrade` / `Unversioned` / `Corrupt`), and a `Runner` with `DryRun` and `Apply` modes.
+- **`agentstategraph-mcp migrate` CLI** is a one-shot maintenance command that refuses to start the MCP/HTTP surface — run it, let it report `DryRun` output, then run it again with `--yes`. Exit codes follow the `sysexits.h` spirit (64 / 65 / 70 / 75) so ops tooling can react programmatically.
+
+```bash
+# Dry-run against a production database
+agentstategraph-mcp migrate --db ./prod.db --dry-run
+
+# Apply
+agentstategraph-mcp migrate --db ./prod.db --yes
+
+# Check a specific ref or target version
+agentstategraph-mcp migrate --db ./prod.db --ref main --to 0.4.0 --dry-run
+```
+
+Full design discussion: [spec/UPGRADE-PATH.md](spec/UPGRADE-PATH.md) — versioning model, migration registry, consumer-side upgrade flow, downgrade / rollback semantics, and the first shipped migration (CTXone's `plan_assignments` sidecar → native `Task.assigned_to`) as a worked example.
 
 ## Reference Implementations
 
