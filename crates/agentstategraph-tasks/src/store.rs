@@ -15,9 +15,9 @@ use chrono::Utc;
 
 use crate::error::TaskStoreError;
 use crate::paths;
-use crate::state::{check_transition, Transition};
+use crate::state::{Transition, check_transition};
 use crate::types::{Plan, PlanStatus, Priority, Proof, Task, TaskId, TaskStatus};
-use crate::verifier::{VerifyEntry, VerifyReport, Verifier};
+use crate::verifier::{Verifier, VerifyEntry, VerifyReport};
 
 /// A handle bound to a `Repository` and a path prefix. All operations on
 /// plans and tasks go through a `TaskStore`.
@@ -234,7 +234,7 @@ impl TaskStore {
         let leaves = match self.repo.list_paths(ref_name, &root_path, None) {
             Ok(v) => v,
             Err(e) if is_path_not_found(&e) => {
-                return Err(TaskStoreError::PlanNotFound(plan.to_string()))
+                return Err(TaskStoreError::PlanNotFound(plan.to_string()));
             }
             Err(e) => return Err(e.into()),
         };
@@ -394,7 +394,8 @@ impl TaskStore {
             let handle = self.repo.speculate(ref_name, Some(desc.clone()))?;
             self.repo.spec_set_json(handle, &task_path, &task_value)?;
             self.repo.spec_set_json(handle, &meta_path, &meta_value)?;
-            self.repo.commit_speculation(handle, self.commit_opts(desc))?;
+            self.repo
+                .commit_speculation(handle, self.commit_opts(desc))?;
         } else {
             self.repo
                 .set_json(ref_name, &task_path, &task_value, self.commit_opts(desc))?;
@@ -427,12 +428,7 @@ impl TaskStore {
         task.abandoned_at = Some(Utc::now());
         task.abandoned_reason = Some(reason.to_string());
 
-        self.commit_terminal_transition(
-            ref_name,
-            plan,
-            &task,
-            format!("Abandon {}/{}", plan, id),
-        )?;
+        self.commit_terminal_transition(ref_name, plan, &task, format!("Abandon {}/{}", plan, id))?;
         Ok(task)
     }
 
@@ -503,12 +499,7 @@ impl TaskStore {
     ) -> Result<Task, TaskStoreError> {
         let mut task = self.get_task(ref_name, plan, id)?;
         task.assigned_to = None;
-        self.write_task(
-            ref_name,
-            plan,
-            &task,
-            format!("Unassign {}/{}", plan, id),
-        )?;
+        self.write_task(ref_name, plan, &task, format!("Unassign {}/{}", plan, id))?;
         Ok(task)
     }
 
@@ -518,11 +509,7 @@ impl TaskStore {
 
     /// Highest-priority `pending` task whose blockers are all `done`.
     /// Ties broken by ascending task id (insertion order).
-    pub fn next_task(
-        &self,
-        ref_name: &str,
-        plan: &str,
-    ) -> Result<Option<Task>, TaskStoreError> {
+    pub fn next_task(&self, ref_name: &str, plan: &str) -> Result<Option<Task>, TaskStoreError> {
         self.next_task_for(ref_name, plan, None, true)
     }
 
@@ -545,11 +532,7 @@ impl TaskStore {
         let mut candidates: Vec<&Task> = tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Pending)
-            .filter(|t| {
-                t.blocked_by
-                    .iter()
-                    .all(|b| blocker_satisfied(&tasks, b))
-            })
+            .filter(|t| t.blocked_by.iter().all(|b| blocker_satisfied(&tasks, b)))
             .filter(|t| match assigned_to {
                 None => true,
                 Some(agent) => match &t.assigned_to {
@@ -591,13 +574,12 @@ impl TaskStore {
         parent_id: &TaskId,
     ) -> Result<TaskStatus, TaskStoreError> {
         let tasks = self.list_tasks(ref_name, plan)?;
-        let parent = tasks
-            .iter()
-            .find(|t| &t.id == parent_id)
-            .ok_or_else(|| TaskStoreError::TaskNotFound {
+        let parent = tasks.iter().find(|t| &t.id == parent_id).ok_or_else(|| {
+            TaskStoreError::TaskNotFound {
                 plan: plan.to_string(),
                 id: parent_id.clone(),
-            })?;
+            }
+        })?;
 
         let subtasks: Vec<&Task> = tasks
             .iter()
@@ -635,10 +617,7 @@ impl TaskStore {
         let tasks = self.list_tasks(ref_name, plan)?;
         let mut results = Vec::new();
         for task in tasks.iter().filter(|t| t.status == TaskStatus::Done) {
-            let proof = task
-                .proof
-                .as_ref()
-                .ok_or(TaskStoreError::ProofRequired)?;
+            let proof = task.proof.as_ref().ok_or(TaskStoreError::ProofRequired)?;
             let outcome = verifier.verify(proof);
             results.push(VerifyEntry {
                 task_id: task.id.clone(),

@@ -5,6 +5,16 @@
 //!
 //! This crate produces a shared library (.so/.dylib/.dll) and static library (.a)
 //! that any language with C FFI can call.
+//!
+//! Every `extern "C"` function in this crate takes raw pointers by design —
+//! they form the C ABI contract. Marking them `unsafe fn` would change that
+//! ABI and make every bindgen-generated header noisier. We validate pointer
+//! inputs inside each function instead (`is_null` checks, bounded `CStr`
+//! reads). The blanket allow below silences clippy on this pattern
+//! crate-wide.
+
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -23,7 +33,7 @@ pub struct SgRepo {
 #[no_mangle]
 pub extern "C" fn agentstategraph_new_memory() -> *mut SgRepo {
     let repo = Repository::new(Box::new(MemoryStorage::new()));
-    if let Err(_) = repo.init() {
+    if repo.init().is_err() {
         return ptr::null_mut();
     }
     Box::into_raw(Box::new(SgRepo { inner: repo }))
@@ -46,7 +56,7 @@ pub extern "C" fn agentstategraph_new_sqlite(path: *const c_char) -> *mut SgRepo
         Err(_) => return ptr::null_mut(),
     };
     let repo = Repository::new(Box::new(storage));
-    if let Err(_) = repo.init() {
+    if repo.init().is_err() {
         return ptr::null_mut();
     }
     Box::into_raw(Box::new(SgRepo { inner: repo }))

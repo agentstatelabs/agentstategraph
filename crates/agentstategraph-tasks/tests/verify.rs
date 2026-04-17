@@ -1,8 +1,6 @@
 mod common;
 
-use agentstategraph_tasks::{
-    Priority, Proof, ProofKind, VerifyResult, Verifier,
-};
+use agentstategraph_tasks::{Priority, Proof, ProofKind, Verifier, VerifyResult};
 
 use common::make_store;
 
@@ -27,19 +25,12 @@ impl Verifier for TestVerifier {
     }
 }
 
-fn complete(
-    store: &agentstategraph_tasks::TaskStore,
-    plan: &str,
-    title: &str,
-    proof: Proof,
-) {
+fn complete(store: &agentstategraph_tasks::TaskStore, plan: &str, title: &str, proof: Proof) {
     let task = store
         .add_task("main", plan, title, Priority::Medium, None, vec![], None)
         .unwrap();
     store.start_task("main", plan, &task.id).unwrap();
-    store
-        .complete_task("main", plan, &task.id, proof)
-        .unwrap();
+    store.complete_task("main", plan, &task.id, proof).unwrap();
 }
 
 #[test]

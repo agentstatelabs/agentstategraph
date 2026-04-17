@@ -43,8 +43,10 @@ pub enum MergeHint {
 
 /// How strictly the schema is enforced.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum EnforcementMode {
     /// No validation. Schema is documentation only.
+    #[default]
     None,
     /// Validate on commit, log warnings, but allow.
     Warn,
@@ -54,11 +56,6 @@ pub enum EnforcementMode {
     Migrate,
 }
 
-impl Default for EnforcementMode {
-    fn default() -> Self {
-        EnforcementMode::None
-    }
-}
 
 /// Validation result for a state tree against a schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +157,10 @@ fn extract_merge_hints(schema: &serde_json::Value, path: &str) -> HashMap<String
 }
 
 /// Basic recursive validation against a JSON Schema.
+// `warnings` is threaded through so future validation rules can surface
+// non-blocking findings (deprecation notices etc.) without restructuring
+// call sites. Present but unused today.
+#[allow(clippy::only_used_in_recursion)]
 fn validate_recursive(
     schema: &serde_json::Value,
     value: &serde_json::Value,
@@ -182,11 +183,11 @@ fn validate_recursive(
     }
 
     // Check required fields
-    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
-        if let Some(obj) = value.as_object() {
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array())
+        && let Some(obj) = value.as_object() {
             for req in required {
-                if let Some(key) = req.as_str() {
-                    if !obj.contains_key(key) {
+                if let Some(key) = req.as_str()
+                    && !obj.contains_key(key) {
                         errors.push(ValidationError {
                             path: format!("{}/{}", path, key),
                             message: format!("required field '{}' is missing", key),
@@ -194,14 +195,12 @@ fn validate_recursive(
                             actual: Some("missing".to_string()),
                         });
                     }
-                }
             }
         }
-    }
 
     // Check enum values
-    if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array()) {
-        if !enum_values.contains(value) {
+    if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array())
+        && !enum_values.contains(value) {
             errors.push(ValidationError {
                 path: path.to_string(),
                 message: format!("value not in allowed enum: {:?}", value),
@@ -209,11 +208,10 @@ fn validate_recursive(
                 actual: Some(format!("{:?}", value)),
             });
         }
-    }
 
     // Recurse into properties
-    if let Some(props) = schema.get("properties").and_then(|v| v.as_object()) {
-        if let Some(obj) = value.as_object() {
+    if let Some(props) = schema.get("properties").and_then(|v| v.as_object())
+        && let Some(obj) = value.as_object() {
             for (key, prop_schema) in props {
                 if let Some(prop_value) = obj.get(key) {
                     let child_path = format!("{}/{}", path, key);
@@ -221,17 +219,15 @@ fn validate_recursive(
                 }
             }
         }
-    }
 
     // Recurse into array items
-    if let Some(items_schema) = schema.get("items") {
-        if let Some(arr) = value.as_array() {
+    if let Some(items_schema) = schema.get("items")
+        && let Some(arr) = value.as_array() {
             for (i, item) in arr.iter().enumerate() {
                 let child_path = format!("{}/{}", path, i);
                 validate_recursive(items_schema, item, &child_path, errors, warnings);
             }
         }
-    }
 }
 
 fn json_type_name(value: &serde_json::Value) -> &'static str {

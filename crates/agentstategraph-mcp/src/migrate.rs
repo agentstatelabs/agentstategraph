@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use agentstategraph::Repository;
 use agentstategraph_migrate::{
-    binary_version, check, exit as exit_codes, CheckResult, Registry, RunMode,
+    CheckResult, Registry, RunMode, binary_version, check, exit as exit_codes,
 };
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use semver::Version;
@@ -95,31 +95,29 @@ pub fn run(args: &[String]) -> i32 {
 
     match check(&repo, &ref_name, &target, &registry) {
         Ok(CheckResult::UpToDate { version }) => {
-            eprintln!(
-                "up-to-date: schema_version={version} (target {target}); nothing to do"
-            );
+            eprintln!("up-to-date: schema_version={version} (target {target}); nothing to do");
             return exit_codes::OK;
         }
         Ok(CheckResult::Downgrade { db, binary }) => {
-            eprintln!(
-                "refusing to downgrade: db schema {db} is newer than binary {binary}"
-            );
+            eprintln!("refusing to downgrade: db schema {db} is newer than binary {binary}");
             return exit_codes::DOWNGRADE_REFUSED;
         }
         Ok(CheckResult::Corrupt(msg)) => {
             eprintln!("corrupt /_meta: {msg}");
             return exit_codes::CORRUPT_META;
         }
-        Ok(CheckResult::UpgradeAvailable { from, to, ref migrations }) => {
+        Ok(CheckResult::UpgradeAvailable {
+            from,
+            to,
+            ref migrations,
+        }) => {
             eprintln!("plan: {from} → {to} via {} migration(s):", migrations.len());
             for name in migrations {
                 eprintln!("  - {name}");
             }
         }
         Ok(CheckResult::Unversioned { implicit }) => {
-            eprintln!(
-                "unversioned db (implicit {implicit}); target {target}"
-            );
+            eprintln!("unversioned db (implicit {implicit}); target {target}");
         }
         Err(e) => {
             eprintln!("migrate: check failed: {e}");

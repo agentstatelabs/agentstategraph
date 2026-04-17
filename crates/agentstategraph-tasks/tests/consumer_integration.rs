@@ -15,9 +15,7 @@ use std::sync::Arc;
 use agentstategraph::{PathPattern, Repository};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_storage::MemoryStorage;
-use agentstategraph_tasks::{
-    Priority, Proof, ProofKind, TaskStore, VerifyResult, Verifier,
-};
+use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskStore, Verifier, VerifyResult};
 
 /// A stand-in for CTXone's `GitFileTestVerifier`. Backed by in-memory
 /// sets rather than a real repo/filesystem — the point is to show the
@@ -166,9 +164,7 @@ fn full_consumer_workflow() {
             .collect(),
         known_tests: HashSet::new(),
     };
-    let report = store
-        .verify_plan("main", "website-v2", &verifier)
-        .unwrap();
+    let report = store.verify_plan("main", "website-v2", &verifier).unwrap();
     assert_eq!(report.results.len(), 2);
     assert_eq!(report.verified_count(), 2);
     assert!(report.is_all_verified());
@@ -181,9 +177,7 @@ fn full_consumer_workflow() {
             .collect(),
         known_tests: HashSet::new(),
     };
-    let report = store
-        .verify_plan("main", "website-v2", &verifier)
-        .unwrap();
+    let report = store.verify_plan("main", "website-v2", &verifier).unwrap();
     assert_eq!(report.verified_count(), 1);
     assert_eq!(report.decayed_count(), 1);
     assert!(!report.is_all_verified());

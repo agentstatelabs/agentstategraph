@@ -7,7 +7,7 @@
 //!   let storage = PostgresStorage::connect("postgres://localhost/agentstategraph").await?;
 //!   let storage = PostgresStorage::connect_tenant("postgres://...", "tenant-123").await?;
 
-use deadpool_postgres::{Config, Pool, Runtime, ManagerConfig, RecyclingMethod};
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 
 use agentstategraph_core::{Commit, Object, ObjectId};
@@ -47,7 +47,10 @@ impl PostgresStorage {
     }
 
     async fn init_tables(&self) -> Result<(), StorageError> {
-        let client = self.pool.get().await
+        let client = self
+            .pool
+            .get()
+            .await
             .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
         client
@@ -99,7 +102,10 @@ impl PostgresStorage {
 impl ObjectStore for PostgresStorage {
     fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let row = client
@@ -124,11 +130,14 @@ impl ObjectStore for PostgresStorage {
 
     fn put_object(&self, obj: &Object) -> Result<ObjectId, StorageError> {
         let id = obj.id();
-        let data = serde_json::to_value(obj)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_value(obj).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             client
@@ -146,7 +155,10 @@ impl ObjectStore for PostgresStorage {
 
     fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let row = client
@@ -167,7 +179,10 @@ impl ObjectStore for PostgresStorage {
 impl CommitStore for PostgresStorage {
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let row = client
@@ -191,19 +206,27 @@ impl CommitStore for PostgresStorage {
     }
 
     fn put_commit(&self, commit: &Commit) -> Result<(), StorageError> {
-        let data = serde_json::to_value(commit)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_value(commit).map_err(|e| StorageError::Serialization(e.to_string()))?;
         let timestamp = commit.timestamp;
 
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             client
                 .execute(
                     "INSERT INTO commits (tenant_id, id, data, timestamp) VALUES ($1, $2, $3, $4)
                      ON CONFLICT (tenant_id, id) DO NOTHING",
-                    &[&self.tenant_id, &commit.id.as_bytes().as_slice(), &data, &timestamp],
+                    &[
+                        &self.tenant_id,
+                        &commit.id.as_bytes().as_slice(),
+                        &data,
+                        &timestamp,
+                    ],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("put commit: {}", e)))?;
@@ -214,7 +237,10 @@ impl CommitStore for PostgresStorage {
 
     fn has_commit(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let row = client
@@ -231,7 +257,10 @@ impl CommitStore for PostgresStorage {
 
     fn list_commits(&self, from: &ObjectId, limit: usize) -> Result<Vec<Commit>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let mut result = Vec::new();
@@ -272,7 +301,10 @@ impl CommitStore for PostgresStorage {
 impl RefStore for PostgresStorage {
     fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let row = client
@@ -299,14 +331,21 @@ impl RefStore for PostgresStorage {
 
     fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             client
                 .execute(
                     "INSERT INTO refs (tenant_id, name, target) VALUES ($1, $2, $3)
                      ON CONFLICT (tenant_id, name) DO UPDATE SET target = $3",
-                    &[&self.tenant_id, &name.to_string(), &target.as_bytes().as_slice()],
+                    &[
+                        &self.tenant_id,
+                        &name.to_string(),
+                        &target.as_bytes().as_slice(),
+                    ],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("set ref: {}", e)))?;
@@ -317,7 +356,10 @@ impl RefStore for PostgresStorage {
 
     fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let rows = client
@@ -340,7 +382,10 @@ impl RefStore for PostgresStorage {
 
     fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let pattern = format!("{}%", prefix);
@@ -371,7 +416,10 @@ impl RefStore for PostgresStorage {
 
     fn delete_ref(&self, name: &str) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await
+            let client = self
+                .pool
+                .get()
+                .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
             let rows = client

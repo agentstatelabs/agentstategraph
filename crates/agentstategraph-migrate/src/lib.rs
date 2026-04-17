@@ -21,7 +21,7 @@ pub mod migrations;
 use std::fmt;
 
 use agentstategraph::{
-    CommitOptions, META_SCHEMA_VERSION_PATH, Repository, RepoError, SCHEMA_VERSION,
+    CommitOptions, META_SCHEMA_VERSION_PATH, RepoError, Repository, SCHEMA_VERSION,
 };
 use agentstategraph_core::{Atom, IntentCategory, Object};
 use semver::Version;
@@ -86,11 +86,7 @@ pub trait Migration: Send + Sync {
     /// Perform the migration, producing (or skipping) one commit tagged
     /// `IntentCategory::Migrate` that also bumps `/_meta/schema_version`
     /// to `self.to_version()`.
-    fn migrate(
-        &self,
-        repo: &Repository,
-        ref_name: &str,
-    ) -> Result<MigrationOutcome, MigrateError>;
+    fn migrate(&self, repo: &Repository, ref_name: &str) -> Result<MigrationOutcome, MigrateError>;
 }
 
 /// Registry of migrations, ordered by `to_version` then registration order.
@@ -118,16 +114,13 @@ impl Registry {
 
     pub fn register(&mut self, m: Box<dyn Migration>) {
         self.items.push(m);
-        self.items.sort_by(|a, b| a.to_version().cmp(b.to_version()));
+        self.items
+            .sort_by(|a, b| a.to_version().cmp(b.to_version()));
     }
 
     /// Migrations whose `to_version` is `> current` and `<= target` and
     /// whose `from_version` requirement matches `current`.
-    pub fn plan<'a>(
-        &'a self,
-        current: &Version,
-        target: &Version,
-    ) -> Vec<&'a dyn Migration> {
+    pub fn plan<'a>(&'a self, current: &Version, target: &Version) -> Vec<&'a dyn Migration> {
         // Walk transitively: each step's `to_version` becomes the next
         // step's "current." Stops at the first gap where no registered
         // migration advances the version further.
@@ -183,9 +176,7 @@ impl Registry {
             let step_to = m.to_version().clone();
 
             if mode == RunMode::DryRun {
-                let applies = m
-                    .applies_to(repo, ref_name)
-                    .unwrap_or(true); // pessimistic in dry-run
+                let applies = m.applies_to(repo, ref_name).unwrap_or(true); // pessimistic in dry-run
                 report.steps.push(StepReport {
                     name: m.name().to_string(),
                     describe: m.describe().to_string(),
@@ -344,8 +335,7 @@ pub fn check(
             }
         }
         StoredVersion::Absent => {
-            let implicit = Version::parse(IMPLICIT_VERSION)
-                .expect("IMPLICIT_VERSION is valid");
+            let implicit = Version::parse(IMPLICIT_VERSION).expect("IMPLICIT_VERSION is valid");
             Ok(CheckResult::Unversioned { implicit })
         }
         StoredVersion::Corrupt(s) => Ok(CheckResult::Corrupt(s)),
@@ -416,7 +406,7 @@ pub fn version_object(v: &Version) -> Object {
 }
 
 /// Public re-export — migration authors need this.
-pub use agentstategraph::{META_PATH_PREFIX};
+pub use agentstategraph::META_PATH_PREFIX;
 
 #[cfg(test)]
 mod tests {
@@ -461,11 +451,21 @@ mod tests {
             name: &'static str,
         }
         impl Migration for Stub {
-            fn from_version(&self) -> &semver::VersionReq { &self.from }
-            fn to_version(&self) -> &Version { &self.to }
-            fn name(&self) -> &str { self.name }
-            fn describe(&self) -> &str { "stub" }
-            fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> { Ok(false) }
+            fn from_version(&self) -> &semver::VersionReq {
+                &self.from
+            }
+            fn to_version(&self) -> &Version {
+                &self.to
+            }
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn describe(&self) -> &str {
+                "stub"
+            }
+            fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> {
+                Ok(false)
+            }
             fn migrate(&self, _: &Repository, _: &str) -> Result<MigrationOutcome, MigrateError> {
                 unreachable!()
             }
@@ -483,13 +483,25 @@ mod tests {
             name: "b",
         }));
 
-        let plan = r.plan(&Version::parse("0.3.0").unwrap(), &Version::parse("0.5.0").unwrap());
-        assert_eq!(plan.iter().map(|m| m.name()).collect::<Vec<_>>(), vec!["a", "b"]);
+        let plan = r.plan(
+            &Version::parse("0.3.0").unwrap(),
+            &Version::parse("0.5.0").unwrap(),
+        );
+        assert_eq!(
+            plan.iter().map(|m| m.name()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
 
-        let plan = r.plan(&Version::parse("0.4.0").unwrap(), &Version::parse("0.5.0").unwrap());
+        let plan = r.plan(
+            &Version::parse("0.4.0").unwrap(),
+            &Version::parse("0.5.0").unwrap(),
+        );
         assert_eq!(plan.iter().map(|m| m.name()).collect::<Vec<_>>(), vec!["b"]);
 
-        let plan = r.plan(&Version::parse("0.5.0").unwrap(), &Version::parse("0.5.0").unwrap());
+        let plan = r.plan(
+            &Version::parse("0.5.0").unwrap(),
+            &Version::parse("0.5.0").unwrap(),
+        );
         assert!(plan.is_empty());
     }
 }

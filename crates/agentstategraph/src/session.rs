@@ -45,6 +45,12 @@ pub enum SessionError {
     OutOfScope { path: String, scope: String },
 }
 
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionManager {
     pub fn new() -> Self {
         Self {
@@ -53,6 +59,7 @@ impl SessionManager {
     }
 
     /// Create a new session.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         agent_id: &str,
@@ -121,14 +128,13 @@ impl SessionManager {
 
     /// Check if a path is within a session's scope.
     pub fn check_scope(session: &Session, path: &str) -> Result<(), SessionError> {
-        if let Some(ref scope) = session.path_scope {
-            if !path.starts_with(scope) {
+        if let Some(ref scope) = session.path_scope
+            && !path.starts_with(scope) {
                 return Err(SessionError::OutOfScope {
                     path: path.to_string(),
                     scope: scope.clone(),
                 });
             }
-        }
         Ok(())
     }
 

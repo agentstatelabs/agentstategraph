@@ -32,10 +32,7 @@ mod tests {
     #[test]
     fn paths_compose() {
         assert_eq!(plan_root("/plans", "website-v2"), "/plans/website-v2");
-        assert_eq!(
-            plan_meta("/plans", "website-v2"),
-            "/plans/website-v2/_meta"
-        );
+        assert_eq!(plan_meta("/plans", "website-v2"), "/plans/website-v2/_meta");
         assert_eq!(
             task("/plans", "website-v2", &TaskId::new(7)),
             "/plans/website-v2/t-007"

@@ -83,11 +83,10 @@ pub fn filter_commits(commits: &[Commit], filters: &QueryFilters) -> Vec<Commit>
 /// Check if a commit matches all specified filters.
 pub fn matches_filters(commit: &Commit, filters: &QueryFilters) -> bool {
     // Agent filter
-    if let Some(ref agent) = filters.agent_id {
-        if &commit.agent_id != agent {
+    if let Some(ref agent) = filters.agent_id
+        && &commit.agent_id != agent {
             return false;
         }
-    }
 
     // Intent category filter
     if let Some(ref category) = filters.intent_category {
@@ -107,11 +106,10 @@ pub fn matches_filters(commit: &Commit, filters: &QueryFilters) -> bool {
     }
 
     // Authority principal filter
-    if let Some(ref principal) = filters.authority_principal {
-        if &commit.authority.principal != principal {
+    if let Some(ref principal) = filters.authority_principal
+        && &commit.authority.principal != principal {
             return false;
         }
-    }
 
     // Reasoning contains (full-text search)
     if let Some(ref query) = filters.reasoning_contains {
@@ -149,16 +147,14 @@ pub fn matches_filters(commit: &Commit, filters: &QueryFilters) -> bool {
     }
 
     // Date range
-    if let Some(from) = filters.date_from {
-        if commit.timestamp < from {
+    if let Some(from) = filters.date_from
+        && commit.timestamp < from {
             return false;
         }
-    }
-    if let Some(to) = filters.date_to {
-        if commit.timestamp > to {
+    if let Some(to) = filters.date_to
+        && commit.timestamp > to {
             return false;
         }
-    }
 
     // Has deviations
     if let Some(true) = filters.has_deviations {

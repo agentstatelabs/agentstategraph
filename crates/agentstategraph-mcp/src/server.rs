@@ -742,10 +742,7 @@ impl AgentStateGraphServer {
     #[tool(
         description = "Get the commit DAG for visualization. Returns nodes with parents, agent, category, and timestamps."
     )]
-    async fn agentstategraph_commit_graph(
-        &self,
-        params: Parameters<CommitGraphParams>,
-    ) -> String {
+    async fn agentstategraph_commit_graph(&self, params: Parameters<CommitGraphParams>) -> String {
         let p = params.0;
         match self.repo.commit_graph(&p.r#ref, p.depth) {
             Ok(nodes) => serde_json::to_string_pretty(&nodes).unwrap_or_default(),
@@ -756,10 +753,7 @@ impl AgentStateGraphServer {
     #[tool(
         description = "Get the intent decomposition tree. Shows how intents are broken down into sub-tasks across agents."
     )]
-    async fn agentstategraph_intent_tree(
-        &self,
-        params: Parameters<IntentTreeParams>,
-    ) -> String {
+    async fn agentstategraph_intent_tree(&self, params: Parameters<IntentTreeParams>) -> String {
         let p = params.0;
         match self.repo.intent_tree(&p.r#ref, p.root_commit_id.as_deref()) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),

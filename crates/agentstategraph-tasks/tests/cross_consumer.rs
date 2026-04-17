@@ -22,10 +22,26 @@ fn two_stores_with_different_prefixes_do_not_interfere() {
     threads.create_plan("main", "thread-1", None).unwrap();
 
     plans
-        .add_task("main", "website-v2", "hero", Priority::High, None, vec![], None)
+        .add_task(
+            "main",
+            "website-v2",
+            "hero",
+            Priority::High,
+            None,
+            vec![],
+            None,
+        )
         .unwrap();
     threads
-        .add_task("main", "thread-1", "reply", Priority::Medium, None, vec![], None)
+        .add_task(
+            "main",
+            "thread-1",
+            "reply",
+            Priority::Medium,
+            None,
+            vec![],
+            None,
+        )
         .unwrap();
 
     // Each store sees only its own plan.

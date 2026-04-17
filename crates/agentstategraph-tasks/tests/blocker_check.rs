@@ -81,7 +81,9 @@ fn abandoned_blocker_does_not_unblock() {
         )
         .unwrap();
 
-    store.abandon_task("main", "p", &a.id, "not needed").unwrap();
+    store
+        .abandon_task("main", "p", &a.id, "not needed")
+        .unwrap();
     let err = store.start_task("main", "p", &b.id).unwrap_err();
     assert!(matches!(err, TaskStoreError::Blocked { .. }));
 }

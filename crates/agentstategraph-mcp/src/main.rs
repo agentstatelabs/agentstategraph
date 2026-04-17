@@ -95,15 +95,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("MODES:");
                 eprintln!("  (default)             MCP server over stdio");
                 eprintln!("  --http                HTTP REST API server");
-                eprintln!("  migrate [...]         One-shot schema migration (see `migrate --help`)");
+                eprintln!(
+                    "  migrate [...]         One-shot schema migration (see `migrate --help`)"
+                );
                 eprintln!();
                 eprintln!("OPTIONS:");
-                eprintln!("  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres");
+                eprintln!(
+                    "  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres"
+                );
                 eprintln!(
                     "  -p, --path <PATH>     SQLite database path (default: ./agentstategraph.db)"
                 );
-                eprintln!("      --database-url <URL>  Postgres connection URL (required for --storage postgres)");
-                eprintln!("      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")");
+                eprintln!(
+                    "      --database-url <URL>  Postgres connection URL (required for --storage postgres)"
+                );
+                eprintln!(
+                    "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
+                );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -135,14 +143,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
 
     // Check for DATABASE_URL env var as fallback for postgres
-    if database_url.is_empty() {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
+    if database_url.is_empty()
+        && let Ok(url) = std::env::var("DATABASE_URL") {
             database_url = url;
             if storage_type == "sqlite" {
                 storage_type = "postgres";
             }
         }
-    }
 
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
@@ -157,7 +164,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Storage: postgres (tenant: {})", tenant_id);
             let rt = tokio::runtime::Runtime::new()?;
             let storage = rt.block_on(async {
-                agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id).await
+                agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id)
+                    .await
             })?;
             Arc::new(Repository::new(Box::new(storage)))
         }
@@ -172,7 +180,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if http_mode {
         if auth_enabled {
-            eprintln!("Auth: enabled (keys file: {})", if keys_file.is_empty() { "none" } else { &keys_file });
+            eprintln!(
+                "Auth: enabled (keys file: {})",
+                if keys_file.is_empty() {
+                    "none"
+                } else {
+                    &keys_file
+                }
+            );
         } else {
             eprintln!("Auth: disabled (single-tenant mode)");
         }
@@ -184,7 +199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?
             .block_on(async {
                 let app = if auth_enabled {
-                    let kf = if keys_file.is_empty() { None } else { Some(keys_file.as_str()) };
+                    let kf = if keys_file.is_empty() {
+                        None
+                    } else {
+                        Some(keys_file.as_str())
+                    };
                     http::router_multi_tenant(repo, kf)
                 } else {
                     http::router(repo)

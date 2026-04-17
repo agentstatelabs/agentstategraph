@@ -532,7 +532,7 @@ impl AgentStateGraph {
         r#ref: &str,
         target: Option<String>,
     ) -> PyResult<PyObject> {
-        use agentstategraph_migrate::{binary_version, check, CheckResult, Registry};
+        use agentstategraph_migrate::{CheckResult, Registry, binary_version, check};
 
         let target = match target {
             Some(s) => semver::Version::parse(&s).map_err(|e| {
@@ -551,7 +551,11 @@ impl AgentStateGraph {
                 dict.set_item("status", "up_to_date")?;
                 dict.set_item("version", version.to_string())?;
             }
-            CheckResult::UpgradeAvailable { from, to, migrations } => {
+            CheckResult::UpgradeAvailable {
+                from,
+                to,
+                migrations,
+            } => {
                 dict.set_item("status", "upgrade_available")?;
                 dict.set_item("from", from.to_string())?;
                 dict.set_item("to", to.to_string())?;

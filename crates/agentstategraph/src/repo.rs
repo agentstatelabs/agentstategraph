@@ -144,7 +144,9 @@ pub enum RepoError {
     #[error("repository not initialized — call init() first")]
     NotInitialized,
 
-    #[error("path {0} is reserved for schema metadata; only IntentCategory::Migrate commits may write here")]
+    #[error(
+        "path {0} is reserved for schema metadata; only IntentCategory::Migrate commits may write here"
+    )]
     ReservedPath(String),
 
     #[error("merge conflicts: {0:?}")]
@@ -458,7 +460,7 @@ impl Repository {
     pub fn spec_get(&self, handle: SpecHandle, path: &str) -> Result<Object, RepoError> {
         self.specs
             .get(handle, self.storage.as_ref(), path)
-            .map_err(|e| RepoError::Speculation(e))
+            .map_err(RepoError::Speculation)
     }
 
     /// Set a value in a speculation's state.
@@ -470,7 +472,7 @@ impl Repository {
     ) -> Result<(), RepoError> {
         self.specs
             .set(handle, self.storage.as_ref(), path, value)
-            .map_err(|e| RepoError::Speculation(e))
+            .map_err(RepoError::Speculation)
     }
 
     /// Set a value from JSON in a speculation's state. Convenience wrapper
@@ -494,7 +496,7 @@ impl Repository {
     pub fn spec_delete(&self, handle: SpecHandle, path: &str) -> Result<(), RepoError> {
         self.specs
             .delete(handle, self.storage.as_ref(), path)
-            .map_err(|e| RepoError::Speculation(e))
+            .map_err(RepoError::Speculation)
     }
 
     /// Compare multiple speculations side-by-side.
@@ -504,7 +506,7 @@ impl Repository {
     ) -> Result<SpecComparison, RepoError> {
         self.specs
             .compare(handles, self.storage.as_ref())
-            .map_err(|e| RepoError::Speculation(e))
+            .map_err(RepoError::Speculation)
     }
 
     /// Commit a speculation — promotes it to a real commit on the base branch.
@@ -521,7 +523,7 @@ impl Repository {
         let (state_root, base_ref) = self
             .specs
             .commit(handle)
-            .map_err(|e| RepoError::Speculation(e))?;
+            .map_err(RepoError::Speculation)?;
 
         let parent_id = self.resolve_ref(&base_ref)?;
 
@@ -534,11 +536,8 @@ impl Repository {
             let resolver = StorageResolver {
                 storage: self.storage.as_ref(),
             };
-            let diff = agentstategraph_core::diff::diff(
-                &resolver,
-                &parent_commit.state_root,
-                &state_root,
-            );
+            let diff =
+                agentstategraph_core::diff::diff(&resolver, &parent_commit.state_root, &state_root);
             if let Some(path) = reserved_path_in_diff(&diff) {
                 return Err(RepoError::ReservedPath(path));
             }
@@ -553,7 +552,7 @@ impl Repository {
     pub fn discard_speculation(&self, handle: SpecHandle) -> Result<(), RepoError> {
         self.specs
             .discard(handle)
-            .map_err(|e| RepoError::Speculation(e))
+            .map_err(RepoError::Speculation)
     }
 
     /// List all active speculations.
@@ -628,8 +627,8 @@ impl Repository {
                         timestamp: commit.timestamp,
                     });
                 }
-            } else if let Some(parent_id) = commit.parents.first() {
-                if let Some(parent) = self.storage.get_commit(parent_id)? {
+            } else if let Some(parent_id) = commit.parents.first()
+                && let Some(parent) = self.storage.get_commit(parent_id)? {
                     let current_val =
                         tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path);
                     let parent_val =
@@ -663,7 +662,6 @@ impl Repository {
                         _ => continue,
                     }
                 }
-            }
         }
 
         Err(RepoError::RefNotFound(format!(
@@ -783,11 +781,7 @@ impl Repository {
     }
 
     /// Get an entire subtree as nested JSON. Batch alternative to N×get calls.
-    pub fn get_tree(
-        &self,
-        ref_name: &str,
-        prefix: &str,
-    ) -> Result<serde_json::Value, RepoError> {
+    pub fn get_tree(&self, ref_name: &str, prefix: &str) -> Result<serde_json::Value, RepoError> {
         // get_json already handles this — just delegate with the prefix as path
         let path = if prefix.is_empty() { "/" } else { prefix };
         self.get_json(ref_name, path)
@@ -898,10 +892,7 @@ impl Repository {
             commits.iter().filter(|c| c.parents.is_empty()).collect()
         };
 
-        fn build_intent_node(
-            commit: &Commit,
-            all_commits: &[Commit],
-        ) -> serde_json::Value {
+        fn build_intent_node(commit: &Commit, all_commits: &[Commit]) -> serde_json::Value {
             // Find children: commits whose first parent is this commit
             let children: Vec<serde_json::Value> = all_commits
                 .iter()
@@ -1087,7 +1078,12 @@ mod tests {
         let repo = test_repo();
         let value = Object::Atom(agentstategraph_core::Atom::String("hack".into()));
         let err = repo
-            .set("main", META_SCHEMA_VERSION_PATH, &value, quick_opts("tamper"))
+            .set(
+                "main",
+                META_SCHEMA_VERSION_PATH,
+                &value,
+                quick_opts("tamper"),
+            )
             .unwrap_err();
         assert!(matches!(err, RepoError::ReservedPath(_)), "got {:?}", err);
 
@@ -1106,11 +1102,7 @@ mod tests {
     fn test_meta_guard_allows_migrate_writes() {
         let repo = test_repo();
         let value = Object::Atom(agentstategraph_core::Atom::String("0.5.0".into()));
-        let opts = CommitOptions::new(
-            "agent/migrate",
-            IntentCategory::Migrate,
-            "bump schema",
-        );
+        let opts = CommitOptions::new("agent/migrate", IntentCategory::Migrate, "bump schema");
         repo.set("main", META_SCHEMA_VERSION_PATH, &value, opts)
             .expect("migrate intent should be allowed to write /_meta");
 

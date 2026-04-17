@@ -62,7 +62,9 @@ fn abandon_requires_reason() {
     let task = store
         .add_task("main", "p", "x", Priority::Low, None, vec![], None)
         .unwrap();
-    let err = store.abandon_task("main", "p", &task.id, "   ").unwrap_err();
+    let err = store
+        .abandon_task("main", "p", &task.id, "   ")
+        .unwrap_err();
     assert!(matches!(err, TaskStoreError::ReasonRequired));
 }
 

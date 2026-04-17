@@ -92,6 +92,12 @@ pub enum SpecError {
     Storage(#[from] agentstategraph_storage::StorageError),
 }
 
+impl Default for SpeculationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpeculationManager {
     pub fn new() -> Self {
         Self {

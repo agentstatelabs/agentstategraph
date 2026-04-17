@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use axum::{
+    Json,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 
 use agentstategraph::Repository;
@@ -26,7 +26,7 @@ pub struct ApiKey {
     pub key: String,
     pub tenant_id: String,
     pub name: String,
-    pub plan: String,      // "free", "standard", "enterprise"
+    pub plan: String, // "free", "standard", "enterprise"
     pub enabled: bool,
     pub created_at: String,
 }
@@ -59,21 +59,16 @@ impl TenantManager {
 
     /// Create a tenant manager with auth enabled.
     /// Loads API keys from a JSON file if provided.
-    pub fn multi_tenant(
-        default_repo: Arc<Repository>,
-        keys_file: Option<&str>,
-    ) -> Arc<Self> {
+    pub fn multi_tenant(default_repo: Arc<Repository>, keys_file: Option<&str>) -> Arc<Self> {
         let mut keys = HashMap::new();
 
-        if let Some(path) = keys_file {
-            if let Ok(data) = std::fs::read_to_string(path) {
-                if let Ok(loaded) = serde_json::from_str::<Vec<ApiKey>>(&data) {
+        if let Some(path) = keys_file
+            && let Ok(data) = std::fs::read_to_string(path)
+                && let Ok(loaded) = serde_json::from_str::<Vec<ApiKey>>(&data) {
                     for key in loaded {
                         keys.insert(key.key.clone(), key);
                     }
                 }
-            }
-        }
 
         Arc::new(Self {
             keys: RwLock::new(keys),
@@ -137,13 +132,12 @@ impl TenantManager {
                 .filter(|k| k.starts_with(key_prefix))
                 .cloned()
                 .collect();
-            if let Some(key) = matching.first() {
-                if let Some(api_key) = keys.get_mut(key) {
+            if let Some(key) = matching.first()
+                && let Some(api_key) = keys.get_mut(key) {
                     api_key.enabled = false;
                     self.save_keys();
                     return true;
                 }
-            }
         }
         false
     }
@@ -176,14 +170,13 @@ impl TenantManager {
     }
 
     fn save_keys(&self) {
-        if let Some(ref path) = self.keys_file {
-            if let Ok(keys) = self.keys.read() {
+        if let Some(ref path) = self.keys_file
+            && let Ok(keys) = self.keys.read() {
                 let all: Vec<&ApiKey> = keys.values().collect();
                 if let Ok(data) = serde_json::to_string_pretty(&all) {
                     let _ = std::fs::write(path, data);
                 }
             }
-        }
     }
 }
 
@@ -201,10 +194,7 @@ impl IntoResponse for AuthError {
                 StatusCode::UNAUTHORIZED,
                 "Missing API key. Pass it as: Authorization: Bearer asg_...",
             ),
-            AuthError::InvalidKey => (
-                StatusCode::UNAUTHORIZED,
-                "Invalid or revoked API key.",
-            ),
+            AuthError::InvalidKey => (StatusCode::UNAUTHORIZED, "Invalid or revoked API key."),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
     }
@@ -229,8 +219,8 @@ pub async fn auth_middleware(
 /// Extract API key from Authorization header or query parameter.
 fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     // Try Authorization: Bearer <key>
-    if let Some(auth) = headers.get("authorization") {
-        if let Ok(value) = auth.to_str() {
+    if let Some(auth) = headers.get("authorization")
+        && let Ok(value) = auth.to_str() {
             if let Some(key) = value.strip_prefix("Bearer ") {
                 return Some(key.trim().to_string());
             }
@@ -239,14 +229,12 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
                 return Some(value.trim().to_string());
             }
         }
-    }
 
     // Try X-API-Key header
-    if let Some(key) = headers.get("x-api-key") {
-        if let Ok(value) = key.to_str() {
+    if let Some(key) = headers.get("x-api-key")
+        && let Ok(value) = key.to_str() {
             return Some(value.trim().to_string());
         }
-    }
 
     None
 }

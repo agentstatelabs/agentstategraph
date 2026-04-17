@@ -58,6 +58,12 @@ pub struct WatchManager {
     watchers: RwLock<HashMap<SubscriptionId, Watcher>>,
 }
 
+impl Default for WatchManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WatchManager {
     pub fn new() -> Self {
         Self {

@@ -103,9 +103,7 @@ fn final_complete_flip_is_observable_only_as_a_single_step() {
         .unwrap();
 
     // At "before": task InProgress, plan Active.
-    let task_before = store
-        .get_task("before", "p", &a.id)
-        .unwrap();
+    let task_before = store.get_task("before", "p", &a.id).unwrap();
     assert_eq!(task_before.status, TaskStatus::InProgress);
     let plan_before = store.get_plan("before", "p").unwrap();
     assert_eq!(plan_before.status, PlanStatus::Active);
@@ -148,7 +146,9 @@ fn final_abandon_also_promotes_plan() {
     // Abandoning the final open task must flip the plan to Completed
     // so the invariant "plan Completed iff every task terminal" holds
     // regardless of which transition closes the last task.
-    store.abandon_task("main", "p", &b.id, "scoped out").unwrap();
+    store
+        .abandon_task("main", "p", &b.id, "scoped out")
+        .unwrap();
     assert_eq!(
         store.get_plan("main", "p").unwrap().status,
         PlanStatus::Completed

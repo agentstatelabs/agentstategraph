@@ -15,5 +15,5 @@ agentstategraph-core = { path = "../../crates/agentstategraph-core" }
 agentstategraph-migrate = { path = "../../crates/agentstategraph-migrate" }
 agentstategraph-storage = { path = "../../crates/agentstategraph-storage" }
 semver = "1"
-pyo3 = { version = "0.24", features = ["extension-module"] }
+pyo3 = { version = "0.24", features = ["extension-module", "multiple-pymethods"] }
 serde_json = "1"

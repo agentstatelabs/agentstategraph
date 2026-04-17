@@ -96,9 +96,11 @@ async fn health_with_mgr(State(mgr): State<Arc<TenantManager>>) -> Json<serde_js
     // Get repo via manager (no auth needed for health)
     let repo = mgr.get_repo(None).unwrap_or_else(|_| {
         // If auth is enabled, health still works — just report status
-        return mgr.get_repo(None).unwrap_or_else(|_| Arc::new(Repository::new(
-            Box::new(agentstategraph_storage::MemoryStorage::new()),
-        )));
+        mgr.get_repo(None).unwrap_or_else(|_| {
+            Arc::new(Repository::new(Box::new(
+                agentstategraph_storage::MemoryStorage::new(),
+            )))
+        })
     });
     let branches = repo.list_branches(None).unwrap_or_default();
     Json(serde_json::json!({
@@ -178,7 +180,9 @@ async fn list_paths(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let prefix = q.prefix.as_deref().unwrap_or("/");
     let paths = repo.list_paths(&ref_name, prefix, q.max_depth)?;
-    Ok(Json(serde_json::json!({ "count": paths.len(), "paths": paths })))
+    Ok(Json(
+        serde_json::json!({ "count": paths.len(), "paths": paths }),
+    ))
 }
 
 async fn search_values(
@@ -188,14 +192,18 @@ async fn search_values(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let query = q.query.as_deref().unwrap_or("");
     if query.is_empty() {
-        return Ok(Json(serde_json::json!({ "error": "query parameter required" })));
+        return Ok(Json(
+            serde_json::json!({ "error": "query parameter required" }),
+        ));
     }
     let results = repo.search_values(&ref_name, query, q.max_results)?;
     let entries: Vec<serde_json::Value> = results
         .iter()
         .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
         .collect();
-    Ok(Json(serde_json::json!({ "count": entries.len(), "results": entries })))
+    Ok(Json(
+        serde_json::json!({ "count": entries.len(), "results": entries }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -224,7 +232,9 @@ async fn set_value(
         opts = opts.with_confidence(c);
     }
     let commit_id = repo.set_json(&ref_name, &req.path, &req.value, opts)?;
-    Ok(Json(serde_json::json!({ "commit_id": commit_id.to_string() })))
+    Ok(Json(
+        serde_json::json!({ "commit_id": commit_id.to_string() }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -242,7 +252,9 @@ async fn delete_value(
     let category = parse_category(&req.intent_category);
     let opts = CommitOptions::new("http", category, &req.intent_description);
     let commit_id = repo.delete(&ref_name, &req.path, opts)?;
-    Ok(Json(serde_json::json!({ "commit_id": commit_id.to_string() })))
+    Ok(Json(
+        serde_json::json!({ "commit_id": commit_id.to_string() }),
+    ))
 }
 
 // ─── History ────────────────────────────────────────────────
@@ -404,7 +416,9 @@ async fn create_branch(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let from = req.from.as_deref().unwrap_or("main");
     let id = repo.branch(&req.name, from)?;
-    Ok(Json(serde_json::json!({ "branch": req.name, "commit": id.short() })))
+    Ok(Json(
+        serde_json::json!({ "branch": req.name, "commit": id.short() }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -426,18 +440,16 @@ async fn merge_branches(
     }
     match repo.merge(&req.source, target, opts) {
         Ok(id) => Ok(Json(serde_json::json!({ "commit_id": id.to_string() }))),
-        Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => {
-            Ok(Json(serde_json::json!({ "conflicts": conflicts.len(), "details": serde_json::to_value(&conflicts).unwrap_or_default() })))
-        }
+        Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => Ok(Json(
+            serde_json::json!({ "conflicts": conflicts.len(), "details": serde_json::to_value(&conflicts).unwrap_or_default() }),
+        )),
         Err(e) => Err(AppError(e.into())),
     }
 }
 
 // ─── Epochs ─────────────────────────────────────────────────
 
-async fn list_epochs(
-    State(repo): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
+async fn list_epochs(State(repo): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
     let entries = repo.list_epochs()?;
     let json: Vec<serde_json::Value> = entries
         .iter()
@@ -467,7 +479,9 @@ async fn create_epoch(
     Json(req): Json<CreateEpochRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let epoch = repo.create_epoch(&req.id, &req.description, vec![])?;
-    Ok(Json(serde_json::json!({ "id": epoch.id, "status": format!("{:?}", epoch.status) })))
+    Ok(Json(
+        serde_json::json!({ "id": epoch.id, "status": format!("{:?}", epoch.status) }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -514,7 +528,11 @@ struct AppError(Box<dyn std::error::Error>);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": self.0.to_string() }))).into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": self.0.to_string() })),
+        )
+            .into_response()
     }
 }
 

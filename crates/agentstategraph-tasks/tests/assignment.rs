@@ -43,7 +43,9 @@ fn assign_and_unassign_task() {
         .add_task("main", "p", "x", Priority::Medium, None, vec![], None)
         .unwrap();
 
-    let task = store.assign_task("main", "p", &task.id, "claude-code").unwrap();
+    let task = store
+        .assign_task("main", "p", &task.id, "claude-code")
+        .unwrap();
     assert_eq!(task.assigned_to.as_deref(), Some("claude-code"));
 
     let task = store.unassign_task("main", "p", &task.id).unwrap();
@@ -78,15 +80,7 @@ fn next_task_for_filters_by_agent() {
         )
         .unwrap();
     store
-        .add_task(
-            "main",
-            "p",
-            "unassigned",
-            Priority::Low,
-            None,
-            vec![],
-            None,
-        )
+        .add_task("main", "p", "unassigned", Priority::Low, None, vec![], None)
         .unwrap();
 
     // Codex sees its own task (highest priority among its candidates).

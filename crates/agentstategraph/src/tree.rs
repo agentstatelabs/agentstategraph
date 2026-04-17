@@ -18,7 +18,7 @@ pub fn tree_get(
 ) -> Result<Object, TreeError> {
     let root_obj = store
         .get_object(root)?
-        .ok_or_else(|| TreeError::ObjectNotFound(*root))?;
+        .ok_or(TreeError::ObjectNotFound(*root))?;
 
     if path.is_root() {
         return Ok(root_obj);
@@ -54,7 +54,7 @@ pub fn tree_set(
     // Load the root
     let root_obj = store
         .get_object(root)?
-        .ok_or_else(|| TreeError::ObjectNotFound(*root))?;
+        .ok_or(TreeError::ObjectNotFound(*root))?;
 
     // Recursively set the value, rebuilding the path from leaf to root
     let new_root = set_recursive(store, &root_obj, path.components(), 0, value_id)?;
@@ -78,7 +78,7 @@ pub fn tree_delete(
 
     let root_obj = store
         .get_object(root)?
-        .ok_or_else(|| TreeError::ObjectNotFound(*root))?;
+        .ok_or(TreeError::ObjectNotFound(*root))?;
 
     let new_root = delete_recursive(store, &root_obj, path.components(), 0)?;
     let new_root_id = store.put_object(&new_root)?;
@@ -96,7 +96,7 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
                 for (key, child_id) in entries {
                     let child = store
                         .get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     map.insert(key.clone(), tree_to_json(store, &child)?);
                 }
                 Ok(serde_json::Value::Object(map))
@@ -106,7 +106,7 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
                 for child_id in items {
                     let child = store
                         .get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     arr.push(tree_to_json(store, &child)?);
                 }
                 Ok(serde_json::Value::Array(arr))
@@ -116,7 +116,7 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
                 for child_id in items {
                     let child = store
                         .get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     arr.push(tree_to_json(store, &child)?);
                 }
                 Ok(serde_json::Value::Array(arr))
@@ -135,14 +135,13 @@ pub fn tree_list_paths(
 ) -> Result<Vec<String>, TreeError> {
     let root_obj = store
         .get_object(root)?
-        .ok_or_else(|| TreeError::ObjectNotFound(*root))?;
+        .ok_or(TreeError::ObjectNotFound(*root))?;
 
     // If prefix is non-empty, navigate to the subtree first
     let (start_obj, base_path) = if prefix.is_empty() || prefix == "/" {
         (root_obj, String::new())
     } else {
-        let path = StatePath::parse(prefix)
-            .map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let path = StatePath::parse(prefix).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
         let obj = tree_get(store, root, &path)?;
         (obj, prefix.to_string())
     };
@@ -166,19 +165,28 @@ fn collect_paths(
 
     match obj {
         Object::Atom(_) => {
-            let path = if current_path.is_empty() { "/".to_string() } else { current_path.to_string() };
+            let path = if current_path.is_empty() {
+                "/".to_string()
+            } else {
+                current_path.to_string()
+            };
             paths.push(path);
         }
         Object::Node(node) => match node {
             Node::Map(entries) => {
                 if entries.is_empty() {
-                    let path = if current_path.is_empty() { "/".to_string() } else { current_path.to_string() };
+                    let path = if current_path.is_empty() {
+                        "/".to_string()
+                    } else {
+                        current_path.to_string()
+                    };
                     paths.push(path);
                 } else {
                     for (key, child_id) in entries {
                         let child_path = format!("{}/{}", current_path, key);
-                        let child = store.get_object(child_id)?
-                            .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                        let child = store
+                            .get_object(child_id)?
+                            .ok_or(TreeError::ObjectNotFound(*child_id))?;
                         collect_paths(store, &child, &child_path, max_depth, depth + 1, paths)?;
                     }
                 }
@@ -186,16 +194,18 @@ fn collect_paths(
             Node::List(items) => {
                 for (i, child_id) in items.iter().enumerate() {
                     let child_path = format!("{}/{}", current_path, i);
-                    let child = store.get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    let child = store
+                        .get_object(child_id)?
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     collect_paths(store, &child, &child_path, max_depth, depth + 1, paths)?;
                 }
             }
             Node::Set(items) => {
                 for (i, child_id) in items.iter().enumerate() {
                     let child_path = format!("{}/{}", current_path, i);
-                    let child = store.get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    let child = store
+                        .get_object(child_id)?
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     collect_paths(store, &child, &child_path, max_depth, depth + 1, paths)?;
                 }
             }
@@ -213,11 +223,18 @@ pub fn tree_search_values(
 ) -> Result<Vec<(String, String)>, TreeError> {
     let root_obj = store
         .get_object(root)?
-        .ok_or_else(|| TreeError::ObjectNotFound(*root))?;
+        .ok_or(TreeError::ObjectNotFound(*root))?;
 
     let query_lower = query.to_lowercase();
     let mut results = Vec::new();
-    search_recursive(store, &root_obj, "", &query_lower, max_results, &mut results)?;
+    search_recursive(
+        store,
+        &root_obj,
+        "",
+        &query_lower,
+        max_results,
+        &mut results,
+    )?;
     Ok(results)
 }
 
@@ -243,30 +260,40 @@ fn search_recursive(
                 _ => return Ok(()),
             };
             if value_str.to_lowercase().contains(query) {
-                let path = if current_path.is_empty() { "/".to_string() } else { current_path.to_string() };
+                let path = if current_path.is_empty() {
+                    "/".to_string()
+                } else {
+                    current_path.to_string()
+                };
                 results.push((path, value_str));
             }
         }
         Object::Node(node) => match node {
             Node::Map(entries) => {
                 for (key, child_id) in entries {
-                    if results.len() >= max_results { break; }
+                    if results.len() >= max_results {
+                        break;
+                    }
                     // Also match on key names
                     if key.to_lowercase().contains(query) {
                         let path = format!("{}/{}", current_path, key);
                         results.push((path.clone(), format!("[key match: {}]", key)));
                     }
-                    let child = store.get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    let child = store
+                        .get_object(child_id)?
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     let child_path = format!("{}/{}", current_path, key);
                     search_recursive(store, &child, &child_path, query, max_results, results)?;
                 }
             }
             Node::List(items) | Node::Set(items) => {
                 for (i, child_id) in items.iter().enumerate() {
-                    if results.len() >= max_results { break; }
-                    let child = store.get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    if results.len() >= max_results {
+                        break;
+                    }
+                    let child = store
+                        .get_object(child_id)?
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     let child_path = format!("{}/{}", current_path, i);
                     search_recursive(store, &child, &child_path, query, max_results, results)?;
                 }
@@ -305,16 +332,16 @@ fn navigate(
                 .ok_or_else(|| TreeError::PathNotFound(path.to_string()))?;
             store
                 .get_object(child_id)?
-                .ok_or_else(|| TreeError::ObjectNotFound(*child_id))
+                .ok_or(TreeError::ObjectNotFound(*child_id))
         }
         (Object::Node(Node::List(items)), PathComponent::Index(idx)) => {
-            let child_id = items.get(*idx).ok_or_else(|| TreeError::IndexOutOfBounds {
+            let child_id = items.get(*idx).ok_or(TreeError::IndexOutOfBounds {
                 index: *idx,
                 length: items.len(),
             })?;
             store
                 .get_object(child_id)?
-                .ok_or_else(|| TreeError::ObjectNotFound(*child_id))
+                .ok_or(TreeError::ObjectNotFound(*child_id))
         }
         (Object::Node(Node::Map(_)), PathComponent::Index(_)) => Err(TreeError::TypeMismatch {
             path: path.to_string(),
@@ -342,7 +369,7 @@ fn set_recursive(
         // We've consumed all path components — return the object at value_id
         return store
             .get_object(&value_id)?
-            .ok_or_else(|| TreeError::ObjectNotFound(value_id));
+            .ok_or(TreeError::ObjectNotFound(value_id));
     }
 
     let component = &components[depth];
@@ -357,7 +384,7 @@ fn set_recursive(
                 let child = if let Some(child_id) = entries.get(key) {
                     store
                         .get_object(child_id)?
-                        .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?
                 } else {
                     // Path doesn't exist yet — create intermediate maps
                     Object::empty_map()
@@ -437,7 +464,7 @@ fn delete_recursive(
                 let child_id = entries.get(key).unwrap();
                 let child = store
                     .get_object(child_id)?
-                    .ok_or_else(|| TreeError::ObjectNotFound(*child_id))?;
+                    .ok_or(TreeError::ObjectNotFound(*child_id))?;
                 let new_child = delete_recursive(store, &child, components, depth + 1)?;
                 let new_child_id = store.put_object(&new_child)?;
                 let mut new_entries = entries.clone();

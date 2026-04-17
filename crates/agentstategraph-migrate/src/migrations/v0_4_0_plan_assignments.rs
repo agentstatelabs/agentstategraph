@@ -22,11 +22,11 @@
 
 use std::sync::LazyLock;
 
-use agentstategraph::{META_SCHEMA_VERSION_PATH, Repository, RepoError};
+use agentstategraph::{META_SCHEMA_VERSION_PATH, RepoError, Repository};
 use semver::{Version, VersionReq};
 use serde_json::Value;
 
-use crate::{migrate_commit_options, version_object, MigrateError, MigrationOutcome};
+use crate::{MigrateError, MigrationOutcome, migrate_commit_options, version_object};
 
 /// The sidecar path CTXone used pre-0.4.
 pub const SIDECAR_PATH: &str = "/plan_assignments";
@@ -76,11 +76,7 @@ impl crate::Migration for Migration {
         }
     }
 
-    fn migrate(
-        &self,
-        repo: &Repository,
-        ref_name: &str,
-    ) -> Result<MigrationOutcome, MigrateError> {
+    fn migrate(&self, repo: &Repository, ref_name: &str) -> Result<MigrationOutcome, MigrateError> {
         let sidecar = match repo.get_json(ref_name, SIDECAR_PATH) {
             Ok(v) => v,
             Err(RepoError::Tree(_)) => {
@@ -106,9 +102,7 @@ impl crate::Migration for Migration {
             }
         };
 
-        let desc = format!(
-            "migrate {SIDECAR_PATH} sidecar → Task.assigned_to (→ 0.4.0)"
-        );
+        let desc = format!("migrate {SIDECAR_PATH} sidecar → Task.assigned_to (→ 0.4.0)");
         let reasoning =
             "native assigned_to supersedes sidecar; spec/UPGRADE-PATH.md §4".to_string();
 
@@ -133,8 +127,7 @@ impl crate::Migration for Migration {
                     continue;
                 };
 
-                let task_path =
-                    format!("{}/{}/{}", self.plans_prefix(), plan_name, task_id);
+                let task_path = format!("{}/{}/{}", self.plans_prefix(), plan_name, task_id);
 
                 let mut task_json = match repo.get_json(ref_name, &task_path) {
                     Ok(v) => v,
@@ -172,8 +165,7 @@ impl crate::Migration for Migration {
             return Err(MigrateError::Repo(e));
         }
 
-        let version_val =
-            serde_json::to_value(TO_VER.to_string()).expect("string is valid json");
+        let version_val = serde_json::to_value(TO_VER.to_string()).expect("string is valid json");
         if let Err(e) = repo.spec_set_json(handle, META_SCHEMA_VERSION_PATH, &version_val) {
             repo.discard_speculation(handle).ok();
             return Err(MigrateError::Repo(e));
@@ -205,15 +197,20 @@ fn bump_version_only(
         "stamp schema_version = 0.4.0 (no sidecar present)",
         "no-op migration; advances /_meta/schema_version",
     );
-    repo.set(ref_name, META_SCHEMA_VERSION_PATH, &version_object(&TO_VER), opts)
-        .map_err(MigrateError::Repo)
+    repo.set(
+        ref_name,
+        META_SCHEMA_VERSION_PATH,
+        &version_object(&TO_VER),
+        opts,
+    )
+    .map_err(MigrateError::Repo)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Migration as MigrationTrait;
-    use crate::{check, CheckResult, Registry, RunMode};
+    use crate::{CheckResult, Registry, RunMode, check};
     use agentstategraph::{CommitOptions, META_SCHEMA_VERSION_PATH, Repository};
     use agentstategraph_core::IntentCategory;
     use agentstategraph_storage::MemoryStorage;
@@ -231,9 +228,7 @@ mod tests {
         repo.set(
             "main",
             META_SCHEMA_VERSION_PATH,
-            &agentstategraph_core::Object::Atom(agentstategraph_core::Atom::String(
-                "0.3.0".into(),
-            )),
+            &agentstategraph_core::Object::Atom(agentstategraph_core::Atom::String("0.3.0".into())),
             CommitOptions::new("test/setup", IntentCategory::Migrate, "seed pre-0.4"),
         )
         .unwrap();
@@ -242,15 +237,39 @@ mod tests {
 
         store.create_plan("main", "alpha", None).unwrap();
         let t1 = store
-            .add_task("main", "alpha", "Write hero", Priority::High, None, vec![], None)
+            .add_task(
+                "main",
+                "alpha",
+                "Write hero",
+                Priority::High,
+                None,
+                vec![],
+                None,
+            )
             .unwrap();
         let t2 = store
-            .add_task("main", "alpha", "Ship hero", Priority::Medium, None, vec![], None)
+            .add_task(
+                "main",
+                "alpha",
+                "Ship hero",
+                Priority::Medium,
+                None,
+                vec![],
+                None,
+            )
             .unwrap();
 
         store.create_plan("main", "beta", None).unwrap();
         let t3 = store
-            .add_task("main", "beta", "Research", Priority::Low, None, vec![], None)
+            .add_task(
+                "main",
+                "beta",
+                "Research",
+                Priority::Low,
+                None,
+                vec![],
+                None,
+            )
             .unwrap();
 
         let assignments = vec![
@@ -308,7 +327,10 @@ mod tests {
         let m = Migration;
         m.migrate(&repo, "main").unwrap();
 
-        assert!(!m.applies_to(&repo, "main").unwrap(), "should be a no-op now");
+        assert!(
+            !m.applies_to(&repo, "main").unwrap(),
+            "should be a no-op now"
+        );
 
         let log_before = repo.log("main", 100).unwrap();
         // Run again — produces one more commit that only bumps version,
@@ -364,7 +386,9 @@ mod tests {
         let target = TO_VER.clone();
 
         let log_before = repo.log("main", 100).unwrap().len();
-        let report = registry.run(&repo, "main", &target, RunMode::DryRun).unwrap();
+        let report = registry
+            .run(&repo, "main", &target, RunMode::DryRun)
+            .unwrap();
         let log_after = repo.log("main", 100).unwrap().len();
 
         assert_eq!(log_before, log_after, "dry-run must not write");
