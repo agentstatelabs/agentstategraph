@@ -5,6 +5,17 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.5.0-beta.1] — 2026-04-17
+
+### Changed
+- Minor version bump from `0.4.0-beta.3` to `0.5.0-beta.1`. The migration framework, `/_meta/*` guard, and upgrade CLI landed in the 0.4 series but are significant enough to reflect as a minor bump in the release line. No API changes from `0.4.0-beta.3` — same code, larger version number.
+- All bindings (Python, TypeScript) aligned to `0.5.0-beta.1`.
+
+## [0.4.0-beta.3] — 2026-04-17
+
+### Changed
+- Aligned Python and TypeScript bindings (both Cargo and package files) to the workspace version `0.4.0-beta.3`. Bindings had been stranded at `0.3.5-beta.2` through the `0.4.0-beta.1` and `0.4.0-beta.2` workspace bumps.
+
 ## [0.4.0-beta.2] — 2026-04-17
 
 ### Added
