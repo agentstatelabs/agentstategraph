@@ -161,6 +161,7 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
         .route("/api/admin/keys", get(list_keys))
         .route("/api/admin/keys", post(create_key))
         .route("/api/admin/keys/revoke", post(revoke_key))
+        .route("/api/admin/keys/rotate", post(rotate_key))
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::admin_auth_middleware,
@@ -218,6 +219,9 @@ struct CreateKeyRequest {
     can_migrate: Option<bool>,
     #[serde(default)]
     is_admin: Option<bool>,
+    /// Optional expiry in days from now (v3-V5). `None` = never expires.
+    #[serde(default)]
+    expires_in_days: Option<u32>,
 }
 
 async fn list_keys(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Value> {
@@ -231,6 +235,9 @@ async fn create_key(
     let plan = req.plan.unwrap_or_else(|| "free".to_string());
     let can_migrate = req.can_migrate.unwrap_or(false);
     let is_admin = req.is_admin.unwrap_or(false);
+    let expires_at = req
+        .expires_in_days
+        .map(|d| chrono::Utc::now() + chrono::Duration::days(d as i64));
     let key = mgr.create_key_with(
         &req.tenant_id,
         &req.name,
@@ -238,6 +245,7 @@ async fn create_key(
         req.commit_agent_id,
         can_migrate,
         is_admin,
+        expires_at,
     );
     // Return the full key ONCE — it won't be shown again
     Json(serde_json::json!({
@@ -248,8 +256,37 @@ async fn create_key(
         "commit_agent_id": key.commit_agent_id,
         "can_migrate": key.can_migrate,
         "is_admin": key.is_admin,
+        "expires_at": key.expires_at.map(|t| t.to_rfc3339()),
         "message": "Save this key — it will not be shown again."
     }))
+}
+
+#[derive(Deserialize)]
+struct RotateKeyRequest {
+    key_prefix: String,
+}
+
+async fn rotate_key(
+    State(mgr): State<Arc<TenantManager>>,
+    Json(req): Json<RotateKeyRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    match mgr.rotate_key(&req.key_prefix) {
+        Some(k) => Ok(Json(serde_json::json!({
+            "key": k.key,
+            "tenant_id": k.tenant_id,
+            "name": k.name,
+            "plan": k.plan,
+            "commit_agent_id": k.commit_agent_id,
+            "can_migrate": k.can_migrate,
+            "is_admin": k.is_admin,
+            "expires_at": k.expires_at.map(|t| t.to_rfc3339()),
+            "message": "Save this key — it will not be shown again. The old key has been revoked."
+        }))),
+        None => Err(AppError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("No key matches prefix `{}`", req.key_prefix),
+        }),
+    }
 }
 
 #[derive(Deserialize)]

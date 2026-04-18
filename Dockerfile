@@ -23,9 +23,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=builder /build/target/release/agentstategraph-mcp /usr/local/bin/agentstategraph-mcp
 
+# v3: run as non-root. `/data` is writable by the `asg` user so SQLite
+# databases and keys files can be created by the container process.
+RUN groupadd --gid 1000 asg \
+ && useradd --uid 1000 --gid asg --shell /bin/bash --create-home asg \
+ && mkdir -p /data \
+ && chown -R asg:asg /data
+
 WORKDIR /data
 
 EXPOSE 3001
+
+USER 1000:1000
 
 ENTRYPOINT ["agentstategraph-mcp"]
 CMD ["--http", "--port", "3001"]

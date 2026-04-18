@@ -48,6 +48,7 @@ dependencies = [
  "axum",
  "chrono",
  "governor",
+ "rand 0.9.4",
  "reqwest",
  "rmcp",
  "schemars",

@@ -17,6 +17,8 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, Utc};
+use rand::{RngCore, TryRngCore};
 
 use agentstategraph::Repository;
 
@@ -45,6 +47,15 @@ pub struct ApiKey {
     /// additional keys explicitly provisioned by an admin have it.
     #[serde(default)]
     pub is_admin: bool,
+    /// Optional expiry. When set and `Utc::now() > expires_at`, the key
+    /// is treated as revoked (v3-V5). `None` means never expires.
+    /// Serde default so existing on-disk keys continue to deserialize.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Last time this key successfully validated. Nice-to-have for
+    /// lifecycle dashboards (v3-V5).
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Context resolved by the auth middleware for each request.
@@ -119,11 +130,12 @@ impl TenantManager {
     /// Generate a new API key for a tenant.
     #[allow(dead_code)]
     pub fn create_key(&self, tenant_id: &str, name: &str, plan: &str) -> ApiKey {
-        self.create_key_with(tenant_id, name, plan, None, false, false)
+        self.create_key_with(tenant_id, name, plan, None, false, false, None)
     }
 
-    /// Generate a new API key with optional commit_agent_id binding and
-    /// migrate capability.
+    /// Generate a new API key with optional commit_agent_id binding,
+    /// migrate capability, and optional expiry (v3-V5).
+    #[allow(clippy::too_many_arguments)]
     pub fn create_key_with(
         &self,
         tenant_id: &str,
@@ -132,21 +144,60 @@ impl TenantManager {
         commit_agent_id: Option<String>,
         can_migrate: bool,
         is_admin: bool,
+        expires_at: Option<DateTime<Utc>>,
     ) -> ApiKey {
-        let key = format!("asg_{}", uuid_v4());
+        let key = generate_key();
         let api_key = ApiKey {
             key: key.clone(),
             tenant_id: tenant_id.to_string(),
             name: name.to_string(),
             plan: plan.to_string(),
             enabled: true,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: Utc::now().to_rfc3339(),
             commit_agent_id,
             can_migrate,
             is_admin,
+            expires_at,
+            last_used_at: None,
         };
         self.register_key(api_key.clone());
         api_key
+    }
+
+    /// Rotate an API key: mint a new one with identical capabilities
+    /// and expiry, and disable the old one (v3-V5). Returns the new
+    /// `ApiKey` (the `.key` field is the only moment the raw value is
+    /// exposed — handlers should return it once to the caller and then
+    /// forget it). Returns `None` if no key matches `key_prefix`.
+    pub fn rotate_key(&self, key_prefix: &str) -> Option<ApiKey> {
+        // Snapshot the old key's settings first.
+        let (tenant_id, name, plan, commit_agent_id, can_migrate, is_admin, expires_at) = {
+            let keys = self.keys.read().ok()?;
+            let full = keys.keys().find(|k| k.starts_with(key_prefix)).cloned()?;
+            let old = keys.get(&full)?;
+            (
+                old.tenant_id.clone(),
+                old.name.clone(),
+                old.plan.clone(),
+                old.commit_agent_id.clone(),
+                old.can_migrate,
+                old.is_admin,
+                old.expires_at,
+            )
+        };
+        // Mint the replacement.
+        let new_key = self.create_key_with(
+            &tenant_id,
+            &name,
+            &plan,
+            commit_agent_id,
+            can_migrate,
+            is_admin,
+            expires_at,
+        );
+        // Disable the old key.
+        self.revoke_key(key_prefix);
+        Some(new_key)
     }
 
     /// Register a raw `ApiKey` value (e.g. for operator-provided bootstrap
@@ -168,10 +219,12 @@ impl TenantManager {
                 name: name.to_string(),
                 plan: "admin".to_string(),
                 enabled: true,
-                created_at: chrono::Utc::now().to_rfc3339(),
+                created_at: Utc::now().to_rfc3339(),
                 commit_agent_id: None,
                 can_migrate: true,
                 is_admin: true,
+                expires_at: None,
+                last_used_at: None,
             },
         );
         drop(keys);
@@ -201,7 +254,7 @@ impl TenantManager {
             return false;
         };
         keys.get(key)
-            .map(|k| k.enabled && k.is_admin)
+            .map(|k| is_key_live(k) && k.is_admin)
             .unwrap_or(false)
     }
 
@@ -209,7 +262,7 @@ impl TenantManager {
     pub fn get_agent_id(&self, api_key: &str) -> Option<String> {
         let keys = self.keys.read().ok()?;
         let k = keys.get(api_key)?;
-        if !k.enabled {
+        if !is_key_live(k) {
             return None;
         }
         k.commit_agent_id.clone()
@@ -226,7 +279,7 @@ impl TenantManager {
             return false;
         };
         keys.get(api_key)
-            .map(|k| k.enabled && k.can_migrate)
+            .map(|k| is_key_live(k) && k.can_migrate)
             .unwrap_or(false)
     }
 
@@ -254,6 +307,8 @@ impl TenantManager {
                     "created_at": k.created_at,
                     "commit_agent_id": k.commit_agent_id,
                     "can_migrate": k.can_migrate,
+                    "expires_at": k.expires_at.map(|t| t.to_rfc3339()),
+                    "last_used_at": k.last_used_at.map(|t| t.to_rfc3339()),
                 })
             })
             .collect()
@@ -278,15 +333,28 @@ impl TenantManager {
         false
     }
 
-    /// Look up tenant by API key.
+    /// Look up tenant by API key. Treats expired keys identically to
+    /// revoked/missing ones — same not-found response, so the reason
+    /// is never leaked (v3-V5).
     pub fn resolve_tenant(&self, api_key: &str) -> Option<String> {
-        let keys = self.keys.read().ok()?;
-        let key_info = keys.get(api_key)?;
-        if key_info.enabled {
-            Some(key_info.tenant_id.clone())
-        } else {
-            None
+        // Peek under a read lock first; only take the write lock when
+        // we actually need to update `last_used_at`.
+        let (tenant, live) = {
+            let keys = self.keys.read().ok()?;
+            let key_info = keys.get(api_key)?;
+            (key_info.tenant_id.clone(), is_key_live(key_info))
+        };
+        if !live {
+            return None;
         }
+        // Best-effort touch: don't fail resolution if we can't grab the
+        // write lock (a poisoned lock shouldn't DoS auth).
+        if let Ok(mut keys) = self.keys.write()
+            && let Some(k) = keys.get_mut(api_key)
+        {
+            k.last_used_at = Some(Utc::now());
+        }
+        Some(tenant)
     }
 
     /// Get the repository for a request. If auth is disabled, returns the default repo.
@@ -444,6 +512,87 @@ fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-fn uuid_v4() -> String {
-    uuid::Uuid::new_v4().to_string().replace('-', "")
+/// Whether a key is currently usable: enabled and not past its
+/// expiry (v3-V5). Central helper so every validator agrees.
+fn is_key_live(k: &ApiKey) -> bool {
+    if !k.enabled {
+        return false;
+    }
+    if let Some(exp) = k.expires_at
+        && Utc::now() > exp
+    {
+        return false;
+    }
+    true
+}
+
+/// Generate a fresh API key with 256 bits of entropy from the OS RNG,
+/// hex-encoded and prefixed with `asg_` (v3-V5). Format:
+/// `asg_<64 hex chars>`.
+fn generate_key() -> String {
+    let mut bytes = [0u8; 32];
+    // Prefer the OS RNG; if it's unavailable for any reason, fall back
+    // to the thread RNG (ChaCha, seeded from OS entropy at thread
+    // start). Either path is cryptographically strong.
+    if rand::rngs::OsRng.try_fill_bytes(&mut bytes).is_err() {
+        rand::rng().fill_bytes(&mut bytes);
+    }
+    let mut s = String::with_capacity(4 + 64);
+    s.push_str("asg_");
+    for b in &bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_key_matches_asg_hex64() {
+        let k = generate_key();
+        assert!(k.starts_with("asg_"), "missing asg_ prefix: {}", k);
+        let hex = &k[4..];
+        assert_eq!(hex.len(), 64, "hex must be 64 chars: {}", k);
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "hex must be lowercase: {}",
+            k
+        );
+    }
+
+    #[test]
+    fn generated_keys_are_unique() {
+        let a = generate_key();
+        let b = generate_key();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn is_key_live_respects_enabled_and_expiry() {
+        let mut k = ApiKey {
+            key: "asg_x".into(),
+            tenant_id: "t".into(),
+            name: "n".into(),
+            plan: "free".into(),
+            enabled: true,
+            created_at: Utc::now().to_rfc3339(),
+            commit_agent_id: None,
+            can_migrate: false,
+            is_admin: false,
+            expires_at: None,
+            last_used_at: None,
+        };
+        assert!(is_key_live(&k));
+        k.enabled = false;
+        assert!(!is_key_live(&k));
+        k.enabled = true;
+        k.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        assert!(!is_key_live(&k));
+        k.expires_at = Some(Utc::now() + chrono::Duration::hours(1));
+        assert!(is_key_live(&k));
+    }
 }

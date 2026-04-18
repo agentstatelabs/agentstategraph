@@ -35,6 +35,27 @@ pub fn resolve_bind_addr(args: &[String], env_bind: Option<String>) -> String {
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
+/// Return a TLS advice string for operators when the server binds to a
+/// non-loopback address without TLS in front of it (v3-V7). Returns
+/// `None` when the bind is loopback or TLS is configured.
+pub fn tls_advice(bind_addr: &str, has_tls: bool) -> Option<String> {
+    if has_tls {
+        return None;
+    }
+    let loopback = bind_addr == "127.0.0.1"
+        || bind_addr == "localhost"
+        || bind_addr == "::1"
+        || bind_addr.starts_with("127.");
+    if loopback {
+        return None;
+    }
+    Some(
+        "binding to non-loopback without TLS — put a TLS-terminating proxy \
+         in front, or run only on a trusted network."
+            .to_string(),
+    )
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -302,6 +323,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Note: default bind is loopback-only. Pass --bind 0.0.0.0 to expose on the LAN."
             );
         }
+        // v3-V7: warn once if we're exposed on a non-loopback address
+        // without TLS. ASG does not terminate TLS itself — operators
+        // need a reverse proxy (nginx/caddy/tailscale) in front.
+        if let Some(msg) = tls_advice(&bind_addr, /* has_tls = */ false) {
+            eprintln!("WARNING: {}", msg);
+        }
         eprintln!("Try: curl http://localhost:{}/api/health", http_port);
 
         tokio::runtime::Builder::new_multi_thread()
@@ -374,7 +401,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_bind_addr;
+    use super::{resolve_bind_addr, tls_advice};
+
+    #[test]
+    fn tls_advice_warns_on_non_loopback_without_tls() {
+        let msg = tls_advice("0.0.0.0", false).expect("expected warn msg");
+        assert!(msg.contains("TLS"));
+    }
+
+    #[test]
+    fn tls_advice_silent_on_loopback() {
+        assert!(tls_advice("127.0.0.1", false).is_none());
+        assert!(tls_advice("localhost", false).is_none());
+        assert!(tls_advice("::1", false).is_none());
+    }
+
+    #[test]
+    fn tls_advice_silent_when_tls_configured() {
+        assert!(tls_advice("0.0.0.0", true).is_none());
+        assert!(tls_advice("10.0.0.5", true).is_none());
+    }
+
+    #[test]
+    fn tls_advice_warns_on_lan_ip() {
+        assert!(tls_advice("10.0.0.5", false).is_some());
+        assert!(tls_advice("192.168.1.2", false).is_some());
+    }
 
     #[test]
     fn default_bind_is_loopback() {

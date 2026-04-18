@@ -40,6 +40,8 @@ fn non_admin_key(key: &str) -> ApiKey {
         commit_agent_id: None,
         can_migrate: false,
         is_admin: false,
+        expires_at: None,
+        last_used_at: None,
     }
 }
 
@@ -54,6 +56,8 @@ fn admin_key(key: &str) -> ApiKey {
         commit_agent_id: None,
         can_migrate: true,
         is_admin: true,
+        expires_at: None,
+        last_used_at: None,
     }
 }
 
