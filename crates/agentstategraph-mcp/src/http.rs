@@ -150,16 +150,26 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
         ))
         .with_state(repo);
 
-    // Admin routes (key management) + health (no auth)
-    let admin_routes = Router::new()
+    // Public health endpoint — no auth.
+    let public_routes = Router::new()
         .route("/api/health", get(health_with_mgr))
+        .with_state(tenant_mgr.clone());
+
+    // Admin routes (key management) — gated behind admin_auth_middleware.
+    // In single-tenant mode the middleware is a no-op (see auth.rs).
+    let admin_routes = Router::new()
         .route("/api/admin/keys", get(list_keys))
         .route("/api/admin/keys", post(create_key))
         .route("/api/admin/keys/revoke", post(revoke_key))
+        .route_layer(middleware::from_fn_with_state(
+            tenant_mgr.clone(),
+            auth::admin_auth_middleware,
+        ))
         .with_state(tenant_mgr);
 
     let mut router = Router::new()
         .nest("/api", api_routes)
+        .merge(public_routes)
         .merge(admin_routes)
         .layer(cors);
 
@@ -206,6 +216,8 @@ struct CreateKeyRequest {
     commit_agent_id: Option<String>,
     #[serde(default)]
     can_migrate: Option<bool>,
+    #[serde(default)]
+    is_admin: Option<bool>,
 }
 
 async fn list_keys(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Value> {
@@ -218,12 +230,14 @@ async fn create_key(
 ) -> Json<serde_json::Value> {
     let plan = req.plan.unwrap_or_else(|| "free".to_string());
     let can_migrate = req.can_migrate.unwrap_or(false);
+    let is_admin = req.is_admin.unwrap_or(false);
     let key = mgr.create_key_with(
         &req.tenant_id,
         &req.name,
         &plan,
         req.commit_agent_id,
         can_migrate,
+        is_admin,
     );
     // Return the full key ONCE — it won't be shown again
     Json(serde_json::json!({
@@ -233,6 +247,7 @@ async fn create_key(
         "plan": key.plan,
         "commit_agent_id": key.commit_agent_id,
         "can_migrate": key.can_migrate,
+        "is_admin": key.is_admin,
         "message": "Save this key — it will not be shown again."
     }))
 }

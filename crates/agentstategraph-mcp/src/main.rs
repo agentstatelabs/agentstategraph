@@ -6,6 +6,7 @@
 //! Options:                    cargo run -p agentstategraph-mcp -- --storage memory
 //!                             cargo run -p agentstategraph-mcp -- --path /data/state.db
 
+use agentstategraph_mcp::auth::TenantManager;
 use agentstategraph_mcp::http;
 
 mod migrate;
@@ -16,6 +17,23 @@ use std::sync::Arc;
 use agentstategraph::Repository;
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use rmcp::ServiceExt;
+
+/// Parse the bind address from CLI args + env.
+///
+/// Precedence: `--bind <ADDR>` > `ASG_BIND` env > default `127.0.0.1`.
+/// Exposed as a free function so unit tests can assert the default.
+pub fn resolve_bind_addr(args: &[String], env_bind: Option<String>) -> String {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--bind" && i + 1 < args.len() {
+            return args[i + 1].clone();
+        }
+        i += 1;
+    }
+    env_bind
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -42,6 +60,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let mut rate_limit_rpm_cli: Option<u32> = None;
+    // v2-C2: default to loopback; require explicit --bind for LAN exposure.
+    let bind_addr = resolve_bind_addr(&args, std::env::var("ASG_BIND").ok());
+    // v2-M1: configurable Postgres pool cap.
+    let mut pg_pool_size: usize = std::env::var("ASG_PG_POOL_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    // v2-C1: bootstrap admin key from CLI/env (chosen over auto-generate;
+    // explicit ops input is clearer than fishing a one-time log line out
+    // of journalctl).
+    let initial_admin_key = std::env::var("ASG_INITIAL_ADMIN_KEY").ok();
+    let mut initial_admin_key_cli: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -101,6 +131,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rate_limit_rpm_cli = Some(v);
                 }
             }
+            "--bind" => {
+                // Already consumed by resolve_bind_addr; skip the value.
+                i += 1;
+            }
+            "--pg-pool-size" => {
+                i += 1;
+                if i < args.len()
+                    && let Ok(v) = args[i].parse::<usize>()
+                {
+                    pg_pool_size = v.max(1);
+                }
+            }
+            "--initial-admin-key" => {
+                i += 1;
+                if i < args.len() {
+                    initial_admin_key_cli = Some(args[i].clone());
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -129,7 +177,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!(
+                    "      --bind <ADDR>     Bind address (default: 127.0.0.1; pass 0.0.0.0 for LAN; env ASG_BIND)"
+                );
+                eprintln!(
                     "      --rate-limit-rpm <N>  Per-IP requests/minute (default: 600, 0 disables; env ASG_RATE_LIMIT_RPM)"
+                );
+                eprintln!(
+                    "      --pg-pool-size <N>  Max Postgres connections (default: 32; env ASG_PG_POOL_SIZE)"
+                );
+                eprintln!(
+                    "      --initial-admin-key <KEY>  Bootstrap admin key (multi-tenant; env ASG_INITIAL_ADMIN_KEY)"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -180,11 +237,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Error: --database-url or DATABASE_URL required for postgres storage");
                 std::process::exit(1);
             }
-            eprintln!("Storage: postgres (tenant: {})", tenant_id);
+            eprintln!(
+                "Storage: postgres (tenant: {}, pool: {})",
+                tenant_id, pg_pool_size
+            );
             let rt = tokio::runtime::Runtime::new()?;
             let storage = rt.block_on(async {
-                agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id)
-                    .await
+                agentstategraph_storage::PostgresStorage::connect_tenant_with_pool_size(
+                    &database_url,
+                    &tenant_id,
+                    pg_pool_size,
+                )
+                .await
             })?;
             Arc::new(Repository::new(Box::new(storage)))
         }
@@ -223,7 +287,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             eprintln!("Auth: disabled (single-tenant mode)");
         }
-        eprintln!("HTTP API listening on http://0.0.0.0:{}", http_port);
+        eprintln!(
+            "HTTP API listening on http://{}:{} (bind: {})",
+            if bind_addr == "0.0.0.0" {
+                "0.0.0.0"
+            } else {
+                bind_addr.as_str()
+            },
+            http_port,
+            bind_addr
+        );
+        if bind_addr == "127.0.0.1" || bind_addr == "localhost" {
+            eprintln!(
+                "Note: default bind is loopback-only. Pass --bind 0.0.0.0 to expose on the LAN."
+            );
+        }
         eprintln!("Try: curl http://localhost:{}/api/health", http_port);
 
         tokio::runtime::Builder::new_multi_thread()
@@ -236,11 +314,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         Some(keys_file.as_str())
                     };
-                    http::router_multi_tenant_with_rate_limit(repo, kf, rate_limit_rpm)
+                    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), kf);
+
+                    // v2-C1: admin bootstrap — register the operator-provided
+                    // key, or refuse to start if none is available and no
+                    // admin key already exists in the keys file.
+                    let provided = initial_admin_key_cli
+                        .clone()
+                        .or_else(|| initial_admin_key.clone());
+                    if let Some(k) = provided {
+                        if tenant_mgr.register_admin_key(k, "bootstrap-admin") {
+                            eprintln!("Auth: registered bootstrap admin key");
+                        }
+                    } else if !tenant_mgr.has_admin_key() {
+                        eprintln!(
+                            "Error: --auth / --keys-file enabled but no admin key present. \
+                             Provide --initial-admin-key <KEY> or ASG_INITIAL_ADMIN_KEY to \
+                             bootstrap, or add an is_admin=true entry to the keys file."
+                        );
+                        std::process::exit(2);
+                    }
+
+                    http::build_router_for_test(repo, tenant_mgr, rate_limit_rpm)
                 } else {
                     http::router_with_rate_limit(repo, rate_limit_rpm)
                 };
-                let addr = format!("0.0.0.0:{}", http_port);
+                let addr = format!("{}:{}", bind_addr, http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 // `into_make_service_with_connect_info::<SocketAddr>()`
                 // exposes the peer IP to tower_governor so per-IP keying
@@ -271,4 +370,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Server shut down.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_bind_addr;
+
+    #[test]
+    fn default_bind_is_loopback() {
+        let args: Vec<String> = vec!["agentstategraph-mcp".into(), "--http".into()];
+        assert_eq!(resolve_bind_addr(&args, None), "127.0.0.1");
+    }
+
+    #[test]
+    fn cli_bind_overrides_default_and_env() {
+        let args: Vec<String> = vec!["--bind".into(), "0.0.0.0".into()];
+        assert_eq!(resolve_bind_addr(&args, Some("10.0.0.5".into())), "0.0.0.0");
+    }
+
+    #[test]
+    fn env_bind_used_when_no_cli() {
+        let args: Vec<String> = vec![];
+        assert_eq!(
+            resolve_bind_addr(&args, Some("192.168.1.2".into())),
+            "192.168.1.2"
+        );
+    }
+
+    #[test]
+    fn empty_env_bind_falls_back_to_default() {
+        let args: Vec<String> = vec![];
+        assert_eq!(resolve_bind_addr(&args, Some(String::new())), "127.0.0.1");
+    }
 }

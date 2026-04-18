@@ -40,6 +40,11 @@ pub struct ApiKey {
     /// Defaults to false; only trusted keys should have it.
     #[serde(default)]
     pub can_migrate: bool,
+    /// Whether this key is authorized to call `/api/admin/*` endpoints
+    /// (v2-C1). Defaults to false; only the bootstrap admin key and any
+    /// additional keys explicitly provisioned by an admin have it.
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 /// Context resolved by the auth middleware for each request.
@@ -114,7 +119,7 @@ impl TenantManager {
     /// Generate a new API key for a tenant.
     #[allow(dead_code)]
     pub fn create_key(&self, tenant_id: &str, name: &str, plan: &str) -> ApiKey {
-        self.create_key_with(tenant_id, name, plan, None, false)
+        self.create_key_with(tenant_id, name, plan, None, false, false)
     }
 
     /// Generate a new API key with optional commit_agent_id binding and
@@ -126,6 +131,7 @@ impl TenantManager {
         plan: &str,
         commit_agent_id: Option<String>,
         can_migrate: bool,
+        is_admin: bool,
     ) -> ApiKey {
         let key = format!("asg_{}", uuid_v4());
         let api_key = ApiKey {
@@ -137,9 +143,66 @@ impl TenantManager {
             created_at: chrono::Utc::now().to_rfc3339(),
             commit_agent_id,
             can_migrate,
+            is_admin,
         };
         self.register_key(api_key.clone());
         api_key
+    }
+
+    /// Register a raw `ApiKey` value (e.g. for operator-provided bootstrap
+    /// admin key). Returns true if the key was inserted; false if a key
+    /// with that same value already existed.
+    pub fn register_admin_key(&self, key: String, name: &str) -> bool {
+        let mut keys = match self.keys.write() {
+            Ok(k) => k,
+            Err(e) => e.into_inner(),
+        };
+        if keys.contains_key(&key) {
+            return false;
+        }
+        keys.insert(
+            key.clone(),
+            ApiKey {
+                key,
+                tenant_id: "admin".to_string(),
+                name: name.to_string(),
+                plan: "admin".to_string(),
+                enabled: true,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                commit_agent_id: None,
+                can_migrate: true,
+                is_admin: true,
+            },
+        );
+        drop(keys);
+        self.save_keys();
+        true
+    }
+
+    /// Whether any enabled admin key is registered.
+    pub fn has_admin_key(&self) -> bool {
+        let Ok(keys) = self.keys.read() else {
+            return false;
+        };
+        keys.values().any(|k| k.enabled && k.is_admin)
+    }
+
+    /// Whether the given key is a valid admin. When auth is disabled
+    /// (single-tenant mode), admin endpoints are accessible without any
+    /// key — single-tenant == trusted local process.
+    pub fn is_admin(&self, api_key: Option<&str>) -> bool {
+        if !self.auth_enabled {
+            return true;
+        }
+        let Some(key) = api_key else {
+            return false;
+        };
+        let Ok(keys) = self.keys.read() else {
+            return false;
+        };
+        keys.get(key)
+            .map(|k| k.enabled && k.is_admin)
+            .unwrap_or(false)
     }
 
     /// Look up the authenticated agent_id bound to an API key, if any.
@@ -259,6 +322,7 @@ impl TenantManager {
 pub enum AuthError {
     MissingKey,
     InvalidKey,
+    NotAdmin,
 }
 
 impl IntoResponse for AuthError {
@@ -269,6 +333,10 @@ impl IntoResponse for AuthError {
                 "Missing API key. Pass it as: Authorization: Bearer asg_...",
             ),
             AuthError::InvalidKey => (StatusCode::UNAUTHORIZED, "Invalid or revoked API key."),
+            AuthError::NotAdmin => (
+                StatusCode::FORBIDDEN,
+                "Admin privilege required for this endpoint.",
+            ),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
     }
@@ -318,6 +386,36 @@ pub async fn auth_middleware(
     request.extensions_mut().insert(repo);
     request.extensions_mut().insert(ctx);
 
+    Ok(next.run(request).await)
+}
+
+/// Axum middleware for `/api/admin/*` endpoints.
+///
+/// Uses the same `extract_api_key` path as `auth_middleware` and rejects
+/// any request whose key is not flagged `is_admin`. In single-tenant
+/// mode (auth disabled) the request passes through — that matches the
+/// `can_migrate` affordance we already have for trusted local processes.
+pub async fn admin_auth_middleware(
+    State(tenant_mgr): State<Arc<TenantManager>>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Result<Response, AuthError> {
+    // Single-tenant mode: admin endpoints are accessible without a key.
+    if !tenant_mgr.auth_enabled() {
+        return Ok(next.run(request).await);
+    }
+
+    let api_key = extract_api_key(&headers);
+    let Some(key) = api_key.as_deref() else {
+        return Err(AuthError::MissingKey);
+    };
+    if tenant_mgr.resolve_tenant(key).is_none() {
+        return Err(AuthError::InvalidKey);
+    }
+    if !tenant_mgr.is_admin(Some(key)) {
+        return Err(AuthError::NotAdmin);
+    }
     Ok(next.run(request).await)
 }
 

@@ -7,8 +7,12 @@
 //!   let storage = PostgresStorage::connect("postgres://localhost/agentstategraph").await?;
 //!   let storage = PostgresStorage::connect_tenant("postgres://...", "tenant-123").await?;
 
-use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
+
+/// Default Postgres pool cap (v2-M1). Overridable via constructor or
+/// the binary's `--pg-pool-size` flag.
+pub const DEFAULT_POOL_SIZE: usize = 32;
 
 use agentstategraph_core::{Commit, Object, ObjectId};
 
@@ -27,11 +31,27 @@ impl PostgresStorage {
     }
 
     /// Connect to Postgres with a specific tenant ID for data isolation.
+    ///
+    /// Applies the default pool size cap (`DEFAULT_POOL_SIZE`).
     pub async fn connect_tenant(database_url: &str, tenant_id: &str) -> Result<Self, StorageError> {
+        Self::connect_tenant_with_pool_size(database_url, tenant_id, DEFAULT_POOL_SIZE).await
+    }
+
+    /// Connect to Postgres with a specific tenant ID and an explicit pool
+    /// size cap (v2-M1). `max_size` is clamped to at least 1.
+    pub async fn connect_tenant_with_pool_size(
+        database_url: &str,
+        tenant_id: &str,
+        max_size: usize,
+    ) -> Result<Self, StorageError> {
         let mut cfg = Config::new();
         cfg.url = Some(database_url.to_string());
         cfg.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
+        });
+        cfg.pool = Some(PoolConfig {
+            max_size: max_size.max(1),
+            ..Default::default()
         });
 
         let pool = cfg
@@ -44,6 +64,11 @@ impl PostgresStorage {
         };
         storage.init_tables().await?;
         Ok(storage)
+    }
+
+    /// Return the configured pool's maximum size. Useful for tests.
+    pub fn pool_max_size(&self) -> usize {
+        self.pool.status().max_size
     }
 
     async fn init_tables(&self) -> Result<(), StorageError> {
@@ -432,5 +457,35 @@ impl RefStore for PostgresStorage {
 
             Ok(rows > 0)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies the constructor applies the supplied `max_size` to the
+    /// underlying deadpool. Does NOT open a Postgres connection —
+    /// `create_pool` only validates config.
+    #[test]
+    fn connect_with_pool_size_applies_cap() {
+        let mut cfg = Config::new();
+        cfg.url = Some("postgres://localhost/agentstategraph_unused".to_string());
+        cfg.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        });
+        cfg.pool = Some(PoolConfig {
+            max_size: 7,
+            ..Default::default()
+        });
+        let pool = cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("build pool");
+        assert_eq!(pool.status().max_size, 7);
+    }
+
+    #[test]
+    fn default_pool_size_is_32() {
+        assert_eq!(DEFAULT_POOL_SIZE, 32);
     }
 }

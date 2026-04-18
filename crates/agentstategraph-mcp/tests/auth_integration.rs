@@ -56,6 +56,7 @@ async fn authenticated_agent_id_overrides_body_agent() {
         created_at: chrono::Utc::now().to_rfc3339(),
         commit_agent_id: Some("agent/real".into()),
         can_migrate: false,
+        is_admin: false,
     };
     let base = boot_with_key(api_key).await;
     let client = reqwest::Client::new();
@@ -114,6 +115,7 @@ async fn key_without_can_migrate_cannot_write_meta() {
         created_at: chrono::Utc::now().to_rfc3339(),
         commit_agent_id: Some("agent/bad".into()),
         can_migrate: false,
+        is_admin: false,
     };
     let base = boot_with_key(api_key).await;
     let client = reqwest::Client::new();
@@ -158,6 +160,7 @@ async fn key_with_can_migrate_can_write_meta() {
         created_at: chrono::Utc::now().to_rfc3339(),
         commit_agent_id: Some("agent/migrate".into()),
         can_migrate: true,
+        is_admin: false,
     };
     let base = boot_with_key(api_key).await;
     let client = reqwest::Client::new();
