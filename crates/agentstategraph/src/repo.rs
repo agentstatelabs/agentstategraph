@@ -522,7 +522,9 @@ impl Repository {
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(from_ref.to_string()))?;
 
-        Ok(self.specs.create(from_ref, commit.state_root, label))
+        self.specs
+            .create(from_ref, commit.state_root, label)
+            .map_err(RepoError::Speculation)
     }
 
     /// Get a value from a speculation's state.
@@ -629,14 +631,27 @@ impl Repository {
     // -----------------------------------------------------------------------
 
     /// Get the commit log starting from a ref.
+    ///
+    /// Each returned commit has `enforce_caps` applied — the same length
+    /// caps `CommitBuilder::build` uses. This bounds what a malicious or
+    /// legacy `.db` can replay to readers. (security threat model v2, F3)
     pub fn log(&self, ref_name: &str, limit: usize) -> Result<Vec<Commit>, RepoError> {
         let commit_id = self.resolve_ref(ref_name)?;
-        Ok(self.storage.list_commits(&commit_id, limit)?)
+        let mut commits = self.storage.list_commits(&commit_id, limit)?;
+        for c in &mut commits {
+            c.enforce_caps();
+        }
+        Ok(commits)
     }
 
     /// Get a specific commit by ID.
+    ///
+    /// Returns the commit with `enforce_caps` applied — see `log`.
     pub fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, RepoError> {
-        Ok(self.storage.get_commit(id)?)
+        Ok(self.storage.get_commit(id)?.map(|mut c| {
+            c.enforce_caps();
+            c
+        }))
     }
 
     // -----------------------------------------------------------------------
@@ -692,8 +707,10 @@ impl Repository {
                     });
                 }
             } else if let Some(parent_id) = commit.parents.first()
-                && let Some(parent) = self.storage.get_commit(parent_id)?
+                && let Some(mut parent) = self.storage.get_commit(parent_id)?
             {
+                // Re-cap on read — see `Commit::enforce_caps`.
+                parent.enforce_caps();
                 let current_val =
                     tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path);
                 let parent_val =

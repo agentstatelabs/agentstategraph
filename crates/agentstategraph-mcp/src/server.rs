@@ -775,7 +775,14 @@ fn parse_category(s: &str) -> IntentCategory {
         "rollback" => IntentCategory::Rollback,
         "checkpoint" => IntentCategory::Checkpoint,
         "merge" => IntentCategory::Merge,
-        "migrate" => IntentCategory::Migrate,
+        // SECURITY (threat model v2, finding C3): the MCP stdio transport
+        // has no capability layer comparable to HTTP's `can_migrate`, so a
+        // caller here must NOT be able to obtain `IntentCategory::Migrate`
+        // by string. Map the literal "migrate" to a Custom category so
+        // `/_meta/*` writes are rejected by the substrate's reserved-path
+        // guard. Real migrations go through the `migrate` subcommand,
+        // which constructs `IntentCategory::Migrate` directly in Rust.
+        "migrate" => IntentCategory::Custom("Migrate-requested".into()),
         "plan" => IntentCategory::Plan,
         other => IntentCategory::Custom(other.to_string()),
     }
@@ -794,5 +801,70 @@ fn json_value_to_object(value: &serde_json::Value) -> Object {
         }
         serde_json::Value::String(s) => Object::string(s.clone()),
         _ => Object::string(value.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentstategraph::{CommitOptions, RepoError, Repository};
+    use agentstategraph_storage::MemoryStorage;
+
+    #[test]
+    fn parse_category_migrate_is_custom_not_migrate() {
+        // Threat model v2, C3: the MCP stdio boundary must NOT let a string
+        // caller obtain IntentCategory::Migrate — that would bypass the
+        // reserved-path guard on `/_meta/*`.
+        let cat = parse_category("migrate");
+        assert!(
+            !matches!(cat, IntentCategory::Migrate),
+            "parse_category(\"migrate\") must not return Migrate on the MCP stdio boundary"
+        );
+        assert!(matches!(cat, IntentCategory::Custom(_)));
+    }
+
+    #[test]
+    fn mcp_set_on_meta_with_migrate_string_is_rejected() {
+        // A caller passing intent_category="migrate" must not be able to
+        // write under /_meta/* — the substrate should reject it with
+        // ReservedPath.
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().expect("init repo");
+        let opts = CommitOptions::new(
+            "test-agent",
+            parse_category("migrate"),
+            "attempted meta write",
+        );
+        let err = repo
+            .set_json(
+                "main",
+                "/_meta/schema_version",
+                &serde_json::json!("1"),
+                opts,
+            )
+            .expect_err("/_meta/* write with string-derived Migrate must be rejected");
+        assert!(
+            matches!(err, RepoError::ReservedPath(_)),
+            "expected ReservedPath, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn direct_migrate_construction_still_works() {
+        // The `agentstategraph-mcp migrate` subcommand constructs
+        // IntentCategory::Migrate directly (not via parse_category) — that
+        // path MUST continue to work, otherwise we've broken legitimate
+        // migrations.
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().expect("init repo");
+        let opts = CommitOptions::new("migrator", IntentCategory::Migrate, "legitimate migration");
+        repo.set_json(
+            "main",
+            "/_meta/schema_version",
+            &serde_json::json!("1"),
+            opts,
+        )
+        .expect("direct IntentCategory::Migrate must still be allowed");
     }
 }

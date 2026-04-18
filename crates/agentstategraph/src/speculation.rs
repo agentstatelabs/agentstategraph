@@ -43,6 +43,13 @@ impl std::fmt::Display for SpecHandle {
 
 static NEXT_SPEC_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Hard cap on the number of live speculations a `SpeculationManager` will
+/// hold at once. Each live spec pins its overlay + state root in memory, so
+/// an unbounded caller (e.g. a misbehaving agent looping on `speculate`)
+/// could exhaust memory. 1024 is well past any realistic exploration depth
+/// while still bounded. Exceeding this cap returns `SpecError::TooMany`.
+pub const MAX_LIVE_SPECULATIONS: usize = 1024;
+
 /// A single speculation — an isolated, mutable fork of state.
 struct Speculation {
     /// Human-readable label.
@@ -85,6 +92,9 @@ pub enum SpecError {
     #[error("speculation not found: {0}")]
     NotFound(SpecHandle),
 
+    #[error("too many live speculations: {live} (max {max})")]
+    TooMany { live: usize, max: usize },
+
     #[error("tree error: {0}")]
     Tree(#[from] TreeError),
 
@@ -106,7 +116,23 @@ impl SpeculationManager {
     }
 
     /// Create a new speculation forked from a state root.
-    pub fn create(&self, base_ref: &str, base_root: ObjectId, label: Option<String>) -> SpecHandle {
+    ///
+    /// Returns `SpecError::TooMany` if creating another speculation would
+    /// exceed `MAX_LIVE_SPECULATIONS` — this prevents memory exhaustion
+    /// from runaway speculative exploration (security threat model v2, F1).
+    pub fn create(
+        &self,
+        base_ref: &str,
+        base_root: ObjectId,
+        label: Option<String>,
+    ) -> Result<SpecHandle, SpecError> {
+        let mut specs = self.specs.write().unwrap();
+        if specs.len() >= MAX_LIVE_SPECULATIONS {
+            return Err(SpecError::TooMany {
+                live: specs.len(),
+                max: MAX_LIVE_SPECULATIONS,
+            });
+        }
         let handle = SpecHandle(NEXT_SPEC_ID.fetch_add(1, Ordering::Relaxed));
         let spec = Speculation {
             label,
@@ -115,8 +141,8 @@ impl SpeculationManager {
             current_root: base_root,
             overlay: HashMap::new(),
         };
-        self.specs.write().unwrap().insert(handle, spec);
-        handle
+        specs.insert(handle, spec);
+        Ok(handle)
     }
 
     /// Get a value from a speculation's current state.
@@ -304,7 +330,6 @@ impl<'a> ObjectStore for OverlayObjectStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentstategraph_core::IntentCategory;
     use agentstategraph_storage::MemoryStorage;
 
     fn setup() -> (MemoryStorage, ObjectId) {
@@ -326,7 +351,9 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        let h = mgr.create("main", root_id, Some("test".to_string()));
+        let h = mgr
+            .create("main", root_id, Some("test".to_string()))
+            .unwrap();
         assert_eq!(mgr.count(), 1);
 
         mgr.discard(h).unwrap();
@@ -338,7 +365,7 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        let h = mgr.create("main", root_id, None);
+        let h = mgr.create("main", root_id, None).unwrap();
         let obj = mgr.get(h, &store, "/storage/type").unwrap();
         assert_eq!(obj, Object::string("none"));
     }
@@ -348,7 +375,7 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        let h = mgr.create("main", root_id, None);
+        let h = mgr.create("main", root_id, None).unwrap();
         mgr.set(h, &store, "/storage/type", &Object::string("nfs"))
             .unwrap();
 
@@ -371,8 +398,12 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        let nfs = mgr.create("main", root_id, Some("NFS approach".to_string()));
-        let ceph = mgr.create("main", root_id, Some("Ceph approach".to_string()));
+        let nfs = mgr
+            .create("main", root_id, Some("NFS approach".to_string()))
+            .unwrap();
+        let ceph = mgr
+            .create("main", root_id, Some("Ceph approach".to_string()))
+            .unwrap();
 
         mgr.set(nfs, &store, "/storage/type", &Object::string("nfs"))
             .unwrap();
@@ -407,8 +438,12 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        let nfs = mgr.create("main", root_id, Some("NFS".to_string()));
-        let ceph = mgr.create("main", root_id, Some("Ceph".to_string()));
+        let nfs = mgr
+            .create("main", root_id, Some("NFS".to_string()))
+            .unwrap();
+        let ceph = mgr
+            .create("main", root_id, Some("Ceph".to_string()))
+            .unwrap();
 
         mgr.set(nfs, &store, "/storage/type", &Object::string("nfs"))
             .unwrap();
@@ -431,7 +466,9 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        let h = mgr.create("main", root_id, Some("winner".to_string()));
+        let h = mgr
+            .create("main", root_id, Some("winner".to_string()))
+            .unwrap();
         mgr.set(h, &store, "/storage/type", &Object::string("nfs"))
             .unwrap();
 
@@ -454,7 +491,10 @@ mod tests {
 
         // Create many speculations
         let handles: Vec<_> = (0..100)
-            .map(|i| mgr.create("main", root_id, Some(format!("spec-{}", i))))
+            .map(|i| {
+                mgr.create("main", root_id, Some(format!("spec-{}", i)))
+                    .unwrap()
+            })
             .collect();
 
         assert_eq!(mgr.count(), 100);
@@ -471,7 +511,7 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        let h = mgr.create("main", root_id, None);
+        let h = mgr.create("main", root_id, None).unwrap();
         mgr.delete(h, &store, "/network").unwrap();
 
         // Network should be gone in speculation
@@ -491,11 +531,38 @@ mod tests {
         let (store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
-        mgr.create("main", root_id, Some("alpha".to_string()));
-        mgr.create("main", root_id, Some("beta".to_string()));
-        mgr.create("main", root_id, None);
+        mgr.create("main", root_id, Some("alpha".to_string()))
+            .unwrap();
+        mgr.create("main", root_id, Some("beta".to_string()))
+            .unwrap();
+        mgr.create("main", root_id, None).unwrap();
 
         let list = mgr.list();
         assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn test_max_live_speculations_cap() {
+        let (_store, root_id) = setup();
+        let mgr = SpeculationManager::new();
+
+        // Create up to the cap — these should all succeed.
+        for i in 0..MAX_LIVE_SPECULATIONS {
+            mgr.create("main", root_id, Some(format!("spec-{}", i)))
+                .expect("within cap");
+        }
+        assert_eq!(mgr.count(), MAX_LIVE_SPECULATIONS);
+
+        // The (cap+1)th must be rejected with TooMany carrying the exact counts.
+        let err = mgr
+            .create("main", root_id, Some("overflow".to_string()))
+            .expect_err("over cap should be rejected");
+        match err {
+            SpecError::TooMany { live, max } => {
+                assert_eq!(live, MAX_LIVE_SPECULATIONS);
+                assert_eq!(max, MAX_LIVE_SPECULATIONS);
+            }
+            other => panic!("expected TooMany, got {:?}", other),
+        }
     }
 }

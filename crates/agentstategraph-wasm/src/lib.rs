@@ -22,7 +22,12 @@ fn parse_category(s: &str) -> IntentCategory {
         "rollback" => IntentCategory::Rollback,
         "checkpoint" => IntentCategory::Checkpoint,
         "merge" => IntentCategory::Merge,
-        "migrate" => IntentCategory::Migrate,
+        // SECURITY (threat model v2, finding C3): the WASM boundary runs
+        // untrusted browser/Deno code with no capability check. Map
+        // "migrate" to a Custom category so `/_meta/*` writes are rejected
+        // by the substrate's reserved-path guard. Migration tooling lives
+        // outside WASM.
+        "migrate" => IntentCategory::Custom("Migrate-requested".into()),
         "plan" => IntentCategory::Plan,
         other => IntentCategory::Custom(other.to_string()),
     }

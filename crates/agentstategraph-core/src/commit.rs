@@ -69,6 +69,42 @@ pub struct Commit {
     pub tool_calls: Vec<ToolCall>,
 }
 
+impl Commit {
+    /// Apply the same size caps `CommitBuilder::build` uses to a commit
+    /// loaded from storage. Idempotent — commits already within caps are
+    /// returned unchanged.
+    ///
+    /// `CommitBuilder::build` truncates on construction, but a `.db` file
+    /// seeded out-of-band (older ASG versions without caps, or a malicious
+    /// operator) may contain unbounded `description` / `reasoning` /
+    /// `agent_id` / `tool_calls`. Blame/log would otherwise replay them
+    /// verbatim to untrusted readers. Higher-level APIs that surface
+    /// commits to callers invoke this implicitly.
+    /// (security threat model v2, F3)
+    ///
+    /// Note: this mutates the commit in place and does NOT recompute the
+    /// content-addressed `id` — a commit's `id` is a historical identifier
+    /// of what was stored, and re-hashing on read would break log/blame
+    /// identity. The caps here exist purely to bound what's shown to
+    /// readers, not to rewrite history.
+    pub fn enforce_caps(&mut self) {
+        if self.agent_id.chars().count() > MAX_AGENT_ID_LEN {
+            self.agent_id = truncate_chars(&self.agent_id, MAX_AGENT_ID_LEN);
+        }
+        if self.intent.description.chars().count() > MAX_DESCRIPTION_LEN {
+            self.intent.description = truncate_chars(&self.intent.description, MAX_DESCRIPTION_LEN);
+        }
+        if let Some(reasoning) = self.reasoning.as_mut()
+            && reasoning.chars().count() > MAX_REASONING_LEN
+        {
+            *reasoning = truncate_chars(reasoning, MAX_REASONING_LEN);
+        }
+        if self.tool_calls.len() > MAX_TOOL_CALLS {
+            self.tool_calls.truncate(MAX_TOOL_CALLS);
+        }
+    }
+}
+
 /// Builder for creating commits. The commit ID is computed on build.
 pub struct CommitBuilder {
     state_root: ObjectId,
@@ -345,6 +381,68 @@ mod tests {
                 .description
                 .is_char_boundary(commit.intent.description.len())
         );
+    }
+
+    #[test]
+    fn test_enforce_caps_truncates_bypassed_builder() {
+        // Simulate a commit loaded from a `.db` written out-of-band
+        // (direct struct construction bypasses `CommitBuilder::build`).
+        let big_reasoning = "r".repeat(100_000); // ~100 KB
+        let big_desc = "d".repeat(MAX_DESCRIPTION_LEN * 4);
+        let big_agent = "a".repeat(MAX_AGENT_ID_LEN * 10);
+        let big_tools: Vec<ToolCall> = (0..(MAX_TOOL_CALLS * 2))
+            .map(|i| ToolCall {
+                tool_name: format!("t{}", i),
+                arguments: serde_json::json!({}),
+                result: None,
+                timestamp: Utc::now(),
+            })
+            .collect();
+
+        let mut commit = Commit {
+            id: ObjectId::hash(b"test"),
+            state_root: ObjectId::hash(b"state"),
+            parents: vec![],
+            timestamp: Utc::now(),
+            agent_id: big_agent,
+            authority: test_authority(),
+            intent: Intent::new(IntentCategory::Checkpoint, big_desc),
+            reasoning: Some(big_reasoning),
+            confidence: Some(0.5),
+            tool_calls: big_tools,
+        };
+
+        commit.enforce_caps();
+
+        assert_eq!(commit.agent_id.chars().count(), MAX_AGENT_ID_LEN);
+        assert_eq!(
+            commit.intent.description.chars().count(),
+            MAX_DESCRIPTION_LEN
+        );
+        assert_eq!(
+            commit.reasoning.as_ref().unwrap().chars().count(),
+            MAX_REASONING_LEN
+        );
+        assert_eq!(commit.tool_calls.len(), MAX_TOOL_CALLS);
+    }
+
+    #[test]
+    fn test_enforce_caps_is_idempotent() {
+        // A commit already within caps must be unchanged.
+        let commit_orig = CommitBuilder::new(
+            ObjectId::hash(b"s"),
+            "agent/test",
+            test_authority(),
+            test_intent(),
+        )
+        .reasoning("short")
+        .build();
+        let mut commit = commit_orig.clone();
+        commit.enforce_caps();
+        assert_eq!(commit.agent_id, commit_orig.agent_id);
+        assert_eq!(commit.intent.description, commit_orig.intent.description);
+        assert_eq!(commit.reasoning, commit_orig.reasoning);
+        assert_eq!(commit.tool_calls.len(), commit_orig.tool_calls.len());
     }
 
     #[test]

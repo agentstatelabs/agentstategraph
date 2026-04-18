@@ -9,6 +9,23 @@ use std::collections::BTreeMap;
 use agentstategraph_core::{Atom, Node, Object, ObjectId, PathComponent, StatePath};
 use agentstategraph_storage::{ObjectStore, StorageError};
 
+/// Absolute ceiling on how deep `tree_list_paths` / `tree_search_values`
+/// will ever recurse, regardless of the caller-supplied `max_depth`.
+///
+/// Set to twice `agentstategraph_core::MAX_PATH_DEPTH` (64 → 128) so we
+/// can still enumerate legacy data that was written by older ASG versions
+/// without the current path-depth cap. A caller passing `usize::MAX` is
+/// clamped to this value, preventing unbounded traversal / OOM.
+/// (security threat model v2, F2)
+pub const LIST_PATHS_HARD_CEILING: usize = 128;
+
+/// Absolute cap on the number of results returned by `tree_list_paths`
+/// and `tree_search_values`. Once this many entries have been collected,
+/// traversal short-circuits and the extras are dropped. Callers receive
+/// the truncated vec without an explicit marker — keep the API simple.
+/// (security threat model v2, F2)
+pub const LIST_PATHS_MAX_RESULTS: usize = 10_000;
+
 /// Read a value from the state tree at the given path.
 /// Returns the Object at that path, or an error if the path doesn't exist.
 pub fn tree_get(
@@ -146,8 +163,16 @@ pub fn tree_list_paths(
         (obj, prefix.to_string())
     };
 
+    // Clamp the caller-supplied depth to the hard ceiling so `usize::MAX`
+    // cannot produce unbounded recursion. See LIST_PATHS_HARD_CEILING.
+    let depth = max_depth.min(LIST_PATHS_HARD_CEILING);
     let mut paths = Vec::new();
-    collect_paths(store, &start_obj, &base_path, max_depth, 0, &mut paths)?;
+    collect_paths(store, &start_obj, &base_path, depth, 0, &mut paths)?;
+    // Truncate to the absolute result cap — a malicious/wide tree cannot
+    // make us materialize more than LIST_PATHS_MAX_RESULTS entries.
+    if paths.len() > LIST_PATHS_MAX_RESULTS {
+        paths.truncate(LIST_PATHS_MAX_RESULTS);
+    }
     Ok(paths)
 }
 
@@ -160,6 +185,9 @@ fn collect_paths(
     paths: &mut Vec<String>,
 ) -> Result<(), TreeError> {
     if depth > max_depth {
+        return Ok(());
+    }
+    if paths.len() >= LIST_PATHS_MAX_RESULTS {
         return Ok(());
     }
 
@@ -226,15 +254,11 @@ pub fn tree_search_values(
         .ok_or(TreeError::ObjectNotFound(*root))?;
 
     let query_lower = query.to_lowercase();
+    // Clamp the caller's max_results to LIST_PATHS_MAX_RESULTS so a huge
+    // query can't force us to materialize an unbounded result set.
+    let limit = max_results.min(LIST_PATHS_MAX_RESULTS);
     let mut results = Vec::new();
-    search_recursive(
-        store,
-        &root_obj,
-        "",
-        &query_lower,
-        max_results,
-        &mut results,
-    )?;
+    search_recursive(store, &root_obj, "", &query_lower, limit, 0, &mut results)?;
     Ok(results)
 }
 
@@ -244,9 +268,15 @@ fn search_recursive(
     current_path: &str,
     query: &str,
     max_results: usize,
+    depth: usize,
     results: &mut Vec<(String, String)>,
 ) -> Result<(), TreeError> {
     if results.len() >= max_results {
+        return Ok(());
+    }
+    // Hard ceiling on traversal depth — mirrors tree_list_paths so a
+    // pathologically deep or cyclic-seeming graph can't infinite-loop.
+    if depth > LIST_PATHS_HARD_CEILING {
         return Ok(());
     }
 
@@ -283,7 +313,15 @@ fn search_recursive(
                         .get_object(child_id)?
                         .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     let child_path = format!("{}/{}", current_path, key);
-                    search_recursive(store, &child, &child_path, query, max_results, results)?;
+                    search_recursive(
+                        store,
+                        &child,
+                        &child_path,
+                        query,
+                        max_results,
+                        depth + 1,
+                        results,
+                    )?;
                 }
             }
             Node::List(items) | Node::Set(items) => {
@@ -295,7 +333,15 @@ fn search_recursive(
                         .get_object(child_id)?
                         .ok_or(TreeError::ObjectNotFound(*child_id))?;
                     let child_path = format!("{}/{}", current_path, i);
-                    search_recursive(store, &child, &child_path, query, max_results, results)?;
+                    search_recursive(
+                        store,
+                        &child,
+                        &child_path,
+                        query,
+                        max_results,
+                        depth + 1,
+                        results,
+                    )?;
                 }
             }
         },
@@ -790,6 +836,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hostname, Object::string("jetson-02"));
+    }
+
+    #[test]
+    fn test_list_paths_truncates_at_max_results() {
+        let store = MemoryStorage::new();
+        // Build a wide tree: a single map with > LIST_PATHS_MAX_RESULTS keys.
+        let mut obj = serde_json::Map::new();
+        let wide = LIST_PATHS_MAX_RESULTS + 500;
+        for i in 0..wide {
+            obj.insert(format!("k{}", i), serde_json::Value::from(i as i64));
+        }
+        let root_id = json_to_tree(&store, &serde_json::Value::Object(obj)).unwrap();
+
+        let paths = tree_list_paths(&store, &root_id, "/", 10).unwrap();
+        assert_eq!(
+            paths.len(),
+            LIST_PATHS_MAX_RESULTS,
+            "list_paths must cap results at LIST_PATHS_MAX_RESULTS"
+        );
+    }
+
+    #[test]
+    fn test_list_paths_clamps_usize_max_depth() {
+        // A usize::MAX max_depth used to drive unbounded recursion; now
+        // it must clamp to LIST_PATHS_HARD_CEILING and return promptly.
+        let (store, root_id) = setup();
+        let paths = tree_list_paths(&store, &root_id, "/", usize::MAX).unwrap();
+        // Just assert we got here without panicking / OOMing, and that we
+        // returned a plausible, bounded result set.
+        assert!(!paths.is_empty());
+        assert!(paths.len() <= LIST_PATHS_MAX_RESULTS);
     }
 
     #[test]
