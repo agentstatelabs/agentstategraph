@@ -33,7 +33,11 @@ version = "0.5.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
+ "agentstategraph-migrate",
  "agentstategraph-storage",
+ "agentstategraph-tasks",
+ "semver",
+ "serde",
  "serde_json",
 ]
 
@@ -141,8 +145,11 @@ version = "0.5.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
+ "agentstategraph-migrate",
  "agentstategraph-storage",
+ "agentstategraph-tasks",
  "js-sys",
+ "semver",
  "serde",
  "serde_json",
  "wasm-bindgen",

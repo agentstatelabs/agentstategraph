@@ -7,7 +7,7 @@ license.workspace = true
 description = "Shared task-store primitives built on AgentStateGraph"
 
 [dependencies]
-agentstategraph = { path = "../agentstategraph" }
+agentstategraph = { path = "../agentstategraph", default-features = false }
 agentstategraph-core = { path = "../agentstategraph-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }

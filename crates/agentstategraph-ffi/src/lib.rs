@@ -19,14 +19,24 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
+use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, Repository, SCHEMA_VERSION};
 use agentstategraph_core::IntentCategory;
+use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskId, TaskStore};
+use semver::Version;
+use serde::Serialize;
 
 /// Opaque handle to a Repository.
 pub struct SgRepo {
-    inner: Repository,
+    inner: Arc<Repository>,
+}
+
+/// Opaque handle to a TaskStore.
+pub struct SgTaskStore {
+    inner: TaskStore,
 }
 
 /// Create a new in-memory AgentStateGraph repository.
@@ -36,7 +46,9 @@ pub extern "C" fn agentstategraph_new_memory() -> *mut SgRepo {
     if repo.init().is_err() {
         return ptr::null_mut();
     }
-    Box::into_raw(Box::new(SgRepo { inner: repo }))
+    Box::into_raw(Box::new(SgRepo {
+        inner: Arc::new(repo),
+    }))
 }
 
 /// Create a new SQLite-backed AgentStateGraph repository.
@@ -59,7 +71,9 @@ pub extern "C" fn agentstategraph_new_sqlite(path: *const c_char) -> *mut SgRepo
     if repo.init().is_err() {
         return ptr::null_mut();
     }
-    Box::into_raw(Box::new(SgRepo { inner: repo }))
+    Box::into_raw(Box::new(SgRepo {
+        inner: Arc::new(repo),
+    }))
 }
 
 /// Free a repository handle.
@@ -273,6 +287,711 @@ pub extern "C" fn agentstategraph_blame(
     }
 }
 
+// ===========================================================================
+// TaskStore FFI
+// ===========================================================================
+
+/// Create a new TaskStore handle bound to the given repository, path
+/// prefix, and agent id. The returned pointer must be freed with
+/// `agentstategraph_taskstore_free`. The underlying repository is shared
+/// (refcounted); freeing the TaskStore does NOT free the repository.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_new(
+    repo: *const SgRepo,
+    prefix: *const c_char,
+    agent_id: *const c_char,
+) -> *mut SgTaskStore {
+    let repo = unsafe { repo.as_ref() };
+    let repo = match repo {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
+    let prefix = unsafe { c_to_str(prefix) };
+    let agent_id = unsafe { c_to_str(agent_id) };
+    if prefix.is_empty() || agent_id.is_empty() {
+        return ptr::null_mut();
+    }
+    let store = TaskStore::new(repo.inner.clone(), prefix, agent_id);
+    Box::into_raw(Box::new(SgTaskStore { inner: store }))
+}
+
+/// Free a TaskStore handle.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_free(store: *mut SgTaskStore) {
+    if !store.is_null() {
+        unsafe {
+            drop(Box::from_raw(store));
+        }
+    }
+}
+
+fn taskstore_ref<'a>(store: *const SgTaskStore) -> Option<&'a SgTaskStore> {
+    unsafe { store.as_ref() }
+}
+
+fn json_ok<T: Serialize>(v: &T) -> *mut c_char {
+    match serde_json::to_string(v) {
+        Ok(s) => to_c_string(&s),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+fn json_err(msg: &str) -> *mut c_char {
+    to_c_string(&format!(
+        "{{\"error\":{}}}",
+        serde_json::to_string(msg).unwrap_or_else(|_| "\"error\"".into())
+    ))
+}
+
+// Plan ops ------------------------------------------------------------------
+
+/// Create a plan. Returns the Plan as JSON, or `{"error": ...}` on failure.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_create_plan(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    name: *const c_char,
+    description: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let name = unsafe { c_to_str(name) };
+    let description = if description.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(description) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    match store.inner.create_plan(&ref_name, &name, description) {
+        Ok(plan) => json_ok(&plan),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// List plans. Returns JSON array.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_list_plans(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    match store.inner.list_plans(&ref_name) {
+        Ok(p) => json_ok(&p),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// List plans filtered by status. `status` is "active", "completed",
+/// "archived", or null/empty for all. Returns JSON array.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_list_plans_by_status(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    status: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let status_str = unsafe { c_to_str(status) };
+    let parsed = parse_plan_status(&status_str);
+    match store.inner.list_plans_by_status(&ref_name, parsed) {
+        Ok(p) => json_ok(&p),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Get a plan by name.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_get_plan(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let name = unsafe { c_to_str(name) };
+    match store.inner.get_plan(&ref_name, &name) {
+        Ok(p) => json_ok(&p),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_archive_plan(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let name = unsafe { c_to_str(name) };
+    match store.inner.archive_plan(&ref_name, &name) {
+        Ok(p) => json_ok(&p),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_delete_plan(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let name = unsafe { c_to_str(name) };
+    match store.inner.delete_plan(&ref_name, &name) {
+        Ok(()) => to_c_string("{\"ok\":true}"),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+// Task ops ------------------------------------------------------------------
+
+/// Add a task. Arguments:
+///   - priority: "low" | "medium" | "high" | "critical"
+///   - parent_id: nullable, e.g. "t-001"
+///   - blockers_json: JSON array of task ids (may be null or "[]")
+///   - assigned_to: nullable agent id
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_add_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    title: *const c_char,
+    priority: *const c_char,
+    parent_id: *const c_char,
+    blockers_json: *const c_char,
+    assigned_to: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let title = unsafe { c_to_str(title) };
+    let priority_str = unsafe { c_to_str(priority) };
+    let prio = parse_priority(&priority_str);
+
+    let parent = if parent_id.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(parent_id) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(TaskId(s))
+        }
+    };
+
+    let blockers: Vec<TaskId> = if blockers_json.is_null() {
+        Vec::new()
+    } else {
+        let s = unsafe { c_to_str(blockers_json) };
+        if s.is_empty() {
+            Vec::new()
+        } else {
+            match serde_json::from_str::<Vec<String>>(&s) {
+                Ok(v) => v.into_iter().map(TaskId).collect(),
+                Err(e) => return json_err(&format!("invalid blockers_json: {e}")),
+            }
+        }
+    };
+
+    let assigned = if assigned_to.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(assigned_to) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+
+    match store
+        .inner
+        .add_task(&ref_name, &plan, &title, prio, parent, blockers, assigned)
+    {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_list_tasks(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    match store.inner.list_tasks(&ref_name, &plan) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_task_ids(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    match store.inner.task_ids(&ref_name, &plan) {
+        Ok(ids) => {
+            let strs: Vec<String> = ids.into_iter().map(|i| i.0).collect();
+            json_ok(&strs)
+        }
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_get_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    match store.inner.get_task(&ref_name, &plan, &id) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_start_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    match store.inner.start_task(&ref_name, &plan, &id) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Complete a task. `proof_kind` is "commit" | "file" | "test" | "text".
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_complete_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+    proof_kind: *const c_char,
+    proof_value: *const c_char,
+    proof_note: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    let kind_str = unsafe { c_to_str(proof_kind) };
+    let value = unsafe { c_to_str(proof_value) };
+    let kind = match parse_proof_kind(&kind_str) {
+        Some(k) => k,
+        None => return json_err(&format!("invalid proof kind: {kind_str}")),
+    };
+    let note = if proof_note.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(proof_note) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    let proof = Proof { kind, value, note };
+    match store.inner.complete_task(&ref_name, &plan, &id, proof) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_abandon_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+    reason: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    let reason = unsafe { c_to_str(reason) };
+    match store.inner.abandon_task(&ref_name, &plan, &id, &reason) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_set_priority(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+    priority: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    let prio = parse_priority(&unsafe { c_to_str(priority) });
+    match store.inner.set_priority(&ref_name, &plan, &id, prio) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Set blockers. `blockers_json` is a JSON string array (may be null or "[]").
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_set_blockers(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+    blockers_json: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    let blockers: Vec<TaskId> = if blockers_json.is_null() {
+        Vec::new()
+    } else {
+        let s = unsafe { c_to_str(blockers_json) };
+        if s.is_empty() {
+            Vec::new()
+        } else {
+            match serde_json::from_str::<Vec<String>>(&s) {
+                Ok(v) => v.into_iter().map(TaskId).collect(),
+                Err(e) => return json_err(&format!("invalid blockers_json: {e}")),
+            }
+        }
+    };
+    match store.inner.set_blockers(&ref_name, &plan, &id, blockers) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_assign_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+    agent: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    let agent = unsafe { c_to_str(agent) };
+    match store.inner.assign_task(&ref_name, &plan, &id, &agent) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_unassign_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    match store.inner.unassign_task(&ref_name, &plan, &id) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Returns the next unblocked task as JSON, `null` if none, or error JSON.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_next_task(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    match store.inner.next_task(&ref_name, &plan) {
+        Ok(opt) => json_ok(&opt),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Next task filtered by assignment. `agent` null for any; `include_unassigned`
+/// controls fallback to unassigned when an agent is specified.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_next_task_for(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    agent: *const c_char,
+    include_unassigned: u8,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let agent_str = if agent.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(agent) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    match store.inner.next_task_for(
+        &ref_name,
+        &plan,
+        agent_str.as_deref(),
+        include_unassigned != 0,
+    ) {
+        Ok(opt) => json_ok(&opt),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Compute the derived (rollup) status of a parent task. Returns
+/// `"pending"` | `"in_progress"` | `"done"` | `"abandoned"` JSON-wrapped.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_derived_status(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    parent_id: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(parent_id) });
+    match store.inner.derived_status(&ref_name, &plan, &id) {
+        Ok(s) => json_ok(&s),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+// ===========================================================================
+// Migration FFI
+// ===========================================================================
+
+/// Check the migration status of a repository. Returns a JSON report:
+/// `{"status":"up_to_date","version":"0.4.0"}`, `"upgrade_available"`,
+/// `"downgrade"`, `"unversioned"`, `"corrupt"`. `target` may be null to
+/// use the binary's current `SCHEMA_VERSION`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_migrate_check(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    target: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let target_str = if target.is_null() {
+        SCHEMA_VERSION.to_string()
+    } else {
+        let s = unsafe { c_to_str(target) };
+        if s.is_empty() {
+            SCHEMA_VERSION.to_string()
+        } else {
+            s
+        }
+    };
+    let target_version = match Version::parse(&target_str) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid target: {e}")),
+    };
+    let registry = Registry::builtin();
+    match agentstategraph_migrate::check(&repo.inner, &ref_name, &target_version, &registry) {
+        Ok(r) => to_c_string(&check_result_json(&r)),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Run migrations. `mode` is `"apply"` or `"dry-run"`. Returns a JSON
+/// report describing each step.
+#[no_mangle]
+pub extern "C" fn agentstategraph_migrate_run(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    target: *const c_char,
+    mode: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let target_str = if target.is_null() {
+        SCHEMA_VERSION.to_string()
+    } else {
+        let s = unsafe { c_to_str(target) };
+        if s.is_empty() {
+            SCHEMA_VERSION.to_string()
+        } else {
+            s
+        }
+    };
+    let target_version = match Version::parse(&target_str) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid target: {e}")),
+    };
+    let mode_str = unsafe { c_to_str(mode) };
+    let run_mode = match mode_str.to_lowercase().as_str() {
+        "apply" => RunMode::Apply,
+        "dry-run" | "dryrun" | "dry_run" => RunMode::DryRun,
+        other => return json_err(&format!("invalid mode: {other}")),
+    };
+    let registry = Registry::builtin();
+    match registry.run(&repo.inner, &ref_name, &target_version, run_mode) {
+        Ok(r) => to_c_string(&report_json(&r)),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+fn check_result_json(r: &CheckResult) -> String {
+    let v = match r {
+        CheckResult::UpToDate { version } => serde_json::json!({
+            "status": "up_to_date",
+            "version": version.to_string(),
+        }),
+        CheckResult::UpgradeAvailable {
+            from,
+            to,
+            migrations,
+        } => serde_json::json!({
+            "status": "upgrade_available",
+            "from": from.to_string(),
+            "to": to.to_string(),
+            "migrations": migrations,
+        }),
+        CheckResult::Downgrade { db, binary } => serde_json::json!({
+            "status": "downgrade",
+            "db": db.to_string(),
+            "binary": binary.to_string(),
+        }),
+        CheckResult::Unversioned { implicit } => serde_json::json!({
+            "status": "unversioned",
+            "implicit": implicit.to_string(),
+        }),
+        CheckResult::Corrupt(msg) => serde_json::json!({
+            "status": "corrupt",
+            "message": msg,
+        }),
+    };
+    serde_json::to_string(&v).unwrap_or_default()
+}
+
+fn report_json(r: &agentstategraph_migrate::Report) -> String {
+    let mode = match r.mode {
+        RunMode::DryRun => "dry-run",
+        RunMode::Apply => "apply",
+    };
+    let steps: Vec<serde_json::Value> = r
+        .steps
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "describe": s.describe,
+                "from": s.from.to_string(),
+                "to": s.to.to_string(),
+                "status": step_status_str(s.status),
+                "commit_id": s.commit_id.as_ref().map(|c| c.to_string()),
+                "notes": s.notes,
+            })
+        })
+        .collect();
+    let v = serde_json::json!({
+        "from": r.from.to_string(),
+        "target": r.target.to_string(),
+        "final_version": r.final_version.to_string(),
+        "mode": mode,
+        "steps": steps,
+    });
+    serde_json::to_string(&v).unwrap_or_default()
+}
+
+fn step_status_str(s: StepStatus) -> &'static str {
+    match s {
+        StepStatus::WouldApply => "would-apply",
+        StepStatus::WouldSkip => "would-skip",
+        StepStatus::Applied => "applied",
+        StepStatus::Skipped => "skipped",
+        StepStatus::Failed => "failed",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -281,7 +1000,7 @@ unsafe fn c_to_str(ptr: *const c_char) -> String {
     if ptr.is_null() {
         String::new()
     } else {
-        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
     }
 }
 
@@ -290,9 +1009,9 @@ unsafe fn parse_repo_ref_path<'a>(
     ref_name: *const c_char,
     path: *const c_char,
 ) -> Option<(&'a SgRepo, String, String)> {
-    let repo = repo.as_ref()?;
-    let ref_name = c_to_str(ref_name);
-    let path = c_to_str(path);
+    let repo = unsafe { repo.as_ref()? };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
     Some((repo, ref_name, path))
 }
 
@@ -313,6 +1032,35 @@ fn parse_category(s: &str) -> IntentCategory {
         "migrate" => IntentCategory::Custom("Migrate-requested".into()),
         "plan" => IntentCategory::Plan,
         other => IntentCategory::Custom(other.to_string()),
+    }
+}
+
+fn parse_priority(s: &str) -> Priority {
+    match s.to_lowercase().as_str() {
+        "low" => Priority::Low,
+        "high" => Priority::High,
+        "critical" => Priority::Critical,
+        _ => Priority::Medium,
+    }
+}
+
+fn parse_plan_status(s: &str) -> Option<agentstategraph_tasks::PlanStatus> {
+    match s.to_lowercase().as_str() {
+        "" => None,
+        "active" => Some(agentstategraph_tasks::PlanStatus::Active),
+        "completed" => Some(agentstategraph_tasks::PlanStatus::Completed),
+        "archived" => Some(agentstategraph_tasks::PlanStatus::Archived),
+        _ => None,
+    }
+}
+
+fn parse_proof_kind(s: &str) -> Option<ProofKind> {
+    match s.to_lowercase().as_str() {
+        "commit" => Some(ProofKind::Commit),
+        "file" => Some(ProofKind::File),
+        "test" => Some(ProofKind::Test),
+        "text" => Some(ProofKind::Text),
+        _ => None,
     }
 }
 

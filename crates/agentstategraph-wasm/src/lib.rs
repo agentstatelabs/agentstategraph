@@ -7,12 +7,17 @@
 //!   asg.set("/name", "my-cluster", "Checkpoint", "init")
 //!   asg.get("/name")  // → '"my-cluster"'
 
+use std::sync::Arc;
+
 use wasm_bindgen::prelude::*;
 
 use agentstategraph::speculation::SpecHandle;
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, Repository, SCHEMA_VERSION};
 use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_storage::IndexedDbStorage;
+use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskId, TaskStore};
+use semver::Version;
 
 fn parse_category(s: &str) -> IntentCategory {
     match s.to_lowercase().as_str() {
@@ -59,7 +64,7 @@ fn make_opts(
 /// - Call `load_data()` on startup to hydrate from IndexedDB
 #[wasm_bindgen]
 pub struct WasmAgentStateGraph {
-    repo: Repository,
+    repo: Arc<Repository>,
     storage: std::sync::Arc<IndexedDbStorage>,
 }
 
@@ -83,7 +88,7 @@ impl WasmAgentStateGraph {
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
 
         Ok(Self {
-            repo: repo2,
+            repo: Arc::new(repo2),
             storage: storage2,
         })
     }
@@ -357,6 +362,402 @@ impl WasmAgentStateGraph {
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 
+    // -----------------------------------------------------------------
+    // TaskStore surface
+    //
+    // Plans/tasks cross the boundary as JSON. Consumers deserialize on
+    // the JS side. See `agentstategraph-tasks` for schemas.
+    // -----------------------------------------------------------------
+
+    /// Create a plan. Returns the Plan as JSON.
+    #[wasm_bindgen(js_name = tasksCreatePlan)]
+    pub fn tasks_create_plan(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        name: &str,
+        description: Option<String>,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let plan = store
+            .create_plan(ref_name, name, description)
+            .map_err(js_err)?;
+        serde_json::to_string(&plan).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksListPlans)]
+    pub fn tasks_list_plans(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let plans = store.list_plans(ref_name).map_err(js_err)?;
+        serde_json::to_string(&plans).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksListPlansByStatus)]
+    pub fn tasks_list_plans_by_status(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        status: Option<String>,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let parsed = status.as_deref().and_then(parse_plan_status);
+        let plans = store
+            .list_plans_by_status(ref_name, parsed)
+            .map_err(js_err)?;
+        serde_json::to_string(&plans).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksGetPlan)]
+    pub fn tasks_get_plan(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        name: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let plan = store.get_plan(ref_name, name).map_err(js_err)?;
+        serde_json::to_string(&plan).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksArchivePlan)]
+    pub fn tasks_archive_plan(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        name: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let plan = store.archive_plan(ref_name, name).map_err(js_err)?;
+        serde_json::to_string(&plan).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksDeletePlan)]
+    pub fn tasks_delete_plan(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        name: &str,
+    ) -> Result<(), JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        store.delete_plan(ref_name, name).map_err(js_err)
+    }
+
+    /// Add a task. `priority` is "low"|"medium"|"high"|"critical".
+    /// `blockers_json` is a JSON array of task id strings (or null).
+    #[wasm_bindgen(js_name = tasksAddTask)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tasks_add_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        title: &str,
+        priority: &str,
+        parent_id: Option<String>,
+        blockers_json: Option<String>,
+        assigned_to: Option<String>,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let prio = parse_priority(priority);
+        let parent = parent_id.filter(|s| !s.is_empty()).map(TaskId);
+        let blockers: Vec<TaskId> = match blockers_json {
+            None => Vec::new(),
+            Some(s) if s.is_empty() => Vec::new(),
+            Some(s) => serde_json::from_str::<Vec<String>>(&s)
+                .map_err(js_err)?
+                .into_iter()
+                .map(TaskId)
+                .collect(),
+        };
+        let task = store
+            .add_task(ref_name, plan, title, prio, parent, blockers, assigned_to)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksListTasks)]
+    pub fn tasks_list_tasks(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let tasks = store.list_tasks(ref_name, plan).map_err(js_err)?;
+        serde_json::to_string(&tasks).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksTaskIds)]
+    pub fn tasks_task_ids(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let ids: Vec<String> = store
+            .task_ids(ref_name, plan)
+            .map_err(js_err)?
+            .into_iter()
+            .map(|i| i.0)
+            .collect();
+        serde_json::to_string(&ids).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksGetTask)]
+    pub fn tasks_get_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .get_task(ref_name, plan, &TaskId(task_id.to_string()))
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksStartTask)]
+    pub fn tasks_start_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .start_task(ref_name, plan, &TaskId(task_id.to_string()))
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    /// Complete a task. `proof_kind` is "commit"|"file"|"test"|"text".
+    #[wasm_bindgen(js_name = tasksCompleteTask)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tasks_complete_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+        proof_kind: &str,
+        proof_value: &str,
+        proof_note: Option<String>,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let kind = parse_proof_kind(proof_kind)
+            .ok_or_else(|| JsValue::from_str(&format!("invalid proof kind: {proof_kind}")))?;
+        let proof = Proof {
+            kind,
+            value: proof_value.to_string(),
+            note: proof_note,
+        };
+        let task = store
+            .complete_task(ref_name, plan, &TaskId(task_id.to_string()), proof)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksAbandonTask)]
+    pub fn tasks_abandon_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+        reason: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .abandon_task(ref_name, plan, &TaskId(task_id.to_string()), reason)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksSetPriority)]
+    pub fn tasks_set_priority(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+        priority: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .set_priority(
+                ref_name,
+                plan,
+                &TaskId(task_id.to_string()),
+                parse_priority(priority),
+            )
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksSetBlockers)]
+    pub fn tasks_set_blockers(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+        blockers_json: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let blockers: Vec<TaskId> = if blockers_json.is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str::<Vec<String>>(blockers_json)
+                .map_err(js_err)?
+                .into_iter()
+                .map(TaskId)
+                .collect()
+        };
+        let task = store
+            .set_blockers(ref_name, plan, &TaskId(task_id.to_string()), blockers)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksAssignTask)]
+    pub fn tasks_assign_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+        agent: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .assign_task(ref_name, plan, &TaskId(task_id.to_string()), agent)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksUnassignTask)]
+    pub fn tasks_unassign_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .unassign_task(ref_name, plan, &TaskId(task_id.to_string()))
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksNextTask)]
+    pub fn tasks_next_task(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store.next_task(ref_name, plan).map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksNextTaskFor)]
+    pub fn tasks_next_task_for(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        agent: Option<String>,
+        include_unassigned: bool,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .next_task_for(ref_name, plan, agent.as_deref(), include_unassigned)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    #[wasm_bindgen(js_name = tasksDerivedStatus)]
+    pub fn tasks_derived_status(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        parent_id: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let status = store
+            .derived_status(ref_name, plan, &TaskId(parent_id.to_string()))
+            .map_err(js_err)?;
+        serde_json::to_string(&status).map_err(js_err)
+    }
+
+    // -----------------------------------------------------------------
+    // Migration surface
+    // -----------------------------------------------------------------
+
+    /// Check migration status. Returns a JSON report (see `CheckResult`).
+    #[wasm_bindgen(js_name = migrateCheck)]
+    pub fn migrate_check(&self, ref_name: &str, target: Option<String>) -> Result<String, JsValue> {
+        let target_str = target.unwrap_or_else(|| SCHEMA_VERSION.to_string());
+        let target_version = Version::parse(&target_str).map_err(js_err)?;
+        let registry = Registry::builtin();
+        let r = agentstategraph_migrate::check(&self.repo, ref_name, &target_version, &registry)
+            .map_err(js_err)?;
+        Ok(check_result_json(&r))
+    }
+
+    /// Run migrations. `mode` is `"apply"` or `"dry-run"`.
+    #[wasm_bindgen(js_name = migrateRun)]
+    pub fn migrate_run(
+        &self,
+        ref_name: &str,
+        target: Option<String>,
+        mode: &str,
+    ) -> Result<String, JsValue> {
+        let target_str = target.unwrap_or_else(|| SCHEMA_VERSION.to_string());
+        let target_version = Version::parse(&target_str).map_err(js_err)?;
+        let run_mode = match mode.to_lowercase().as_str() {
+            "apply" => RunMode::Apply,
+            "dry-run" | "dryrun" | "dry_run" => RunMode::DryRun,
+            other => return Err(JsValue::from_str(&format!("invalid mode: {other}"))),
+        };
+        let registry = Registry::builtin();
+        let r = registry
+            .run(&self.repo, ref_name, &target_version, run_mode)
+            .map_err(js_err)?;
+        Ok(report_json(&r))
+    }
+
     /// List epochs. Returns JSON.
     pub fn list_epochs(&self) -> Result<String, JsValue> {
         let entries = self
@@ -375,5 +776,114 @@ impl WasmAgentStateGraph {
             })
             .collect();
         Ok(serde_json::to_string(&json).unwrap_or_default())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (non-exported)
+// ---------------------------------------------------------------------------
+
+fn js_err<E: std::fmt::Display>(e: E) -> JsValue {
+    JsValue::from_str(&format!("{}", e))
+}
+
+fn parse_priority(s: &str) -> Priority {
+    match s.to_lowercase().as_str() {
+        "low" => Priority::Low,
+        "high" => Priority::High,
+        "critical" => Priority::Critical,
+        _ => Priority::Medium,
+    }
+}
+
+fn parse_plan_status(s: &str) -> Option<agentstategraph_tasks::PlanStatus> {
+    match s.to_lowercase().as_str() {
+        "active" => Some(agentstategraph_tasks::PlanStatus::Active),
+        "completed" => Some(agentstategraph_tasks::PlanStatus::Completed),
+        "archived" => Some(agentstategraph_tasks::PlanStatus::Archived),
+        _ => None,
+    }
+}
+
+fn parse_proof_kind(s: &str) -> Option<ProofKind> {
+    match s.to_lowercase().as_str() {
+        "commit" => Some(ProofKind::Commit),
+        "file" => Some(ProofKind::File),
+        "test" => Some(ProofKind::Test),
+        "text" => Some(ProofKind::Text),
+        _ => None,
+    }
+}
+
+fn check_result_json(r: &CheckResult) -> String {
+    let v = match r {
+        CheckResult::UpToDate { version } => serde_json::json!({
+            "status": "up_to_date",
+            "version": version.to_string(),
+        }),
+        CheckResult::UpgradeAvailable {
+            from,
+            to,
+            migrations,
+        } => serde_json::json!({
+            "status": "upgrade_available",
+            "from": from.to_string(),
+            "to": to.to_string(),
+            "migrations": migrations,
+        }),
+        CheckResult::Downgrade { db, binary } => serde_json::json!({
+            "status": "downgrade",
+            "db": db.to_string(),
+            "binary": binary.to_string(),
+        }),
+        CheckResult::Unversioned { implicit } => serde_json::json!({
+            "status": "unversioned",
+            "implicit": implicit.to_string(),
+        }),
+        CheckResult::Corrupt(msg) => serde_json::json!({
+            "status": "corrupt",
+            "message": msg,
+        }),
+    };
+    serde_json::to_string(&v).unwrap_or_default()
+}
+
+fn report_json(r: &agentstategraph_migrate::Report) -> String {
+    let mode = match r.mode {
+        RunMode::DryRun => "dry-run",
+        RunMode::Apply => "apply",
+    };
+    let steps: Vec<serde_json::Value> = r
+        .steps
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "describe": s.describe,
+                "from": s.from.to_string(),
+                "to": s.to.to_string(),
+                "status": step_status_str(s.status),
+                "commit_id": s.commit_id.as_ref().map(|c| c.to_string()),
+                "notes": s.notes,
+            })
+        })
+        .collect();
+    let v = serde_json::json!({
+        "from": r.from.to_string(),
+        "target": r.target.to_string(),
+        "final_version": r.final_version.to_string(),
+        "mode": mode,
+        "steps": steps,
+    });
+    serde_json::to_string(&v).unwrap_or_default()
+}
+
+fn step_status_str(s: StepStatus) -> &'static str {
+    match s {
+        StepStatus::WouldApply => "would-apply",
+        StepStatus::WouldSkip => "would-skip",
+        StepStatus::Applied => "applied",
+        StepStatus::Skipped => "skipped",
+        StepStatus::Failed => "failed",
     }
 }
