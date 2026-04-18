@@ -11,10 +11,16 @@
 #[macro_use]
 extern crate napi_derive;
 
+use std::sync::Arc;
+
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_tasks::{
+    NoopVerifier, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
+    TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyReport, VerifyResult,
+};
 
 fn parse_category(s: &str) -> IntentCategory {
     match s.to_lowercase().as_str() {
@@ -75,7 +81,7 @@ fn err(e: impl std::fmt::Display) -> napi::Error {
 /// AgentStateGraph — AI-native versioned state store.
 #[napi]
 pub struct AgentStateGraph {
-    repo: Repository,
+    repo: Arc<Repository>,
 }
 
 #[napi]
@@ -92,7 +98,9 @@ impl AgentStateGraph {
             None => Repository::new(Box::new(MemoryStorage::new())),
         };
         repo.init().map_err(err)?;
-        Ok(Self { repo })
+        Ok(Self {
+            repo: Arc::new(repo),
+        })
     }
 
     // -- State operations --
@@ -436,5 +444,637 @@ impl AgentStateGraph {
                 })
             })
             .collect())
+    }
+
+    // -- Schema migration --
+
+    /// Check the stored schema version against this binary's SCHEMA_VERSION.
+    /// Returns an object with `status` ∈ up_to_date | upgrade_available | downgrade
+    /// | unversioned | corrupt.
+    #[napi]
+    pub fn check_schema(
+        &self,
+        reference: Option<String>,
+        target: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        use agentstategraph_migrate::{CheckResult, Registry, binary_version, check};
+
+        let ref_name = reference.unwrap_or_else(|| "main".to_string());
+        let target = match target {
+            Some(s) => semver::Version::parse(&s).map_err(err)?,
+            None => binary_version(),
+        };
+        let registry = Registry::builtin();
+        let result = check(&*self.repo, &ref_name, &target, &registry).map_err(err)?;
+        Ok(match result {
+            CheckResult::UpToDate { version } => serde_json::json!({
+                "status": "up_to_date",
+                "version": version.to_string(),
+            }),
+            CheckResult::UpgradeAvailable {
+                from,
+                to,
+                migrations,
+            } => serde_json::json!({
+                "status": "upgrade_available",
+                "from": from.to_string(),
+                "to": to.to_string(),
+                "migrations": migrations,
+            }),
+            CheckResult::Downgrade { db, binary } => serde_json::json!({
+                "status": "downgrade",
+                "db": db.to_string(),
+                "binary": binary.to_string(),
+            }),
+            CheckResult::Unversioned { implicit } => serde_json::json!({
+                "status": "unversioned",
+                "implicit": implicit.to_string(),
+            }),
+            CheckResult::Corrupt(msg) => serde_json::json!({
+                "status": "corrupt",
+                "message": msg,
+            }),
+        })
+    }
+
+    /// Run migrations. `mode` is `"apply"` (default) or `"dry-run"`.
+    #[napi]
+    pub fn migrate(
+        &self,
+        reference: Option<String>,
+        target: Option<String>,
+        mode: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        use agentstategraph_migrate::{Registry, RunMode, StepStatus, binary_version};
+
+        let ref_name = reference.unwrap_or_else(|| "main".to_string());
+        let target = match target {
+            Some(s) => semver::Version::parse(&s).map_err(err)?,
+            None => binary_version(),
+        };
+        let run_mode = match mode.as_deref().unwrap_or("apply") {
+            "apply" => RunMode::Apply,
+            "dry-run" | "dry_run" | "dryrun" => RunMode::DryRun,
+            other => {
+                return Err(napi::Error::from_reason(format!("invalid mode {other:?}")));
+            }
+        };
+        let registry = Registry::builtin();
+        let report = registry
+            .run(&*self.repo, &ref_name, &target, run_mode)
+            .map_err(err)?;
+
+        let steps: Vec<serde_json::Value> = report
+            .steps
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "describe": s.describe,
+                    "from": s.from.to_string(),
+                    "to": s.to.to_string(),
+                    "status": match s.status {
+                        StepStatus::WouldApply => "would_apply",
+                        StepStatus::WouldSkip => "would_skip",
+                        StepStatus::Applied => "applied",
+                        StepStatus::Skipped => "skipped",
+                        StepStatus::Failed => "failed",
+                    },
+                    "commit_id": s.commit_id.as_ref().map(|c| c.to_string()),
+                    "notes": s.notes,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "from": report.from.to_string(),
+            "target": report.target.to_string(),
+            "final_version": report.final_version.to_string(),
+            "mode": match report.mode {
+                RunMode::Apply => "apply",
+                RunMode::DryRun => "dry-run",
+            },
+            "steps": steps,
+        }))
+    }
+}
+
+/// Exit codes an app should use when surfacing `check_schema()` results.
+#[napi]
+pub fn exit_codes() -> serde_json::Value {
+    use agentstategraph_migrate::exit;
+    serde_json::json!({
+        "OK": exit::OK,
+        "DOWNGRADE_REFUSED": exit::DOWNGRADE_REFUSED,
+        "CORRUPT_META": exit::CORRUPT_META,
+        "MIGRATION_FAILED": exit::MIGRATION_FAILED,
+        "UPGRADE_REQUIRED": exit::UPGRADE_REQUIRED,
+    })
+}
+
+// =========================================================================
+// TaskStore
+// =========================================================================
+
+fn task_err(e: TaskStoreError) -> napi::Error {
+    napi::Error::from_reason(e.to_string())
+}
+
+fn parse_priority(s: &str) -> napi::Result<Priority> {
+    Ok(match s.to_lowercase().as_str() {
+        "low" => Priority::Low,
+        "medium" => Priority::Medium,
+        "high" => Priority::High,
+        "critical" => Priority::Critical,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "invalid priority {other:?}"
+            )));
+        }
+    })
+}
+
+fn priority_str(p: Priority) -> &'static str {
+    match p {
+        Priority::Low => "low",
+        Priority::Medium => "medium",
+        Priority::High => "high",
+        Priority::Critical => "critical",
+    }
+}
+
+fn status_str(s: TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Pending => "pending",
+        TaskStatus::InProgress => "in_progress",
+        TaskStatus::Done => "done",
+        TaskStatus::Abandoned => "abandoned",
+    }
+}
+
+fn plan_status_str(s: PlanStatus) -> &'static str {
+    match s {
+        PlanStatus::Active => "active",
+        PlanStatus::Completed => "completed",
+        PlanStatus::Archived => "archived",
+    }
+}
+
+fn parse_plan_status(s: &str) -> napi::Result<PlanStatus> {
+    Ok(match s.to_lowercase().as_str() {
+        "active" => PlanStatus::Active,
+        "completed" => PlanStatus::Completed,
+        "archived" => PlanStatus::Archived,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "invalid plan status {other:?}"
+            )));
+        }
+    })
+}
+
+fn parse_proof_kind(s: &str) -> napi::Result<ProofKind> {
+    Ok(match s.to_lowercase().as_str() {
+        "commit" => ProofKind::Commit,
+        "file" => ProofKind::File,
+        "test" => ProofKind::Test,
+        "text" => ProofKind::Text,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "invalid proof kind {other:?}"
+            )));
+        }
+    })
+}
+
+fn proof_kind_str(k: ProofKind) -> &'static str {
+    match k {
+        ProofKind::Commit => "commit",
+        ProofKind::File => "file",
+        ProofKind::Test => "test",
+        ProofKind::Text => "text",
+    }
+}
+
+fn plan_to_json(p: &Plan) -> serde_json::Value {
+    serde_json::json!({
+        "name": p.name,
+        "description": p.description,
+        "status": plan_status_str(p.status),
+        "created_at": p.created_at.to_rfc3339(),
+        "created_by": p.created_by,
+        "archived_at": p.archived_at.map(|t| t.to_rfc3339()),
+    })
+}
+
+fn task_to_json(t: &Task) -> serde_json::Value {
+    serde_json::json!({
+        "id": t.id.as_str(),
+        "title": t.title,
+        "status": status_str(t.status),
+        "priority": priority_str(t.priority),
+        "parent_id": t.parent_id.as_ref().map(|i| i.as_str().to_string()),
+        "blocked_by": t.blocked_by.iter().map(|i| i.as_str().to_string()).collect::<Vec<_>>(),
+        "created_at": t.created_at.to_rfc3339(),
+        "created_by": t.created_by,
+        "started_at": t.started_at.map(|x| x.to_rfc3339()),
+        "started_by": t.started_by,
+        "completed_at": t.completed_at.map(|x| x.to_rfc3339()),
+        "completed_by": t.completed_by,
+        "proof": t.proof.as_ref().map(|p| serde_json::json!({
+            "kind": proof_kind_str(p.kind),
+            "value": p.value,
+            "note": p.note,
+        })),
+        "abandoned_at": t.abandoned_at.map(|x| x.to_rfc3339()),
+        "abandoned_reason": t.abandoned_reason,
+        "assigned_to": t.assigned_to,
+    })
+}
+
+fn report_to_json(r: &VerifyReport) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = r
+        .results
+        .iter()
+        .map(|e| {
+            let (status, msg) = match &e.result {
+                VerifyResult::Verified { message } => ("verified", message.clone()),
+                VerifyResult::Decayed { reason } => ("decayed", reason.clone()),
+                VerifyResult::Unverifiable { reason } => ("unverifiable", reason.clone()),
+            };
+            serde_json::json!({
+                "task_id": e.task_id.as_str(),
+                "status": status,
+                "message": msg,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "plan": r.plan,
+        "results": entries,
+        "verified_count": r.verified_count(),
+        "decayed_count": r.decayed_count(),
+        "unverifiable_count": r.unverifiable_count(),
+        "all_strongly_verified": r.all_strongly_verified(),
+        "summary": r.summary(),
+    })
+}
+
+struct KindMapVerifier {
+    commit: bool,
+    file: bool,
+    test: bool,
+    text: bool,
+}
+
+impl Verifier for KindMapVerifier {
+    fn verify(&self, proof: &Proof) -> VerifyResult {
+        let ok = match proof.kind {
+            ProofKind::Commit => self.commit,
+            ProofKind::File => self.file,
+            ProofKind::Test => self.test,
+            ProofKind::Text => self.text,
+        };
+        if ok {
+            VerifyResult::Verified {
+                message: format!("{} proof accepted by kind map", proof_kind_str(proof.kind)),
+            }
+        } else {
+            VerifyResult::Unverifiable {
+                reason: format!("{} proof not in kind map", proof_kind_str(proof.kind)),
+            }
+        }
+    }
+}
+
+/// TaskStore — plans-and-tasks layer on top of an AgentStateGraph.
+#[napi]
+pub struct TaskStore {
+    inner: TasksBackend,
+}
+
+#[napi]
+impl TaskStore {
+    #[napi(constructor)]
+    pub fn new(asg: &AgentStateGraph, prefix: Option<String>, agent_id: Option<String>) -> Self {
+        let prefix = prefix.unwrap_or_else(|| "/plans".to_string());
+        let agent_id = agent_id.unwrap_or_else(|| "node".to_string());
+        Self {
+            inner: TasksBackend::new(Arc::clone(&asg.repo), prefix, agent_id),
+        }
+    }
+
+    // --- Plan ---
+
+    #[napi]
+    pub fn create_plan(
+        &self,
+        ref_name: String,
+        name: String,
+        description: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let p = self
+            .inner
+            .create_plan(&ref_name, &name, description)
+            .map_err(task_err)?;
+        Ok(plan_to_json(&p))
+    }
+
+    #[napi]
+    pub fn list_plans(&self, ref_name: String) -> napi::Result<Vec<serde_json::Value>> {
+        let plans = self.inner.list_plans(&ref_name).map_err(task_err)?;
+        Ok(plans.iter().map(plan_to_json).collect())
+    }
+
+    #[napi]
+    pub fn list_plans_by_status(
+        &self,
+        ref_name: String,
+        status: String,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let s = parse_plan_status(&status)?;
+        let plans = self
+            .inner
+            .list_plans_by_status(&ref_name, Some(s))
+            .map_err(task_err)?;
+        Ok(plans.iter().map(plan_to_json).collect())
+    }
+
+    #[napi]
+    pub fn get_plan(&self, ref_name: String, name: String) -> napi::Result<serde_json::Value> {
+        let p = self.inner.get_plan(&ref_name, &name).map_err(task_err)?;
+        Ok(plan_to_json(&p))
+    }
+
+    #[napi]
+    pub fn archive_plan(&self, ref_name: String, name: String) -> napi::Result<serde_json::Value> {
+        let p = self
+            .inner
+            .archive_plan(&ref_name, &name)
+            .map_err(task_err)?;
+        Ok(plan_to_json(&p))
+    }
+
+    #[napi]
+    pub fn delete_plan(&self, ref_name: String, name: String) -> napi::Result<()> {
+        self.inner.delete_plan(&ref_name, &name).map_err(task_err)
+    }
+
+    // --- Task ---
+
+    #[napi]
+    pub fn add_task(
+        &self,
+        ref_name: String,
+        plan: String,
+        title: String,
+        priority: Option<String>,
+        parent_id: Option<String>,
+        blocked_by: Option<Vec<String>>,
+        assigned_to: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let pri = parse_priority(&priority.unwrap_or_else(|| "medium".to_string()))?;
+        let parent = parent_id.map(TaskId);
+        let blockers: Vec<TaskId> = blocked_by
+            .unwrap_or_default()
+            .into_iter()
+            .map(TaskId)
+            .collect();
+        let task = self
+            .inner
+            .add_task(&ref_name, &plan, &title, pri, parent, blockers, assigned_to)
+            .map_err(task_err)?;
+        Ok(task_to_json(&task))
+    }
+
+    #[napi]
+    pub fn list_tasks(
+        &self,
+        ref_name: String,
+        plan: String,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let tasks = self.inner.list_tasks(&ref_name, &plan).map_err(task_err)?;
+        Ok(tasks.iter().map(task_to_json).collect())
+    }
+
+    #[napi]
+    pub fn task_ids(&self, ref_name: String, plan: String) -> napi::Result<Vec<String>> {
+        let ids = self.inner.task_ids(&ref_name, &plan).map_err(task_err)?;
+        Ok(ids.into_iter().map(|i| i.0).collect())
+    }
+
+    #[napi]
+    pub fn get_task(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+    ) -> napi::Result<serde_json::Value> {
+        let t = self
+            .inner
+            .get_task(&ref_name, &plan, &TaskId(id))
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn start_task(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+    ) -> napi::Result<serde_json::Value> {
+        let t = self
+            .inner
+            .start_task(&ref_name, &plan, &TaskId(id))
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn complete_task(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+        proof_kind: String,
+        proof_value: String,
+        proof_note: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let kind = parse_proof_kind(&proof_kind)?;
+        let mut proof = Proof {
+            kind,
+            value: proof_value,
+            note: None,
+        };
+        if let Some(n) = proof_note {
+            proof = proof.with_note(n);
+        }
+        let t = self
+            .inner
+            .complete_task(&ref_name, &plan, &TaskId(id), proof)
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn abandon_task(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+        reason: String,
+    ) -> napi::Result<serde_json::Value> {
+        let t = self
+            .inner
+            .abandon_task(&ref_name, &plan, &TaskId(id), &reason)
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn set_priority(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+        priority: String,
+    ) -> napi::Result<serde_json::Value> {
+        let pri = parse_priority(&priority)?;
+        let t = self
+            .inner
+            .set_priority(&ref_name, &plan, &TaskId(id), pri)
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn set_blockers(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+        blockers: Vec<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let b: Vec<TaskId> = blockers.into_iter().map(TaskId).collect();
+        let t = self
+            .inner
+            .set_blockers(&ref_name, &plan, &TaskId(id), b)
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn assign_task(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+        agent: String,
+    ) -> napi::Result<serde_json::Value> {
+        let t = self
+            .inner
+            .assign_task(&ref_name, &plan, &TaskId(id), &agent)
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn unassign_task(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+    ) -> napi::Result<serde_json::Value> {
+        let t = self
+            .inner
+            .unassign_task(&ref_name, &plan, &TaskId(id))
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
+    pub fn next_task(
+        &self,
+        ref_name: String,
+        plan: String,
+    ) -> napi::Result<Option<serde_json::Value>> {
+        Ok(self
+            .inner
+            .next_task(&ref_name, &plan)
+            .map_err(task_err)?
+            .as_ref()
+            .map(task_to_json))
+    }
+
+    #[napi]
+    pub fn next_task_for(
+        &self,
+        ref_name: String,
+        plan: String,
+        assigned_to: Option<String>,
+        include_unassigned: Option<bool>,
+    ) -> napi::Result<Option<serde_json::Value>> {
+        Ok(self
+            .inner
+            .next_task_for(
+                &ref_name,
+                &plan,
+                assigned_to.as_deref(),
+                include_unassigned.unwrap_or(true),
+            )
+            .map_err(task_err)?
+            .as_ref()
+            .map(task_to_json))
+    }
+
+    #[napi]
+    pub fn derived_status(
+        &self,
+        ref_name: String,
+        plan: String,
+        parent_id: String,
+    ) -> napi::Result<String> {
+        let s = self
+            .inner
+            .derived_status(&ref_name, &plan, &TaskId(parent_id))
+            .map_err(task_err)?;
+        Ok(status_str(s).to_string())
+    }
+
+    /// Run a canned verifier: proof kinds with `true` in `verify_by_kind`
+    /// are reported as Verified; others as Unverifiable. Map keys: commit,
+    /// file, test, text.
+    #[napi]
+    pub fn verify_plan_with_kinds(
+        &self,
+        ref_name: String,
+        plan: String,
+        verify_by_kind: std::collections::HashMap<String, bool>,
+    ) -> napi::Result<serde_json::Value> {
+        let v = KindMapVerifier {
+            commit: *verify_by_kind.get("commit").unwrap_or(&false),
+            file: *verify_by_kind.get("file").unwrap_or(&false),
+            test: *verify_by_kind.get("test").unwrap_or(&false),
+            text: *verify_by_kind.get("text").unwrap_or(&false),
+        };
+        let report = self
+            .inner
+            .verify_plan(&ref_name, &plan, &v)
+            .map_err(task_err)?;
+        Ok(report_to_json(&report))
+    }
+
+    #[napi]
+    pub fn verify_plan_noop(
+        &self,
+        ref_name: String,
+        plan: String,
+    ) -> napi::Result<serde_json::Value> {
+        let report = self
+            .inner
+            .verify_plan(&ref_name, &plan, &NoopVerifier)
+            .map_err(task_err)?;
+        Ok(report_to_json(&report))
     }
 }

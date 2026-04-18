@@ -11,6 +11,8 @@
 //!   asg.diff("main", "feature")
 //!   asg.merge("feature", "main", description="merge feature")
 
+use std::sync::Arc;
+
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -18,6 +20,10 @@ use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_tasks::{
+    NoopVerifier, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
+    TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyEntry, VerifyReport, VerifyResult,
+};
 
 /// Convert a Python JSON-compatible value to a AgentStateGraph Object.
 fn py_to_object(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Object> {
@@ -84,7 +90,7 @@ fn make_opts(
 /// Supports branching, merging, diffing, and speculative execution.
 #[pyclass]
 struct AgentStateGraph {
-    repo: Repository,
+    repo: Arc<Repository>,
 }
 
 #[pymethods]
@@ -104,7 +110,9 @@ impl AgentStateGraph {
         };
         repo.init()
             .map_err(|e| PyRuntimeError::new_err(format!("init error: {}", e)))?;
-        Ok(Self { repo })
+        Ok(Self {
+            repo: Arc::new(repo),
+        })
     }
 
     // -- State operations --
@@ -542,7 +550,7 @@ impl AgentStateGraph {
         };
         let registry = Registry::builtin();
 
-        let result = check(&self.repo, r#ref, &target, &registry)
+        let result = check(&*self.repo, r#ref, &target, &registry)
             .map_err(|e| PyRuntimeError::new_err(format!("check failed: {e}")))?;
 
         let dict = pyo3::types::PyDict::new(py);
@@ -593,10 +601,579 @@ fn exit_codes(py: Python<'_>) -> PyResult<PyObject> {
     Ok(d.into())
 }
 
+/// Run migrations on a ref. Returns a dict summarizing the Report.
+///
+/// `mode` must be either `"apply"` (default) or `"dry-run"`.
+#[pymethods]
+impl AgentStateGraph {
+    #[pyo3(signature = (r#ref="main", target=None, mode="apply"))]
+    fn migrate(
+        &self,
+        py: Python<'_>,
+        r#ref: &str,
+        target: Option<String>,
+        mode: &str,
+    ) -> PyResult<PyObject> {
+        use agentstategraph_migrate::{Registry, RunMode, binary_version};
+
+        let target = match target {
+            Some(s) => semver::Version::parse(&s)
+                .map_err(|e| PyRuntimeError::new_err(format!("invalid target version: {e}")))?,
+            None => binary_version(),
+        };
+        let run_mode = match mode {
+            "apply" => RunMode::Apply,
+            "dry-run" | "dry_run" | "dryrun" => RunMode::DryRun,
+            other => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "invalid mode {other:?}; expected 'apply' or 'dry-run'"
+                )));
+            }
+        };
+        let registry = Registry::builtin();
+        let report = registry
+            .run(&*self.repo, r#ref, &target, run_mode)
+            .map_err(|e| PyRuntimeError::new_err(format!("migrate failed: {e}")))?;
+
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("from", report.from.to_string())?;
+        dict.set_item("target", report.target.to_string())?;
+        dict.set_item("final_version", report.final_version.to_string())?;
+        dict.set_item(
+            "mode",
+            match report.mode {
+                RunMode::Apply => "apply",
+                RunMode::DryRun => "dry-run",
+            },
+        )?;
+        let steps = pyo3::types::PyList::empty(py);
+        for step in &report.steps {
+            let sd = pyo3::types::PyDict::new(py);
+            sd.set_item("name", &step.name)?;
+            sd.set_item("describe", &step.describe)?;
+            sd.set_item("from", step.from.to_string())?;
+            sd.set_item("to", step.to.to_string())?;
+            use agentstategraph_migrate::StepStatus;
+            sd.set_item(
+                "status",
+                match step.status {
+                    StepStatus::WouldApply => "would_apply",
+                    StepStatus::WouldSkip => "would_skip",
+                    StepStatus::Applied => "applied",
+                    StepStatus::Skipped => "skipped",
+                    StepStatus::Failed => "failed",
+                },
+            )?;
+            sd.set_item("commit_id", step.commit_id.as_ref().map(|c| c.to_string()))?;
+            sd.set_item("notes", step.notes.clone())?;
+            steps.append(sd)?;
+        }
+        dict.set_item("steps", steps)?;
+        Ok(dict.into())
+    }
+}
+
+// =========================================================================
+// TaskStore — wraps agentstategraph_tasks::TaskStore
+// =========================================================================
+
+fn task_err(e: TaskStoreError) -> PyErr {
+    PyRuntimeError::new_err(e.to_string())
+}
+
+fn parse_priority(s: &str) -> PyResult<Priority> {
+    match s.to_lowercase().as_str() {
+        "low" => Ok(Priority::Low),
+        "medium" => Ok(Priority::Medium),
+        "high" => Ok(Priority::High),
+        "critical" => Ok(Priority::Critical),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid priority {other:?}; expected low|medium|high|critical"
+        ))),
+    }
+}
+
+fn priority_str(p: Priority) -> &'static str {
+    match p {
+        Priority::Low => "low",
+        Priority::Medium => "medium",
+        Priority::High => "high",
+        Priority::Critical => "critical",
+    }
+}
+
+fn status_str(s: TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Pending => "pending",
+        TaskStatus::InProgress => "in_progress",
+        TaskStatus::Done => "done",
+        TaskStatus::Abandoned => "abandoned",
+    }
+}
+
+fn plan_status_str(s: PlanStatus) -> &'static str {
+    match s {
+        PlanStatus::Active => "active",
+        PlanStatus::Completed => "completed",
+        PlanStatus::Archived => "archived",
+    }
+}
+
+fn parse_plan_status(s: &str) -> PyResult<PlanStatus> {
+    match s.to_lowercase().as_str() {
+        "active" => Ok(PlanStatus::Active),
+        "completed" => Ok(PlanStatus::Completed),
+        "archived" => Ok(PlanStatus::Archived),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid plan status {other:?}"
+        ))),
+    }
+}
+
+fn parse_proof_kind(s: &str) -> PyResult<ProofKind> {
+    match s.to_lowercase().as_str() {
+        "commit" => Ok(ProofKind::Commit),
+        "file" => Ok(ProofKind::File),
+        "test" => Ok(ProofKind::Test),
+        "text" => Ok(ProofKind::Text),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid proof kind {other:?}; expected commit|file|test|text"
+        ))),
+    }
+}
+
+fn proof_kind_str(k: ProofKind) -> &'static str {
+    match k {
+        ProofKind::Commit => "commit",
+        ProofKind::File => "file",
+        ProofKind::Test => "test",
+        ProofKind::Text => "text",
+    }
+}
+
+fn plan_to_dict(py: Python<'_>, p: &Plan) -> PyResult<PyObject> {
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("name", &p.name)?;
+    d.set_item("description", p.description.clone())?;
+    d.set_item("status", plan_status_str(p.status))?;
+    d.set_item("created_at", p.created_at.to_rfc3339())?;
+    d.set_item("created_by", &p.created_by)?;
+    d.set_item("archived_at", p.archived_at.map(|t| t.to_rfc3339()))?;
+    Ok(d.into())
+}
+
+fn task_to_dict(py: Python<'_>, t: &Task) -> PyResult<PyObject> {
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("id", t.id.as_str())?;
+    d.set_item("title", &t.title)?;
+    d.set_item("status", status_str(t.status))?;
+    d.set_item("priority", priority_str(t.priority))?;
+    d.set_item(
+        "parent_id",
+        t.parent_id.as_ref().map(|i| i.as_str().to_string()),
+    )?;
+    d.set_item(
+        "blocked_by",
+        t.blocked_by
+            .iter()
+            .map(|i| i.as_str().to_string())
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item("created_at", t.created_at.to_rfc3339())?;
+    d.set_item("created_by", &t.created_by)?;
+    d.set_item("started_at", t.started_at.map(|x| x.to_rfc3339()))?;
+    d.set_item("started_by", t.started_by.clone())?;
+    d.set_item("completed_at", t.completed_at.map(|x| x.to_rfc3339()))?;
+    d.set_item("completed_by", t.completed_by.clone())?;
+    if let Some(proof) = &t.proof {
+        let pd = pyo3::types::PyDict::new(py);
+        pd.set_item("kind", proof_kind_str(proof.kind))?;
+        pd.set_item("value", &proof.value)?;
+        pd.set_item("note", proof.note.clone())?;
+        d.set_item("proof", pd)?;
+    } else {
+        d.set_item("proof", py.None())?;
+    }
+    d.set_item("abandoned_at", t.abandoned_at.map(|x| x.to_rfc3339()))?;
+    d.set_item("abandoned_reason", t.abandoned_reason.clone())?;
+    d.set_item("assigned_to", t.assigned_to.clone())?;
+    Ok(d.into())
+}
+
+fn report_to_dict(py: Python<'_>, r: &VerifyReport) -> PyResult<PyObject> {
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("plan", &r.plan)?;
+    let entries = pyo3::types::PyList::empty(py);
+    for e in &r.results {
+        let ed = pyo3::types::PyDict::new(py);
+        ed.set_item("task_id", e.task_id.as_str())?;
+        let (status, msg) = match &e.result {
+            VerifyResult::Verified { message } => ("verified", message.clone()),
+            VerifyResult::Decayed { reason } => ("decayed", reason.clone()),
+            VerifyResult::Unverifiable { reason } => ("unverifiable", reason.clone()),
+        };
+        ed.set_item("status", status)?;
+        ed.set_item("message", msg)?;
+        entries.append(ed)?;
+    }
+    d.set_item("results", entries)?;
+    d.set_item("verified_count", r.verified_count())?;
+    d.set_item("decayed_count", r.decayed_count())?;
+    d.set_item("unverifiable_count", r.unverifiable_count())?;
+    d.set_item("all_strongly_verified", r.all_strongly_verified())?;
+    d.set_item("summary", r.summary())?;
+    Ok(d.into())
+}
+
+/// A canned verifier that returns `Verified` for certain proof kinds
+/// (per a user-supplied `ProofKind -> bool` map) and `Unverifiable`
+/// otherwise. Exposed via `TaskStore.verify_plan_with_kinds`.
+struct KindMapVerifier {
+    commit: bool,
+    file: bool,
+    test: bool,
+    text: bool,
+}
+
+impl Verifier for KindMapVerifier {
+    fn verify(&self, proof: &Proof) -> VerifyResult {
+        let ok = match proof.kind {
+            ProofKind::Commit => self.commit,
+            ProofKind::File => self.file,
+            ProofKind::Test => self.test,
+            ProofKind::Text => self.text,
+        };
+        if ok {
+            VerifyResult::Verified {
+                message: format!("{} proof accepted by kind map", proof_kind_str(proof.kind)),
+            }
+        } else {
+            VerifyResult::Unverifiable {
+                reason: format!("{} proof not in kind map", proof_kind_str(proof.kind)),
+            }
+        }
+    }
+}
+
+/// TaskStore — plans and tasks layered on an AgentStateGraph.
+///
+/// Wraps `agentstategraph_tasks::TaskStore`. Construct from an
+/// `AgentStateGraph` and a path prefix (e.g. `/plans`).
+#[pyclass]
+struct TaskStore {
+    inner: TasksBackend,
+}
+
+#[pymethods]
+impl TaskStore {
+    #[new]
+    #[pyo3(signature = (asg, prefix="/plans", agent_id="python"))]
+    fn new(asg: &AgentStateGraph, prefix: &str, agent_id: &str) -> Self {
+        Self {
+            inner: TasksBackend::new(Arc::clone(&asg.repo), prefix, agent_id),
+        }
+    }
+
+    // --- Plan ops ---
+
+    fn create_plan(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        name: &str,
+        description: Option<String>,
+    ) -> PyResult<PyObject> {
+        let plan = self
+            .inner
+            .create_plan(ref_name, name, description)
+            .map_err(task_err)?;
+        plan_to_dict(py, &plan)
+    }
+
+    fn list_plans(&self, py: Python<'_>, ref_name: &str) -> PyResult<PyObject> {
+        let plans = self.inner.list_plans(ref_name).map_err(task_err)?;
+        let list = pyo3::types::PyList::empty(py);
+        for p in &plans {
+            list.append(plan_to_dict(py, p)?)?;
+        }
+        Ok(list.into())
+    }
+
+    fn list_plans_by_status(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        status: &str,
+    ) -> PyResult<PyObject> {
+        let s = parse_plan_status(status)?;
+        let plans = self
+            .inner
+            .list_plans_by_status(ref_name, Some(s))
+            .map_err(task_err)?;
+        let list = pyo3::types::PyList::empty(py);
+        for p in &plans {
+            list.append(plan_to_dict(py, p)?)?;
+        }
+        Ok(list.into())
+    }
+
+    fn get_plan(&self, py: Python<'_>, ref_name: &str, name: &str) -> PyResult<PyObject> {
+        let p = self.inner.get_plan(ref_name, name).map_err(task_err)?;
+        plan_to_dict(py, &p)
+    }
+
+    fn archive_plan(&self, py: Python<'_>, ref_name: &str, name: &str) -> PyResult<PyObject> {
+        let p = self.inner.archive_plan(ref_name, name).map_err(task_err)?;
+        plan_to_dict(py, &p)
+    }
+
+    fn delete_plan(&self, ref_name: &str, name: &str) -> PyResult<()> {
+        self.inner.delete_plan(ref_name, name).map_err(task_err)
+    }
+
+    // --- Task ops ---
+
+    #[pyo3(signature = (ref_name, plan, title, priority="medium", parent_id=None, blocked_by=None, assigned_to=None))]
+    fn add_task(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        title: &str,
+        priority: &str,
+        parent_id: Option<String>,
+        blocked_by: Option<Vec<String>>,
+        assigned_to: Option<String>,
+    ) -> PyResult<PyObject> {
+        let pri = parse_priority(priority)?;
+        let parent = parent_id.map(TaskId);
+        let blockers: Vec<TaskId> = blocked_by
+            .unwrap_or_default()
+            .into_iter()
+            .map(TaskId)
+            .collect();
+        let task = self
+            .inner
+            .add_task(ref_name, plan, title, pri, parent, blockers, assigned_to)
+            .map_err(task_err)?;
+        task_to_dict(py, &task)
+    }
+
+    fn list_tasks(&self, py: Python<'_>, ref_name: &str, plan: &str) -> PyResult<PyObject> {
+        let tasks = self.inner.list_tasks(ref_name, plan).map_err(task_err)?;
+        let list = pyo3::types::PyList::empty(py);
+        for t in &tasks {
+            list.append(task_to_dict(py, t)?)?;
+        }
+        Ok(list.into())
+    }
+
+    fn task_ids(&self, ref_name: &str, plan: &str) -> PyResult<Vec<String>> {
+        let ids = self.inner.task_ids(ref_name, plan).map_err(task_err)?;
+        Ok(ids.into_iter().map(|i| i.0).collect())
+    }
+
+    fn get_task(&self, py: Python<'_>, ref_name: &str, plan: &str, id: &str) -> PyResult<PyObject> {
+        let t = self
+            .inner
+            .get_task(ref_name, plan, &TaskId(id.to_string()))
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    fn start_task(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+    ) -> PyResult<PyObject> {
+        let t = self
+            .inner
+            .start_task(ref_name, plan, &TaskId(id.to_string()))
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    #[pyo3(signature = (ref_name, plan, id, proof_kind, proof_value, proof_note=None))]
+    fn complete_task(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+        proof_kind: &str,
+        proof_value: &str,
+        proof_note: Option<String>,
+    ) -> PyResult<PyObject> {
+        let kind = parse_proof_kind(proof_kind)?;
+        let mut proof = Proof {
+            kind,
+            value: proof_value.to_string(),
+            note: None,
+        };
+        if let Some(n) = proof_note {
+            proof = proof.with_note(n);
+        }
+        let t = self
+            .inner
+            .complete_task(ref_name, plan, &TaskId(id.to_string()), proof)
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    fn abandon_task(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+        reason: &str,
+    ) -> PyResult<PyObject> {
+        let t = self
+            .inner
+            .abandon_task(ref_name, plan, &TaskId(id.to_string()), reason)
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    fn set_priority(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+        priority: &str,
+    ) -> PyResult<PyObject> {
+        let pri = parse_priority(priority)?;
+        let t = self
+            .inner
+            .set_priority(ref_name, plan, &TaskId(id.to_string()), pri)
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    fn set_blockers(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+        blockers: Vec<String>,
+    ) -> PyResult<PyObject> {
+        let b: Vec<TaskId> = blockers.into_iter().map(TaskId).collect();
+        let t = self
+            .inner
+            .set_blockers(ref_name, plan, &TaskId(id.to_string()), b)
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    fn assign_task(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+        agent: &str,
+    ) -> PyResult<PyObject> {
+        let t = self
+            .inner
+            .assign_task(ref_name, plan, &TaskId(id.to_string()), agent)
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    fn unassign_task(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+    ) -> PyResult<PyObject> {
+        let t = self
+            .inner
+            .unassign_task(ref_name, plan, &TaskId(id.to_string()))
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    fn next_task(&self, py: Python<'_>, ref_name: &str, plan: &str) -> PyResult<PyObject> {
+        match self.inner.next_task(ref_name, plan).map_err(task_err)? {
+            Some(t) => task_to_dict(py, &t),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[pyo3(signature = (ref_name, plan, assigned_to=None, include_unassigned=true))]
+    fn next_task_for(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        assigned_to: Option<String>,
+        include_unassigned: bool,
+    ) -> PyResult<PyObject> {
+        match self
+            .inner
+            .next_task_for(ref_name, plan, assigned_to.as_deref(), include_unassigned)
+            .map_err(task_err)?
+        {
+            Some(t) => task_to_dict(py, &t),
+            None => Ok(py.None()),
+        }
+    }
+
+    fn derived_status(&self, ref_name: &str, plan: &str, parent_id: &str) -> PyResult<String> {
+        let s = self
+            .inner
+            .derived_status(ref_name, plan, &TaskId(parent_id.to_string()))
+            .map_err(task_err)?;
+        Ok(status_str(s).to_string())
+    }
+
+    /// Run a canned verifier: every proof whose kind is keyed `True`
+    /// in `verify_by_kind` is reported as `Verified`; others are
+    /// reported as `Unverifiable`.
+    fn verify_plan_with_kinds(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        verify_by_kind: std::collections::HashMap<String, bool>,
+    ) -> PyResult<PyObject> {
+        let v = KindMapVerifier {
+            commit: *verify_by_kind.get("commit").unwrap_or(&false),
+            file: *verify_by_kind.get("file").unwrap_or(&false),
+            test: *verify_by_kind.get("test").unwrap_or(&false),
+            text: *verify_by_kind.get("text").unwrap_or(&false),
+        };
+        let report = self
+            .inner
+            .verify_plan(ref_name, plan, &v)
+            .map_err(task_err)?;
+        report_to_dict(py, &report)
+    }
+
+    /// Run the noop verifier — every `done` task yields `Unverifiable`.
+    fn verify_plan_noop(&self, py: Python<'_>, ref_name: &str, plan: &str) -> PyResult<PyObject> {
+        let report = self
+            .inner
+            .verify_plan(ref_name, plan, &NoopVerifier)
+            .map_err(task_err)?;
+        report_to_dict(py, &report)
+    }
+}
+
+// Silence unused-import warnings for types only referenced via traits.
+#[allow(dead_code)]
+fn _touch_unused(_: &VerifyEntry) {}
+
 /// Python module definition.
 #[pymodule]
 fn agentstategraph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AgentStateGraph>()?;
+    m.add_class::<TaskStore>()?;
     m.add_function(wrap_pyfunction!(exit_codes, m)?)?;
     Ok(())
 }
