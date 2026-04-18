@@ -9,7 +9,7 @@ package agentstategraph
 
 /*
 #include <stdlib.h>
-#include <stdint.h>
+#include "agentstategraph.h"
 */
 import "C"
 

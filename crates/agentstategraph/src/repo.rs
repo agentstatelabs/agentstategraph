@@ -2164,20 +2164,10 @@ mod tests {
         // A normal history: every commit is strictly after its parent.
         let repo = Repository::new(Box::new(MemoryStorage::new()));
         repo.init().unwrap();
-        repo.set(
-            "main",
-            "/a",
-            &Object::string("1"),
-            quick_opts("first"),
-        )
-        .unwrap();
-        repo.set(
-            "main",
-            "/a",
-            &Object::string("2"),
-            quick_opts("second"),
-        )
-        .unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("first"))
+            .unwrap();
+        repo.set("main", "/a", &Object::string("2"), quick_opts("second"))
+            .unwrap();
         let anomalies = repo.detect_timestamp_anomalies("main").unwrap();
         assert!(
             anomalies.is_empty(),
@@ -2189,13 +2179,8 @@ mod tests {
     fn test_blame_entry_timestamp_anomaly_is_false_by_default() {
         let repo = Repository::new(Box::new(MemoryStorage::new()));
         repo.init().unwrap();
-        repo.set(
-            "main",
-            "/a",
-            &Object::string("v"),
-            quick_opts("write"),
-        )
-        .unwrap();
+        repo.set("main", "/a", &Object::string("v"), quick_opts("write"))
+            .unwrap();
         let entry = repo.blame("main", "/a").unwrap();
         assert!(!entry.timestamp_anomaly);
     }
@@ -2206,20 +2191,10 @@ mod tests {
     fn test_seal_epoch_captures_reachable_commits() {
         let repo = Repository::new(Box::new(MemoryStorage::new()));
         repo.init().unwrap();
-        repo.set(
-            "main",
-            "/a",
-            &Object::string("1"),
-            quick_opts("a"),
-        )
-        .unwrap();
-        repo.set(
-            "main",
-            "/b",
-            &Object::string("2"),
-            quick_opts("b"),
-        )
-        .unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
 
         repo.create_epoch("e1", "first epoch", vec![]).unwrap();
         repo.seal_epoch("e1", "done").unwrap();
@@ -2252,16 +2227,12 @@ mod tests {
 
         // Rewind main to pre_seal via set_ref. In warn mode this succeeds.
         let res = repo.set_ref("main", pre_seal);
-        assert!(
-            res.is_ok(),
-            "warn mode must accept the rewind; got {res:?}"
-        );
+        assert!(res.is_ok(), "warn mode must accept the rewind; got {res:?}");
     }
 
     #[test]
     fn test_epoch_seal_violation_in_strict_mode_is_rejected() {
-        let repo = Repository::new(Box::new(MemoryStorage::new()))
-            .with_epoch_seal_strict(true);
+        let repo = Repository::new(Box::new(MemoryStorage::new())).with_epoch_seal_strict(true);
         repo.init().unwrap();
         let _ = repo
             .set("main", "/a", &Object::string("1"), quick_opts("a"))
