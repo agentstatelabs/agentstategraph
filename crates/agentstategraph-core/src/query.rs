@@ -187,6 +187,14 @@ pub struct BlameEntry {
     pub intent_description: String,
     pub reasoning: Option<String>,
     pub timestamp: DateTime<Utc>,
+    /// True if this commit's timestamp is less than or equal to at least
+    /// one of its parents' timestamps. Indicates a possible clock rewind
+    /// (or a legitimate concurrent commit in a DAG merge). Always check
+    /// alongside the commit id, not instead of it — a well-intentioned
+    /// skew is not an attack, but a persistent pattern is a signal.
+    /// (security threat model v3+, V4)
+    #[serde(default)]
+    pub timestamp_anomaly: bool,
 }
 
 #[cfg(test)]

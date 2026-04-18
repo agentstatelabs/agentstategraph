@@ -95,6 +95,19 @@ fn reserved_path_in_diff(diff: &[DiffOp]) -> Option<String> {
     None
 }
 
+/// Environment variable that switches epoch seal enforcement from warn
+/// (default) to strict (reject ref updates that would orphan sealed commits).
+/// (security threat model v3+, V8)
+pub const EPOCH_SEAL_STRICT_ENV: &str = "ASG_EPOCH_SEAL_STRICT";
+
+/// A record of a sealed commit that would become unreachable from a
+/// proposed new ref target.
+#[derive(Debug, Clone)]
+pub struct EpochViolation {
+    pub epoch_id: String,
+    pub unreachable_commits: Vec<ObjectId>,
+}
+
 /// The primary API for interacting with an AgentStateGraph state store.
 pub struct Repository {
     storage: Box<dyn Storage>,
@@ -102,6 +115,11 @@ pub struct Repository {
     session_mgr: crate::session::SessionManager,
     watch_mgr: crate::watch::WatchManager,
     epochs: std::sync::RwLock<Vec<agentstategraph_core::Epoch>>,
+    /// When true, ref updates that orphan sealed commits are rejected with
+    /// `RepoError::EpochSealViolated`. When false (default), violations log
+    /// a warning and the update proceeds. Opt-in via `Repository::with_epoch_seal_strict`
+    /// or `ASG_EPOCH_SEAL_STRICT=1`.
+    epoch_seal_strict: bool,
 }
 
 /// Options for creating a commit.
@@ -185,18 +203,46 @@ pub enum RepoError {
 
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
+
+    #[error(
+        "epoch seal violated: epoch '{epoch_id}' sealed commit(s) {unreachable_commits:?} would be orphaned by this ref update"
+    )]
+    EpochSealViolated {
+        epoch_id: String,
+        unreachable_commits: Vec<ObjectId>,
+    },
 }
 
 impl Repository {
     /// Create a new Repository wrapping the given storage backend.
+    ///
+    /// The epoch-seal enforcement mode defaults to warn. If the environment
+    /// variable `ASG_EPOCH_SEAL_STRICT=1` is set at construction time, the
+    /// repository starts in strict mode. Use
+    /// [`Repository::with_epoch_seal_strict`] to opt in programmatically.
     pub fn new(storage: Box<dyn Storage>) -> Self {
+        let strict = std::env::var(EPOCH_SEAL_STRICT_ENV)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         Self {
             storage,
             specs: SpeculationManager::new(),
             session_mgr: crate::session::SessionManager::new(),
             watch_mgr: crate::watch::WatchManager::new(),
             epochs: std::sync::RwLock::new(Vec::new()),
+            epoch_seal_strict: strict,
         }
+    }
+
+    /// Return a Repository with epoch-seal enforcement set to the given mode.
+    /// Overrides the `ASG_EPOCH_SEAL_STRICT` environment variable.
+    ///
+    /// Strict mode rejects ref updates that would render any sealed-epoch
+    /// commit unreachable from the new target. Warn mode (default) logs
+    /// a warning and proceeds. (security threat model v3+, V8)
+    pub fn with_epoch_seal_strict(mut self, strict: bool) -> Self {
+        self.epoch_seal_strict = strict;
+        self
     }
 
     /// Initialize the repository with an empty state tree on "main".
@@ -333,7 +379,7 @@ impl Repository {
         )?;
 
         let new_commit = self.create_commit(new_root, vec![commit_id], options)?;
-        self.storage.set_ref(ref_name, new_commit.id)?;
+        self.guarded_set_ref(ref_name, new_commit.id)?;
 
         Ok(new_commit.id)
     }
@@ -373,7 +419,7 @@ impl Repository {
         let new_root = tree::tree_delete(self.storage.as_ref(), &commit.state_root, &state_path)?;
 
         let new_commit = self.create_commit(new_root, vec![commit_id], options)?;
-        self.storage.set_ref(ref_name, new_commit.id)?;
+        self.guarded_set_ref(ref_name, new_commit.id)?;
 
         Ok(new_commit.id)
     }
@@ -390,7 +436,10 @@ impl Repository {
         }
 
         let commit_id = self.resolve_ref(from)?;
-        self.storage.set_ref(name, commit_id)?;
+        // Branch creation is a new-pointer write; no existing commits become
+        // unreachable, so epoch-seal enforcement is a no-op here. Route
+        // through `guarded_set_ref` anyway for consistency.
+        self.guarded_set_ref(name, commit_id)?;
         Ok(commit_id)
     }
 
@@ -459,7 +508,7 @@ impl Repository {
                     vec![target_commit_id, source_commit_id],
                     options,
                 )?;
-                self.storage.set_ref(target, commit.id)?;
+                self.guarded_set_ref(target, commit.id)?;
                 Ok(commit.id)
             }
             MergeResult::FastForward(ff_id) => {
@@ -470,7 +519,7 @@ impl Repository {
                 } else {
                     target_commit_id
                 };
-                self.storage.set_ref(target, ff_commit)?;
+                self.guarded_set_ref(target, ff_commit)?;
                 Ok(ff_commit)
             }
             MergeResult::Conflicts { conflicts, .. } => Err(RepoError::MergeConflicts(conflicts)),
@@ -612,7 +661,7 @@ impl Repository {
         }
 
         let commit = self.create_commit(state_root, vec![parent_id], options)?;
-        self.storage.set_ref(&base_ref, commit.id)?;
+        self.guarded_set_ref(&base_ref, commit.id)?;
         Ok(commit.id)
     }
 
@@ -682,6 +731,13 @@ impl Repository {
     }
 
     /// Blame — for a path, find which commit last modified it and why.
+    ///
+    /// The returned entry has `timestamp_anomaly` set when the commit's
+    /// timestamp is `<=` at least one of its parents' timestamps — a signal
+    /// of possible clock rewind. This is detection, not prevention: honest
+    /// NTP skew triggers occasional flags, but persistent or concentrated
+    /// flags from one agent are worth investigating.
+    /// (security threat model v3+, V4)
     pub fn blame(
         &self,
         ref_name: &str,
@@ -696,15 +752,7 @@ impl Repository {
             if commit.parents.is_empty() {
                 // Initial commit — this is where everything was "set"
                 if tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path).is_ok() {
-                    return Ok(agentstategraph_core::BlameEntry {
-                        path: path.to_string(),
-                        commit_id: commit.id.short(),
-                        agent_id: commit.agent_id.clone(),
-                        intent_category: format!("{:?}", commit.intent.category),
-                        intent_description: commit.intent.description.clone(),
-                        reasoning: commit.reasoning.clone(),
-                        timestamp: commit.timestamp,
-                    });
+                    return self.blame_entry_for(path, commit);
                 }
             } else if let Some(parent_id) = commit.parents.first()
                 && let Some(mut parent) = self.storage.get_commit(parent_id)?
@@ -719,27 +767,11 @@ impl Repository {
                 // If the value is different (or didn't exist in parent), this commit is the blame target
                 match (current_val.ok(), parent_val.ok()) {
                     (Some(curr), Some(prev)) if curr != prev => {
-                        return Ok(agentstategraph_core::BlameEntry {
-                            path: path.to_string(),
-                            commit_id: commit.id.short(),
-                            agent_id: commit.agent_id.clone(),
-                            intent_category: format!("{:?}", commit.intent.category),
-                            intent_description: commit.intent.description.clone(),
-                            reasoning: commit.reasoning.clone(),
-                            timestamp: commit.timestamp,
-                        });
+                        return self.blame_entry_for(path, commit);
                     }
                     (Some(_), None) => {
                         // Value was added in this commit
-                        return Ok(agentstategraph_core::BlameEntry {
-                            path: path.to_string(),
-                            commit_id: commit.id.short(),
-                            agent_id: commit.agent_id.clone(),
-                            intent_category: format!("{:?}", commit.intent.category),
-                            intent_description: commit.intent.description.clone(),
-                            reasoning: commit.reasoning.clone(),
-                            timestamp: commit.timestamp,
-                        });
+                        return self.blame_entry_for(path, commit);
                     }
                     _ => continue,
                 }
@@ -750,6 +782,80 @@ impl Repository {
             "no commit found that modified {}",
             path
         )))
+    }
+
+    /// Build a `BlameEntry` from a commit, computing the `timestamp_anomaly`
+    /// flag by comparing this commit's timestamp to each parent's timestamp.
+    fn blame_entry_for(
+        &self,
+        path: &str,
+        commit: &Commit,
+    ) -> Result<agentstategraph_core::BlameEntry, RepoError> {
+        let anomaly = self.commit_has_timestamp_anomaly(commit)?;
+        Ok(agentstategraph_core::BlameEntry {
+            path: path.to_string(),
+            commit_id: commit.id.short(),
+            agent_id: commit.agent_id.clone(),
+            intent_category: format!("{:?}", commit.intent.category),
+            intent_description: commit.intent.description.clone(),
+            reasoning: commit.reasoning.clone(),
+            timestamp: commit.timestamp,
+            timestamp_anomaly: anomaly,
+        })
+    }
+
+    /// True iff this commit's timestamp is `<=` at least one of its parents'
+    /// timestamps. Root commits (no parents) are always monotonic by
+    /// definition.
+    fn commit_has_timestamp_anomaly(&self, commit: &Commit) -> Result<bool, RepoError> {
+        for parent_id in &commit.parents {
+            if let Some(mut parent) = self.storage.get_commit(parent_id)? {
+                parent.enforce_caps();
+                if commit.timestamp <= parent.timestamp {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Detect timestamp anomalies reachable from a ref — commits whose
+    /// timestamps are `<=` at least one parent's timestamp. Returns
+    /// `(commit_id, reason)` pairs. An empty list means the reachable
+    /// history is monotonic.
+    ///
+    /// This is a READ-TIME check, not a write-time guard: a single flag is
+    /// consistent with clock skew or DAG-concurrent commits, but a pattern
+    /// of flags from one agent or branch is a tamper signal. Audit
+    /// alongside the commit id, not in place of it.
+    /// (security threat model v3+, V4)
+    pub fn detect_timestamp_anomalies(
+        &self,
+        ref_name: &str,
+    ) -> Result<Vec<(ObjectId, String)>, RepoError> {
+        let commits = self.log(ref_name, 100_000)?;
+        let mut findings = Vec::new();
+        for commit in &commits {
+            for parent_id in &commit.parents {
+                if let Some(mut parent) = self.storage.get_commit(parent_id)? {
+                    parent.enforce_caps();
+                    if commit.timestamp <= parent.timestamp {
+                        findings.push((
+                            commit.id,
+                            format!(
+                                "commit {} timestamp {} <= parent {} timestamp {}",
+                                commit.id.short(),
+                                commit.timestamp.to_rfc3339(),
+                                parent.id.short(),
+                                parent.timestamp.to_rfc3339(),
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(findings)
     }
 
     // -----------------------------------------------------------------------
@@ -791,7 +897,22 @@ impl Repository {
     }
 
     /// Seal an epoch, making it immutable.
+    ///
+    /// Captures the set of commits reachable from `main` at seal time into
+    /// `Epoch::sealed_commits` so that subsequent ref mutations can be
+    /// checked for seal violations (a rewind of main that would orphan a
+    /// sealed commit). This walk is O(reachable-from-main) once per seal;
+    /// subsequent checks are O(sealed_commits × new-reachable).
+    /// (security threat model v3+, V8)
     pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), RepoError> {
+        // Walk main before locking epochs — avoid holding the write lock
+        // across storage calls, and also avoid deadlock with any read-side
+        // that might re-enter.
+        let sealed_commits = match self.storage.get_ref("main")? {
+            Some(head) => self.reachable_commits_from(&head)?,
+            None => Vec::new(),
+        };
+
         let mut epochs = self
             .epochs
             .write()
@@ -808,6 +929,7 @@ impl Repository {
         }
         let seal_hash = ObjectId::hash(&hasher_input);
 
+        epoch.sealed_commits = sealed_commits;
         epoch
             .seal(summary.to_string(), seal_hash)
             .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
@@ -1073,6 +1195,125 @@ impl Repository {
             }
         }
         Ok(())
+    }
+
+    /// Walk the commit DAG backwards from `head`, returning every reachable
+    /// commit id (including `head` itself). Follows every parent — merge
+    /// commits include both sides.
+    fn reachable_commits_from(&self, head: &ObjectId) -> Result<Vec<ObjectId>, RepoError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![*head];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(commit) = self.storage.get_commit(&id)? {
+                for p in &commit.parents {
+                    if !seen.contains(p) {
+                        stack.push(*p);
+                    }
+                }
+            }
+        }
+        Ok(seen.into_iter().collect())
+    }
+
+    /// Given a proposed new ref target, return one `EpochViolation` per
+    /// sealed epoch whose `sealed_commits` include any commit that is NOT
+    /// reachable from the new target.
+    ///
+    /// An empty result means the proposed update preserves every seal.
+    /// (security threat model v3+, V8)
+    pub fn check_epoch_seal_violations(
+        &self,
+        new_ref_target: &ObjectId,
+    ) -> Result<Vec<EpochViolation>, RepoError> {
+        let reachable: std::collections::HashSet<ObjectId> = self
+            .reachable_commits_from(new_ref_target)?
+            .into_iter()
+            .collect();
+        let epochs = self
+            .epochs
+            .read()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let mut violations = Vec::new();
+        for epoch in epochs.iter() {
+            if epoch.status != agentstategraph_core::EpochStatus::Sealed
+                && epoch.status != agentstategraph_core::EpochStatus::Archived
+            {
+                continue;
+            }
+            let unreachable: Vec<ObjectId> = epoch
+                .sealed_commits
+                .iter()
+                .copied()
+                .filter(|c| !reachable.contains(c))
+                .collect();
+            if !unreachable.is_empty() {
+                violations.push(EpochViolation {
+                    epoch_id: epoch.id.clone(),
+                    unreachable_commits: unreachable,
+                });
+            }
+        }
+        Ok(violations)
+    }
+
+    /// Enforce epoch seals against a proposed `set_ref` to `ref_name`.
+    /// In warn mode (default) logs to stderr and proceeds. In strict mode
+    /// returns `RepoError::EpochSealViolated`.
+    fn enforce_epoch_seals(&self, ref_name: &str, new_target: &ObjectId) -> Result<(), RepoError> {
+        // Only `main` is the canonical seal anchor; branch/spec updates
+        // don't orphan sealed commits reachable from main because main
+        // itself hasn't moved. We still check on `main` mutations and on
+        // explicit low-level set_ref for any ref (cheap insurance).
+        let violations = self.check_epoch_seal_violations(new_target)?;
+        if violations.is_empty() {
+            return Ok(());
+        }
+        // Prefer main-only enforcement: a side-branch can legitimately sit
+        // on a state that doesn't include every sealed commit. Skip unless
+        // the ref being mutated is `main`.
+        if ref_name != "main" {
+            return Ok(());
+        }
+        if self.epoch_seal_strict {
+            let v = violations.into_iter().next().expect("non-empty");
+            return Err(RepoError::EpochSealViolated {
+                epoch_id: v.epoch_id,
+                unreachable_commits: v.unreachable_commits,
+            });
+        }
+        for v in &violations {
+            eprintln!(
+                "[WARN] asg epoch seal: ref '{}' → {} would orphan {} commit(s) from sealed epoch '{}' (e.g. {})",
+                ref_name,
+                new_target.short(),
+                v.unreachable_commits.len(),
+                v.epoch_id,
+                v.unreachable_commits
+                    .first()
+                    .map(|c| c.short())
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Wrapper around `storage.set_ref` that first runs the epoch-seal
+    /// enforcement check. Every internal code path that moves a ref goes
+    /// through this.
+    fn guarded_set_ref(&self, ref_name: &str, new_target: ObjectId) -> Result<(), RepoError> {
+        self.enforce_epoch_seals(ref_name, &new_target)?;
+        self.storage.set_ref(ref_name, new_target)?;
+        Ok(())
+    }
+
+    /// Low-level: move a ref to a specific commit id, subject to epoch-seal
+    /// enforcement. Used by migration tooling and by tests that need to
+    /// simulate rewinds. Prefer `set`/`merge`/etc for normal writes.
+    pub fn set_ref(&self, ref_name: &str, target: ObjectId) -> Result<(), RepoError> {
+        self.guarded_set_ref(ref_name, target)
     }
 
     /// Resolve a ref name to a commit ID.
@@ -1914,5 +2155,131 @@ mod tests {
 
         // No speculations left
         assert!(repo.list_speculations().is_empty());
+    }
+
+    // ---- v3+ timestamp anomaly detection (V4) --------------------------
+
+    #[test]
+    fn test_detect_timestamp_anomalies_flat_history() {
+        // A normal history: every commit is strictly after its parent.
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.set(
+            "main",
+            "/a",
+            &Object::string("1"),
+            quick_opts("first"),
+        )
+        .unwrap();
+        repo.set(
+            "main",
+            "/a",
+            &Object::string("2"),
+            quick_opts("second"),
+        )
+        .unwrap();
+        let anomalies = repo.detect_timestamp_anomalies("main").unwrap();
+        assert!(
+            anomalies.is_empty(),
+            "expected no anomalies on monotonic history; got {anomalies:?}"
+        );
+    }
+
+    #[test]
+    fn test_blame_entry_timestamp_anomaly_is_false_by_default() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.set(
+            "main",
+            "/a",
+            &Object::string("v"),
+            quick_opts("write"),
+        )
+        .unwrap();
+        let entry = repo.blame("main", "/a").unwrap();
+        assert!(!entry.timestamp_anomaly);
+    }
+
+    // ---- v3+ epoch seal enforcement (V8) -------------------------------
+
+    #[test]
+    fn test_seal_epoch_captures_reachable_commits() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.set(
+            "main",
+            "/a",
+            &Object::string("1"),
+            quick_opts("a"),
+        )
+        .unwrap();
+        repo.set(
+            "main",
+            "/b",
+            &Object::string("2"),
+            quick_opts("b"),
+        )
+        .unwrap();
+
+        repo.create_epoch("e1", "first epoch", vec![]).unwrap();
+        repo.seal_epoch("e1", "done").unwrap();
+
+        let epoch = repo.get_epoch("e1").unwrap();
+        assert!(
+            !epoch.sealed_commits.is_empty(),
+            "seal_epoch must populate sealed_commits"
+        );
+    }
+
+    #[test]
+    fn test_epoch_seal_violation_in_warn_mode_is_logged_not_rejected() {
+        // Warn mode is the default — a rewind past a sealed commit logs
+        // but still succeeds.
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        let _ = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        let pre_seal = repo
+            .set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+        let _post_seal = repo
+            .set("main", "/c", &Object::string("3"), quick_opts("c"))
+            .unwrap();
+
+        repo.create_epoch("e1", "scoped work", vec![]).unwrap();
+        repo.seal_epoch("e1", "ship").unwrap();
+
+        // Rewind main to pre_seal via set_ref. In warn mode this succeeds.
+        let res = repo.set_ref("main", pre_seal);
+        assert!(
+            res.is_ok(),
+            "warn mode must accept the rewind; got {res:?}"
+        );
+    }
+
+    #[test]
+    fn test_epoch_seal_violation_in_strict_mode_is_rejected() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()))
+            .with_epoch_seal_strict(true);
+        repo.init().unwrap();
+        let _ = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        let pre_seal = repo
+            .set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+        repo.set("main", "/c", &Object::string("3"), quick_opts("c"))
+            .unwrap();
+
+        repo.create_epoch("e1", "scoped work", vec![]).unwrap();
+        repo.seal_epoch("e1", "ship").unwrap();
+
+        // Now the attempt to rewind past a sealed commit must fail.
+        let res = repo.set_ref("main", pre_seal);
+        match res {
+            Err(RepoError::EpochSealViolated { .. }) => {}
+            other => panic!("expected EpochSealViolated, got {other:?}"),
+        }
     }
 }

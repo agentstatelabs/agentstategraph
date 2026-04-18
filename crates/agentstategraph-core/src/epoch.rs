@@ -36,6 +36,13 @@ pub struct Epoch {
     pub branches: Vec<String>,
     /// Queryable tags.
     pub tags: Vec<String>,
+    /// Commits that must remain reachable from main after sealing. Populated
+    /// by `Repository::seal_epoch` from the then-current main chain. Empty
+    /// on active epochs and on `.db` files written before V8 landed —
+    /// existing serialized epochs deserialize cleanly via `#[serde(default)]`.
+    /// (security threat model v3+, V8)
+    #[serde(default)]
+    pub sealed_commits: Vec<ObjectId>,
 }
 
 /// Status of an epoch.
@@ -119,6 +126,7 @@ impl Epoch {
             agents: Vec::new(),
             branches: Vec::new(),
             tags: Vec::new(),
+            sealed_commits: Vec::new(),
         }
     }
 
