@@ -10,14 +10,23 @@ use serde::Deserialize;
 
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::{IntentCategory, Object, QueryFilters};
-use agentstategraph_tasks::{TaskStore, Priority, Proof, ProofKind, TaskId};
+use agentstategraph_core::{DiffOp, IntentCategory, Object, QueryFilters};
+use agentstategraph_policy::{ChangeProposal, Decision, Policy, PolicyStore, Situation};
+use agentstategraph_tasks::{Priority, Proof, TaskId, TaskStore};
+
+/// Threshold above which a change is tagged `large` in token inference.
+pub const LARGE_CHANGE_THRESHOLD: usize = 50;
 
 /// The AgentStateGraph MCP server.
 #[derive(Clone)]
 pub struct AgentStateGraphServer {
     repo: Arc<Repository>,
     tasks: Arc<TaskStore>,
+    policies: Arc<PolicyStore>,
+    /// Fail-safe translation for `Decision::NoPolicyMatch`. "deny" (default)
+    /// flips NoPolicyMatch to Deny at the MCP layer; "allow" passes through.
+    /// Configured via `AgentStateGraphServer::with_fail_safe`.
+    policy_fail_safe: String,
     tool_router: ToolRouter<Self>,
 }
 
@@ -149,6 +158,23 @@ pub struct CommitSpecParams {
     pub intent_description: String,
     pub reasoning: Option<String>,
     pub confidence: Option<f64>,
+    /// Optional fields attached to the implicit `ChangeProposal` that is
+    /// evaluated against policy before the speculation is promoted.
+    /// Caller uses these to satisfy `required_fields` on change-cost
+    /// policies (POLICY_V1.md §22.2.1), e.g. `{"estimated_downtime":
+    /// "5m", "rollback_plan": "T-007"}`.
+    #[serde(default)]
+    pub attached_fields: Option<std::collections::HashMap<String, String>>,
+    /// Optional base-ref override. If omitted, the speculation's own
+    /// base_ref (captured when `agentstategraph_speculate` was called)
+    /// is used to compute the diff for token inference.
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// Optional sibling handle IDs passed through as the proposal's
+    /// `alternatives`. Purely metadata for audit — does not affect the
+    /// evaluation result.
+    #[serde(default)]
+    pub alternatives: Option<Vec<u64>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -285,6 +311,83 @@ fn default_graph_depth() -> usize {
     50
 }
 
+// -- Policy parameter types --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyProposeParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Full `Policy` JSON — POLICY_V1.md §2.1 + §22.2.1.
+    pub policy: serde_json::Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyRatifyParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    pub ratifier: String,
+    pub reasoning: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicySupersedeParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub old_path: String,
+    /// Full new `Policy` JSON.
+    pub new_policy: serde_json::Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyListParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub prefix: Option<String>,
+    /// One of `"active"`, `"proposed"`, `"all"`. Default: `"active"`.
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyShowParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    pub version: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyHistoryParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyEvaluateParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Situation facts as a flat string map.
+    pub situation: std::collections::HashMap<String, String>,
+    pub action: String,
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyEvaluateChangeParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Full `ChangeProposal` JSON — POLICY_V1.md §22.2.2.
+    pub proposal: serde_json::Value,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyCheckTokensParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub tokens: Vec<String>,
+}
+
 // -- Plan/Task parameter types --
 
 #[derive(Deserialize, JsonSchema)]
@@ -396,11 +499,33 @@ pub struct NextTaskParams {
 impl AgentStateGraphServer {
     pub fn new(repo: Arc<Repository>) -> Self {
         let tasks = Arc::new(TaskStore::new(repo.clone(), "/plans", "mcp-agent"));
+        let policies = Arc::new(PolicyStore::new(repo.clone(), "/policies", "mcp-agent"));
         Self {
             repo,
             tasks,
+            policies,
+            policy_fail_safe: "deny".to_string(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Override the fail-safe translation applied to `Decision::NoPolicyMatch`
+    /// in the `policy_evaluate` / `policy_evaluate_change` tools. Accepts
+    /// `"deny"` (default) or `"allow"`. Unknown values are coerced to
+    /// `"deny"`.
+    pub fn with_fail_safe(mut self, mode: impl Into<String>) -> Self {
+        let m = mode.into();
+        self.policy_fail_safe = if m == "allow" {
+            "allow".to_string()
+        } else {
+            "deny".to_string()
+        };
+        self
+    }
+
+    /// Read-only accessor for tests.
+    pub fn policies(&self) -> &PolicyStore {
+        &self.policies
     }
 
     #[tool(
@@ -632,26 +757,65 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Promote a speculation to a real commit on its base branch using its numeric handle_id. The speculation is consumed (handle becomes invalid). This is how you 'pick the winner' after comparing speculations."
+        description = "Promote a speculation to a real commit on its base branch using its numeric handle_id. Before promoting, the speculation's diff is turned into a ChangeProposal (with inferred tokens: destructive, schema-change, ref-rewrite, large, reindex, migration) and evaluated against the policy engine. If the decision is Deny or RequireApproval the speculation is NOT promoted and the Decision JSON is returned so the caller can apply the fallback branch. The speculation is consumed only on Allow / NoPolicyMatch."
     )]
     async fn agentstategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
-        let category = parse_category(&p.intent_category);
-        let mut opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
-        if let Some(r) = p.reasoning {
-            opts = opts.with_reasoning(r);
+
+        // Infer the ChangeProposal from the live speculation diff.
+        let tokens = match infer_change_tokens(&self.repo, handle) {
+            Ok(t) => t,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let intent = p.intent_description.clone();
+        let mut proposal = ChangeProposal::new(
+            "promote_speculation",
+            "mcp-agent",
+            &intent,
+            p.handle_id.to_string(),
+        );
+        proposal.tokens = tokens;
+        proposal.alternatives = p
+            .alternatives
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        if let Some(af) = p.attached_fields.clone() {
+            proposal.attached_fields = af;
         }
-        if let Some(c) = p.confidence {
-            opts = opts.with_confidence(c);
-        }
-        match self.repo.commit_speculation(handle, opts) {
-            Ok(commit_id) => format!("Speculation committed: {}", commit_id),
+
+        // Ref to evaluate policies against (same ref we will commit back to).
+        let eval_ref = p.base_ref.clone().unwrap_or_else(|| "main".to_string());
+
+        match self.policies.evaluate_change(&eval_ref, &proposal) {
+            Ok(Decision::Allow { .. }) | Ok(Decision::NoPolicyMatch) => {
+                // Allowed — run the existing promotion path.
+                let category = parse_category(&p.intent_category);
+                let mut opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
+                if let Some(r) = p.reasoning {
+                    opts = opts.with_reasoning(r);
+                }
+                if let Some(c) = p.confidence {
+                    opts = opts.with_confidence(c);
+                }
+                match self.repo.commit_speculation(handle, opts) {
+                    Ok(commit_id) => format!("Speculation committed: {}", commit_id),
+                    Err(e) => format!("Error: {}", e),
+                }
+            }
+            Ok(decision @ (Decision::Deny { .. } | Decision::RequireApproval { .. })) => {
+                serde_json::to_string_pretty(&decision).unwrap_or_else(|_| "null".to_string())
+            }
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(description = "Discard a speculation by its numeric handle_id. All changes freed immediately. Use this for the 'losers' after promoting a winner with commit_spec.")]
+    #[tool(
+        description = "Discard a speculation by its numeric handle_id. All changes freed immediately. Use this for the 'losers' after promoting a winner with commit_spec."
+    )]
     async fn agentstategraph_discard(&self, params: Parameters<DiscardParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
@@ -883,7 +1047,8 @@ impl AgentStateGraphServer {
                 "status": format!("{:?}", plan.status),
                 "created_at": plan.created_at.to_rfc3339(),
                 "created_by": plan.created_by,
-            })).unwrap_or_default(),
+            }))
+            .unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }
     }
@@ -901,29 +1066,45 @@ impl AgentStateGraphServer {
         });
         match self.tasks.list_plans_by_status(&p.r#ref, status) {
             Ok(plans) => {
-                let json: Vec<serde_json::Value> = plans.iter().map(|p| serde_json::json!({
-                    "name": p.name,
-                    "description": p.description,
-                    "status": format!("{:?}", p.status),
-                    "created_at": p.created_at.to_rfc3339(),
-                })).collect();
-                format!("{} plans:\n{}", json.len(), serde_json::to_string_pretty(&json).unwrap_or_default())
+                let json: Vec<serde_json::Value> = plans
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "name": p.name,
+                            "description": p.description,
+                            "status": format!("{:?}", p.status),
+                            "created_at": p.created_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
+                format!(
+                    "{} plans:\n{}",
+                    json.len(),
+                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                )
             }
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(
-        description = "Get a plan's details including status and task summary."
-    )]
+    #[tool(description = "Get a plan's details including status and task summary.")]
     async fn agentstategraph_get_plan(&self, params: Parameters<GetPlanParams>) -> String {
         let p = params.0;
         match self.tasks.get_plan(&p.r#ref, &p.name) {
             Ok(plan) => {
                 let tasks = self.tasks.list_tasks(&p.r#ref, &p.name).unwrap_or_default();
-                let pending = tasks.iter().filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Pending)).count();
-                let in_progress = tasks.iter().filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::InProgress)).count();
-                let done = tasks.iter().filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Done)).count();
+                let pending = tasks
+                    .iter()
+                    .filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Pending))
+                    .count();
+                let in_progress = tasks
+                    .iter()
+                    .filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::InProgress))
+                    .count();
+                let done = tasks
+                    .iter()
+                    .filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Done))
+                    .count();
                 serde_json::to_string_pretty(&serde_json::json!({
                     "name": plan.name,
                     "description": plan.description,
@@ -933,7 +1114,8 @@ impl AgentStateGraphServer {
                     "pending": pending,
                     "in_progress": in_progress,
                     "done": done,
-                })).unwrap_or_default()
+                }))
+                .unwrap_or_default()
             }
             Err(e) => format!("Error: {}", e),
         }
@@ -944,22 +1126,42 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_add_task(&self, params: Parameters<AddTaskParams>) -> String {
         let p = params.0;
-        let priority = match p.priority.as_deref().unwrap_or("Medium").to_lowercase().as_str() {
+        let priority = match p
+            .priority
+            .as_deref()
+            .unwrap_or("Medium")
+            .to_lowercase()
+            .as_str()
+        {
             "low" => Priority::Low,
             "high" => Priority::High,
             "critical" => Priority::Critical,
             _ => Priority::Medium,
         };
         let parent_id = p.parent_id.map(TaskId);
-        let blocked_by = p.blocked_by.unwrap_or_default().into_iter().map(TaskId).collect();
-        match self.tasks.add_task(&p.r#ref, &p.plan, &p.title, priority, parent_id, blocked_by, p.assigned_to) {
+        let blocked_by = p
+            .blocked_by
+            .unwrap_or_default()
+            .into_iter()
+            .map(TaskId)
+            .collect();
+        match self.tasks.add_task(
+            &p.r#ref,
+            &p.plan,
+            &p.title,
+            priority,
+            parent_id,
+            blocked_by,
+            p.assigned_to,
+        ) {
             Ok(task) => serde_json::to_string_pretty(&serde_json::json!({
                 "id": task.id.as_str(),
                 "title": task.title,
                 "status": format!("{:?}", task.status),
                 "priority": format!("{:?}", task.priority),
                 "assigned_to": task.assigned_to,
-            })).unwrap_or_default(),
+            }))
+            .unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }
     }
@@ -989,7 +1191,11 @@ impl AgentStateGraphServer {
                     }
                     v
                 }).collect();
-                format!("{} tasks:\n{}", json.len(), serde_json::to_string_pretty(&json).unwrap_or_default())
+                format!(
+                    "{} tasks:\n{}",
+                    json.len(),
+                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                )
             }
             Err(e) => format!("Error: {}", e),
         }
@@ -1001,7 +1207,10 @@ impl AgentStateGraphServer {
     async fn agentstategraph_start_task(&self, params: Parameters<TaskActionParams>) -> String {
         let p = params.0;
         match self.tasks.start_task(&p.r#ref, &p.plan, &TaskId(p.task_id)) {
-            Ok(task) => format!("Task {} started (was: Pending → now: InProgress)", task.id.as_str()),
+            Ok(task) => format!(
+                "Task {} started (was: Pending → now: InProgress)",
+                task.id.as_str()
+            ),
             Err(e) => format!("Error: {}", e),
         }
     }
@@ -1009,7 +1218,10 @@ impl AgentStateGraphServer {
     #[tool(
         description = "Complete a task with proof. Proof documents what was accomplished: a commit hash, file path, test name, or text description. Auto-completes the plan when the last task finishes."
     )]
-    async fn agentstategraph_complete_task(&self, params: Parameters<CompleteTaskParams>) -> String {
+    async fn agentstategraph_complete_task(
+        &self,
+        params: Parameters<CompleteTaskParams>,
+    ) -> String {
         let p = params.0;
         let proof = match p.proof_kind.to_lowercase().as_str() {
             "commit" => Proof::commit(p.proof_value),
@@ -1022,18 +1234,22 @@ impl AgentStateGraphServer {
         } else {
             proof
         };
-        match self.tasks.complete_task(&p.r#ref, &p.plan, &TaskId(p.task_id), proof) {
+        match self
+            .tasks
+            .complete_task(&p.r#ref, &p.plan, &TaskId(p.task_id), proof)
+        {
             Ok(task) => format!("Task {} completed (InProgress → Done)", task.id.as_str()),
             Err(e) => format!("Error: {}", e),
         }
     }
 
-    #[tool(
-        description = "Abandon a task with a reason. Terminal state — cannot be restarted."
-    )]
+    #[tool(description = "Abandon a task with a reason. Terminal state — cannot be restarted.")]
     async fn agentstategraph_abandon_task(&self, params: Parameters<AbandonTaskParams>) -> String {
         let p = params.0;
-        match self.tasks.abandon_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.reason) {
+        match self
+            .tasks
+            .abandon_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.reason)
+        {
             Ok(task) => format!("Task {} abandoned: {}", task.id.as_str(), p.reason),
             Err(e) => format!("Error: {}", e),
         }
@@ -1044,7 +1260,10 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_assign_task(&self, params: Parameters<AssignTaskParams>) -> String {
         let p = params.0;
-        match self.tasks.assign_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.agent) {
+        match self
+            .tasks
+            .assign_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.agent)
+        {
             Ok(task) => format!("Task {} assigned to {}", task.id.as_str(), p.agent),
             Err(e) => format!("Error: {}", e),
         }
@@ -1056,7 +1275,8 @@ impl AgentStateGraphServer {
     async fn agentstategraph_next_task(&self, params: Parameters<NextTaskParams>) -> String {
         let p = params.0;
         let result = if let Some(agent) = p.agent {
-            self.tasks.next_task_for(&p.r#ref, &p.plan, Some(&agent), true)
+            self.tasks
+                .next_task_for(&p.r#ref, &p.plan, Some(&agent), true)
         } else {
             self.tasks.next_task(&p.r#ref, &p.plan)
         };
@@ -1070,6 +1290,182 @@ impl AgentStateGraphServer {
                 "blocked_by": task.blocked_by.iter().map(|b| b.as_str().to_string()).collect::<Vec<_>>(),
             })).unwrap_or_default(),
             Ok(None) => "No pending tasks".to_string(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    // -- Policy tools (POLICY_V1.md §6 + §22.5) --
+
+    #[tool(
+        description = "Propose a new policy. Writes an unratified policy node at /policies/<path>. Body is a full Policy JSON (path, situation, situation_selector, allow/deny/require_approval, triggers, required_fields, severity, etc.). Returns path@version."
+    )]
+    async fn agentstategraph_policy_propose(
+        &self,
+        params: Parameters<PolicyProposeParams>,
+    ) -> String {
+        let p = params.0;
+        let policy: Policy = match serde_json::from_value(p.policy) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: invalid Policy JSON: {}", e),
+        };
+        match self.policies.propose(&p.r#ref, policy) {
+            Ok(handle) => format!("Proposed {}", handle),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Ratify an unratified policy proposal. The ratifier string (human or agent id) and free-form reasoning are recorded on the policy node."
+    )]
+    async fn agentstategraph_policy_ratify(
+        &self,
+        params: Parameters<PolicyRatifyParams>,
+    ) -> String {
+        let p = params.0;
+        match self
+            .policies
+            .ratify(&p.r#ref, &p.path, &p.ratifier, &p.reasoning)
+        {
+            Ok(()) => format!("Ratified {} by {}", p.path, p.ratifier),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Supersede an active policy with a new version. The prior version is moved to /policies/<path>/history/<n>; the new policy is written at the active path with version+1 and supersedes: <old>@<old_version>. Returns new path@version."
+    )]
+    async fn agentstategraph_policy_supersede(
+        &self,
+        params: Parameters<PolicySupersedeParams>,
+    ) -> String {
+        let p = params.0;
+        let new_policy: Policy = match serde_json::from_value(p.new_policy) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: invalid Policy JSON: {}", e),
+        };
+        match self.policies.supersede(&p.r#ref, &p.old_path, new_policy) {
+            Ok(handle) => format!("Superseded → {}", handle),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "List policies. Filter by path prefix and status (\"active\", \"proposed\", or \"all\" — default \"active\")."
+    )]
+    async fn agentstategraph_policy_list(&self, params: Parameters<PolicyListParams>) -> String {
+        let p = params.0;
+        let status = p.status.as_deref().unwrap_or("active").to_lowercase();
+        let result = match status.as_str() {
+            "proposed" => self
+                .policies
+                .list(&p.r#ref, p.prefix.as_deref())
+                .map(|ps| ps.into_iter().filter(|p| !p.is_ratified()).collect()),
+            "all" => self.policies.list(&p.r#ref, p.prefix.as_deref()),
+            _ => self.policies.active(&p.r#ref, p.prefix.as_deref()),
+        };
+        match result {
+            Ok(policies) => serde_json::to_string_pretty(&policies).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Read a policy. Returns the active version by default; pass `version` to pin a historical read."
+    )]
+    async fn agentstategraph_policy_show(&self, params: Parameters<PolicyShowParams>) -> String {
+        let p = params.0;
+        match self.policies.get(&p.r#ref, &p.path, p.version) {
+            Ok(policy) => serde_json::to_string_pretty(&policy).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Walk the supersedes chain for a policy path. Returns the full version history oldest-first."
+    )]
+    async fn agentstategraph_policy_history(
+        &self,
+        params: Parameters<PolicyHistoryParams>,
+    ) -> String {
+        let p = params.0;
+        match self.policies.history(&p.r#ref, &p.path) {
+            Ok(chain) => serde_json::to_string_pretty(&chain).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Authorization evaluation. Given a situation (flat string map), a proposed action, and the agent id, returns a Decision (Allow / Deny / RequireApproval / NoPolicyMatch). NoPolicyMatch is translated per the server's fail-safe config (default: deny); the original kind is surfaced in the response."
+    )]
+    async fn agentstategraph_policy_evaluate(
+        &self,
+        params: Parameters<PolicyEvaluateParams>,
+    ) -> String {
+        let p = params.0;
+        let situation = Situation(p.situation);
+        match self
+            .policies
+            .evaluate(&p.r#ref, &situation, &p.action, &p.agent_id)
+        {
+            Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Change-proposal evaluation. Takes a full ChangeProposal (action, agent_id, intent, preferred_option, alternatives, tokens, attached_fields) and returns a Decision with a fallback when RequireApproval. NoPolicyMatch is translated per the server's fail-safe config (default: deny)."
+    )]
+    async fn agentstategraph_policy_evaluate_change(
+        &self,
+        params: Parameters<PolicyEvaluateChangeParams>,
+    ) -> String {
+        let p = params.0;
+        let proposal: ChangeProposal = match serde_json::from_value(p.proposal) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: invalid ChangeProposal JSON: {}", e),
+        };
+        match self.policies.evaluate_change(&p.r#ref, &proposal) {
+            Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Pre-flight: given a set of change tokens, list every active policy whose triggers would match. Lets agents surface which policies a change will hit before committing to a proposal."
+    )]
+    async fn agentstategraph_policy_check_tokens(
+        &self,
+        params: Parameters<PolicyCheckTokensParams>,
+    ) -> String {
+        let p = params.0;
+        match self.policies.active(&p.r#ref, None) {
+            Ok(policies) => {
+                let token_set: std::collections::HashSet<&str> =
+                    p.tokens.iter().map(String::as_str).collect();
+                let matches: Vec<serde_json::Value> = policies
+                    .iter()
+                    .filter(|policy| {
+                        policy
+                            .triggers
+                            .iter()
+                            .any(|t| token_set.contains(t.as_str()))
+                    })
+                    .map(|policy| {
+                        let hit: Vec<&String> = policy
+                            .triggers
+                            .iter()
+                            .filter(|t| token_set.contains(t.as_str()))
+                            .collect();
+                        serde_json::json!({
+                            "policy": policy.handle(),
+                            "matched_triggers": hit,
+                            "severity": policy.severity,
+                            "required_fields": policy.required_fields,
+                        })
+                    })
+                    .collect();
+                serde_json::to_string_pretty(&matches).unwrap_or_default()
+            }
             Err(e) => format!("Error: {}", e),
         }
     }
@@ -1098,6 +1494,149 @@ fn parse_category(s: &str) -> IntentCategory {
         "migrate" => IntentCategory::Custom("Migrate-requested".into()),
         "plan" => IntentCategory::Plan,
         other => IntentCategory::Custom(other.to_string()),
+    }
+}
+
+/// Translate `Decision::NoPolicyMatch` per the MCP fail-safe config.
+///
+/// The engine never rewrites its result — translation happens only at
+/// this layer. The returned JSON always surfaces the original
+/// `no_policy_match` kind alongside the translated decision so callers
+/// can distinguish "authorized by an explicit allow" from "nothing
+/// matched; default policy applied."
+pub fn render_decision_with_fail_safe(decision: &Decision, fail_safe: &str) -> String {
+    match decision {
+        Decision::NoPolicyMatch => {
+            let translated = if fail_safe == "allow" {
+                serde_json::json!({
+                    "kind": "allow",
+                    "matched_policy": "<fail-safe:allow>",
+                    "preconditions": [],
+                })
+            } else {
+                serde_json::json!({
+                    "kind": "deny",
+                    "matched_policy": "<fail-safe:deny>",
+                    "reason": "no policy matched; fail-safe deny applied at MCP layer",
+                })
+            };
+            serde_json::to_string_pretty(&serde_json::json!({
+                "original": { "kind": "no_policy_match" },
+                "translated": translated,
+                "fail_safe": fail_safe,
+            }))
+            .unwrap_or_else(|_| "null".to_string())
+        }
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| "null".to_string()),
+    }
+}
+
+/// Infer change tokens from the diff between a speculation and its base
+/// ref. Implementation of POLICY_V1.md §22.2.2 + implementation plan
+/// §4.3. Token rules (heuristics — documented as such):
+///
+/// - `destructive` — any `RemoveKey` / `RemoveElement` / `RemoveFromSet` op
+/// - `schema-change` — any path touched under `/_meta/schema_version`
+/// - `ref-rewrite` — any `ChangeType` op (a path's node shape was
+///   rewritten; the closest proxy for a ref rename the engine currently
+///   emits)
+/// - `large` — total count of diff ops > `LARGE_CHANGE_THRESHOLD` (50)
+/// - `reindex` — any path under `/index/` or containing a `"reindexed":
+///   true` marker (heuristic)
+/// - `migration` — any path under `/_meta/migrations/`
+pub fn infer_change_tokens(
+    repo: &Repository,
+    handle: SpecHandle,
+) -> Result<Vec<String>, agentstategraph::RepoError> {
+    let comparison = repo.compare_speculations(&[handle])?;
+    let diff = comparison
+        .entries
+        .into_iter()
+        .next()
+        .map(|e| e.diff_from_base)
+        .unwrap_or_default();
+    Ok(infer_tokens_from_diff(&diff))
+}
+
+/// Pure token-inference helper, extracted for testability. See
+/// `infer_change_tokens` for the rule set.
+pub fn infer_tokens_from_diff(diff: &[DiffOp]) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let push = |t: &str, tokens: &mut Vec<String>| {
+        if !tokens.iter().any(|x| x == t) {
+            tokens.push(t.to_string());
+        }
+    };
+
+    let mut destructive = false;
+    let mut ref_rewrite = false;
+    let mut schema_change = false;
+    let mut migration = false;
+    let mut reindex = false;
+
+    for op in diff {
+        let path_ref = diff_op_path(op);
+        match op {
+            DiffOp::RemoveKey { .. }
+            | DiffOp::RemoveElement { .. }
+            | DiffOp::RemoveFromSet { .. } => {
+                destructive = true;
+            }
+            DiffOp::ChangeType { .. } => {
+                ref_rewrite = true;
+            }
+            _ => {}
+        }
+        let path = path_ref.unwrap_or("");
+        if path.starts_with("/_meta/schema_version") || path == "/_meta/schema_version" {
+            schema_change = true;
+        }
+        if path.starts_with("/_meta/migrations/") || path == "/_meta/migrations" {
+            migration = true;
+        }
+        if path.starts_with("/index/") || path == "/index" {
+            reindex = true;
+        }
+        // Heuristic: a "reindexed": true marker anywhere in the diff.
+        if let DiffOp::AddKey { key, value, .. } = op
+            && key == "reindexed"
+            && matches!(value, agentstategraph_core::DiffValue::Bool(true))
+        {
+            reindex = true;
+        }
+    }
+
+    if destructive {
+        push("destructive", &mut tokens);
+    }
+    if schema_change {
+        push("schema-change", &mut tokens);
+    }
+    if ref_rewrite {
+        push("ref-rewrite", &mut tokens);
+    }
+    if reindex {
+        push("reindex", &mut tokens);
+    }
+    if migration {
+        push("migration", &mut tokens);
+    }
+    if diff.len() > LARGE_CHANGE_THRESHOLD {
+        push("large", &mut tokens);
+    }
+    tokens
+}
+
+fn diff_op_path(op: &DiffOp) -> Option<&str> {
+    match op {
+        DiffOp::SetValue { path, .. }
+        | DiffOp::AddKey { path, .. }
+        | DiffOp::RemoveKey { path, .. }
+        | DiffOp::AddElement { path, .. }
+        | DiffOp::RemoveElement { path, .. }
+        | DiffOp::AddToSet { path, .. }
+        | DiffOp::RemoveFromSet { path, .. }
+        | DiffOp::ChangeType { path, .. } => Some(path.as_str()),
     }
 }
 

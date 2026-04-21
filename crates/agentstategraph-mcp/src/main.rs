@@ -10,7 +10,8 @@ use agentstategraph_mcp::auth::TenantManager;
 use agentstategraph_mcp::http;
 
 mod migrate;
-mod server;
+
+use agentstategraph_mcp::server;
 
 use std::sync::Arc;
 

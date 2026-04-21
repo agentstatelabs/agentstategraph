@@ -132,6 +132,7 @@ asg.blame("/name")  # who changed it and why
 - **Speculative execution** — O(1) branching, instant discard
 - **Multi-agent orchestration** — scoped sessions, delegation, intent trees
 - **Plans & tasks** — shared `agentstategraph-tasks` primitive with state machine, proofs, blockers, agent assignment
+- **Policy** — `agentstategraph-policy` primitive for authorization + cost-of-change gating with fallback actions (soft enforcement + audit trail)
 - **Schema-evolution framework** — `/_meta/schema_version` guard + `agentstategraph-migrate` crate + `agentstategraph-mcp migrate` CLI
 - **Epochs** — sealable, tamper-evident audit bundles
 - **Unified query** — composable filters across commits, intents, agents
