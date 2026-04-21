@@ -336,6 +336,26 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string tokensJson);
 
+    /* PolicyStore — 0.7.5-beta.1 §5c signing + external evaluator */
+
+    [DllImport(Lib, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr agentstategraph_policy_sign(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? signerKeyId);
+
+    [DllImport(Lib, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr agentstategraph_policy_verify(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    [DllImport(Lib, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr agentstategraph_policy_set_external_evaluator(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string configJson);
+
     /* Migrate */
 
     [DllImport(Lib)]

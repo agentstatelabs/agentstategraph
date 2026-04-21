@@ -64,6 +64,96 @@ public sealed record ProcedureStep(
     [property: JsonPropertyName("if_previous_failed")] string? IfPreviousFailed = null);
 
 /// <summary>
+/// Optional detached signature metadata recorded on a <see cref="Policy"/>
+/// when <c>agentstategraph_policy_sign</c> is invoked (POLICY_V1.md §5c).
+/// Mirrors the Rust <c>PolicySignature</c> serde payload.
+/// </summary>
+public sealed record PolicySignature(
+    [property: JsonPropertyName("algorithm")] string Algorithm,
+    [property: JsonPropertyName("signer_key_id")] string SignerKeyId,
+    [property: JsonPropertyName("signature_hex")] string SignatureHex);
+
+/// <summary>
+/// Tagged union describing where an external evaluator's body comes from
+/// (POLICY_V1.md §5c external_evaluator). Wire form is serde-tagged on
+/// <c>kind</c> with snake_case discriminator values.
+/// </summary>
+/// <remarks>
+/// Like <see cref="Decision"/>, derived records do NOT expose a sibling
+/// <c>Kind</c> property — that collides with the
+/// <see cref="JsonPolymorphicAttribute"/> discriminator. Use the runtime
+/// type or <see cref="KindTag"/> when a string is needed.
+/// </remarks>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
+[JsonDerivedType(typeof(Inline), typeDiscriminator: "inline")]
+[JsonDerivedType(typeof(FilePath), typeDiscriminator: "file_path")]
+[JsonDerivedType(typeof(CommitRef), typeDiscriminator: "commit_ref")]
+public abstract record EvaluatorSource
+{
+    /// <summary>Wire-level discriminator tag, computed from runtime type.</summary>
+    [JsonIgnore]
+    public string KindTag => this switch
+    {
+        Inline => "inline",
+        FilePath => "file_path",
+        CommitRef => "commit_ref",
+        _ => "unknown",
+    };
+
+    /// <summary>Inline evaluator source text.</summary>
+    public sealed record Inline(
+        [property: JsonPropertyName("body")] string Body) : EvaluatorSource;
+
+    /// <summary>Filesystem path to the evaluator body.</summary>
+    public sealed record FilePath(
+        [property: JsonPropertyName("path")] string Path) : EvaluatorSource;
+
+    /// <summary>Repo-relative path resolved against a commit.</summary>
+    public sealed record CommitRef(
+        [property: JsonPropertyName("path")] string Path) : EvaluatorSource;
+}
+
+/// <summary>
+/// Optional reference to an external evaluator engine that replaces the
+/// built-in rule matcher for a <see cref="Policy"/> (POLICY_V1.md §5c).
+/// Wire form is serde-tagged on <c>kind</c> with snake_case values
+/// (<c>rego</c> / <c>cedar</c> / <c>wasm</c>).
+/// </summary>
+/// <remarks>
+/// Derived records do not expose a sibling <c>Kind</c> property — see
+/// <see cref="Decision"/> for the rationale. Use the runtime type or
+/// <see cref="KindTag"/>.
+/// </remarks>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
+[JsonDerivedType(typeof(Rego), typeDiscriminator: "rego")]
+[JsonDerivedType(typeof(Cedar), typeDiscriminator: "cedar")]
+[JsonDerivedType(typeof(Wasm), typeDiscriminator: "wasm")]
+public abstract record ExternalEvaluatorRef
+{
+    /// <summary>Wire-level discriminator tag, computed from runtime type.</summary>
+    [JsonIgnore]
+    public string KindTag => this switch
+    {
+        Rego => "rego",
+        Cedar => "cedar",
+        Wasm => "wasm",
+        _ => "unknown",
+    };
+
+    /// <summary>Rego evaluator (OPA).</summary>
+    public sealed record Rego(
+        [property: JsonPropertyName("source")] EvaluatorSource Source) : ExternalEvaluatorRef;
+
+    /// <summary>Cedar evaluator.</summary>
+    public sealed record Cedar(
+        [property: JsonPropertyName("source")] EvaluatorSource Source) : ExternalEvaluatorRef;
+
+    /// <summary>Wasm evaluator.</summary>
+    public sealed record Wasm(
+        [property: JsonPropertyName("source")] EvaluatorSource Source) : ExternalEvaluatorRef;
+}
+
+/// <summary>
 /// The unit of authorization + procedure. Matches the Rust
 /// <c>agentstategraph_policy::Policy</c> record one-to-one.
 /// </summary>
@@ -86,7 +176,15 @@ public sealed record Policy(
     [property: JsonPropertyName("ratified_at")] DateTimeOffset? RatifiedAt = null,
     [property: JsonPropertyName("ratification_reasoning")] string? RatificationReasoning = null,
     [property: JsonPropertyName("expires_at")] DateTimeOffset? ExpiresAt = null,
-    [property: JsonPropertyName("supersedes")] string? Supersedes = null)
+    [property: JsonPropertyName("supersedes")] string? Supersedes = null,
+    /// <summary>Optional detached signature (0.7.5-beta.1 §5c).</summary>
+    [property: JsonPropertyName("signature")] PolicySignature? Signature = null,
+    /// <summary>Optional multi-tenant scope. When set, the policy is only
+    /// evaluated for sessions whose <c>scope_tenant</c> matches.</summary>
+    [property: JsonPropertyName("tenant_id")] string? TenantId = null,
+    /// <summary>Optional pointer to an external evaluator (Rego / Cedar /
+    /// Wasm) that replaces the built-in matcher.</summary>
+    [property: JsonPropertyName("external_evaluator")] ExternalEvaluatorRef? ExternalEvaluator = null)
 {
     /// <summary>Canonical <c>path@version</c> handle.</summary>
     public string Handle => $"{Path}@{Version}";
@@ -228,4 +326,7 @@ public sealed record Session(
     [property: JsonPropertyName("delegated_intent")] string? DelegatedIntent = null,
     [property: JsonPropertyName("report_to")] string? ReportTo = null,
     [property: JsonPropertyName("path_scope")] string? PathScope = null,
-    [property: JsonPropertyName("ended_at")] DateTimeOffset? EndedAt = null);
+    [property: JsonPropertyName("ended_at")] DateTimeOffset? EndedAt = null,
+    /// <summary>Tenant id used to filter policies whose <c>tenant_id</c>
+    /// is non-null (0.7.5-beta.1 §5c). <c>null</c> means "no filter".</summary>
+    [property: JsonPropertyName("scope_tenant")] string? ScopeTenant = null);

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using AgentStateGraph;
 using Xunit;
 
@@ -421,6 +422,134 @@ public sealed class PolicyStoreTests
         using var repo = TestHelpers.FreshRepo();
         using var ps = new PolicyStore(repo, "/policies", "xunit");
         Assert.Throws<ArgumentNullException>(() => ps.Propose(Ref, null!));
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.7.5-beta.1 §5e — signing + multi-tenant + external evaluator.
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void Policy_SignatureField_RoundTrips()
+    {
+        var sig = new PolicySignature(
+            Algorithm: "ed25519",
+            SignerKeyId: "key-1",
+            SignatureHex: "deadbeef");
+        var policy = TestHelpers.SkeletonPolicy("infra/signed") with { Signature = sig };
+
+        var back = TestHelpers.JsonRoundTrip(policy);
+        Assert.NotNull(back.Signature);
+        Assert.Equal("ed25519", back.Signature!.Algorithm);
+        Assert.Equal("key-1", back.Signature.SignerKeyId);
+        Assert.Equal("deadbeef", back.Signature.SignatureHex);
+    }
+
+    [Fact]
+    public void Policy_TenantId_RoundTrips()
+    {
+        var policy = TestHelpers.SkeletonPolicy("infra/tenant-a") with { TenantId = "tenant-a" };
+        var back = TestHelpers.JsonRoundTrip(policy);
+        Assert.Equal("tenant-a", back.TenantId);
+
+        var unscoped = TestHelpers.SkeletonPolicy("infra/all-tenants");
+        var back2 = TestHelpers.JsonRoundTrip(unscoped);
+        Assert.Null(back2.TenantId);
+    }
+
+    [Fact]
+    public void Policy_ExternalEvaluator_RoundTrips()
+    {
+        // Exercise each variant of both the outer and inner tagged unions.
+        var rego = TestHelpers.SkeletonPolicy("infra/rego") with
+        {
+            ExternalEvaluator = new ExternalEvaluatorRef.Rego(
+                new EvaluatorSource.Inline("package p\nallow { true }")),
+        };
+        var backRego = TestHelpers.JsonRoundTrip(rego);
+        var evalRego = Assert.IsType<ExternalEvaluatorRef.Rego>(backRego.ExternalEvaluator);
+        Assert.Equal("rego", backRego.ExternalEvaluator!.KindTag);
+        var inlineSrc = Assert.IsType<EvaluatorSource.Inline>(evalRego.Source);
+        Assert.Equal("inline", evalRego.Source.KindTag);
+        Assert.Contains("allow", inlineSrc.Body);
+
+        var cedar = TestHelpers.SkeletonPolicy("infra/cedar") with
+        {
+            ExternalEvaluator = new ExternalEvaluatorRef.Cedar(
+                new EvaluatorSource.FilePath("/etc/cedar/policy.cedar")),
+        };
+        var backCedar = TestHelpers.JsonRoundTrip(cedar);
+        var evalCedar = Assert.IsType<ExternalEvaluatorRef.Cedar>(backCedar.ExternalEvaluator);
+        var fileSrc = Assert.IsType<EvaluatorSource.FilePath>(evalCedar.Source);
+        Assert.Equal("file_path", evalCedar.Source.KindTag);
+        Assert.Equal("/etc/cedar/policy.cedar", fileSrc.Path);
+
+        var wasm = TestHelpers.SkeletonPolicy("infra/wasm") with
+        {
+            ExternalEvaluator = new ExternalEvaluatorRef.Wasm(
+                new EvaluatorSource.CommitRef("policies/eval.wasm")),
+        };
+        var backWasm = TestHelpers.JsonRoundTrip(wasm);
+        var evalWasm = Assert.IsType<ExternalEvaluatorRef.Wasm>(backWasm.ExternalEvaluator);
+        var commitSrc = Assert.IsType<EvaluatorSource.CommitRef>(evalWasm.Source);
+        Assert.Equal("commit_ref", evalWasm.Source.KindTag);
+        Assert.Equal("policies/eval.wasm", commitSrc.Path);
+    }
+
+    [Fact]
+    public void Session_ScopeTenant_RoundTrips()
+    {
+        var session = new Session(
+            Id: "sess-1",
+            AgentId: "agent-1",
+            WorkingBranch: "main",
+            Head: "abc",
+            Status: SessionStatus.Active,
+            CreatedAt: DateTimeOffset.UtcNow,
+            ScopeTenant: "tenant-xyz");
+        var back = TestHelpers.JsonRoundTrip(session);
+        Assert.Equal("tenant-xyz", back.ScopeTenant);
+
+        var unscoped = session with { ScopeTenant = null };
+        Assert.Null(TestHelpers.JsonRoundTrip(unscoped).ScopeTenant);
+    }
+
+    [Fact]
+    public void PolicyStore_Sign_ReturnsStubOrSignature()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ps = new PolicyStore(repo, "/policies", "xunit");
+        ps.Propose(Ref, TestHelpers.SkeletonPolicy("infra/signable"));
+        ps.Ratify(Ref, "infra/signable", "ops", "ok");
+
+        using var doc = ps.Sign(Ref, "infra/signable", signerKeyId: null);
+        Assert.Equal(JsonValueKind.Object, doc.RootElement.ValueKind);
+        // With no signer registered, the FFI either returns a stub
+        // envelope or an {"error": "..."} payload; either is acceptable
+        // for the pass-through binding. We only assert the shape parses.
+        var isStub = doc.RootElement.TryGetProperty("signature", out _)
+            || doc.RootElement.TryGetProperty("stub", out _)
+            || doc.RootElement.TryGetProperty("algorithm", out _);
+        var isError = doc.RootElement.TryGetProperty("error", out _);
+        Assert.True(isStub || isError, $"unexpected Sign envelope: {doc.RootElement.GetRawText()}");
+    }
+
+    [Fact]
+    public void PolicyStore_SetExternalEvaluator_ReturnsStubEnvelope()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ps = new PolicyStore(repo, "/policies", "xunit");
+
+        // Minimal well-formed config — the Rust side is a stub so any
+        // valid JSON is fine.
+        var cfg = "{\"kind\":\"rego\",\"source\":{\"kind\":\"inline\",\"body\":\"package p\"}}";
+        using var doc = ps.SetExternalEvaluator(cfg);
+        Assert.Equal(JsonValueKind.Object, doc.RootElement.ValueKind);
+        // Stub currently returns {"error": "..."} — binding must surface
+        // it verbatim rather than throwing.
+        var hasError = doc.RootElement.TryGetProperty("error", out _);
+        var hasOk = doc.RootElement.TryGetProperty("ok", out _);
+        Assert.True(hasError || hasOk,
+            $"unexpected SetExternalEvaluator envelope: {doc.RootElement.GetRawText()}");
     }
 
     [Fact]

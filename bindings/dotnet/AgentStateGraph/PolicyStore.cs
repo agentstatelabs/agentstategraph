@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using AgentStateGraph.Interop;
 
 namespace AgentStateGraph;
@@ -95,21 +96,39 @@ public sealed class PolicyStore : IDisposable
     /// Every policy under <paramref name="prefix"/> (or all when <c>null</c>).
     /// Unratified proposals are included.
     /// </summary>
-    public IReadOnlyList<Policy> List(string refName, string? prefix = null)
+    /// <param name="refName">Branch / ref name.</param>
+    /// <param name="prefix">Optional path prefix filter.</param>
+    /// <param name="tenantFilter">
+    /// Optional tenant scope (0.7.5-beta.1 §5c). When non-null the result is
+    /// filtered client-side to policies whose <see cref="Policy.TenantId"/>
+    /// is null (applies to all tenants) or equals <paramref name="tenantFilter"/>.
+    /// The native FFI does not yet accept a tenant argument; this matches the
+    /// Go §5c approach until a tenant-aware extern ships.
+    /// </param>
+    public IReadOnlyList<Policy> List(string refName, string? prefix = null, string? tenantFilter = null)
     {
         ThrowIfDisposed();
         var ptr = NativeMethods.agentstategraph_policy_list(H, refName, prefix);
-        return Json.Deserialize<List<Policy>>(Strings.ConsumeUtf8(ptr), "list");
+        var all = Json.Deserialize<List<Policy>>(Strings.ConsumeUtf8(ptr), "list");
+        return FilterByTenant(all, tenantFilter);
     }
 
     /// <summary>
     /// Currently-active policies: ratified AND <c>active_from &lt;= now</c>.
     /// </summary>
-    public IReadOnlyList<Policy> Active(string refName, string? prefix = null)
+    /// <param name="refName">Branch / ref name.</param>
+    /// <param name="prefix">Optional path prefix filter.</param>
+    /// <param name="tenantFilter">
+    /// Optional tenant scope — same client-side semantics as
+    /// <see cref="List"/>. See that method's remarks for why the filter is
+    /// client-side.
+    /// </param>
+    public IReadOnlyList<Policy> Active(string refName, string? prefix = null, string? tenantFilter = null)
     {
         ThrowIfDisposed();
         var ptr = NativeMethods.agentstategraph_policy_active(H, refName, prefix);
-        return Json.Deserialize<List<Policy>>(Strings.ConsumeUtf8(ptr), "active");
+        var all = Json.Deserialize<List<Policy>>(Strings.ConsumeUtf8(ptr), "active");
+        return FilterByTenant(all, tenantFilter);
     }
 
     /// <summary>The active (or latest proposed) policy at <paramref name="path"/>.</summary>
@@ -143,23 +162,32 @@ public sealed class PolicyStore : IDisposable
         string refName,
         IReadOnlyDictionary<string, string>? situation,
         string action,
-        string agentId)
+        string agentId,
+        string? tenantFilter = null)
     {
         ThrowIfDisposed();
         var situationJson = Json.Serialize(situation ?? new Dictionary<string, string>());
         var ptr = NativeMethods.agentstategraph_policy_evaluate(
             H, refName, situationJson, action, agentId);
-        return Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate");
+        var decision = Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate");
+        return ApplyTenantFilter(refName, decision, tenantFilter);
     }
 
     /// <summary>Runs the change-proposal evaluator (POLICY_V1.md §22.2).</summary>
-    public Decision EvaluateChange(string refName, ChangeProposal proposal)
+    /// <param name="tenantFilter">
+    /// Optional tenant scope (0.7.5-beta.1 §5c). When non-null and the decision's
+    /// <c>matched_policy</c> carries a non-null <see cref="Policy.TenantId"/> that
+    /// disagrees, the decision is rewritten to <see cref="Decision.NoPolicyMatch"/>.
+    /// Matches the Go §5c client-side filter until a tenant-aware FFI ships.
+    /// </param>
+    public Decision EvaluateChange(string refName, ChangeProposal proposal, string? tenantFilter = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(proposal);
         var ptr = NativeMethods.agentstategraph_policy_evaluate_change(
             H, refName, Json.Serialize(proposal));
-        return Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate_change");
+        var decision = Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate_change");
+        return ApplyTenantFilter(refName, decision, tenantFilter);
     }
 
     /// <summary>
@@ -194,6 +222,133 @@ public sealed class PolicyStore : IDisposable
             }
         }
         return matched;
+    }
+
+    // -----------------------------------------------------------------------
+    // Signing + external evaluator (0.7.5-beta.1 §5c)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Invokes <c>agentstategraph_policy_sign</c>. The Rust implementation
+    /// currently returns a stub envelope describing the signature that
+    /// would be computed; callers parse the <see cref="JsonDocument"/>
+    /// themselves. Pass <paramref name="signerKeyId"/> as <c>null</c> to
+    /// let the FFI pick a default.
+    /// </summary>
+    public JsonDocument Sign(string refName, string path, string? signerKeyId = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(refName);
+        ArgumentNullException.ThrowIfNull(path);
+        var ptr = NativeMethods.agentstategraph_policy_sign(H, refName, path, signerKeyId);
+        var raw = Json.ThrowIfError(Strings.ConsumeUtf8(ptr), "policy_sign");
+        return JsonDocument.Parse(raw);
+    }
+
+    /// <summary>
+    /// Invokes <c>agentstategraph_policy_verify</c>. Returns the raw
+    /// envelope as a <see cref="JsonDocument"/>.
+    /// </summary>
+    public JsonDocument Verify(string refName, string path)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(refName);
+        ArgumentNullException.ThrowIfNull(path);
+        var ptr = NativeMethods.agentstategraph_policy_verify(H, refName, path);
+        var raw = Json.ThrowIfError(Strings.ConsumeUtf8(ptr), "policy_verify");
+        return JsonDocument.Parse(raw);
+    }
+
+    /// <summary>
+    /// Invokes <c>agentstategraph_policy_set_external_evaluator</c>. The
+    /// Rust implementation is currently a stub that returns an error
+    /// envelope — the raw response is wrapped in a
+    /// <see cref="JsonDocument"/> and returned unchanged so callers can
+    /// distinguish "stub" from a real registration once the implementation
+    /// lands.
+    /// </summary>
+    public JsonDocument SetExternalEvaluator(string configJson)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(configJson);
+        var ptr = NativeMethods.agentstategraph_policy_set_external_evaluator(H, configJson);
+        var raw = Strings.ConsumeUtf8(ptr)
+            ?? throw new AgentStateGraphException("policy_set_external_evaluator", "native FFI returned null");
+        // NOTE: do NOT error-check — the current Rust stub intentionally
+        // returns `{"error": "..."}` and callers need the envelope intact.
+        return JsonDocument.Parse(raw);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tenant-scope helpers (0.7.5-beta.1 §5c, client-side filter)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// A policy is visible under <paramref name="filter"/> iff the filter is
+    /// null, the policy's tenant is null (applies to all tenants), or the
+    /// two match exactly.
+    /// </summary>
+    private static bool TenantMatches(Policy p, string? filter)
+    {
+        if (filter is null || p.TenantId is null)
+        {
+            return true;
+        }
+        return string.Equals(p.TenantId, filter, StringComparison.Ordinal);
+    }
+
+    private static IReadOnlyList<Policy> FilterByTenant(List<Policy> policies, string? filter)
+    {
+        if (filter is null)
+        {
+            return policies;
+        }
+        var filtered = new List<Policy>(policies.Count);
+        foreach (var p in policies)
+        {
+            if (TenantMatches(p, filter))
+            {
+                filtered.Add(p);
+            }
+        }
+        return filtered;
+    }
+
+    private Decision ApplyTenantFilter(string refName, Decision decision, string? filter)
+    {
+        if (filter is null)
+        {
+            return decision;
+        }
+        var matchedPath = decision switch
+        {
+            Decision.Allow a => a.MatchedPolicy,
+            Decision.Deny d => d.MatchedPolicy,
+            Decision.RequireApproval r => r.MatchedPolicy,
+            _ => null,
+        };
+        if (string.IsNullOrEmpty(matchedPath))
+        {
+            return decision;
+        }
+        // matched_policy is `path@version` — strip the version to look up
+        // the policy by path.
+        var atIdx = matchedPath.IndexOf('@');
+        var pathOnly = atIdx >= 0 ? matchedPath[..atIdx] : matchedPath;
+        try
+        {
+            var matched = Get(refName, pathOnly);
+            if (TenantMatches(matched, filter))
+            {
+                return decision;
+            }
+        }
+        catch (AgentStateGraphException)
+        {
+            // If the lookup fails we err on the side of the original decision.
+            return decision;
+        }
+        return new Decision.NoPolicyMatch();
     }
 
     public void Dispose()
