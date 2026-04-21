@@ -433,3 +433,43 @@ fn test_situation_map_roundtrips_into_store() {
     let s: Situation = m.into();
     assert_eq!(s.get("namespace").map(|s| s.as_str()), Some("prod"));
 }
+
+#[test]
+fn test_compare_tokens_match_commit_spec_inference() {
+    // 0.6.75-beta.1 §6: the `compare` tool now emits the same token
+    // vector per handle that `commit_spec` would compute internally.
+    // Agents pre-flighting policy gates can read `tokens` from the
+    // compare response before deciding whether to promote.
+    let repo = fresh_repo();
+
+    // Seed a destructive spec.
+    repo.set_json(
+        "main",
+        "/apps/victim",
+        &serde_json::json!("bye"),
+        CommitOptions::new("seed", IntentCategory::Checkpoint, "seed"),
+    )
+    .expect("seed");
+    let handle = repo
+        .speculate("main", Some("destructive".into()))
+        .expect("spec");
+    repo.spec_delete(handle, "/apps/victim").expect("delete");
+
+    // Direct parity: `infer_change_tokens` over the handle (same
+    // function the tool uses) yields the same vector as
+    // `infer_tokens_from_diff` applied to the compare entry's diff.
+    let via_handle = infer_change_tokens(&repo, handle).expect("infer");
+    let comparison = repo.compare_speculations(&[handle]).expect("compare");
+    let via_compare = infer_tokens_from_diff(
+        &comparison
+            .entries
+            .first()
+            .map(|e| e.diff_from_base.clone())
+            .unwrap_or_default(),
+    );
+    assert_eq!(
+        via_handle, via_compare,
+        "compare token inference must match commit_spec token inference"
+    );
+    assert!(via_compare.iter().any(|t| t == "destructive"));
+}

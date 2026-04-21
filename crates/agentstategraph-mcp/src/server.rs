@@ -743,7 +743,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Compare multiple speculations side-by-side using their numeric handle_ids (from agentstategraph_speculate). Returns diffs showing how each diverges from base. Use after spec_modify to see differences before promoting a winner with commit_spec."
+        description = "Compare multiple speculations side-by-side using their numeric handle_ids (from agentstategraph_speculate). Returns, per handle, the diff from base plus the inferred change tokens (destructive, schema-change, ref-rewrite, large, reindex, migration) that commit_spec would evaluate against the policy engine. Use to pre-flight policy gates before promoting a winner."
     )]
     async fn agentstategraph_compare(&self, params: Parameters<CompareParams>) -> String {
         let p = params.0;
@@ -758,10 +758,16 @@ impl AgentStateGraphServer {
                     .entries
                     .iter()
                     .map(|e| {
+                        // Policy pre-flight: emit the same tokens that
+                        // commit_spec would infer, so an agent can see
+                        // which handles will hit which policies before
+                        // it commits to a promotion.
+                        let tokens = infer_tokens_from_diff(&e.diff_from_base);
                         serde_json::json!({
                             "handle": e.handle.id(),
                             "label": e.label,
                             "changes": e.diff_from_base.len(),
+                            "tokens": tokens,
                             "diff": e.diff_from_base,
                         })
                     })
