@@ -809,3 +809,73 @@ fn test_is_currently_active_helper() {
     p.active_from = now;
     assert!(p.is_currently_active(now));
 }
+
+// -----------------------------------------------------------------------
+// §1 (0.7.5) — expires_at scheduled deactivation
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_evaluate_ignores_expired_policy() {
+    // A ratified policy whose expires_at is in the past is treated as
+    // not-currently-active: evaluate skips it like an unratified
+    // proposal.
+    let (_r, store) = make_store("/policies");
+
+    let mut p = skeleton("expired/p", Selector::Always);
+    p.allow = vec![allow_action("any", vec![])];
+    p.active_from = Utc::now() - chrono::Duration::hours(2);
+    p.expires_at = Some(Utc::now() - chrono::Duration::hours(1));
+    store.propose(REF, p).unwrap();
+    store
+        .ratify(REF, "expired/p", "alice", "expired now")
+        .unwrap();
+
+    let sit: Situation =
+        std::collections::HashMap::from([("k".to_string(), "v".to_string())]).into();
+    let dec = store.evaluate(REF, &sit, "any", "a1").unwrap();
+    assert_eq!(
+        dec,
+        Decision::NoPolicyMatch,
+        "expired policy must be skipped"
+    );
+}
+
+#[test]
+fn test_evaluate_honors_not_yet_expired_policy() {
+    let (_r, store) = make_store("/policies");
+
+    let mut p = skeleton("live/p", Selector::Always);
+    p.allow = vec![allow_action("any", vec![])];
+    p.active_from = Utc::now() - chrono::Duration::hours(1);
+    p.expires_at = Some(Utc::now() + chrono::Duration::hours(1));
+    store.propose(REF, p).unwrap();
+    store
+        .ratify(REF, "live/p", "alice", "expires tomorrow")
+        .unwrap();
+
+    let sit: Situation =
+        std::collections::HashMap::from([("k".to_string(), "v".to_string())]).into();
+    let dec = store.evaluate(REF, &sit, "any", "a1").unwrap();
+    assert!(
+        matches!(dec, Decision::Allow { .. }),
+        "future-expiry policy must still match; got {:?}",
+        dec
+    );
+}
+
+#[test]
+fn test_is_currently_active_honors_expires_at_boundary() {
+    // expires_at is an exclusive upper bound: a policy whose
+    // expires_at == now is already expired.
+    let mut p = skeleton("boundary", Selector::Always);
+    let now = Utc::now();
+    p.ratified_by = Some("alice".into());
+    p.ratified_at = Some(now - chrono::Duration::hours(1));
+    p.active_from = now - chrono::Duration::hours(1);
+
+    p.expires_at = Some(now);
+    assert!(!p.is_currently_active(now));
+
+    p.expires_at = Some(now + chrono::Duration::seconds(1));
+    assert!(p.is_currently_active(now));
+}
