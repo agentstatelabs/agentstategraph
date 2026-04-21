@@ -335,7 +335,7 @@ impl TaskStore {
             let task: Task = serde_json::from_value(value.clone())?;
             tasks.push(task);
         }
-        tasks.sort_by(|a, b| a.id.cmp(&b.id));
+        tasks.sort_by_key(|t| t.id.clone());
         Ok(tasks)
     }
 

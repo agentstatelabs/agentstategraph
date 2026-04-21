@@ -114,8 +114,7 @@ impl Registry {
 
     pub fn register(&mut self, m: Box<dyn Migration>) {
         self.items.push(m);
-        self.items
-            .sort_by(|a, b| a.to_version().cmp(b.to_version()));
+        self.items.sort_by_key(|m| m.to_version().clone());
     }
 
     /// Migrations whose `to_version` is `> current` and `<= target` and
