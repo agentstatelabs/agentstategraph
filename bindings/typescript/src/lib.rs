@@ -18,13 +18,17 @@ extern crate napi_derive;
 
 use std::sync::Arc;
 
+use agentstategraph::session::{Session, SessionStatus};
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_policy::{
+    ChangeProposal, Decision, Policy, PolicyStore as PolicyBackend, Situation,
+};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use agentstategraph_tasks::{
-    NoopVerifier, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
-    TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyReport, VerifyResult,
+    NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
+    TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyReport, VerifyResult,
 };
 
 fn parse_category(s: &str) -> IntentCategory {
@@ -433,7 +437,7 @@ impl AgentStateGraph {
             .collect())
     }
 
-    /// List active sessions.
+    /// List active sessions (compact form — kept for backwards compat).
     #[napi]
     pub fn sessions(&self, agent_id: Option<String>) -> napi::Result<Vec<serde_json::Value>> {
         let sessions = self
@@ -453,6 +457,68 @@ impl AgentStateGraph {
                 })
             })
             .collect())
+    }
+
+    // -- Session full surface (post-0.6.5 audit) --
+
+    /// Create a durable session record. `head` is resolved from the tip
+    /// of `working_branch`.
+    #[napi]
+    pub fn create_session(
+        &self,
+        agent_id: String,
+        working_branch: Option<String>,
+        parent_session: Option<String>,
+        delegated_intent: Option<String>,
+        report_to: Option<String>,
+        path_scope: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let branch = working_branch.unwrap_or_else(|| "main".to_string());
+        let log = self.repo.log(&branch, 1).map_err(err)?;
+        let head = log
+            .into_iter()
+            .next()
+            .map(|c| c.id)
+            .ok_or_else(|| napi::Error::from_reason(format!("ref {branch:?} empty")))?;
+        let mgr = self.repo.sessions();
+        let s = mgr
+            .create(
+                &agent_id,
+                &branch,
+                head,
+                parent_session,
+                delegated_intent,
+                report_to,
+                path_scope,
+            )
+            .map_err(err)?;
+        Ok(session_to_json(&s))
+    }
+
+    /// Get a session by id. Returns null when not found.
+    #[napi]
+    pub fn get_session(&self, id: String) -> napi::Result<Option<serde_json::Value>> {
+        let mgr = self.repo.sessions();
+        Ok(mgr.get(&id).map_err(err)?.as_ref().map(session_to_json))
+    }
+
+    /// List sessions, optionally filtered by agent_id.
+    #[napi]
+    pub fn list_sessions(
+        &self,
+        agent_filter: Option<String>,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let mgr = self.repo.sessions();
+        let sessions = mgr.list(agent_filter.as_deref()).map_err(err)?;
+        Ok(sessions.iter().map(session_to_json).collect())
+    }
+
+    /// End a session with `status` ∈ active | completed | abandoned.
+    #[napi]
+    pub fn end_session(&self, id: String, status: String) -> napi::Result<()> {
+        let st = parse_session_status(&status)?;
+        let mgr = self.repo.sessions();
+        mgr.end(&id, st).map_err(err)
     }
 
     // -- Schema migration --
@@ -698,6 +764,10 @@ fn task_to_json(t: &Task) -> serde_json::Value {
         "abandoned_at": t.abandoned_at.map(|x| x.to_rfc3339()),
         "abandoned_reason": t.abandoned_reason,
         "assigned_to": t.assigned_to,
+        // Policy-fallback extension fields (POLICY_V1.md §22.4).
+        "payload": t.payload,
+        "parent_change": t.parent_change,
+        "on_complete": t.on_complete.as_ref().map(|h| serde_json::to_value(h).unwrap_or(serde_json::Value::Null)),
     })
 }
 
@@ -841,6 +911,9 @@ impl TaskStore {
         parent_id: Option<String>,
         blocked_by: Option<Vec<String>>,
         assigned_to: Option<String>,
+        payload: Option<serde_json::Value>,
+        parent_change: Option<String>,
+        on_complete: Option<serde_json::Value>,
     ) -> napi::Result<serde_json::Value> {
         let pri = parse_priority(&priority.unwrap_or_else(|| "medium".to_string()))?;
         let parent = parent_id.map(TaskId);
@@ -849,9 +922,29 @@ impl TaskStore {
             .into_iter()
             .map(TaskId)
             .collect();
+        let payload_val = payload.and_then(|v| if v.is_null() { None } else { Some(v) });
+        let on_complete_val = match on_complete {
+            None => None,
+            Some(serde_json::Value::Null) => None,
+            Some(v) => Some(
+                serde_json::from_value::<OnCompleteHook>(v)
+                    .map_err(|e| napi::Error::from_reason(format!("invalid on_complete: {e}")))?,
+            ),
+        };
         let task = self
             .inner
-            .add_task(&ref_name, &plan, &title, pri, parent, blockers, assigned_to)
+            .add_task_with_extensions(
+                &ref_name,
+                &plan,
+                &title,
+                pri,
+                parent,
+                blockers,
+                assigned_to,
+                payload_val,
+                parent_change,
+                on_complete_val,
+            )
             .map_err(task_err)?;
         Ok(task_to_json(&task))
     }
@@ -1086,4 +1179,243 @@ impl TaskStore {
             .map_err(task_err)?;
         Ok(report_to_json(&report))
     }
+}
+
+// =========================================================================
+// Session helpers
+// =========================================================================
+
+fn session_status_str(s: &SessionStatus) -> &'static str {
+    match s {
+        SessionStatus::Active => "active",
+        SessionStatus::Completed => "completed",
+        SessionStatus::Abandoned => "abandoned",
+    }
+}
+
+fn parse_session_status(s: &str) -> napi::Result<SessionStatus> {
+    Ok(match s.to_lowercase().as_str() {
+        "active" => SessionStatus::Active,
+        "completed" => SessionStatus::Completed,
+        "abandoned" => SessionStatus::Abandoned,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "invalid session status {other:?}; expected active|completed|abandoned"
+            )));
+        }
+    })
+}
+
+fn session_to_json(s: &Session) -> serde_json::Value {
+    serde_json::json!({
+        "id": s.id,
+        "agent_id": s.agent_id,
+        "working_branch": s.working_branch,
+        "head": s.head.to_string(),
+        "parent_session": s.parent_session,
+        "delegated_intent": s.delegated_intent,
+        "report_to": s.report_to,
+        "path_scope": s.path_scope,
+        "status": session_status_str(&s.status),
+        "created_at": s.created_at.to_rfc3339(),
+        "ended_at": s.ended_at.map(|t| t.to_rfc3339()),
+    })
+}
+
+// =========================================================================
+// PolicyStore — wraps agentstategraph_policy::PolicyStore
+// =========================================================================
+
+fn policy_err(e: agentstategraph_policy::PolicyError) -> napi::Error {
+    napi::Error::from_reason(e.to_string())
+}
+
+/// PolicyStore — situation-matching authorization + change-cost policies.
+///
+/// Wraps `agentstategraph_policy::PolicyStore`. Complex values (Policy,
+/// Situation, ChangeProposal, Decision) pass as plain JS objects and are
+/// round-tripped through serde_json — same idiom as the Python binding.
+#[napi]
+pub struct PolicyStore {
+    inner: PolicyBackend,
+}
+
+#[napi]
+impl PolicyStore {
+    #[napi(constructor)]
+    pub fn new(asg: &AgentStateGraph, prefix: Option<String>, agent_id: Option<String>) -> Self {
+        let prefix = prefix.unwrap_or_else(|| "/policies".to_string());
+        let agent_id = agent_id.unwrap_or_else(|| "node".to_string());
+        Self {
+            inner: PolicyBackend::new(Arc::clone(&asg.repo), prefix, agent_id),
+        }
+    }
+
+    // --- Write ops ---
+
+    /// Write a proposed (unratified) policy. Returns `"path@version"`.
+    #[napi]
+    pub fn propose(&self, ref_name: String, policy: serde_json::Value) -> napi::Result<String> {
+        let p: Policy = serde_json::from_value(policy)
+            .map_err(|e| napi::Error::from_reason(format!("invalid policy: {e}")))?;
+        self.inner.propose(&ref_name, p).map_err(policy_err)
+    }
+
+    /// Ratify an unratified proposal at `path`.
+    #[napi]
+    pub fn ratify(
+        &self,
+        ref_name: String,
+        path: String,
+        ratifier: String,
+        reasoning: String,
+    ) -> napi::Result<()> {
+        self.inner
+            .ratify(&ref_name, &path, &ratifier, &reasoning)
+            .map_err(policy_err)
+    }
+
+    /// Replace the active policy at `path`. Returns the new handle.
+    #[napi]
+    pub fn supersede(
+        &self,
+        ref_name: String,
+        path: String,
+        new_policy: serde_json::Value,
+    ) -> napi::Result<String> {
+        let p: Policy = serde_json::from_value(new_policy)
+            .map_err(|e| napi::Error::from_reason(format!("invalid policy: {e}")))?;
+        self.inner
+            .supersede(&ref_name, &path, p)
+            .map_err(policy_err)
+    }
+
+    // --- Read ops ---
+
+    /// List policies whose path starts with `prefix_filter` (null = all).
+    #[napi]
+    pub fn list(
+        &self,
+        ref_name: String,
+        prefix_filter: Option<String>,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let ps = self
+            .inner
+            .list(&ref_name, prefix_filter.as_deref())
+            .map_err(policy_err)?;
+        Ok(ps.iter().map(policy_to_json).collect())
+    }
+
+    /// List currently-active (ratified + `active_from <= now`) policies.
+    #[napi]
+    pub fn active(
+        &self,
+        ref_name: String,
+        prefix_filter: Option<String>,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let ps = self
+            .inner
+            .active(&ref_name, prefix_filter.as_deref())
+            .map_err(policy_err)?;
+        Ok(ps.iter().map(policy_to_json).collect())
+    }
+
+    /// Fetch a policy at `path`. Pass `version` to get a pinned
+    /// historical version; omit for the current active one.
+    #[napi]
+    pub fn get(
+        &self,
+        ref_name: String,
+        path: String,
+        version: Option<u32>,
+    ) -> napi::Result<serde_json::Value> {
+        let v = version.map(|x| x as u64);
+        let p = self.inner.get(&ref_name, &path, v).map_err(policy_err)?;
+        Ok(policy_to_json(&p))
+    }
+
+    /// Walk the supersedes chain, oldest first → current.
+    #[napi]
+    pub fn history(&self, ref_name: String, path: String) -> napi::Result<Vec<serde_json::Value>> {
+        let ps = self.inner.history(&ref_name, &path).map_err(policy_err)?;
+        Ok(ps.iter().map(policy_to_json).collect())
+    }
+
+    /// Authorization evaluation (POLICY_V1.md §5). `situation` is a
+    /// flat {string: string} map.
+    #[napi]
+    pub fn evaluate(
+        &self,
+        ref_name: String,
+        situation: serde_json::Value,
+        action: String,
+        agent_id: String,
+    ) -> napi::Result<serde_json::Value> {
+        let sit = situation_from_json(situation)?;
+        let d = self
+            .inner
+            .evaluate(&ref_name, &sit, &action, &agent_id)
+            .map_err(policy_err)?;
+        Ok(decision_to_json(&d))
+    }
+
+    /// Change-proposal evaluation (POLICY_V1.md §22.2).
+    #[napi]
+    pub fn evaluate_change(
+        &self,
+        ref_name: String,
+        proposal: serde_json::Value,
+    ) -> napi::Result<serde_json::Value> {
+        let prop: ChangeProposal = serde_json::from_value(proposal)
+            .map_err(|e| napi::Error::from_reason(format!("invalid proposal: {e}")))?;
+        let d = self
+            .inner
+            .evaluate_change(&ref_name, &prop)
+            .map_err(policy_err)?;
+        Ok(decision_to_json(&d))
+    }
+
+    /// List active policies whose `triggers` intersect `tokens`.
+    /// Binding-level helper mirroring the internal filter used by
+    /// `evaluate_change` (TODO: hoist into PolicyStore proper).
+    #[napi]
+    pub fn check_tokens(
+        &self,
+        ref_name: String,
+        tokens: Vec<String>,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let actives = self.inner.active(&ref_name, None).map_err(policy_err)?;
+        let token_set: std::collections::HashSet<&str> =
+            tokens.iter().map(|s| s.as_str()).collect();
+        let matched: Vec<serde_json::Value> = actives
+            .iter()
+            .filter(|p| p.triggers.iter().any(|t| token_set.contains(t.as_str())))
+            .map(policy_to_json)
+            .collect();
+        Ok(matched)
+    }
+}
+
+fn policy_to_json(p: &Policy) -> serde_json::Value {
+    serde_json::to_value(p).unwrap_or(serde_json::Value::Null)
+}
+
+fn decision_to_json(d: &Decision) -> serde_json::Value {
+    serde_json::to_value(d).unwrap_or(serde_json::Value::Null)
+}
+
+fn situation_from_json(v: serde_json::Value) -> napi::Result<Situation> {
+    // Accept either a flat {string: string} map (the transparent serde
+    // form) or a {"facts": {...}} wrapper. Fall back to a full round-trip.
+    if let serde_json::Value::Object(ref map) = v
+        && map.values().all(|x| x.is_string())
+    {
+        let hm: std::collections::HashMap<String, String> = map
+            .iter()
+            .map(|(k, val)| (k.clone(), val.as_str().unwrap_or("").to_string()))
+            .collect();
+        return Ok(Situation::from(hm));
+    }
+    serde_json::from_value(v)
+        .map_err(|e| napi::Error::from_reason(format!("invalid situation: {e}")))
 }
