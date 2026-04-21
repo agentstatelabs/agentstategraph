@@ -940,7 +940,10 @@ impl AgentStateGraphServer {
         description = "List active agent sessions. Shows parent-child relationships and path scoping."
     )]
     async fn agentstategraph_sessions(&self, params: Parameters<SessionListParams>) -> String {
-        let sessions = self.repo.sessions().list(params.0.agent_id.as_deref());
+        let sessions = match self.repo.sessions().list(params.0.agent_id.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return format!("Error: {}", e),
+        };
         let json: Vec<serde_json::Value> = sessions
             .iter()
             .map(|s| {

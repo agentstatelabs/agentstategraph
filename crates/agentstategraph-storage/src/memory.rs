@@ -6,9 +6,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
-use agentstategraph_core::{Commit, Object, ObjectId};
+use chrono::{DateTime, Utc};
 
-use crate::traits::{CommitStore, ObjectStore, RefStore, StorageError};
+use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+
+use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
 
 /// In-memory storage backend. Thread-safe via RwLock.
 ///
@@ -17,6 +19,12 @@ pub struct MemoryStorage {
     objects: RwLock<HashMap<ObjectId, Object>>,
     commits: RwLock<HashMap<ObjectId, Commit>>,
     refs: RwLock<BTreeMap<String, ObjectId>>,
+    epochs: RwLock<Vec<Epoch>>,
+    sessions: RwLock<HashMap<String, Session>>,
+    /// (commit_id, epoch_id) associations, in insertion order.
+    commit_epoch: RwLock<Vec<(ObjectId, String)>>,
+    /// (commit_id, session_id) associations, in insertion order.
+    commit_session: RwLock<Vec<(ObjectId, String)>>,
 }
 
 impl MemoryStorage {
@@ -25,6 +33,10 @@ impl MemoryStorage {
             objects: RwLock::new(HashMap::new()),
             commits: RwLock::new(HashMap::new()),
             refs: RwLock::new(BTreeMap::new()),
+            epochs: RwLock::new(Vec::new()),
+            sessions: RwLock::new(HashMap::new()),
+            commit_epoch: RwLock::new(Vec::new()),
+            commit_session: RwLock::new(Vec::new()),
         }
     }
 }
@@ -170,6 +182,170 @@ impl RefStore for MemoryStorage {
             .write()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(store.remove(name).is_some())
+    }
+}
+
+impl EpochStore for MemoryStorage {
+    fn create_epoch(&self, epoch: &Epoch) -> Result<(), StorageError> {
+        let mut epochs = self
+            .epochs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if epochs.iter().any(|e| e.id == epoch.id) {
+            return Err(StorageError::Backend(format!(
+                "epoch '{}' already exists",
+                epoch.id
+            )));
+        }
+        epochs.push(epoch.clone());
+        Ok(())
+    }
+
+    fn seal_epoch(
+        &self,
+        id: &str,
+        summary: &str,
+        sealed_at: DateTime<Utc>,
+        sealed_commits: &[ObjectId],
+    ) -> Result<(), StorageError> {
+        let mut epochs = self
+            .epochs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let epoch = epochs
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| StorageError::Backend(format!("epoch not found: {}", id)))?;
+        if epoch.status == EpochStatus::Sealed || epoch.status == EpochStatus::Archived {
+            return Err(StorageError::EpochAlreadySealed { id: id.to_string() });
+        }
+        epoch.status = EpochStatus::Sealed;
+        epoch.sealed_at = Some(sealed_at);
+        epoch.seal_summary = Some(summary.to_string());
+        epoch.sealed_commits = sealed_commits.to_vec();
+        Ok(())
+    }
+
+    fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
+        let epochs = self
+            .epochs
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let mut out: Vec<Epoch> = epochs.clone();
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(out)
+    }
+
+    fn get_epoch(&self, id: &str) -> Result<Option<Epoch>, StorageError> {
+        let epochs = self
+            .epochs
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(epochs.iter().find(|e| e.id == id).cloned())
+    }
+
+    fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
+        // Enforce seal semantics first.
+        {
+            let epochs = self
+                .epochs
+                .read()
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let epoch = epochs
+                .iter()
+                .find(|e| e.id == epoch_id)
+                .ok_or_else(|| StorageError::Backend(format!("epoch not found: {}", epoch_id)))?;
+            if epoch.status == EpochStatus::Sealed || epoch.status == EpochStatus::Archived {
+                return Err(StorageError::EpochAlreadySealed {
+                    id: epoch_id.to_string(),
+                });
+            }
+        }
+        let mut assoc = self
+            .commit_epoch
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        assoc.push((*commit_id, epoch_id.to_string()));
+        Ok(())
+    }
+}
+
+impl SessionStore for MemoryStorage {
+    fn create_session(&self, session: &Session) -> Result<(), StorageError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        sessions.insert(session.id.clone(), session.clone());
+        Ok(())
+    }
+
+    fn end_session(
+        &self,
+        id: &str,
+        status: SessionStatus,
+        ended_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let session = sessions
+            .get_mut(id)
+            .ok_or_else(|| StorageError::Backend(format!("session not found: {}", id)))?;
+        if session.status != SessionStatus::Active {
+            return Err(StorageError::SessionEnded { id: id.to_string() });
+        }
+        session.status = status;
+        session.ended_at = Some(ended_at);
+        Ok(())
+    }
+
+    fn list_sessions(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(sessions
+            .values()
+            .filter(|s| agent_filter.map(|f| s.agent_id == f).unwrap_or(true))
+            .cloned()
+            .collect())
+    }
+
+    fn get_session(&self, id: &str) -> Result<Option<Session>, StorageError> {
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(sessions.get(id).cloned())
+    }
+
+    fn set_commit_session(
+        &self,
+        commit_id: &ObjectId,
+        session_id: &str,
+    ) -> Result<(), StorageError> {
+        {
+            let sessions = self
+                .sessions
+                .read()
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let session = sessions.get(session_id).ok_or_else(|| {
+                StorageError::Backend(format!("session not found: {}", session_id))
+            })?;
+            if session.status != SessionStatus::Active {
+                return Err(StorageError::SessionEnded {
+                    id: session_id.to_string(),
+                });
+            }
+        }
+        let mut assoc = self
+            .commit_session
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        assoc.push((*commit_id, session_id.to_string()));
+        Ok(())
     }
 }
 

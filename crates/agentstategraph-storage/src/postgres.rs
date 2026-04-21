@@ -6,6 +6,12 @@
 //! Usage:
 //!   let storage = PostgresStorage::connect("postgres://localhost/agentstategraph").await?;
 //!   let storage = PostgresStorage::connect_tenant("postgres://...", "tenant-123").await?;
+//!
+//! **Note on epochs/sessions**: as of 0.6.5-beta.1 the Postgres backend
+//! only persists objects/commits/refs. The `EpochStore` and
+//! `SessionStore` impls return `StorageError::Backend("not yet
+//! implemented")`. Durable epochs + sessions on Postgres are slated
+//! for a later milestone; SQLite is the current persistent backend.
 
 use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
@@ -14,9 +20,10 @@ use tokio_postgres::NoTls;
 /// the binary's `--pg-pool-size` flag.
 pub const DEFAULT_POOL_SIZE: usize = 32;
 
-use agentstategraph_core::{Commit, Object, ObjectId};
+use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
+use chrono::{DateTime, Utc};
 
-use crate::traits::{CommitStore, ObjectStore, RefStore, StorageError};
+use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
 
 /// PostgreSQL-backed storage with connection pooling and optional multi-tenancy.
 pub struct PostgresStorage {
@@ -457,6 +464,65 @@ impl RefStore for PostgresStorage {
 
             Ok(rows > 0)
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Epoch + Session stubs — see module-level doc comment.
+// ---------------------------------------------------------------------------
+
+fn not_yet_implemented() -> StorageError {
+    StorageError::Backend("not yet implemented".into())
+}
+
+impl EpochStore for PostgresStorage {
+    fn create_epoch(&self, _epoch: &Epoch) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn seal_epoch(
+        &self,
+        _id: &str,
+        _summary: &str,
+        _sealed_at: DateTime<Utc>,
+        _sealed_commits: &[ObjectId],
+    ) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn get_epoch(&self, _id: &str) -> Result<Option<Epoch>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn set_commit_epoch(&self, _commit_id: &ObjectId, _epoch_id: &str) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+}
+
+impl SessionStore for PostgresStorage {
+    fn create_session(&self, _session: &Session) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn end_session(
+        &self,
+        _id: &str,
+        _status: SessionStatus,
+        _ended_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn list_sessions(&self, _agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn get_session(&self, _id: &str) -> Result<Option<Session>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn set_commit_session(
+        &self,
+        _commit_id: &ObjectId,
+        _session_id: &str,
+    ) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
     }
 }
 

@@ -1,41 +1,18 @@
 //! Agent sessions — working contexts for sub-agent orchestration.
 //!
-//! Sessions formalize the parent-child agent relationship. A lead agent
-//! delegates work by creating scoped sessions for sub-agents, each with
-//! their own branch and restricted path access.
+//! The `Session` type itself lives in `agentstategraph-core` so storage
+//! backends can implement `SessionStore` directly. This module keeps
+//! the user-facing `SessionManager` and the `check_scope` helper, and
+//! delegates all storage to the `SessionStore` trait.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
-
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 
 use agentstategraph_core::intent::{AgentId, IntentId, SessionId};
 use agentstategraph_core::object::ObjectId;
-
-/// An active agent session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session {
-    pub id: SessionId,
-    pub agent_id: AgentId,
-    pub working_branch: String,
-    pub head: ObjectId,
-    /// Who spawned this session.
-    pub parent_session: Option<SessionId>,
-    /// The intent this session was created to fulfill.
-    pub delegated_intent: Option<IntentId>,
-    /// Who to report back to.
-    pub report_to: Option<String>,
-    /// Path scope restriction (if set, agent can only modify paths under this prefix).
-    pub path_scope: Option<String>,
-    /// When this session was created.
-    pub created_at: DateTime<Utc>,
-}
-
-/// Manages active sessions.
-pub struct SessionManager {
-    sessions: RwLock<HashMap<SessionId, Session>>,
-}
+pub use agentstategraph_core::session::{Session, SessionStatus};
+#[allow(unused_imports)]
+use agentstategraph_storage::SessionStore;
+use agentstategraph_storage::{Storage, StorageError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -43,22 +20,25 @@ pub enum SessionError {
     NotFound(String),
     #[error("path '{path}' is outside session scope '{scope}'")]
     OutOfScope { path: String, scope: String },
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
 }
 
-impl Default for SessionManager {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Manages active sessions.
+///
+/// Backed by a `SessionStore` so sessions survive process restart.
+/// This struct is a thin wrapper: creation, end-of-life and lookup all
+/// route through storage.
+pub struct SessionManager<'a> {
+    storage: &'a dyn Storage,
 }
 
-impl SessionManager {
-    pub fn new() -> Self {
-        Self {
-            sessions: RwLock::new(HashMap::new()),
-        }
+impl<'a> SessionManager<'a> {
+    pub fn new(storage: &'a dyn Storage) -> Self {
+        Self { storage }
     }
 
-    /// Create a new session.
+    /// Create a new session and persist it.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
@@ -69,7 +49,7 @@ impl SessionManager {
         delegated_intent: Option<IntentId>,
         report_to: Option<String>,
         path_scope: Option<String>,
-    ) -> Session {
+    ) -> Result<Session, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         let session = Session {
             id: id.clone(),
@@ -80,106 +60,134 @@ impl SessionManager {
             delegated_intent,
             report_to,
             path_scope,
+            status: SessionStatus::Active,
             created_at: Utc::now(),
+            ended_at: None,
         };
-        self.sessions.write().unwrap().insert(id, session.clone());
-        session
+        self.storage.create_session(&session)?;
+        Ok(session)
     }
 
     /// Get a session by ID.
-    pub fn get(&self, id: &str) -> Option<Session> {
-        self.sessions.read().unwrap().get(id).cloned()
+    pub fn get(&self, id: &str) -> Result<Option<Session>, SessionError> {
+        Ok(self.storage.get_session(id)?)
     }
 
-    /// Update a session's head.
+    /// Update a session's head pointer. Persisted via a rewrite of the
+    /// session row (create-or-replace semantics).
     pub fn update_head(&self, id: &str, head: ObjectId) -> Result<(), SessionError> {
-        let mut sessions = self.sessions.write().unwrap();
-        let session = sessions
-            .get_mut(id)
+        let mut session = self
+            .storage
+            .get_session(id)?
             .ok_or_else(|| SessionError::NotFound(id.to_string()))?;
         session.head = head;
+        // create_session uses INSERT OR REPLACE in SQLite / map.insert in
+        // memory, so it doubles as an update.
+        self.storage.create_session(&session)?;
         Ok(())
     }
 
     /// List all sessions, optionally filtered by agent.
-    pub fn list(&self, agent_filter: Option<&str>) -> Vec<Session> {
-        let sessions = self.sessions.read().unwrap();
-        sessions
-            .values()
-            .filter(|s| agent_filter.map(|f| s.agent_id == f).unwrap_or(true))
-            .cloned()
-            .collect()
+    pub fn list(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, SessionError> {
+        Ok(self.storage.list_sessions(agent_filter)?)
     }
 
     /// List child sessions of a parent.
-    pub fn children(&self, parent_id: &str) -> Vec<Session> {
-        let sessions = self.sessions.read().unwrap();
-        sessions
-            .values()
+    pub fn children(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
+        let all = self.storage.list_sessions(None)?;
+        Ok(all
+            .into_iter()
             .filter(|s| s.parent_session.as_deref() == Some(parent_id))
-            .cloned()
-            .collect()
+            .collect())
     }
 
-    /// Remove a session.
-    pub fn remove(&self, id: &str) -> Option<Session> {
-        self.sessions.write().unwrap().remove(id)
-    }
-
-    /// Check if a path is within a session's scope.
-    pub fn check_scope(session: &Session, path: &str) -> Result<(), SessionError> {
-        if let Some(ref scope) = session.path_scope
-            && !path.starts_with(scope)
-        {
-            return Err(SessionError::OutOfScope {
-                path: path.to_string(),
-                scope: scope.clone(),
-            });
-        }
+    /// End a session. Preferred over `remove` for audit purposes.
+    pub fn end(&self, id: &str, status: SessionStatus) -> Result<(), SessionError> {
+        self.storage.end_session(id, status, Utc::now())?;
         Ok(())
     }
 
-    /// Count active sessions.
-    pub fn count(&self) -> usize {
-        self.sessions.read().unwrap().len()
+    /// Count sessions.
+    pub fn count(&self) -> Result<usize, SessionError> {
+        Ok(self.storage.list_sessions(None)?.len())
     }
+}
+
+/// Check if a path is within a session's scope. Free function so it
+/// can be used with a borrowed `Session` without going through the
+/// manager.
+pub fn check_scope(session: &Session, path: &str) -> Result<(), SessionError> {
+    if let Some(ref scope) = session.path_scope
+        && !path.starts_with(scope)
+    {
+        return Err(SessionError::OutOfScope {
+            path: path.to_string(),
+            scope: scope.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// Back-compat alias — matches the old `SessionManager::check_scope`
+/// associated-function style while delegating to the free function.
+impl SessionManager<'_> {
+    pub fn check_scope(session: &Session, path: &str) -> Result<(), SessionError> {
+        check_scope(session, path)
+    }
+}
+
+// Convenience for callers to construct an `AgentId` string inline.
+#[doc(hidden)]
+pub fn _sanity_agent_id() -> AgentId {
+    String::new()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentstategraph_storage::MemoryStorage;
+
+    fn mgr_store() -> MemoryStorage {
+        MemoryStorage::new()
+    }
 
     #[test]
     fn test_create_and_get_session() {
-        let mgr = SessionManager::new();
-        let session = mgr.create(
-            "agent/planner",
-            "agents/planner/workspace",
-            ObjectId::hash(b"head"),
-            None,
-            None,
-            None,
-            None,
-        );
+        let store = mgr_store();
+        let mgr = SessionManager::new(&store);
+        let session = mgr
+            .create(
+                "agent/planner",
+                "agents/planner/workspace",
+                ObjectId::hash(b"head"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
-        let retrieved = mgr.get(&session.id).unwrap();
+        let retrieved = mgr.get(&session.id).unwrap().unwrap();
         assert_eq!(retrieved.agent_id, "agent/planner");
     }
 
     #[test]
     fn test_parent_child_sessions() {
-        let mgr = SessionManager::new();
-        let parent = mgr.create(
-            "agent/orchestrator",
-            "agents/orchestrator/workspace",
-            ObjectId::hash(b"head"),
-            None,
-            Some("intent-001".to_string()),
-            None,
-            None,
-        );
+        let store = mgr_store();
+        let mgr = SessionManager::new(&store);
+        let parent = mgr
+            .create(
+                "agent/orchestrator",
+                "agents/orchestrator/workspace",
+                ObjectId::hash(b"head"),
+                None,
+                Some("intent-001".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
 
-        let child1 = mgr.create(
+        mgr.create(
             "agent/storage",
             "agents/storage/workspace",
             ObjectId::hash(b"head"),
@@ -187,9 +195,10 @@ mod tests {
             Some("intent-002".to_string()),
             Some("agent/orchestrator".to_string()),
             Some("/config/storage".to_string()),
-        );
+        )
+        .unwrap();
 
-        let child2 = mgr.create(
+        mgr.create(
             "agent/network",
             "agents/network/workspace",
             ObjectId::hash(b"head"),
@@ -197,9 +206,10 @@ mod tests {
             Some("intent-003".to_string()),
             Some("agent/orchestrator".to_string()),
             Some("/config/network".to_string()),
-        );
+        )
+        .unwrap();
 
-        let children = mgr.children(&parent.id);
+        let children = mgr.children(&parent.id).unwrap();
         assert_eq!(children.len(), 2);
     }
 
@@ -214,16 +224,15 @@ mod tests {
             delegated_intent: None,
             report_to: None,
             path_scope: Some("/config/storage".to_string()),
+            status: SessionStatus::Active,
             created_at: Utc::now(),
+            ended_at: None,
         };
 
-        // Within scope
-        assert!(SessionManager::check_scope(&session, "/config/storage/type").is_ok());
-        assert!(SessionManager::check_scope(&session, "/config/storage").is_ok());
-
-        // Out of scope
-        assert!(SessionManager::check_scope(&session, "/config/network/subnet").is_err());
-        assert!(SessionManager::check_scope(&session, "/nodes/0").is_err());
+        assert!(check_scope(&session, "/config/storage/type").is_ok());
+        assert!(check_scope(&session, "/config/storage").is_ok());
+        assert!(check_scope(&session, "/config/network/subnet").is_err());
+        assert!(check_scope(&session, "/nodes/0").is_err());
     }
 
     #[test]
@@ -237,15 +246,17 @@ mod tests {
             delegated_intent: None,
             report_to: None,
             path_scope: None,
+            status: SessionStatus::Active,
             created_at: Utc::now(),
+            ended_at: None,
         };
-
-        assert!(SessionManager::check_scope(&session, "/anything/at/all").is_ok());
+        assert!(check_scope(&session, "/anything/at/all").is_ok());
     }
 
     #[test]
     fn test_list_by_agent() {
-        let mgr = SessionManager::new();
+        let store = mgr_store();
+        let mgr = SessionManager::new(&store);
         mgr.create(
             "agent/a",
             "br/a",
@@ -254,7 +265,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         mgr.create(
             "agent/b",
             "br/b",
@@ -263,7 +275,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         mgr.create(
             "agent/a",
             "br/a2",
@@ -272,10 +285,11 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
 
-        assert_eq!(mgr.list(Some("agent/a")).len(), 2);
-        assert_eq!(mgr.list(Some("agent/b")).len(), 1);
-        assert_eq!(mgr.list(None).len(), 3);
+        assert_eq!(mgr.list(Some("agent/a")).unwrap().len(), 2);
+        assert_eq!(mgr.list(Some("agent/b")).unwrap().len(), 1);
+        assert_eq!(mgr.list(None).unwrap().len(), 3);
     }
 }

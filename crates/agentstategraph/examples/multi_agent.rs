@@ -42,51 +42,63 @@ fn main() {
     println!("✓ Orchestrator initialized cluster state\n");
 
     // ─── 2. Create scoped sessions for sub-agents ─────────────────
-    let orchestrator_session = repo.sessions().create(
-        "agent/orchestrator",
-        "main",
-        repo.log("main", 1).unwrap()[0].id,
-        None,
-        Some("intent-001".to_string()),
-        None,
-        None,
-    );
+    let orchestrator_session = repo
+        .sessions()
+        .create(
+            "agent/orchestrator",
+            "main",
+            repo.log("main", 1).unwrap()[0].id,
+            None,
+            Some("intent-001".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
     println!("✓ Orchestrator session: {}\n", orchestrator_session.id);
 
     // Network agent — scoped to /cluster/network
-    let net_session = repo.sessions().create(
-        "agent/network",
-        "agents/network/workspace",
-        repo.log("main", 1).unwrap()[0].id,
-        Some(orchestrator_session.id.clone()),
-        Some("intent-002".to_string()),
-        Some("agent/orchestrator".to_string()),
-        Some("/cluster/network".to_string()),
-    );
+    let net_session = repo
+        .sessions()
+        .create(
+            "agent/network",
+            "agents/network/workspace",
+            repo.log("main", 1).unwrap()[0].id,
+            Some(orchestrator_session.id.clone()),
+            Some("intent-002".to_string()),
+            Some("agent/orchestrator".to_string()),
+            Some("/cluster/network".to_string()),
+        )
+        .unwrap();
     repo.branch("agents/network/workspace", "main").unwrap();
 
     // Storage agent — scoped to /cluster/storage
-    let storage_session = repo.sessions().create(
-        "agent/storage",
-        "agents/storage/workspace",
-        repo.log("main", 1).unwrap()[0].id,
-        Some(orchestrator_session.id.clone()),
-        Some("intent-003".to_string()),
-        Some("agent/orchestrator".to_string()),
-        Some("/cluster/storage".to_string()),
-    );
+    let storage_session = repo
+        .sessions()
+        .create(
+            "agent/storage",
+            "agents/storage/workspace",
+            repo.log("main", 1).unwrap()[0].id,
+            Some(orchestrator_session.id.clone()),
+            Some("intent-003".to_string()),
+            Some("agent/orchestrator".to_string()),
+            Some("/cluster/storage".to_string()),
+        )
+        .unwrap();
     repo.branch("agents/storage/workspace", "main").unwrap();
 
     // GPU scheduler — scoped to /cluster/scheduling
-    let gpu_session = repo.sessions().create(
-        "agent/gpu-scheduler",
-        "agents/gpu-scheduler/workspace",
-        repo.log("main", 1).unwrap()[0].id,
-        Some(orchestrator_session.id.clone()),
-        Some("intent-004".to_string()),
-        Some("agent/orchestrator".to_string()),
-        Some("/cluster/scheduling".to_string()),
-    );
+    let gpu_session = repo
+        .sessions()
+        .create(
+            "agent/gpu-scheduler",
+            "agents/gpu-scheduler/workspace",
+            repo.log("main", 1).unwrap()[0].id,
+            Some(orchestrator_session.id.clone()),
+            Some("intent-004".to_string()),
+            Some("agent/orchestrator".to_string()),
+            Some("/cluster/scheduling".to_string()),
+        )
+        .unwrap();
     repo.branch("agents/gpu-scheduler/workspace", "main")
         .unwrap();
 
@@ -229,7 +241,7 @@ fn main() {
 
     // ─── 6. Show session hierarchy ────────────────────────────────
     println!("\n--- Session hierarchy ---\n");
-    let all_sessions = repo.sessions().list(None);
+    let all_sessions = repo.sessions().list(None).unwrap();
     for s in &all_sessions {
         let indent = if s.parent_session.is_some() {
             "    "
@@ -287,5 +299,8 @@ fn main() {
 
     println!("\n=== Multi-Agent Orchestration complete ===");
     println!("Total commits: {}", repo.log("main", 100).unwrap().len());
-    println!("Active sessions: {}", repo.sessions().list(None).len());
+    println!(
+        "Active sessions: {}",
+        repo.sessions().list(None).unwrap().len()
+    );
 }

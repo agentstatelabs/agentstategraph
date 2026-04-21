@@ -431,7 +431,11 @@ impl AgentStateGraph {
     /// List active sessions.
     #[napi]
     pub fn sessions(&self, agent_id: Option<String>) -> napi::Result<Vec<serde_json::Value>> {
-        let sessions = self.repo.sessions().list(agent_id.as_deref());
+        let sessions = self
+            .repo
+            .sessions()
+            .list(agent_id.as_deref())
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         Ok(sessions
             .iter()
             .map(|s| {

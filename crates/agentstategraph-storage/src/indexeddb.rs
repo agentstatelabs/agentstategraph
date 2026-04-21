@@ -3,6 +3,12 @@
 //! Uses the browser's IndexedDB to store objects, commits, and refs.
 //! Data survives page refreshes and browser restarts.
 //!
+//! **Note on epochs/sessions**: as of 0.6.5-beta.1 the IndexedDB backend
+//! only persists objects/commits/refs. The `EpochStore` and
+//! `SessionStore` impls return `StorageError::Backend("not yet
+//! implemented")`. Browser-side durable epochs + sessions are slated
+//! for a later milestone.
+//!
 //! Three IndexedDB object stores:
 //!   "objects"  → ObjectId (hex string) → Object (JSON)
 //!   "commits"  → ObjectId (hex string) → Commit (JSON)
@@ -17,8 +23,9 @@
 use std::sync::RwLock;
 
 use crate::memory::MemoryStorage;
-use crate::traits::{CommitStore, ObjectStore, RefStore, StorageError};
-use agentstategraph_core::{Commit, Object, ObjectId};
+use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
+use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
+use chrono::{DateTime, Utc};
 
 /// IndexedDB-backed storage with in-memory cache.
 ///
@@ -218,6 +225,65 @@ fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Epoch + Session stubs — see module-level doc comment.
+// ---------------------------------------------------------------------------
+
+fn not_yet_implemented() -> StorageError {
+    StorageError::Backend("not yet implemented".into())
+}
+
+impl EpochStore for IndexedDbStorage {
+    fn create_epoch(&self, _epoch: &Epoch) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn seal_epoch(
+        &self,
+        _id: &str,
+        _summary: &str,
+        _sealed_at: DateTime<Utc>,
+        _sealed_commits: &[ObjectId],
+    ) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn get_epoch(&self, _id: &str) -> Result<Option<Epoch>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn set_commit_epoch(&self, _commit_id: &ObjectId, _epoch_id: &str) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+}
+
+impl SessionStore for IndexedDbStorage {
+    fn create_session(&self, _session: &Session) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn end_session(
+        &self,
+        _id: &str,
+        _status: SessionStatus,
+        _ended_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn list_sessions(&self, _agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn get_session(&self, _id: &str) -> Result<Option<Session>, StorageError> {
+        Err(not_yet_implemented())
+    }
+    fn set_commit_session(
+        &self,
+        _commit_id: &ObjectId,
+        _session_id: &str,
+    ) -> Result<(), StorageError> {
+        Err(not_yet_implemented())
+    }
 }
 
 #[cfg(test)]

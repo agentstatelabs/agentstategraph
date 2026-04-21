@@ -19,6 +19,7 @@ pub mod object;
 pub mod path;
 pub mod query;
 pub mod schema;
+pub mod session;
 
 // Re-export primary types for convenience
 pub use commit::{Commit, CommitBuilder};
@@ -38,3 +39,4 @@ pub use object::{Atom, Node, Object, ObjectId};
 pub use path::{PathComponent, PathError, StatePath};
 pub use query::{BlameEntry, Query, QueryFilters, QueryOptions, QueryTarget, filter_commits};
 pub use schema::{EnforcementMode, MergeHint, Schema, ValidationResult};
+pub use session::{Session, SessionStatus};

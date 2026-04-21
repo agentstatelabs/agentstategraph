@@ -112,9 +112,14 @@ pub struct EpochViolation {
 pub struct Repository {
     storage: Box<dyn Storage>,
     specs: SpeculationManager,
-    session_mgr: crate::session::SessionManager,
     watch_mgr: crate::watch::WatchManager,
-    epochs: std::sync::RwLock<Vec<agentstategraph_core::Epoch>>,
+    /// Active epoch id — if set, all new commits are associated with it
+    /// via `storage.set_commit_epoch` on commit finalization. Set via
+    /// `set_active_epoch` / cleared via `clear_active_epoch`. Not a
+    /// public MCP tool yet — that's a follow-up milestone.
+    active_epoch: std::sync::RwLock<Option<String>>,
+    /// Active session id — same semantics as `active_epoch`.
+    active_session: std::sync::RwLock<Option<String>>,
     /// When true, ref updates that orphan sealed commits are rejected with
     /// `RepoError::EpochSealViolated`. When false (default), violations log
     /// a warning and the update proceeds. Opt-in via `Repository::with_epoch_seal_strict`
@@ -227,9 +232,9 @@ impl Repository {
         Self {
             storage,
             specs: SpeculationManager::new(),
-            session_mgr: crate::session::SessionManager::new(),
             watch_mgr: crate::watch::WatchManager::new(),
-            epochs: std::sync::RwLock::new(Vec::new()),
+            active_epoch: std::sync::RwLock::new(None),
+            active_session: std::sync::RwLock::new(None),
             epoch_seal_strict: strict,
         }
     }
@@ -862,9 +867,49 @@ impl Repository {
     // Session operations (sub-agent orchestration)
     // -----------------------------------------------------------------------
 
-    /// Get the session manager for sub-agent orchestration.
-    pub fn sessions(&self) -> &crate::session::SessionManager {
-        &self.session_mgr
+    /// Get a session manager for sub-agent orchestration. The manager
+    /// borrows this repository's storage backend so all state is
+    /// durable.
+    pub fn sessions(&self) -> crate::session::SessionManager<'_> {
+        crate::session::SessionManager::new(self.storage.as_ref())
+    }
+
+    /// Set (or clear) the active epoch id. When set, commits created via
+    /// `commit`/`set`/`merge`/`commit_speculation` will be associated
+    /// with that epoch in storage.
+    pub fn set_active_epoch(&self, id: Option<String>) -> Result<(), RepoError> {
+        *self
+            .active_epoch
+            .write()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))? = id;
+        Ok(())
+    }
+
+    /// Return the currently-active epoch id, if any.
+    pub fn active_epoch(&self) -> Result<Option<String>, RepoError> {
+        Ok(self
+            .active_epoch
+            .read()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?
+            .clone())
+    }
+
+    /// Set (or clear) the active session id.
+    pub fn set_active_session(&self, id: Option<String>) -> Result<(), RepoError> {
+        *self
+            .active_session
+            .write()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))? = id;
+        Ok(())
+    }
+
+    /// Return the currently-active session id, if any.
+    pub fn active_session(&self) -> Result<Option<String>, RepoError> {
+        Ok(self
+            .active_session
+            .read()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?
+            .clone())
     }
 
     // -----------------------------------------------------------------------
@@ -880,7 +925,7 @@ impl Repository {
     // Epoch operations
     // -----------------------------------------------------------------------
 
-    /// Create a new epoch.
+    /// Create a new epoch, persisted via the storage backend.
     pub fn create_epoch(
         &self,
         id: &str,
@@ -888,73 +933,39 @@ impl Repository {
         root_intents: Vec<String>,
     ) -> Result<agentstategraph_core::Epoch, RepoError> {
         let epoch = agentstategraph_core::Epoch::new(id, description, root_intents);
-        let mut epochs = self
-            .epochs
-            .write()
-            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
-        epochs.push(epoch.clone());
+        self.storage.create_epoch(&epoch)?;
         Ok(epoch)
     }
 
     /// Seal an epoch, making it immutable.
     ///
-    /// Captures the set of commits reachable from `main` at seal time into
-    /// `Epoch::sealed_commits` so that subsequent ref mutations can be
-    /// checked for seal violations (a rewind of main that would orphan a
-    /// sealed commit). This walk is O(reachable-from-main) once per seal;
-    /// subsequent checks are O(sealed_commits × new-reachable).
+    /// Captures the set of commits reachable from `main` at seal time
+    /// so that subsequent ref mutations can be checked for seal
+    /// violations (a rewind of main that would orphan a sealed commit).
+    /// Persisted via the storage backend — survives process restart.
     /// (security threat model v3+, V8)
     pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), RepoError> {
-        // Walk main before locking epochs — avoid holding the write lock
-        // across storage calls, and also avoid deadlock with any read-side
-        // that might re-enter.
+        // Walk main first — cheap, and we want the sealed_commits set
+        // computed against the current tip.
         let sealed_commits = match self.storage.get_ref("main")? {
             Some(head) => self.reachable_commits_from(&head)?,
             None => Vec::new(),
         };
-
-        let mut epochs = self
-            .epochs
-            .write()
-            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
-        let epoch = epochs
-            .iter_mut()
-            .find(|e| e.id == id)
-            .ok_or_else(|| RepoError::RefNotFound(format!("epoch not found: {}", id)))?;
-
-        // Compute seal hash from all commits in the epoch
-        let mut hasher_input = Vec::new();
-        for commit_id in &epoch.commits {
-            hasher_input.extend_from_slice(commit_id.as_bytes());
-        }
-        let seal_hash = ObjectId::hash(&hasher_input);
-
-        epoch.sealed_commits = sealed_commits;
-        epoch
-            .seal(summary.to_string(), seal_hash)
-            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        self.storage
+            .seal_epoch(id, summary, chrono::Utc::now(), &sealed_commits)?;
         Ok(())
     }
 
-    /// List all epochs.
+    /// List all epochs (as lightweight index entries).
     pub fn list_epochs(&self) -> Result<Vec<agentstategraph_core::EpochEntry>, RepoError> {
-        let epochs = self
-            .epochs
-            .read()
-            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let epochs = self.storage.list_epochs()?;
         Ok(epochs.iter().map(|e| e.to_entry()).collect())
     }
 
     /// Get a specific epoch by ID.
     pub fn get_epoch(&self, id: &str) -> Result<agentstategraph_core::Epoch, RepoError> {
-        let epochs = self
-            .epochs
-            .read()
-            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
-        epochs
-            .iter()
-            .find(|e| e.id == id)
-            .cloned()
+        self.storage
+            .get_epoch(id)?
             .ok_or_else(|| RepoError::RefNotFound(format!("epoch not found: {}", id)))
     }
 
@@ -1232,10 +1243,7 @@ impl Repository {
             .reachable_commits_from(new_ref_target)?
             .into_iter()
             .collect();
-        let epochs = self
-            .epochs
-            .read()
-            .map_err(|e| RepoError::RefNotFound(e.to_string()))?;
+        let epochs = self.storage.list_epochs()?;
         let mut violations = Vec::new();
         for epoch in epochs.iter() {
             if epoch.status != agentstategraph_core::EpochStatus::Sealed
@@ -1347,6 +1355,16 @@ impl Repository {
 
         let commit = builder.build();
         self.storage.put_commit(&commit)?;
+        // Associate with the active epoch/session if any. Association
+        // errors are surfaced — a sealed active epoch shouldn't silently
+        // drop its mark. Callers can unset the active epoch before
+        // retrying.
+        if let Some(epoch_id) = self.active_epoch()? {
+            self.storage.set_commit_epoch(&commit.id, &epoch_id)?;
+        }
+        if let Some(session_id) = self.active_session()? {
+            self.storage.set_commit_session(&commit.id, &session_id)?;
+        }
         Ok(commit)
     }
 }
