@@ -1,0 +1,35 @@
+# .NET build output
+bin/
+obj/
+
+# IDE / user files
+*.user
+*.suo
+.vs/
+.vscode/
+*.userprefs
+
+# Test results
+TestResults/
+[Tt]est[Rr]esults/
+*.trx
+*.coverage
+*.coveragexml
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+
+# Cargo native artifacts — we don't want to commit a copy
+# of the Rust build output inside the binding directory.
+runtimes/
+native/
+*.so
+*.dylib
+*.dll
+*.pdb
+
+# OS cruft
+.DS_Store
+Thumbs.db

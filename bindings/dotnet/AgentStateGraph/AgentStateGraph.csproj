@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AgentStateGraph</AssemblyName>
+    <RootNamespace>AgentStateGraph</RootNamespace>
+
+    <PackageId>agentstatelabs.AgentStateGraph</PackageId>
+    <Version>0.7.25-beta.1</Version>
+    <Authors>Craig Brown</Authors>
+    <Company>AgentStateLabs, LLC</Company>
+    <Description>
+      AI-native versioned state store for intent-based systems. C# binding
+      over the native Rust implementation via P/Invoke.
+    </Description>
+    <PackageLicenseExpression>BSL-1.1</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/agentstatelabs/AgentStateGraph</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/agentstatelabs/AgentStateGraph</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>agent;state;versioning;ai;ffi;rust</PackageTags>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+</Project>
