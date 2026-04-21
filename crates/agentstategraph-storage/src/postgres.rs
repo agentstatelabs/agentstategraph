@@ -7,11 +7,9 @@
 //!   let storage = PostgresStorage::connect("postgres://localhost/agentstategraph").await?;
 //!   let storage = PostgresStorage::connect_tenant("postgres://...", "tenant-123").await?;
 //!
-//! **Note on epochs/sessions**: as of 0.6.5-beta.1 the Postgres backend
-//! only persists objects/commits/refs. The `EpochStore` and
-//! `SessionStore` impls return `StorageError::Backend("not yet
-//! implemented")`. Durable epochs + sessions on Postgres are slated
-//! for a later milestone; SQLite is the current persistent backend.
+//! As of 0.6.75-beta.1 this backend persists epochs and sessions too,
+//! with the same schema shape as SQLite (JSON-as-TEXT). Multi-tenant
+//! isolation continues via a `tenant_id` column on every table.
 
 use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
@@ -20,7 +18,7 @@ use tokio_postgres::NoTls;
 /// the binary's `--pg-pool-size` flag.
 pub const DEFAULT_POOL_SIZE: usize = 32;
 
-use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
 use chrono::{DateTime, Utc};
 
 use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
@@ -112,6 +110,50 @@ impl PostgresStorage {
 
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_ts
                     ON commits(tenant_id, timestamp DESC);
+
+                CREATE TABLE IF NOT EXISTS epochs (
+                    tenant_id       TEXT NOT NULL,
+                    id              TEXT NOT NULL,
+                    description     TEXT NOT NULL DEFAULT '',
+                    status          TEXT NOT NULL DEFAULT 'Active',
+                    created_at      TEXT NOT NULL,
+                    sealed_at       TEXT,
+                    summary         TEXT,
+                    root_intents    TEXT NOT NULL DEFAULT '[]',
+                    agents          TEXT NOT NULL DEFAULT '[]',
+                    tags            TEXT NOT NULL DEFAULT '[]',
+                    commit_count    INTEGER NOT NULL DEFAULT 0,
+                    sealed_commits  TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY (tenant_id, id)
+                );
+
+                CREATE TABLE IF NOT EXISTS sessions (
+                    tenant_id       TEXT NOT NULL,
+                    id              TEXT NOT NULL,
+                    agent_id        TEXT NOT NULL,
+                    parent_id       TEXT,
+                    scope_path      TEXT,
+                    scope_branch    TEXT,
+                    status          TEXT NOT NULL DEFAULT 'Active',
+                    created_at      TEXT NOT NULL,
+                    ended_at        TEXT,
+                    metadata        TEXT NOT NULL DEFAULT '{}',
+                    commit_count    INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (tenant_id, id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_epochs_tenant_status
+                    ON epochs(tenant_id, status);
+                CREATE INDEX IF NOT EXISTS idx_sessions_tenant_agent
+                    ON sessions(tenant_id, agent_id);
+
+                ALTER TABLE commits ADD COLUMN IF NOT EXISTS epoch_id TEXT;
+                ALTER TABLE commits ADD COLUMN IF NOT EXISTS session_id TEXT;
+
+                CREATE INDEX IF NOT EXISTS idx_commits_tenant_epoch
+                    ON commits(tenant_id, epoch_id);
+                CREATE INDEX IF NOT EXISTS idx_commits_tenant_session
+                    ON commits(tenant_id, session_id);
                 ",
             )
             .await
@@ -468,61 +510,585 @@ impl RefStore for PostgresStorage {
 }
 
 // ---------------------------------------------------------------------------
-// Epoch + Session stubs — see module-level doc comment.
+// Helpers for Epoch / Session row assembly. Parallel to the SQLite backend.
 // ---------------------------------------------------------------------------
 
-fn not_yet_implemented() -> StorageError {
-    StorageError::Backend("not yet implemented".into())
+fn epoch_status_str(s: &EpochStatus) -> &'static str {
+    match s {
+        EpochStatus::Active => "Active",
+        EpochStatus::Sealed => "Sealed",
+        EpochStatus::Archived => "Archived",
+    }
 }
+
+fn parse_epoch_status(s: &str) -> EpochStatus {
+    match s {
+        "Sealed" => EpochStatus::Sealed,
+        "Archived" => EpochStatus::Archived,
+        _ => EpochStatus::Active,
+    }
+}
+
+fn parse_rfc3339(s: &str) -> Result<DateTime<Utc>, StorageError> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| StorageError::Serialization(format!("timestamp parse: {}", e)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_to_epoch(
+    id: String,
+    description: String,
+    status: String,
+    created_at: String,
+    sealed_at: Option<String>,
+    summary: Option<String>,
+    root_intents: String,
+    agents: String,
+    tags: String,
+    sealed_commits: String,
+) -> Result<Epoch, StorageError> {
+    let root_intents: Vec<String> = serde_json::from_str(&root_intents)
+        .map_err(|e| StorageError::Serialization(format!("root_intents: {}", e)))?;
+    let agents: Vec<String> = serde_json::from_str(&agents)
+        .map_err(|e| StorageError::Serialization(format!("agents: {}", e)))?;
+    let tags: Vec<String> = serde_json::from_str(&tags)
+        .map_err(|e| StorageError::Serialization(format!("tags: {}", e)))?;
+    let sealed_commits: Vec<ObjectId> = serde_json::from_str(&sealed_commits)
+        .map_err(|e| StorageError::Serialization(format!("sealed_commits: {}", e)))?;
+
+    Ok(Epoch {
+        id,
+        description,
+        root_intents,
+        status: parse_epoch_status(&status),
+        created_at: parse_rfc3339(&created_at)?,
+        sealed_at: sealed_at.as_deref().map(parse_rfc3339).transpose()?,
+        seal_summary: summary,
+        seal_hash: None,
+        commits: Vec::new(),
+        agents,
+        branches: Vec::new(),
+        tags,
+        sealed_commits,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_to_session(
+    id: String,
+    agent_id: String,
+    parent_id: Option<String>,
+    scope_path: Option<String>,
+    scope_branch: Option<String>,
+    status: String,
+    created_at: String,
+    ended_at: Option<String>,
+    metadata: String,
+) -> Result<Session, StorageError> {
+    #[derive(serde::Deserialize, Default)]
+    struct Meta {
+        #[serde(default)]
+        head: Option<ObjectId>,
+        #[serde(default)]
+        delegated_intent: Option<String>,
+        #[serde(default)]
+        report_to: Option<String>,
+        #[serde(default)]
+        working_branch: Option<String>,
+    }
+    let meta: Meta = serde_json::from_str(&metadata).unwrap_or_default();
+    let head = meta.head.unwrap_or_else(|| ObjectId::hash(b""));
+    let working_branch = meta
+        .working_branch
+        .unwrap_or_else(|| scope_branch.clone().unwrap_or_default());
+    Ok(Session {
+        id,
+        agent_id,
+        working_branch,
+        head,
+        parent_session: parent_id,
+        delegated_intent: meta.delegated_intent,
+        report_to: meta.report_to,
+        path_scope: scope_path,
+        status: SessionStatus::from_wire(&status),
+        created_at: parse_rfc3339(&created_at)?,
+        ended_at: ended_at.as_deref().map(parse_rfc3339).transpose()?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// EpochStore
+// ---------------------------------------------------------------------------
 
 impl EpochStore for PostgresStorage {
-    fn create_epoch(&self, _epoch: &Epoch) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+    fn create_epoch(&self, epoch: &Epoch) -> Result<(), StorageError> {
+        let root_intents = serde_json::to_string(&epoch.root_intents)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let agents = serde_json::to_string(&epoch.agents)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let tags = serde_json::to_string(&epoch.tags)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let sealed_commits = serde_json::to_string(&epoch.sealed_commits)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            client
+                .execute(
+                    "INSERT INTO epochs
+                     (tenant_id, id, description, status, created_at, sealed_at,
+                      summary, root_intents, agents, tags, commit_count, sealed_commits)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                    &[
+                        &self.tenant_id,
+                        &epoch.id,
+                        &epoch.description,
+                        &epoch_status_str(&epoch.status),
+                        &epoch.created_at.to_rfc3339(),
+                        &epoch.sealed_at.map(|t| t.to_rfc3339()),
+                        &epoch.seal_summary,
+                        &root_intents,
+                        &agents,
+                        &tags,
+                        &(epoch.commits.len() as i64),
+                        &sealed_commits,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("create epoch: {}", e)))?;
+            Ok(())
+        })
     }
+
     fn seal_epoch(
         &self,
-        _id: &str,
-        _summary: &str,
-        _sealed_at: DateTime<Utc>,
-        _sealed_commits: &[ObjectId],
+        id: &str,
+        summary: &str,
+        sealed_at: DateTime<Utc>,
+        sealed_commits: &[ObjectId],
     ) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+        let sc_json = serde_json::to_string(sealed_commits)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let row = client
+                .query_opt(
+                    "SELECT status FROM epochs WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("seal lookup: {}", e)))?;
+
+            match row.as_ref().map(|r| r.get::<_, String>("status")) {
+                None => Err(StorageError::Backend(format!("epoch not found: {}", id))),
+                Some(s) if s == "Sealed" || s == "Archived" => {
+                    Err(StorageError::EpochAlreadySealed { id: id.to_string() })
+                }
+                _ => {
+                    client
+                        .execute(
+                            "UPDATE epochs
+                             SET status = 'Sealed', sealed_at = $1, summary = $2,
+                                 sealed_commits = $3
+                             WHERE tenant_id = $4 AND id = $5",
+                            &[
+                                &sealed_at.to_rfc3339(),
+                                &summary,
+                                &sc_json,
+                                &self.tenant_id,
+                                &id,
+                            ],
+                        )
+                        .await
+                        .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
+                    Ok(())
+                }
+            }
+        })
     }
+
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
-        Err(not_yet_implemented())
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let rows = client
+                .query(
+                    "SELECT id, description, status, created_at, sealed_at, summary,
+                            root_intents, agents, tags, sealed_commits
+                     FROM epochs
+                     WHERE tenant_id = $1
+                     ORDER BY created_at DESC",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("list epochs: {}", e)))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(row_to_epoch(
+                    row.get("id"),
+                    row.get("description"),
+                    row.get("status"),
+                    row.get("created_at"),
+                    row.get("sealed_at"),
+                    row.get("summary"),
+                    row.get("root_intents"),
+                    row.get("agents"),
+                    row.get("tags"),
+                    row.get("sealed_commits"),
+                )?);
+            }
+            Ok(out)
+        })
     }
-    fn get_epoch(&self, _id: &str) -> Result<Option<Epoch>, StorageError> {
-        Err(not_yet_implemented())
+
+    fn get_epoch(&self, id: &str) -> Result<Option<Epoch>, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let row = client
+                .query_opt(
+                    "SELECT id, description, status, created_at, sealed_at, summary,
+                            root_intents, agents, tags, sealed_commits
+                     FROM epochs WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("get epoch: {}", e)))?;
+
+            match row {
+                None => Ok(None),
+                Some(row) => Ok(Some(row_to_epoch(
+                    row.get("id"),
+                    row.get("description"),
+                    row.get("status"),
+                    row.get("created_at"),
+                    row.get("sealed_at"),
+                    row.get("summary"),
+                    row.get("root_intents"),
+                    row.get("agents"),
+                    row.get("tags"),
+                    row.get("sealed_commits"),
+                )?)),
+            }
+        })
     }
-    fn set_commit_epoch(&self, _commit_id: &ObjectId, _epoch_id: &str) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+
+    fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let row = client
+                .query_opt(
+                    "SELECT status FROM epochs WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &epoch_id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("assoc lookup: {}", e)))?;
+
+            match row.as_ref().map(|r| r.get::<_, String>("status")) {
+                None => {
+                    return Err(StorageError::Backend(format!(
+                        "epoch not found: {}",
+                        epoch_id
+                    )));
+                }
+                Some(s) if s == "Sealed" || s == "Archived" => {
+                    return Err(StorageError::EpochAlreadySealed {
+                        id: epoch_id.to_string(),
+                    });
+                }
+                _ => {}
+            }
+
+            client
+                .execute(
+                    "UPDATE commits SET epoch_id = $1 WHERE tenant_id = $2 AND id = $3",
+                    &[&epoch_id, &self.tenant_id, &commit_id.as_bytes().as_slice()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("set commit epoch: {}", e)))?;
+
+            client
+                .execute(
+                    "UPDATE epochs SET commit_count = (
+                         SELECT COUNT(*) FROM commits
+                          WHERE tenant_id = $1 AND epoch_id = epochs.id
+                     )
+                     WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &epoch_id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("update commit_count: {}", e)))?;
+
+            Ok(())
+        })
     }
 }
 
+// ---------------------------------------------------------------------------
+// SessionStore
+// ---------------------------------------------------------------------------
+
 impl SessionStore for PostgresStorage {
-    fn create_session(&self, _session: &Session) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+    fn create_session(&self, session: &Session) -> Result<(), StorageError> {
+        let metadata = serde_json::json!({
+            "head": session.head,
+            "delegated_intent": session.delegated_intent,
+            "report_to": session.report_to,
+            "working_branch": session.working_branch,
+        })
+        .to_string();
+
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            client
+                .execute(
+                    "INSERT INTO sessions
+                     (tenant_id, id, agent_id, parent_id, scope_path, scope_branch,
+                      status, created_at, ended_at, metadata, commit_count)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                             COALESCE(
+                                 (SELECT commit_count FROM sessions
+                                  WHERE tenant_id = $1 AND id = $2),
+                                 0))
+                     ON CONFLICT (tenant_id, id) DO UPDATE
+                       SET agent_id = EXCLUDED.agent_id,
+                           parent_id = EXCLUDED.parent_id,
+                           scope_path = EXCLUDED.scope_path,
+                           scope_branch = EXCLUDED.scope_branch,
+                           status = EXCLUDED.status,
+                           created_at = EXCLUDED.created_at,
+                           ended_at = EXCLUDED.ended_at,
+                           metadata = EXCLUDED.metadata",
+                    &[
+                        &self.tenant_id,
+                        &session.id,
+                        &session.agent_id,
+                        &session.parent_session,
+                        &session.path_scope,
+                        &session.working_branch,
+                        &session.status.as_str(),
+                        &session.created_at.to_rfc3339(),
+                        &session.ended_at.map(|t| t.to_rfc3339()),
+                        &metadata,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("create session: {}", e)))?;
+            Ok(())
+        })
     }
+
     fn end_session(
         &self,
-        _id: &str,
-        _status: SessionStatus,
-        _ended_at: DateTime<Utc>,
+        id: &str,
+        status: SessionStatus,
+        ended_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let row = client
+                .query_opt(
+                    "SELECT status FROM sessions WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("end session lookup: {}", e)))?;
+
+            match row.as_ref().map(|r| r.get::<_, String>("status")) {
+                None => Err(StorageError::Backend(format!("session not found: {}", id))),
+                Some(s) if s != "Active" => Err(StorageError::SessionEnded { id: id.to_string() }),
+                _ => {
+                    client
+                        .execute(
+                            "UPDATE sessions SET status = $1, ended_at = $2
+                             WHERE tenant_id = $3 AND id = $4",
+                            &[
+                                &status.as_str(),
+                                &ended_at.to_rfc3339(),
+                                &self.tenant_id,
+                                &id,
+                            ],
+                        )
+                        .await
+                        .map_err(|e| StorageError::Backend(format!("end session: {}", e)))?;
+                    Ok(())
+                }
+            }
+        })
     }
-    fn list_sessions(&self, _agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
-        Err(not_yet_implemented())
+
+    fn list_sessions(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let rows = client
+                .query(
+                    "SELECT id, agent_id, parent_id, scope_path, scope_branch, status,
+                            created_at, ended_at, metadata
+                     FROM sessions
+                     WHERE tenant_id = $1 AND ($2::text IS NULL OR agent_id = $2)
+                     ORDER BY created_at DESC",
+                    &[&self.tenant_id, &agent_filter],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("list sessions: {}", e)))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(row_to_session(
+                    row.get("id"),
+                    row.get("agent_id"),
+                    row.get("parent_id"),
+                    row.get("scope_path"),
+                    row.get("scope_branch"),
+                    row.get("status"),
+                    row.get("created_at"),
+                    row.get("ended_at"),
+                    row.get("metadata"),
+                )?);
+            }
+            Ok(out)
+        })
     }
-    fn get_session(&self, _id: &str) -> Result<Option<Session>, StorageError> {
-        Err(not_yet_implemented())
+
+    fn get_session(&self, id: &str) -> Result<Option<Session>, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let row = client
+                .query_opt(
+                    "SELECT id, agent_id, parent_id, scope_path, scope_branch, status,
+                            created_at, ended_at, metadata
+                     FROM sessions WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("get session: {}", e)))?;
+
+            match row {
+                None => Ok(None),
+                Some(row) => Ok(Some(row_to_session(
+                    row.get("id"),
+                    row.get("agent_id"),
+                    row.get("parent_id"),
+                    row.get("scope_path"),
+                    row.get("scope_branch"),
+                    row.get("status"),
+                    row.get("created_at"),
+                    row.get("ended_at"),
+                    row.get("metadata"),
+                )?)),
+            }
+        })
     }
+
     fn set_commit_session(
         &self,
-        _commit_id: &ObjectId,
-        _session_id: &str,
+        commit_id: &ObjectId,
+        session_id: &str,
     ) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let row = client
+                .query_opt(
+                    "SELECT status FROM sessions WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &session_id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("assoc lookup: {}", e)))?;
+
+            match row.as_ref().map(|r| r.get::<_, String>("status")) {
+                None => {
+                    return Err(StorageError::Backend(format!(
+                        "session not found: {}",
+                        session_id
+                    )));
+                }
+                Some(s) if s != "Active" => {
+                    return Err(StorageError::SessionEnded {
+                        id: session_id.to_string(),
+                    });
+                }
+                _ => {}
+            }
+
+            client
+                .execute(
+                    "UPDATE commits SET session_id = $1 WHERE tenant_id = $2 AND id = $3",
+                    &[
+                        &session_id,
+                        &self.tenant_id,
+                        &commit_id.as_bytes().as_slice(),
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("set commit session: {}", e)))?;
+
+            client
+                .execute(
+                    "UPDATE sessions SET commit_count = (
+                         SELECT COUNT(*) FROM commits
+                          WHERE tenant_id = $1 AND session_id = sessions.id
+                     )
+                     WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &session_id],
+                )
+                .await
+                .map_err(|e| {
+                    StorageError::Backend(format!("update session commit_count: {}", e))
+                })?;
+
+            Ok(())
+        })
     }
 }
 
