@@ -189,10 +189,8 @@ fn ffi_set_external_evaluator_returns_stub_error() {
     assert!(!store.is_null(), "policy_store_new returned null");
 
     let config = CString::new(r#"{"kind":"wasm","options":{}}"#).unwrap();
-    let raw = agentstategraph_ffi::agentstategraph_policy_set_external_evaluator(
-        store,
-        config.as_ptr(),
-    );
+    let raw =
+        agentstategraph_ffi::agentstategraph_policy_set_external_evaluator(store, config.as_ptr());
     assert!(!raw.is_null(), "stub FFI returned null");
     let out = unsafe { CStr::from_ptr(raw) }
         .to_string_lossy()
