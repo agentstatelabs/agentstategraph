@@ -54,5 +54,7 @@ pub mod verifier;
 pub use error::TaskStoreError;
 pub use state::Transition;
 pub use store::TaskStore;
-pub use types::{Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus};
+pub use types::{
+    OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
+};
 pub use verifier::{NoopVerifier, Verifier, VerifyEntry, VerifyReport, VerifyResult};

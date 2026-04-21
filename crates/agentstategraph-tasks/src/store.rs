@@ -33,7 +33,7 @@ fn validate_blocker_ids(blockers: &[TaskId]) -> Result<(), TaskStoreError> {
 use crate::error::TaskStoreError;
 use crate::paths;
 use crate::state::{Transition, check_transition};
-use crate::types::{Plan, PlanStatus, Priority, Proof, Task, TaskId, TaskStatus};
+use crate::types::{OnCompleteHook, Plan, PlanStatus, Priority, Proof, Task, TaskId, TaskStatus};
 use crate::verifier::{Verifier, VerifyEntry, VerifyReport};
 
 /// A handle bound to a `Repository` and a path prefix. All operations on
@@ -192,6 +192,43 @@ impl TaskStore {
         blocked_by: Vec<TaskId>,
         assigned_to: Option<String>,
     ) -> Result<Task, TaskStoreError> {
+        self.add_task_with_extensions(
+            ref_name,
+            plan,
+            title,
+            priority,
+            parent_id,
+            blocked_by,
+            assigned_to,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Like `add_task` but also accepts the policy-fallback extension
+    /// fields (POLICY_V1.md §22.4):
+    ///
+    /// - `payload`: opaque JSON the task carries for a downstream
+    ///   consumer. The `-tasks` crate does not interpret it.
+    /// - `parent_change`: identifier of the change this task gates,
+    ///   when created from a deferred `ChangeProposal`.
+    /// - `on_complete`: hook the consumer dispatches when the task
+    ///   transitions to `Done`. The `-tasks` crate does not execute it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_task_with_extensions(
+        &self,
+        ref_name: &str,
+        plan: &str,
+        title: &str,
+        priority: Priority,
+        parent_id: Option<TaskId>,
+        blocked_by: Vec<TaskId>,
+        assigned_to: Option<String>,
+        payload: Option<serde_json::Value>,
+        parent_change: Option<String>,
+        on_complete: Option<OnCompleteHook>,
+    ) -> Result<Task, TaskStoreError> {
         if !self.plan_exists(ref_name, plan)? {
             return Err(TaskStoreError::PlanNotFound(plan.to_string()));
         }
@@ -228,6 +265,9 @@ impl TaskStore {
             abandoned_at: None,
             abandoned_reason: None,
             assigned_to,
+            payload,
+            parent_change,
+            on_complete,
         };
 
         let task_path = paths::task(&self.prefix, plan, &id);

@@ -37,6 +37,42 @@ pub struct Task {
     pub abandoned_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
+    /// Opaque JSON payload attached to a task. Used by the policy
+    /// fallback pattern (POLICY_V1.md §22.4) to stash a deferred
+    /// `ChangeProposal` or similar state for a downstream consumer to
+    /// act on when the task completes. The `-tasks` crate does not
+    /// interpret the contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    /// Identifier of the change this task gates. For the fallback
+    /// pattern this is the opaque spec / commit handle from the
+    /// original `ChangeProposal`. The `-tasks` crate does not resolve
+    /// it; consumers (MCP server, Lens) look it up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_change: Option<String>,
+    /// Hook that downstream consumers should run when this task
+    /// transitions to `Done`. The `-tasks` crate serializes and
+    /// round-trips the hook but does NOT execute it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_complete: Option<OnCompleteHook>,
+}
+
+/// A hook attached to a task, run by the consumer when the task
+/// completes. The `-tasks` crate is a pure round-trip for these —
+/// dispatch lives in the MCP server (phase 3) or other consumers
+/// (future Lens, CLI).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OnCompleteHook {
+    /// Promote a deferred `ChangeProposal` by re-running policy
+    /// evaluation with `approval_granted: <this_task_path>` attached.
+    /// The consumer is responsible for locating the proposal — usually
+    /// it lives in the task's `payload`.
+    PromoteChange,
+    /// Call an arbitrary named hook registered by the consumer.
+    /// `name` is an opaque string the consumer (e.g. the MCP server)
+    /// understands.
+    Named { name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -237,6 +273,9 @@ mod tests {
             abandoned_at: None,
             abandoned_reason: None,
             assigned_to: Some("codex".to_string()),
+            payload: None,
+            parent_change: None,
+            on_complete: None,
         };
         let json = serde_json::to_value(&task).unwrap();
         let back: Task = serde_json::from_value(json).unwrap();
