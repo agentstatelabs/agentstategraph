@@ -7,10 +7,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [0.7.25-beta.1] — 2026-04-21
 
-Theme: **C# / .NET binding.** Brand-new language binding joining
-Python / TypeScript / Go / WASM / C FFI. Everything lives under
-`bindings/dotnet/`; zero changes to the Rust workspace or any
-other binding. Six engineering sections plus a release commit.
+Theme: **C# / .NET binding (experimental).** Brand-new language
+binding joining Python / TypeScript / Go / WASM / C FFI.
+Everything lives under `bindings/dotnet/`; zero changes to the
+Rust workspace or any other binding. Six engineering sections
+plus a release commit.
+
+**Shipped as experimental / community-maintained.** The full
+surface compiles cleanly on Ubuntu / macOS / Windows, but a
+known System.Text.Json polymorphism collision on the `Decision`
+discriminator causes ~8 xUnit tests + the parity runner to
+fail at runtime. Fix is specific, documented in
+`bindings/dotnet/README.md` "Known issues"; PR welcome. The
+.NET CI job is set to `continue-on-error: true` so the rest of
+the workspace isn't gated on .NET fixes. NuGet publish is held
+until the test suite goes green.
 
 ### Added
 
