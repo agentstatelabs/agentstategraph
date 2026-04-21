@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 agentstategraph = { path = "../../crates/agentstategraph" }
 agentstategraph-core = { path = "../../crates/agentstategraph-core" }
 agentstategraph-migrate = { path = "../../crates/agentstategraph-migrate" }
+agentstategraph-policy = { path = "../../crates/agentstategraph-policy" }
 agentstategraph-storage = { path = "../../crates/agentstategraph-storage" }
 agentstategraph-tasks = { path = "../../crates/agentstategraph-tasks" }
 semver = "1"

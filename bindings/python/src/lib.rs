@@ -16,13 +16,18 @@ use std::sync::Arc;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use agentstategraph::session::{Session, SessionStatus};
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_policy::{
+    ChangeProposal, Decision, Policy, PolicyStore as PolicyBackend, Situation,
+};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use agentstategraph_tasks::{
-    NoopVerifier, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
-    TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyEntry, VerifyReport, VerifyResult,
+    NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
+    TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyEntry, VerifyReport,
+    VerifyResult,
 };
 
 /// Convert a Python JSON-compatible value to a AgentStateGraph Object.
@@ -797,6 +802,20 @@ fn task_to_dict(py: Python<'_>, t: &Task) -> PyResult<PyObject> {
     d.set_item("abandoned_at", t.abandoned_at.map(|x| x.to_rfc3339()))?;
     d.set_item("abandoned_reason", t.abandoned_reason.clone())?;
     d.set_item("assigned_to", t.assigned_to.clone())?;
+    // Policy-fallback extension fields (POLICY_V1.md §22.4).
+    if let Some(payload) = &t.payload {
+        d.set_item("payload", json_to_py(py, payload)?)?;
+    } else {
+        d.set_item("payload", py.None())?;
+    }
+    d.set_item("parent_change", t.parent_change.clone())?;
+    if let Some(hook) = &t.on_complete {
+        let v = serde_json::to_value(hook)
+            .map_err(|e| PyRuntimeError::new_err(format!("on_complete serialize: {e}")))?;
+        d.set_item("on_complete", json_to_py(py, &v)?)?;
+    } else {
+        d.set_item("on_complete", py.None())?;
+    }
     Ok(d.into())
 }
 
@@ -933,7 +952,8 @@ impl TaskStore {
 
     // --- Task ops ---
 
-    #[pyo3(signature = (ref_name, plan, title, priority="medium", parent_id=None, blocked_by=None, assigned_to=None))]
+    #[pyo3(signature = (ref_name, plan, title, priority="medium", parent_id=None, blocked_by=None, assigned_to=None, payload=None, parent_change=None, on_complete=None))]
+    #[allow(clippy::too_many_arguments)]
     fn add_task(
         &self,
         py: Python<'_>,
@@ -944,6 +964,9 @@ impl TaskStore {
         parent_id: Option<String>,
         blocked_by: Option<Vec<String>>,
         assigned_to: Option<String>,
+        payload: Option<&Bound<'_, PyAny>>,
+        parent_change: Option<String>,
+        on_complete: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyObject> {
         let pri = parse_priority(priority)?;
         let parent = parent_id.map(TaskId);
@@ -952,9 +975,35 @@ impl TaskStore {
             .into_iter()
             .map(TaskId)
             .collect();
+        let payload_val = match payload {
+            None => None,
+            Some(v) if v.is_none() => None,
+            Some(v) => Some(py_any_to_json(py, v)?),
+        };
+        let on_complete_val = match on_complete {
+            None => None,
+            Some(v) if v.is_none() => None,
+            Some(v) => {
+                let json = py_any_to_json(py, v)?;
+                let hook: OnCompleteHook = serde_json::from_value(json)
+                    .map_err(|e| PyRuntimeError::new_err(format!("invalid on_complete: {e}")))?;
+                Some(hook)
+            }
+        };
         let task = self
             .inner
-            .add_task(ref_name, plan, title, pri, parent, blockers, assigned_to)
+            .add_task_with_extensions(
+                ref_name,
+                plan,
+                title,
+                pri,
+                parent,
+                blockers,
+                assigned_to,
+                payload_val,
+                parent_change,
+                on_complete_val,
+            )
             .map_err(task_err)?;
         task_to_dict(py, &task)
     }
@@ -1169,11 +1218,355 @@ impl TaskStore {
 #[allow(dead_code)]
 fn _touch_unused(_: &VerifyEntry) {}
 
+// =========================================================================
+// JSON bridge helpers (shared by PolicyStore + Session + Task extensions)
+// =========================================================================
+
+/// Convert any Python value to `serde_json::Value` via `json.dumps`.
+fn py_any_to_json(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    let json_mod = py.import("json")?;
+    let s: String = json_mod.call_method1("dumps", (value,))?.extract()?;
+    serde_json::from_str(&s).map_err(|e| PyRuntimeError::new_err(format!("JSON parse: {e}")))
+}
+
+fn policy_err(e: agentstategraph_policy::PolicyError) -> PyErr {
+    PyRuntimeError::new_err(e.to_string())
+}
+
+fn session_err(e: agentstategraph::SessionError) -> PyErr {
+    PyRuntimeError::new_err(e.to_string())
+}
+
+// =========================================================================
+// PolicyStore — wraps agentstategraph_policy::PolicyStore
+// =========================================================================
+
+/// PolicyStore — situation-matching authorization + change-cost policies.
+///
+/// Wraps `agentstategraph_policy::PolicyStore`. Construct from an
+/// `AgentStateGraph`, a path prefix (e.g. `/policies`), and an agent_id.
+///
+/// All complex values (Policy, Situation, ChangeProposal, Decision) are
+/// passed as plain Python dicts; the wrapper serializes them through
+/// serde_json round-trips to keep the Python surface small.
+#[pyclass]
+struct PolicyStore {
+    inner: PolicyBackend,
+}
+
+#[pymethods]
+impl PolicyStore {
+    #[new]
+    #[pyo3(signature = (asg, prefix="/policies", agent_id="python"))]
+    fn new(asg: &AgentStateGraph, prefix: &str, agent_id: &str) -> Self {
+        Self {
+            inner: PolicyBackend::new(Arc::clone(&asg.repo), prefix, agent_id),
+        }
+    }
+
+    // --- Write ops ---
+
+    /// Write a proposed (unratified) policy. Returns the "path@version"
+    /// handle on success. Fails if a policy already exists at that path.
+    fn propose(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        policy: &Bound<'_, PyAny>,
+    ) -> PyResult<String> {
+        let json = py_any_to_json(py, policy)?;
+        let p: Policy = serde_json::from_value(json)
+            .map_err(|e| PyRuntimeError::new_err(format!("invalid policy dict: {e}")))?;
+        self.inner.propose(ref_name, p).map_err(policy_err)
+    }
+
+    /// Ratify an unratified proposal at `path`.
+    fn ratify(&self, ref_name: &str, path: &str, ratifier: &str, reasoning: &str) -> PyResult<()> {
+        self.inner
+            .ratify(ref_name, path, ratifier, reasoning)
+            .map_err(policy_err)
+    }
+
+    /// Replace the active policy at `path` with `new_policy`. Returns
+    /// the new "path@version" handle.
+    fn supersede(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        path: &str,
+        new_policy: &Bound<'_, PyAny>,
+    ) -> PyResult<String> {
+        let json = py_any_to_json(py, new_policy)?;
+        let p: Policy = serde_json::from_value(json)
+            .map_err(|e| PyRuntimeError::new_err(format!("invalid policy dict: {e}")))?;
+        self.inner.supersede(ref_name, path, p).map_err(policy_err)
+    }
+
+    // --- Read ops ---
+
+    /// List every policy (active versions, ratified or not) whose path
+    /// starts with `prefix_filter`. `None` lists everything.
+    #[pyo3(signature = (ref_name, prefix_filter=None))]
+    fn list(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        prefix_filter: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let policies = self
+            .inner
+            .list(ref_name, prefix_filter)
+            .map_err(policy_err)?;
+        policies_to_pylist(py, &policies)
+    }
+
+    /// List currently-active policies (ratified AND `active_from <= now`).
+    #[pyo3(signature = (ref_name, prefix_filter=None))]
+    fn active(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        prefix_filter: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let policies = self
+            .inner
+            .active(ref_name, prefix_filter)
+            .map_err(policy_err)?;
+        policies_to_pylist(py, &policies)
+    }
+
+    /// Fetch a policy at `path`. If `version` is provided, returns the
+    /// pinned historical version; otherwise the current active version.
+    #[pyo3(signature = (ref_name, path, version=None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        path: &str,
+        version: Option<u64>,
+    ) -> PyResult<PyObject> {
+        let p = self
+            .inner
+            .get(ref_name, path, version)
+            .map_err(policy_err)?;
+        policy_to_py(py, &p)
+    }
+
+    /// Walk the supersedes chain (oldest first → current).
+    fn history(&self, py: Python<'_>, ref_name: &str, path: &str) -> PyResult<PyObject> {
+        let policies = self.inner.history(ref_name, path).map_err(policy_err)?;
+        policies_to_pylist(py, &policies)
+    }
+
+    /// Authorization evaluation (POLICY_V1.md §5). Returns a Decision
+    /// dict with a "kind" field.
+    fn evaluate(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        situation: &Bound<'_, PyAny>,
+        action: &str,
+        agent_id: &str,
+    ) -> PyResult<PyObject> {
+        let sit = situation_from_py(py, situation)?;
+        let decision = self
+            .inner
+            .evaluate(ref_name, &sit, action, agent_id)
+            .map_err(policy_err)?;
+        decision_to_py(py, &decision)
+    }
+
+    /// Change-proposal evaluation (POLICY_V1.md §22.2). Returns a
+    /// Decision dict.
+    fn evaluate_change(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        proposal: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        let json = py_any_to_json(py, proposal)?;
+        let prop: ChangeProposal = serde_json::from_value(json)
+            .map_err(|e| PyRuntimeError::new_err(format!("invalid proposal: {e}")))?;
+        let decision = self
+            .inner
+            .evaluate_change(ref_name, &prop)
+            .map_err(policy_err)?;
+        decision_to_py(py, &decision)
+    }
+
+    /// List ratified policies whose `triggers` intersect the given token
+    /// set. Convenience helper exposing the same filter
+    /// `evaluate_change` uses internally.
+    fn check_tokens(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        tokens: Vec<String>,
+    ) -> PyResult<PyObject> {
+        let actives = self.inner.active(ref_name, None).map_err(policy_err)?;
+        let token_set: std::collections::HashSet<&str> =
+            tokens.iter().map(|s| s.as_str()).collect();
+        let matched: Vec<Policy> = actives
+            .into_iter()
+            .filter(|p| p.triggers.iter().any(|t| token_set.contains(t.as_str())))
+            .collect();
+        policies_to_pylist(py, &matched)
+    }
+}
+
+fn policy_to_py(py: Python<'_>, p: &Policy) -> PyResult<PyObject> {
+    let v = serde_json::to_value(p)
+        .map_err(|e| PyRuntimeError::new_err(format!("policy serialize: {e}")))?;
+    json_to_py(py, &v)
+}
+
+fn policies_to_pylist(py: Python<'_>, policies: &[Policy]) -> PyResult<PyObject> {
+    let list = pyo3::types::PyList::empty(py);
+    for p in policies {
+        list.append(policy_to_py(py, p)?)?;
+    }
+    Ok(list.into())
+}
+
+fn decision_to_py(py: Python<'_>, d: &Decision) -> PyResult<PyObject> {
+    let v = serde_json::to_value(d)
+        .map_err(|e| PyRuntimeError::new_err(format!("decision serialize: {e}")))?;
+    json_to_py(py, &v)
+}
+
+fn situation_from_py(py: Python<'_>, situation: &Bound<'_, PyAny>) -> PyResult<Situation> {
+    // Accept either a dict[str,str] (the transparent serde form) or a
+    // {"facts": {...}} wrapper for future-proofing. Fall back to a full
+    // JSON round-trip for anything else.
+    if let Ok(map) = situation.extract::<std::collections::HashMap<String, String>>() {
+        return Ok(Situation::from(map));
+    }
+    let json = py_any_to_json(py, situation)?;
+    serde_json::from_value(json)
+        .map_err(|e| PyRuntimeError::new_err(format!("invalid situation: {e}")))
+}
+
+// =========================================================================
+// Session — wraps agentstategraph::session::{Session, SessionStatus}
+// =========================================================================
+
+fn session_status_str(s: &SessionStatus) -> &'static str {
+    match s {
+        SessionStatus::Active => "active",
+        SessionStatus::Completed => "completed",
+        SessionStatus::Abandoned => "abandoned",
+    }
+}
+
+fn parse_session_status(s: &str) -> PyResult<SessionStatus> {
+    match s.to_lowercase().as_str() {
+        "active" => Ok(SessionStatus::Active),
+        "completed" => Ok(SessionStatus::Completed),
+        "abandoned" => Ok(SessionStatus::Abandoned),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid session status {other:?}; expected active|completed|abandoned"
+        ))),
+    }
+}
+
+fn session_to_dict(py: Python<'_>, s: &Session) -> PyResult<PyObject> {
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("id", &s.id)?;
+    d.set_item("agent_id", &s.agent_id)?;
+    d.set_item("working_branch", &s.working_branch)?;
+    d.set_item("head", s.head.to_string())?;
+    d.set_item("parent_session", s.parent_session.clone())?;
+    d.set_item("delegated_intent", s.delegated_intent.clone())?;
+    d.set_item("report_to", s.report_to.clone())?;
+    d.set_item("path_scope", s.path_scope.clone())?;
+    d.set_item("status", session_status_str(&s.status))?;
+    d.set_item("created_at", s.created_at.to_rfc3339())?;
+    d.set_item("ended_at", s.ended_at.map(|t| t.to_rfc3339()))?;
+    Ok(d.into())
+}
+
+/// Session operations — sub-agent orchestration. Exposed via
+/// `AgentStateGraph.sessions()`-style methods (but attached directly to
+/// AgentStateGraph for API simplicity).
+#[pymethods]
+impl AgentStateGraph {
+    /// Create a durable session record. `head` defaults to the tip of
+    /// `working_branch` if omitted.
+    #[pyo3(signature = (agent_id, working_branch="main", parent_session=None, delegated_intent=None, report_to=None, path_scope=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_session(
+        &self,
+        py: Python<'_>,
+        agent_id: &str,
+        working_branch: &str,
+        parent_session: Option<String>,
+        delegated_intent: Option<String>,
+        report_to: Option<String>,
+        path_scope: Option<String>,
+    ) -> PyResult<PyObject> {
+        // Resolve head via a 1-commit log read on the working branch.
+        let head = {
+            let log = self
+                .repo
+                .log(working_branch, 1)
+                .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
+            log.into_iter()
+                .next()
+                .map(|c| c.id)
+                .ok_or_else(|| PyRuntimeError::new_err(format!("ref {working_branch:?} empty")))?
+        };
+        let mgr = self.repo.sessions();
+        let s = mgr
+            .create(
+                agent_id,
+                working_branch,
+                head,
+                parent_session,
+                delegated_intent,
+                report_to,
+                path_scope,
+            )
+            .map_err(session_err)?;
+        session_to_dict(py, &s)
+    }
+
+    /// Get a session by id.
+    fn get_session(&self, py: Python<'_>, id: &str) -> PyResult<PyObject> {
+        let mgr = self.repo.sessions();
+        match mgr.get(id).map_err(session_err)? {
+            Some(s) => session_to_dict(py, &s),
+            None => Ok(py.None()),
+        }
+    }
+
+    /// List sessions, optionally filtered by agent_id.
+    #[pyo3(signature = (agent_filter=None))]
+    fn list_sessions(&self, py: Python<'_>, agent_filter: Option<&str>) -> PyResult<PyObject> {
+        let mgr = self.repo.sessions();
+        let sessions = mgr.list(agent_filter).map_err(session_err)?;
+        let list = pyo3::types::PyList::empty(py);
+        for s in &sessions {
+            list.append(session_to_dict(py, s)?)?;
+        }
+        Ok(list.into())
+    }
+
+    /// End a session with a given status ("active" | "completed" |
+    /// "abandoned"). `active` is legal but rarely useful — typical use
+    /// is "completed" or "abandoned".
+    fn end_session(&self, id: &str, status: &str) -> PyResult<()> {
+        let st = parse_session_status(status)?;
+        let mgr = self.repo.sessions();
+        mgr.end(id, st).map_err(session_err)
+    }
+}
+
 /// Python module definition.
 #[pymodule]
 fn agentstategraph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AgentStateGraph>()?;
     m.add_class::<TaskStore>()?;
+    m.add_class::<PolicyStore>()?;
     m.add_function(wrap_pyfunction!(exit_codes, m)?)?;
     Ok(())
 }
