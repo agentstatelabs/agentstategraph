@@ -12,7 +12,8 @@ use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{DiffOp, IntentCategory, Object, QueryFilters};
 use agentstategraph_policy::{
-    ChangeProposal, Decision, Policy, PolicySignature, PolicyStore, SignatureVerifier, Situation,
+    ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry, Policy,
+    PolicySignature, PolicyStore, SignatureVerifier, Situation,
 };
 use agentstategraph_policy_sign::{PolicySigner, canonicalize};
 use agentstategraph_tasks::{Priority, Proof, TaskId, TaskStore};
@@ -43,6 +44,12 @@ pub struct AgentStateGraphServer {
     /// `evaluate_change` therefore treat them as not-currently-active.
     /// §2c of the 0.7.5 plan.
     require_signed_policies: bool,
+    /// Optional external-evaluator registry wired through to the internal
+    /// `PolicyStore` (0.7.5 §4c). When set, policies carrying an
+    /// `external_evaluator` whose kind matches a registered runner are
+    /// dispatched through it. `None` means no external runners — every
+    /// policy goes through the local evaluator.
+    external_evaluators: Option<Arc<ExternalEvaluatorRegistry>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -574,6 +581,7 @@ impl AgentStateGraphServer {
             signer: None,
             verifier: None,
             require_signed_policies: false,
+            external_evaluators: None,
             tool_router: Self::tool_router(),
         }
     }
@@ -591,12 +599,8 @@ impl AgentStateGraphServer {
     /// rebuilt with the verifier and the current `require_signed_policies`
     /// setting.
     pub fn with_policy_verifier(mut self, verifier: Arc<dyn SignatureVerifier>) -> Self {
-        self.verifier = Some(verifier.clone());
-        self.policies = Arc::new(
-            PolicyStore::new(self.repo.clone(), "/policies", "mcp-agent")
-                .with_verifier(verifier)
-                .with_require_signed(self.require_signed_policies),
-        );
+        self.verifier = Some(verifier);
+        self.rebuild_policy_store();
         self
     }
 
@@ -605,14 +609,87 @@ impl AgentStateGraphServer {
     /// verifier the store is in pass-through mode.
     pub fn with_require_signed_policies(mut self, require: bool) -> Self {
         self.require_signed_policies = require;
-        if let Some(verifier) = self.verifier.clone() {
-            self.policies = Arc::new(
-                PolicyStore::new(self.repo.clone(), "/policies", "mcp-agent")
-                    .with_verifier(verifier)
-                    .with_require_signed(require),
-            );
-        }
+        self.rebuild_policy_store();
         self
+    }
+
+    /// Register an externally-constructed runner (0.7.5 §4c). May be
+    /// called multiple times to register multiple runners; the last
+    /// registration for a given `kind()` wins. The internal
+    /// `PolicyStore` is rebuilt with a registry that contains every
+    /// runner registered so far plus the current verifier /
+    /// `require_signed_policies` state.
+    pub fn with_external_evaluator(mut self, eval: Arc<dyn ExternalEvaluator>) -> Self {
+        let mut registry = match self.external_evaluators.take() {
+            Some(arc) => Arc::try_unwrap(arc).unwrap_or_else(|shared| {
+                // Another holder exists (shouldn't happen during the
+                // builder chain, but be defensive): clone its entries
+                // into a fresh registry.
+                let mut copy = ExternalEvaluatorRegistry::new();
+                for kind in shared.kinds() {
+                    if let Some(runner) = shared.get(kind) {
+                        copy.register(runner.clone());
+                    }
+                }
+                copy
+            }),
+            None => ExternalEvaluatorRegistry::new(),
+        };
+        registry.register(eval);
+        self.external_evaluators = Some(Arc::new(registry));
+        self.rebuild_policy_store();
+        self
+    }
+
+    /// Convenience: construct + register the stock WASM runner
+    /// (`agentstategraph-policy-wasm`). Equivalent to
+    /// `self.with_external_evaluator(Arc::new(WasmEvaluator::default()))`.
+    /// Gated on the `policy-wasm` feature.
+    #[cfg(feature = "policy-wasm")]
+    pub fn with_wasm_evaluator(self) -> Self {
+        self.with_external_evaluator(Arc::new(
+            agentstategraph_policy_wasm::WasmEvaluator::default(),
+        ))
+    }
+
+    /// Convenience: construct + register the stock Rego runner
+    /// (`agentstategraph-policy-rego`). The runner shells out to an
+    /// `opa` binary on `$PATH` at evaluation time. Gated on the
+    /// `policy-rego` feature.
+    #[cfg(feature = "policy-rego")]
+    pub fn with_rego_evaluator(self) -> Self {
+        self.with_external_evaluator(Arc::new(
+            agentstategraph_policy_rego::RegoEvaluator::default(),
+        ))
+    }
+
+    /// Convenience: construct + register the stock Cedar runner
+    /// (`agentstategraph-policy-cedar`). The runner shells out to a
+    /// `cedar` binary on `$PATH` at evaluation time. Gated on the
+    /// `policy-cedar` feature.
+    #[cfg(feature = "policy-cedar")]
+    pub fn with_cedar_evaluator(self) -> Self {
+        self.with_external_evaluator(Arc::new(
+            agentstategraph_policy_cedar::CedarEvaluator::default(),
+        ))
+    }
+
+    /// Rebuild `self.policies` to reflect the current verifier +
+    /// `require_signed_policies` + external-evaluator state. Called by
+    /// every builder that mutates one of those three inputs so the
+    /// store always observes the full configuration regardless of the
+    /// order the builders were chained in.
+    fn rebuild_policy_store(&mut self) {
+        let mut store = PolicyStore::new(self.repo.clone(), "/policies", "mcp-agent");
+        if let Some(verifier) = self.verifier.clone() {
+            store = store
+                .with_verifier(verifier)
+                .with_require_signed(self.require_signed_policies);
+        }
+        if let Some(registry) = self.external_evaluators.clone() {
+            store = store.with_external_evaluators(registry);
+        }
+        self.policies = Arc::new(store);
     }
 
     /// Override the fail-safe translation applied to `Decision::NoPolicyMatch`

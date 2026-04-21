@@ -57,6 +57,70 @@ pub fn tls_advice(bind_addr: &str, has_tls: bool) -> Option<String> {
     )
 }
 
+/// Apply `--external-evaluator <kind>` flags to a freshly-constructed
+/// `AgentStateGraphServer`. Unknown kinds are logged and skipped;
+/// kinds whose feature isn't compiled in are logged and skipped.
+/// Returns the (possibly modified) server so callers can chain.
+fn apply_external_evaluators(
+    #[cfg_attr(
+        not(any(
+            feature = "policy-wasm",
+            feature = "policy-rego",
+            feature = "policy-cedar"
+        )),
+        allow(unused_mut)
+    )]
+    mut srv: server::AgentStateGraphServer,
+    kinds: &[String],
+) -> server::AgentStateGraphServer {
+    for kind in kinds {
+        match kind.as_str() {
+            "wasm" => {
+                #[cfg(feature = "policy-wasm")]
+                {
+                    eprintln!("Policy: registering external evaluator 'wasm'");
+                    srv = srv.with_wasm_evaluator();
+                }
+                #[cfg(not(feature = "policy-wasm"))]
+                eprintln!(
+                    "Warning: --external-evaluator wasm requested but the \
+                     'policy-wasm' feature is not enabled; skipping."
+                );
+            }
+            "rego" => {
+                #[cfg(feature = "policy-rego")]
+                {
+                    eprintln!("Policy: registering external evaluator 'rego'");
+                    srv = srv.with_rego_evaluator();
+                }
+                #[cfg(not(feature = "policy-rego"))]
+                eprintln!(
+                    "Warning: --external-evaluator rego requested but the \
+                     'policy-rego' feature is not enabled; skipping."
+                );
+            }
+            "cedar" => {
+                #[cfg(feature = "policy-cedar")]
+                {
+                    eprintln!("Policy: registering external evaluator 'cedar'");
+                    srv = srv.with_cedar_evaluator();
+                }
+                #[cfg(not(feature = "policy-cedar"))]
+                eprintln!(
+                    "Warning: --external-evaluator cedar requested but the \
+                     'policy-cedar' feature is not enabled; skipping."
+                );
+            }
+            other => eprintln!(
+                "Warning: --external-evaluator '{}' is not a recognized kind \
+                 (expected wasm|rego|cedar); skipping.",
+                other
+            ),
+        }
+    }
+    srv
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -94,6 +158,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // of journalctl).
     let initial_admin_key = std::env::var("ASG_INITIAL_ADMIN_KEY").ok();
     let mut initial_admin_key_cli: Option<String> = None;
+    // 0.7.5 §4c: repeatable `--external-evaluator <kind>` flag. Each
+    // value (`wasm` / `rego` / `cedar`) registers the stock runner from
+    // the corresponding sibling crate — but only if that crate was
+    // compiled in via its feature flag. Unknown kinds are rejected;
+    // kinds whose feature is disabled produce a startup warning and are
+    // skipped.
+    let mut external_evaluators: Vec<String> = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -171,6 +242,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     initial_admin_key_cli = Some(args[i].clone());
                 }
             }
+            "--external-evaluator" => {
+                i += 1;
+                if i < args.len() {
+                    external_evaluators.push(args[i].clone());
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -209,6 +286,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!(
                     "      --initial-admin-key <KEY>  Bootstrap admin key (multi-tenant; env ASG_INITIAL_ADMIN_KEY)"
+                );
+                eprintln!(
+                    "      --external-evaluator <KIND>  Register stock external policy runner (wasm|rego|cedar); repeatable"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -386,7 +466,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let service = server::AgentStateGraphServer::new(repo)
+                let mut srv = server::AgentStateGraphServer::new(repo);
+                srv = apply_external_evaluators(srv, &external_evaluators);
+                let service = srv
                     .serve(rmcp::transport::stdio())
                     .await
                     .map_err(|e| format!("MCP server error: {}", e))?;

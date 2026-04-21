@@ -1364,6 +1364,41 @@ pub extern "C" fn agentstategraph_policy_verify(
     to_c_string("{\"valid\":null,\"reason\":\"no verifier registered\"}")
 }
 
+/// Configure an external policy evaluator on the store (0.7.5 §4c).
+///
+/// `config_json` accepts the opaque shape
+/// `{ "kind": "wasm" | "rego" | "cedar", "options": { ... } }`; the
+/// concrete options are runner-specific (e.g. `{"opa_path": "..."}` for
+/// Rego). This keeps the C ABI surface small — the full runner wiring
+/// happens through `AgentStateGraphServer::with_external_evaluator` on
+/// the Rust side.
+///
+/// This extern is currently a stub: it validates the pointers and
+/// unconditionally returns the envelope
+/// `{"error": "external evaluators not configured via FFI; use the server builder"}`.
+/// The symbol is declared so §5 language bindings can reference it
+/// without another header bump; real FFI runner configuration is a
+/// follow-up milestone.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_set_external_evaluator(
+    store: *const SgPolicyStore,
+    config_json: *const c_char,
+) -> *mut c_char {
+    let Some(_store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let _config = unsafe { c_to_str(config_json) };
+    // TODO(post-§4c): materialize the runner from `config_json` and
+    // attach it to a mutable handle. Today `SgPolicyStore` wraps a
+    // `PolicyStore` by value (not `Arc<Mutex<>>`), so installing a
+    // registry would require a handle redesign. The Rust-side builder
+    // `AgentStateGraphServer::with_external_evaluator` is the supported
+    // path in the meantime.
+    to_c_string(
+        "{\"error\":\"external evaluators not configured via FFI; use the server builder\"}",
+    )
+}
+
 fn parse_situation(s: &str) -> Result<Situation, serde_json::Error> {
     if s.is_empty() {
         return Ok(Situation::default());

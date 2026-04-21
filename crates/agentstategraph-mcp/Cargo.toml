@@ -21,6 +21,9 @@ agentstategraph-migrate = { path = "../agentstategraph-migrate" }
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
 agentstategraph-policy = { path = "../agentstategraph-policy" }
 agentstategraph-policy-sign = { path = "../agentstategraph-policy-sign" }
+agentstategraph-policy-wasm = { path = "../agentstategraph-policy-wasm", optional = true }
+agentstategraph-policy-rego = { path = "../agentstategraph-policy-rego", optional = true }
+agentstategraph-policy-cedar = { path = "../agentstategraph-policy-cedar", optional = true }
 ed25519-dalek = "2"
 hex = "0.4"
 semver = "1"
@@ -39,5 +42,13 @@ tower_governor = { version = "0.8", features = ["axum"] }
 governor = "0.10"
 tracing = "0.1"
 
+[features]
+default = []
+policy-wasm = ["dep:agentstategraph-policy-wasm"]
+policy-rego = ["dep:agentstategraph-policy-rego"]
+policy-cedar = ["dep:agentstategraph-policy-cedar"]
+all-external-evaluators = ["policy-wasm", "policy-rego", "policy-cedar"]
+
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+agentstategraph-ffi = { path = "../agentstategraph-ffi" }
