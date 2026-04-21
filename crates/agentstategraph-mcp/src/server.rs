@@ -240,6 +240,22 @@ pub struct SessionListParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct EnterEpochParams {
+    /// Id of an existing epoch (create it first via create_epoch).
+    /// Subsequent commits will land with commits.epoch_id set to this id
+    /// until exit_epoch is called. A sealed epoch cannot be entered.
+    pub epoch_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EnterSessionParams {
+    /// Id of an existing session. Subsequent commits will land with
+    /// commits.session_id set to this id until exit_session is called.
+    /// A session that has ended cannot be entered.
+    pub session_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ListPathsParams {
     /// Branch or ref (default: "main").
     #[serde(default = "default_ref")]
@@ -905,6 +921,99 @@ impl AgentStateGraphServer {
         let p = params.0;
         match self.repo.seal_epoch(&p.id, &p.summary) {
             Ok(()) => format!("Epoch '{}' sealed", p.id),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Set the active epoch for this server. Subsequent commits through this process will be associated with this epoch via commits.epoch_id, enabling audit rollup by epoch. The epoch must already exist (call create_epoch first) and must not be sealed. Returns the previous active epoch id, if any."
+    )]
+    async fn agentstategraph_enter_epoch(&self, params: Parameters<EnterEpochParams>) -> String {
+        let p = params.0;
+        // Validate: epoch exists and is not sealed.
+        let epoch = match self.repo.get_epoch(&p.epoch_id) {
+            Ok(e) => e,
+            Err(e) => return format!("Error: {}", e),
+        };
+        if matches!(
+            epoch.status,
+            agentstategraph_core::EpochStatus::Sealed | agentstategraph_core::EpochStatus::Archived
+        ) {
+            return format!("Error: epoch '{}' is sealed or archived", p.epoch_id);
+        }
+        let prev = match self.repo.active_epoch() {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match self.repo.set_active_epoch(Some(p.epoch_id.clone())) {
+            Ok(()) => serde_json::json!({
+                "entered": p.epoch_id,
+                "previous": prev,
+            })
+            .to_string(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Clear the active epoch for this server. Subsequent commits will not be associated with any epoch (commits.epoch_id = NULL). Returns the epoch id that was active, if any."
+    )]
+    async fn agentstategraph_exit_epoch(&self) -> String {
+        let prev = match self.repo.active_epoch() {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match self.repo.set_active_epoch(None) {
+            Ok(()) => serde_json::json!({ "exited": prev }).to_string(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Set the active session for this server. Subsequent commits will be associated with this session via commits.session_id. The session must exist and must not have ended. Returns the previous active session id, if any."
+    )]
+    async fn agentstategraph_enter_session(
+        &self,
+        params: Parameters<EnterSessionParams>,
+    ) -> String {
+        let p = params.0;
+        let session = match self.repo.sessions().get(&p.session_id) {
+            Ok(opt) => match opt {
+                Some(s) => s,
+                None => return format!("Error: session '{}' not found", p.session_id),
+            },
+            Err(e) => return format!("Error: {}", e),
+        };
+        if !matches!(session.status, agentstategraph_core::SessionStatus::Active) {
+            return format!(
+                "Error: session '{}' is not Active (status: {:?})",
+                p.session_id, session.status
+            );
+        }
+        let prev = match self.repo.active_session() {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match self.repo.set_active_session(Some(p.session_id.clone())) {
+            Ok(()) => serde_json::json!({
+                "entered": p.session_id,
+                "previous": prev,
+            })
+            .to_string(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Clear the active session for this server. Subsequent commits will not be associated with any session."
+    )]
+    async fn agentstategraph_exit_session(&self) -> String {
+        let prev = match self.repo.active_session() {
+            Ok(p) => p,
+            Err(e) => return format!("Error: {}", e),
+        };
+        match self.repo.set_active_session(None) {
+            Ok(()) => serde_json::json!({ "exited": prev }).to_string(),
             Err(e) => format!("Error: {}", e),
         }
     }

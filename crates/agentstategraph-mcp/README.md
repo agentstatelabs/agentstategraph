@@ -69,3 +69,29 @@ Inferred tokens on the implicit proposal:
 Callers can attach additional proposal metadata via the new
 `attached_fields` / `alternatives` parameters on `commit_spec` to
 satisfy a policy's `required_fields`.
+
+## Epoch + session scoping (0.6.75-beta.1)
+
+Four new tools wire the `Repository::active_epoch` / `active_session`
+plumbing (shipped in 0.6.5) to MCP clients. Tool count: 44 → 48.
+
+| Tool | One-liner |
+|---|---|
+| `enter_epoch` | Set the active epoch; subsequent commits land with `commits.epoch_id` = this id. Rejects sealed or archived epochs. Returns the previous active epoch id. |
+| `exit_epoch` | Clear the active epoch. Returns the id that was active, if any. |
+| `enter_session` | Set the active session; subsequent commits land with `commits.session_id` = this id. Rejects sessions that are not `Active`. Returns the previous active session id. |
+| `exit_session` | Clear the active session. Returns the id that was active, if any. |
+
+Typical flow from a client:
+
+```
+create_epoch(id="2026-q2-ops", ...)
+enter_epoch(epoch_id="2026-q2-ops")
+… work that produces commits …
+exit_epoch
+seal_epoch(id="2026-q2-ops", summary="...")
+```
+
+The same enter/exit pattern applies to sessions; epoch and session
+pointers are independent (clearing one does not touch the other).
+
