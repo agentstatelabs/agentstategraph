@@ -152,6 +152,7 @@ mod tests {
             expires_at: None,
             supersedes: None,
             signature: None,
+            tenant_id: None,
         }
     }
 

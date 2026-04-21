@@ -46,6 +46,7 @@ fn skeleton(path: &str, selector: Selector) -> Policy {
         expires_at: None,
         supersedes: None,
         signature: None,
+        tenant_id: None,
     }
 }
 
@@ -1106,4 +1107,30 @@ mod signature_hook {
         let back: Policy = serde_json::from_value(j).unwrap();
         assert_eq!(back.signature, p.signature);
     }
+}
+
+// -----------------------------------------------------------------------
+// §3a (0.7.5) — tenant_id serde
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_policy_tenant_id_roundtrips() {
+    let mut p = skeleton("tenant/scoped", Selector::Always);
+    p.tenant_id = Some("acme".to_string());
+    let s = serde_json::to_string(&p).unwrap();
+    assert!(s.contains("\"tenant_id\":\"acme\""));
+    let parsed: Policy = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed.tenant_id.as_deref(), Some("acme"));
+}
+
+#[test]
+fn test_policy_tenant_id_omitted_when_none() {
+    let p = skeleton("global/policy", Selector::Always);
+    assert!(p.tenant_id.is_none());
+    let s = serde_json::to_string(&p).unwrap();
+    assert!(
+        !s.contains("tenant_id"),
+        "expected tenant_id omitted when None, got {}",
+        s
+    );
 }

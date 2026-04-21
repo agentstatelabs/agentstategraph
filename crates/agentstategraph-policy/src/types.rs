@@ -75,6 +75,15 @@ pub struct Policy {
     /// has been registered on the `PolicyStore`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<PolicySignature>,
+
+    /// Tenant identifier for namespace isolation (0.7.5 §3). `None`
+    /// means the policy is a "global" policy that applies to every
+    /// tenant; `Some(id)` means the policy only applies to callers
+    /// that pass a matching `tenant_filter` into `evaluate` /
+    /// `evaluate_change`. See POLICY_V1.md §17 and ROADMAP D3 for
+    /// the cheap-namespace-discriminator rationale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
 }
 
 /// Detached signature carried on a [`Policy`]. Tagged serde union keyed

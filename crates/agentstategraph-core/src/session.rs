@@ -68,6 +68,13 @@ pub struct Session {
     /// Path scope restriction (if set, the agent can only modify paths
     /// under this prefix).
     pub path_scope: Option<String>,
+    /// Tenant scope restriction. When set, `PolicyStore::evaluate` /
+    /// `evaluate_change` consulted with a `tenant_filter` tied to this
+    /// session consult only policies whose `tenant_id` matches or is
+    /// `None` (global). Added in 0.7.5-beta.1 §3a. `None` = no tenant
+    /// scoping, same behaviour as pre-0.7.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_tenant: Option<String>,
     /// Lifecycle status.
     #[serde(default = "default_status")]
     pub status: SessionStatus,

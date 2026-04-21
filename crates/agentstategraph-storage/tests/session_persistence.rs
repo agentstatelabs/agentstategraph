@@ -20,6 +20,7 @@ fn sample_session(id: &str) -> Session {
         delegated_intent: Some("intent-1".to_string()),
         report_to: Some("agent/root".to_string()),
         path_scope: Some("/scope/test".to_string()),
+        scope_tenant: None,
         status: SessionStatus::Active,
         created_at: Utc::now(),
         ended_at: None,

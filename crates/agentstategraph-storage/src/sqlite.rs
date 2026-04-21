@@ -713,6 +713,7 @@ fn row_to_session(
         delegated_intent: meta.delegated_intent,
         report_to: meta.report_to,
         path_scope: scope_path,
+        scope_tenant: None,
         status: SessionStatus::from_wire(&status),
         created_at: parse_rfc3339(&created_at)?,
         ended_at: ended_at.as_deref().map(parse_rfc3339).transpose()?,

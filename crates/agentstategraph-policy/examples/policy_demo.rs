@@ -220,6 +220,7 @@ fn high_cost_change_policy() -> Policy {
         expires_at: None,
         supersedes: None,
         signature: None,
+        tenant_id: None,
     }
 }
 

@@ -50,6 +50,7 @@ fn base_policy(path: &str) -> Policy {
         expires_at: None,
         supersedes: None,
         signature: None,
+        tenant_id: None,
     }
 }
 
