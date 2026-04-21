@@ -392,16 +392,17 @@ func TestPolicy_ListAndActiveFilters(t *testing.T) {
 	}
 }
 
-func TestPolicy_RatifyEmptyReasoningRejected(t *testing.T) {
-	// The policy store rejects empty reasoning (POLICY_V1.md §5
-	// commit-time check); confirm the FFI error surfaces as a Go
-	// error.
+func TestPolicy_RatifyEmptyRatifierRejected(t *testing.T) {
+	// PolicyStore::ratify rejects an empty ratifier (the trimmed
+	// string must have content). Empty reasoning is stored as None
+	// — not an error — so this test guards the one commit-time
+	// check the Rust store actually enforces.
 	_, ps := newStore(t)
 	if _, err := ps.Propose("main", newPolicy("infra/x")); err != nil {
 		t.Fatal(err)
 	}
-	err := ps.Ratify("main", "infra/x", "ops", "")
+	err := ps.Ratify("main", "infra/x", "", "some reasoning")
 	if err == nil {
-		t.Fatalf("expected error for empty reasoning, got nil")
+		t.Fatalf("expected error for empty ratifier, got nil")
 	}
 }
