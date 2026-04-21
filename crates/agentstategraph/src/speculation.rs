@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_create_and_discard() {
-        let (store, root_id) = setup();
+        let (_store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
         let h = mgr
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_discard_is_instant() {
-        let (store, root_id) = setup();
+        let (_store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
         // Create many speculations
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_list_speculations() {
-        let (store, root_id) = setup();
+        let (_store, root_id) = setup();
         let mgr = SpeculationManager::new();
 
         mgr.create("main", root_id, Some("alpha".to_string()))

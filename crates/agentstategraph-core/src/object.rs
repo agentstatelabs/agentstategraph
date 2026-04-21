@@ -228,7 +228,7 @@ mod tests {
             Object::bool(true).id(),
             Object::bool(false).id(),
             Object::int(42).id(),
-            Object::float(3.14).id(),
+            Object::float(std::f64::consts::PI).id(),
             Object::string("test").id(),
             Object::bytes(vec![1, 2, 3]).id(),
         ];

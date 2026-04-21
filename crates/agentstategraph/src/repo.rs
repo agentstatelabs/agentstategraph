@@ -1931,7 +1931,7 @@ mod tests {
             .unwrap();
 
         let merge_opts = CommitOptions::new("agent/test", IntentCategory::Merge, "merge feature");
-        let merge_commit_id = repo.merge("feature", "main", merge_opts).unwrap();
+        let _merge_commit_id = repo.merge("feature", "main", merge_opts).unwrap();
 
         let log = repo.log("main", 1).unwrap();
         let merge_commit = &log[0];

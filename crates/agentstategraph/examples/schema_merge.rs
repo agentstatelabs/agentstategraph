@@ -6,7 +6,7 @@
 //! Run: cargo run --example schema_merge -p agentstategraph
 
 use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::schema::{EnforcementMode, MergeHint, Schema};
+use agentstategraph_core::schema::{EnforcementMode, Schema};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_storage::MemoryStorage;
 

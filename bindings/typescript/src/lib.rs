@@ -8,6 +8,11 @@
 //!   asg.set("/name", "my-cluster", { category: "Checkpoint", description: "init" })
 //!   asg.get("/name")  // → "my-cluster"
 
+// Binding glue: exported napi functions mirror the JS-side call shape
+// which has no natural way to collapse into fewer args. Allow the lint
+// here rather than wrapping every export in its own allow attribute.
+#![allow(clippy::too_many_arguments)]
+
 #[macro_use]
 extern crate napi_derive;
 
@@ -469,7 +474,7 @@ impl AgentStateGraph {
             None => binary_version(),
         };
         let registry = Registry::builtin();
-        let result = check(&*self.repo, &ref_name, &target, &registry).map_err(err)?;
+        let result = check(&self.repo, &ref_name, &target, &registry).map_err(err)?;
         Ok(match result {
             CheckResult::UpToDate { version } => serde_json::json!({
                 "status": "up_to_date",
@@ -525,7 +530,7 @@ impl AgentStateGraph {
         };
         let registry = Registry::builtin();
         let report = registry
-            .run(&*self.repo, &ref_name, &target, run_mode)
+            .run(&self.repo, &ref_name, &target, run_mode)
             .map_err(err)?;
 
         let steps: Vec<serde_json::Value> = report

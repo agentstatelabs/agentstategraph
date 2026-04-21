@@ -8,7 +8,7 @@
 //! Run: cargo run --example multi_agent -p stategraph
 
 use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_core::IntentCategory;
 use agentstategraph_storage::MemoryStorage;
 
 fn main() {
@@ -204,9 +204,9 @@ fn main() {
             CommitOptions::new(
                 "agent/orchestrator",
                 IntentCategory::Merge,
-                &format!("Merge {} agent work", name.to_lowercase()),
+                format!("Merge {} agent work", name.to_lowercase()),
             )
-            .with_reasoning(&format!(
+            .with_reasoning(format!(
                 "{} agent completed successfully, merging to main",
                 name
             )),

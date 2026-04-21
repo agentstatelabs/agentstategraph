@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn test_structural_type_change() {
         let mut r = TestResolver::new();
-        let old = r.store_json(&serde_json::json!({"value": "was a string"}));
+        let _old = r.store_json(&serde_json::json!({"value": "was a string"}));
         let new_list = Object::list(vec![r.store(&Object::int(1))]);
         let new_id = r.store(&new_list);
 

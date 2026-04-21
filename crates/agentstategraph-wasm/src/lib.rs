@@ -7,6 +7,10 @@
 //!   asg.set("/name", "my-cluster", "Checkpoint", "init")
 //!   asg.get("/name")  // → '"my-cluster"'
 
+// Binding glue: exported wasm-bindgen functions mirror the JS-side
+// call shape which has no natural way to collapse into fewer args.
+#![allow(clippy::too_many_arguments)]
+
 use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;

@@ -148,10 +148,8 @@ fn main() {
     println!("--- All epochs ---\n");
     for epoch in &all_epochs {
         println!(
-            "  {} [{}] — {}",
-            epoch.id,
-            format!("{:?}", epoch.status),
-            epoch.description
+            "  {} [{:?}] — {}",
+            epoch.id, epoch.status, epoch.description
         );
     }
 

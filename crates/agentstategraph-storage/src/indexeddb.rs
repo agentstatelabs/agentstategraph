@@ -333,7 +333,7 @@ impl RefStore for IndexedDbStorage {
 fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
     // Strip "sg_" prefix if present
     let hex = hex.strip_prefix("sg_").unwrap_or(hex);
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     (0..hex.len())

@@ -547,7 +547,7 @@ mod tests {
 
         match three_way_merge(&r, &base, &ours, &theirs) {
             MergeResult::Conflicts { conflicts, .. } => {
-                assert!(conflicts.len() >= 1);
+                assert!(!conflicts.is_empty());
             }
             _ => panic!("expected conflict"),
         }
@@ -562,7 +562,7 @@ mod tests {
 
         match three_way_merge(&r, &base, &ours, &theirs) {
             MergeResult::Conflicts { conflicts, .. } => {
-                assert!(conflicts.len() >= 1, "delete-vs-modify should conflict");
+                assert!(!conflicts.is_empty(), "delete-vs-modify should conflict");
             }
             _ => panic!("expected conflict for delete-vs-modify"),
         }
@@ -582,7 +582,7 @@ mod tests {
         }));
 
         match three_way_merge(&r, &base, &ours, &theirs) {
-            MergeResult::Success(merged) => {
+            MergeResult::Success(_merged) => {
                 // subnet should be ours (192.168.0.0/16), dns should be theirs (1.1.1.1)
                 // This is a successful merge of non-conflicting nested changes
             }

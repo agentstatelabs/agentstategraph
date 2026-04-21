@@ -141,11 +141,7 @@ fn main() {
     println!("\n--- Commit log ---\n");
     let log = repo.log("main", 10).unwrap();
     for commit in log.iter().rev() {
-        println!(
-            "  {} [{}]",
-            commit.id.short(),
-            format!("{:?}", commit.intent.category)
-        );
+        println!("  {} [{:?}]", commit.id.short(), commit.intent.category);
         println!("    agent: {}", commit.agent_id);
         println!("    intent: {}", commit.intent.description);
         if !commit.intent.tags.is_empty() {

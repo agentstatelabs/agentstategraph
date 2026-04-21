@@ -45,8 +45,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Clippy
-        run: cargo clippy --workspace --exclude agentstategraph-wasm --exclude agentstategraph-python --exclude agentstategraph-napi -- -D warnings
-        continue-on-error: true  # Don't block PRs on clippy initially
+        # -D warnings is mandatory as of 0.6.75-beta.1 — see ROADMAP.md
+        # Working agreements. Only agentstategraph-python is excluded
+        # (environmental _PyBaseObject_Type link issue on some runners).
+        run: cargo clippy --workspace --exclude agentstategraph-python --all-targets -- -D warnings
 
   fmt:
     name: Format
