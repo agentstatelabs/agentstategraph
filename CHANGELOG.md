@@ -5,6 +5,102 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.0-beta.1] — 2026-04-21
+
+Theme: **bring all existing bindings current.** The policy primitive
+(0.6.0) and the Task extensions (0.6.0) and the Session relocation
+(0.6.5) are now surfaced through every language binding except C#
+(its own milestone at 0.7.25). Nine engineering sections plus a
+release commit, each on its own commit per the ROADMAP.md
+section-granular rule.
+
+### Added
+
+- **`Policy.active_from` enforced in the evaluator.** A ratified
+  policy with `active_from > now` is treated as not-yet-active —
+  `evaluate()` and `evaluate_change()` skip it the same way they
+  skip an unratified proposal. Enables scheduled go-live per
+  POLICY_V1.md §17. New helper `Policy::is_currently_active(now)`.
+  `expires_at` remains advisory metadata; expiry enforcement is
+  scheduled for 0.7.5.
+
+- **Python binding**: PolicyStore class with 10 methods (propose /
+  ratify / supersede / list / active / get / history / evaluate /
+  evaluate_change / check_tokens). Complex types (Policy, Decision,
+  FallbackAction, Severity, ChangeProposal, Situation, Selector,
+  AuthorizedAction, ApprovalRule, ProcedureStep, OnCompleteHook)
+  pass as serde-JSON dicts. Session + SessionStatus round-trip via
+  new `AgentStateGraph.{create,get,list,end}_session` methods.
+  `Task.payload` / `parent_change` / `on_complete` round-trip via
+  `TaskStore.add_task` kwargs. 14 new Python tests.
+
+- **TypeScript binding**: napi-rs wrappers mirroring Python's
+  surface. PolicyStore class, same 10 methods, JS-object idiom via
+  serde round-trip. `createSession` / `getSession` / `listSessions`
+  / `endSession` methods. `TaskStore.add_task` extended with three
+  trailing-optional args. 11 new node:test cases.
+
+- **C FFI binding**: 12 new extern C functions
+  (`agentstategraph_policy_store_{new,free}` plus the 10 operations)
+  and the `SgPolicyStore` opaque handle. JSON round-trip on every
+  non-primitive field. Declarations added to the shared header at
+  `bindings/go/agentstategraph.h`. 10 new native Rust FFI tests.
+
+- **Go binding**: cgo wrappers over the C FFI. `*PolicyStore` with
+  10 methods returning typed Go structs (Policy, Decision,
+  ChangeProposal, etc.). Variant-tagged sub-documents exposed as
+  `json.RawMessage` so Go callers unmarshal into the variant they
+  need. 13 new Go tests.
+
+- **WASM binding**: wasm-bindgen wrappers. PolicyStore with 10
+  methods, JSON-string boundary idiom (matches existing TaskStore
+  surface in this crate). `createSession` / `getSession` /
+  `listSessions` / `endSession` wrappers on `WasmAgentStateGraph`.
+  `tasksAddTaskWithExtensions` for the Task extension fields. 13
+  new wasm-bindgen-test cases, gated behind `#[cfg(target_arch =
+  "wasm32")]`.
+
+- **Cross-binding parity tests**: shared scenario fixture at
+  `spec/policy_parity_fixture.json` exercised from six runners —
+  Rust reference (`agentstategraph-policy`) plus Python, TS, Go,
+  WASM, and C FFI. All six produce identical `Decision.kind` and
+  `matched_policy` for the same inputs. Scenario is the POLICY_V1.md
+  §22.7 OpenSearch flow with an extra policy ratified-but-future-
+  active to guard §1 regressions.
+
+### Changed
+
+- **Session imports unified**. Every binding now imports `Session`
+  and `SessionStatus` from `agentstategraph_core` (the canonical
+  location since 0.6.5) rather than the `agentstategraph::session`
+  facade re-export. No functional change; readability audit.
+
+- Workspace bumped `0.6.75-beta.1` → `0.7.0-beta.1` per the 0.0.25
+  cadence. Python + TypeScript binding `Cargo.toml` / `package.json`
+  aligned.
+
+- **Clippy `-D warnings` baseline holds** (the 0.6.75 §5 guardrail).
+  The `unnecessary_sort_by` pattern from clippy 1.95, caught on CI,
+  was fixed in 0.6.75-beta.1 post-release; this milestone adds a
+  `collapsible_if` fix in the TypeScript binding's situation helper.
+
+### Deferred to follow-ups (all scheduled per ROADMAP.md)
+
+- **C# / .NET binding** — 0.7.25-beta.1
+- **`expires_at` scheduled deactivation** — 0.7.5-beta.1
+- **Advanced policy**: cryptographic signing, multi-tenant
+  namespace, external Rego/Cedar/WASM evaluator escape hatch —
+  0.7.5-beta.1
+- **Watch API** — 0.7.75-beta.1
+- **AgentStateConsole Phase 1 support** — 0.8.0-beta.1
+
+### Security / design notes
+
+- `check_tokens` is binding-level logic in all five bindings plus
+  the MCP server (filters `active()` policies by trigger
+  intersection). Candidate for hoisting into `PolicyStore` proper
+  in a follow-up so the behaviour lives in one place.
+
 ## [0.6.75-beta.1] — 2026-04-21
 
 Theme: **complete the 0.6 line.** Every deferral flagged in 0.6.0 +
