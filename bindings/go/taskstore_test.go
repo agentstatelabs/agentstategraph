@@ -1,6 +1,7 @@
 package agentstategraph
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -115,5 +116,56 @@ func TestTaskStore_NextTaskBlockers(t *testing.T) {
 	}
 	if next == nil || next.ID != a.ID {
 		t.Fatalf("expected blocked 'b' to defer to 'a', got %+v", next)
+	}
+}
+
+func TestTaskStore_AddTaskWithExtensions(t *testing.T) {
+	asg, _ := NewMemory()
+	defer asg.Close()
+	store, err := NewTaskStore(asg, "/plans", "agent/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.CreatePlan("main", "p1", "test plan"); err != nil {
+		t.Fatal(err)
+	}
+
+	parentChange := "change:spec-1"
+	opts := &AddTaskExtOptions{
+		Payload:      json.RawMessage(`{"preferred": "Option C"}`),
+		ParentChange: &parentChange,
+		OnComplete:   json.RawMessage(`{"kind": "promote_change"}`),
+	}
+	task, err := store.AddTaskWithExtensions("main", "p1", "Approve change", PriorityMedium, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(task.Payload) == 0 {
+		t.Fatal("expected Payload to round-trip; got empty")
+	}
+	var p map[string]string
+	if err := json.Unmarshal(task.Payload, &p); err != nil {
+		t.Fatalf("payload decode: %v", err)
+	}
+	if p["preferred"] != "Option C" {
+		t.Fatalf("payload round-trip: got %+v", p)
+	}
+
+	if task.ParentChange == nil || *task.ParentChange != parentChange {
+		t.Fatalf("ParentChange round-trip: got %+v", task.ParentChange)
+	}
+
+	if len(task.OnComplete) == 0 {
+		t.Fatal("expected OnComplete to round-trip; got empty")
+	}
+	var hook map[string]string
+	if err := json.Unmarshal(task.OnComplete, &hook); err != nil {
+		t.Fatalf("on_complete decode: %v", err)
+	}
+	if hook["kind"] != "promote_change" {
+		t.Fatalf("on_complete round-trip: got %+v", hook)
 	}
 }

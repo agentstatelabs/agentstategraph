@@ -95,6 +95,12 @@ type Task struct {
 	AbandonedAt     *time.Time `json:"abandoned_at,omitempty"`
 	AbandonedReason *string    `json:"abandoned_reason,omitempty"`
 	AssignedTo      *string    `json:"assigned_to,omitempty"`
+	// 0.6.0 Task extension fields (surfaced via add_task_ex from
+	// 0.7.25-beta.2). Left as raw JSON so consumers can unmarshal
+	// into their own typed shape without the wrapper prescribing one.
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	ParentChange *string         `json:"parent_change,omitempty"`
+	OnComplete   json.RawMessage `json:"on_complete,omitempty"`
 }
 
 // TaskStore — handle bound to an AgentStateGraph repository, path prefix,
@@ -295,6 +301,15 @@ type AddTaskOptions struct {
 	AssignedTo *string
 }
 
+// AddTaskExtOptions — optional fields for AddTaskWithExtensions.
+// Embeds AddTaskOptions plus the 0.6.0 Task extension fields.
+type AddTaskExtOptions struct {
+	AddTaskOptions
+	Payload       json.RawMessage // raw JSON value, nil for none
+	ParentChange  *string
+	OnComplete    json.RawMessage // OnCompleteHook JSON per agentstategraph-tasks
+}
+
 // AddTask appends a new task to a plan.
 func (ts *TaskStore) AddTask(ref, plan, title string, priority Priority, opts *AddTaskOptions) (*Task, error) {
 	cRef := C.CString(ref)
@@ -333,6 +348,69 @@ func (ts *TaskStore) AddTask(ref, plan, title string, priority Priority, opts *A
 			ts.handle, cRef, cPlan, cTitle, cPrio, cParent, cBlockers, cAssigned,
 		),
 		"add_task",
+	)
+	if err != nil {
+		return nil, err
+	}
+	var t Task
+	if err := decodeOrErr(raw, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// AddTaskWithExtensions appends a new task to a plan, threading the
+// 0.6.0 Task extension fields (Payload, ParentChange, OnComplete)
+// through FFI. Unlike AddTask, the returned Task has these fields
+// populated when non-nil. Closes the 0.7.25-beta.1 §3 FFI gap.
+func (ts *TaskStore) AddTaskWithExtensions(ref, plan, title string, priority Priority, opts *AddTaskExtOptions) (*Task, error) {
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	cPlan := C.CString(plan)
+	defer C.free(unsafe.Pointer(cPlan))
+	cTitle := C.CString(title)
+	defer C.free(unsafe.Pointer(cTitle))
+	cPrio := C.CString(string(priority))
+	defer C.free(unsafe.Pointer(cPrio))
+
+	var cParent, cBlockers, cAssigned, cPayload, cParentChange, cOnComplete *C.char
+	if opts != nil {
+		if opts.ParentID != nil {
+			cParent = C.CString(*opts.ParentID)
+			defer C.free(unsafe.Pointer(cParent))
+		}
+		if len(opts.Blockers) > 0 {
+			b, err := json.Marshal(opts.Blockers)
+			if err != nil {
+				return nil, err
+			}
+			cBlockers = C.CString(string(b))
+			defer C.free(unsafe.Pointer(cBlockers))
+		}
+		if opts.AssignedTo != nil {
+			cAssigned = C.CString(*opts.AssignedTo)
+			defer C.free(unsafe.Pointer(cAssigned))
+		}
+		if len(opts.Payload) > 0 {
+			cPayload = C.CString(string(opts.Payload))
+			defer C.free(unsafe.Pointer(cPayload))
+		}
+		if opts.ParentChange != nil {
+			cParentChange = C.CString(*opts.ParentChange)
+			defer C.free(unsafe.Pointer(cParentChange))
+		}
+		if len(opts.OnComplete) > 0 {
+			cOnComplete = C.CString(string(opts.OnComplete))
+			defer C.free(unsafe.Pointer(cOnComplete))
+		}
+	}
+
+	raw, err := consume(
+		C.agentstategraph_taskstore_add_task_ex(
+			ts.handle, cRef, cPlan, cTitle, cPrio, cParent, cBlockers, cAssigned,
+			cPayload, cParentChange, cOnComplete,
+		),
+		"add_task_ex",
 	)
 	if err != nil {
 		return nil, err

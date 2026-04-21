@@ -18,6 +18,7 @@ import "C"
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"unsafe"
 )
@@ -135,6 +136,59 @@ func (asg *AgentStateGraph) Branch(name, from string) (string, error) {
 	}
 	defer C.agentstategraph_free_string(result)
 	return C.GoString(result), nil
+}
+
+// BranchEntry is one row of ListBranches.
+type BranchEntry struct {
+	Name   string `json:"name"`
+	Target string `json:"target"`
+}
+
+// ListBranches returns every branch whose name starts with prefix. Pass
+// "" for no filter.
+func (asg *AgentStateGraph) ListBranches(prefix string) ([]BranchEntry, error) {
+	var cPrefix *C.char
+	if prefix != "" {
+		cPrefix = C.CString(prefix)
+		defer C.free(unsafe.Pointer(cPrefix))
+	}
+	result := C.agentstategraph_list_branches(asg.repo, cPrefix)
+	if result == nil {
+		return nil, errors.New("list_branches failed")
+	}
+	defer C.agentstategraph_free_string(result)
+	raw := C.GoString(result)
+	if strings.HasPrefix(raw, `{"error"`) {
+		return nil, fmt.Errorf("list_branches: %s", raw)
+	}
+	var entries []BranchEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil, fmt.Errorf("list_branches: decode: %w", err)
+	}
+	return entries, nil
+}
+
+// DeleteBranch removes a branch by name. Returns true if the branch
+// existed, false if it did not (non-error).
+func (asg *AgentStateGraph) DeleteBranch(name string) (bool, error) {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	result := C.agentstategraph_delete_branch(asg.repo, cName)
+	if result == nil {
+		return false, errors.New("delete_branch failed")
+	}
+	defer C.agentstategraph_free_string(result)
+	raw := C.GoString(result)
+	if strings.HasPrefix(raw, `{"error"`) {
+		return false, fmt.Errorf("delete_branch: %s", raw)
+	}
+	var resp struct {
+		Deleted bool `json:"deleted"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return false, fmt.Errorf("delete_branch: decode: %w", err)
+	}
+	return resp.Deleted, nil
 }
 
 // Diff computes a structured diff between two refs.

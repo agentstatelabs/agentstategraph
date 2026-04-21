@@ -143,3 +143,58 @@ func TestDelete(t *testing.T) {
 		t.Fatal("expected error getting deleted path")
 	}
 }
+
+func TestListBranches(t *testing.T) {
+	asg, _ := NewMemory()
+	defer asg.Close()
+
+	if _, err := asg.Branch("feature-x", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := asg.Branch("feature-y", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := asg.ListBranches("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) < 3 {
+		t.Fatalf("expected at least 3 branches (main, feature-x, feature-y), got %+v", entries)
+	}
+
+	// Prefix filter
+	feats, err := asg.ListBranches("feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(feats) != 2 {
+		t.Fatalf("expected 2 feature branches, got %+v", feats)
+	}
+}
+
+func TestDeleteBranch(t *testing.T) {
+	asg, _ := NewMemory()
+	defer asg.Close()
+
+	if _, err := asg.Branch("temp", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := asg.DeleteBranch("temp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Fatal("expected deleted=true for existing branch")
+	}
+
+	// Second delete returns false, no error
+	deleted, err = asg.DeleteBranch("temp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted {
+		t.Fatal("expected deleted=false for missing branch")
+	}
+}
