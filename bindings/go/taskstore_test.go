@@ -128,7 +128,8 @@ func TestTaskStore_AddTaskWithExtensions(t *testing.T) {
 	}
 	defer store.Close()
 
-	if _, err := store.CreatePlan("main", "p1", "test plan"); err != nil {
+	desc := "test plan"
+	if _, err := store.CreatePlan("main", "p1", &desc); err != nil {
 		t.Fatal(err)
 	}
 

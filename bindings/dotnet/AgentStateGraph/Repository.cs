@@ -135,7 +135,11 @@ public sealed class Repository : IDisposable
     public string Branch(string name, string? from = null)
     {
         ThrowIfDisposed();
-        var ptr = NativeMethods.agentstategraph_branch(_handle.DangerousGetHandle(), name, from);
+        // FFI expects a non-null `from`; substitute the default ref when
+        // the caller omits it. (The Go binding passes "main" explicitly;
+        // the C# API models the default as an optional parameter.)
+        var fromRef = from ?? "main";
+        var ptr = NativeMethods.agentstategraph_branch(_handle.DangerousGetHandle(), name, fromRef);
         return Strings.ConsumeUtf8(ptr)
             ?? throw new AgentStateGraphException("branch", "native FFI returned null");
     }
