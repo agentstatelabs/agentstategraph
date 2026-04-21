@@ -268,10 +268,87 @@ The value is:
 Name this upfront. Overselling "stops rogue AI agents" fails the first
 time anyone tries to verify it.
 
+## 0.7.5 — Advanced policy
+
+Three independent features landed in 0.7.5-beta.1. Each composes with
+the rest of the substrate and each is opt-in.
+
+### Signing (`agentstategraph-policy-sign`)
+
+Optional sibling crate. Keeps `ed25519-dalek` out of the main policy
+crate so consumers who don't sign don't pay the crypto cost.
+
+- `Policy.signature: Option<PolicySignature>` — a tagged union;
+  Ed25519 is the only variant shipped. Payload: `{algorithm,
+  signer_key_id, signature_hex}`.
+- Canonical JSON: sorted keys, no whitespace, UTF-8, excludes the
+  `signature` field itself. Sign the bytes, store the hex. Verify by
+  re-canonicalizing + checking against a `KeyRegistry`-registered
+  public key.
+- Server-side: `AgentStateGraphServer::with_signer(...)` +
+  `with_policy_verifier(...)`. When `with_require_signed_policies(true)`
+  is set and a verifier is installed, policies without a valid
+  signature are treated as not-currently-active (skipped). Unsigned
+  policies continue to work by default — the verifier is opt-in.
+- MCP tools: `policy_sign(ref, path, signer_key_id)` and
+  `policy_verify(ref, path)`. FFI externs
+  `agentstategraph_policy_sign` + `agentstategraph_policy_verify`.
+
+Key rotation + CRL semantics are scheduled for pre-GA.
+
+### Multi-tenant
+
+Cheap namespace discriminator per ROADMAP D3.
+
+- `Policy.tenant_id: Option<String>` — `None` is a global policy that
+  applies to every tenant; `Some(id)` restricts the policy to callers
+  that pass a matching `tenant_filter` at evaluation time.
+- `Session.scope_tenant: Option<String>` carries the session-level
+  default.
+- `PolicyStore::{active, evaluate, evaluate_change, list,
+  policies_for_situation}_scoped` take the `tenant_filter`. Zero-arg
+  methods remain as back-compat wrappers that default
+  `tenant_filter = None`.
+- Semantics: `tenant_filter = None` returns everything (globals +
+  every tenant's policies). `tenant_filter = Some("acme")` returns
+  policies whose `tenant_id == Some("acme")` OR `tenant_id == None`.
+  Globals apply to every tenant.
+
+MCP tools that take a situation / action / proposal accept an
+optional `tenant_filter` parameter.
+
+### External evaluators
+
+Escape-hatch for Rego / Cedar / WASM policy engines. See
+`docs/POLICY-EVALUATOR-ABI.md` for the WASM ABI contract.
+
+- `Policy.external_evaluator: Option<ExternalEvaluatorRef>` — a
+  tagged union of `Rego { source }`, `Cedar { source }`, `Wasm
+  { source }`. `EvaluatorSource` is itself a tagged union of
+  `Inline { body }`, `FilePath { path }`, `CommitRef { path }`.
+- Runner crates (each opt-in):
+  - `agentstategraph-policy-wasm` — wasmtime host, documented ABI
+  - `agentstategraph-policy-rego` — subprocess `opa eval`
+  - `agentstategraph-policy-cedar` — subprocess `cedar` CLI (stub in
+    0.7.5-beta.1; concrete wiring TBD)
+- Server builders: `with_external_evaluator(Arc<dyn
+  ExternalEvaluator>)`, plus feature-gated convenience helpers
+  `with_wasm_evaluator()`, `with_rego_evaluator()`,
+  `with_cedar_evaluator()`.
+- Dispatch: `external_evaluator == None` → local evaluator. External
+  ref whose kind is registered → runner. Kind NOT registered →
+  policy falls through the local path unchanged (the external ref is
+  inert metadata until a matching runner is installed).
+- FFI: `agentstategraph_policy_set_external_evaluator` is a stub in
+  0.7.5-beta.1 (returns a documented error envelope); bindings
+  register runners through the MCP server's in-process builders.
+
 ## Related docs
 
 - `spec/AGENTSTATEGRAPH-RFC.md` — the primitive substrate
 - `spec/POLICY-IMPLEMENTATION-PLAN.md` — the 0.6.0-beta.1 execution plan
 - `spec/SECURITY-THREAT-MODEL.md` — threat surfaces across the stack
+- `spec/0.7.5-PLAN.md` — advanced policy implementation plan
+- `docs/POLICY-EVALUATOR-ABI.md` — WASM external-evaluator ABI
 - `crates/agentstategraph-mcp/README.md` — MCP tool surface
 - `crates/agentstategraph-policy/README.md` *(forthcoming)* — crate API reference
