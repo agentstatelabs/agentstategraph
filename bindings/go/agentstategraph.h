@@ -26,6 +26,8 @@ extern char* agentstategraph_set(SgRepo repo, const char* ref_name, const char* 
 extern char* agentstategraph_delete(SgRepo repo, const char* ref_name, const char* path,
     const char* intent_category, const char* intent_description);
 extern char* agentstategraph_branch(SgRepo repo, const char* name, const char* from);
+extern char* agentstategraph_list_branches(SgRepo repo, const char* prefix);
+extern char* agentstategraph_delete_branch(SgRepo repo, const char* name);
 extern char* agentstategraph_diff(SgRepo repo, const char* ref_a, const char* ref_b);
 extern char* agentstategraph_merge(SgRepo repo, const char* source, const char* target,
     const char* description);
@@ -46,6 +48,10 @@ extern char* agentstategraph_taskstore_delete_plan(SgTaskStore store, const char
 extern char* agentstategraph_taskstore_add_task(SgTaskStore store, const char* ref_name, const char* plan,
     const char* title, const char* priority, const char* parent_id, const char* blockers_json,
     const char* assigned_to);
+extern char* agentstategraph_taskstore_add_task_ex(SgTaskStore store, const char* ref_name, const char* plan,
+    const char* title, const char* priority, const char* parent_id, const char* blockers_json,
+    const char* assigned_to, const char* payload_json, const char* parent_change,
+    const char* on_complete_json);
 extern char* agentstategraph_taskstore_list_tasks(SgTaskStore store, const char* ref_name, const char* plan);
 extern char* agentstategraph_taskstore_task_ids(SgTaskStore store, const char* ref_name, const char* plan);
 extern char* agentstategraph_taskstore_get_task(SgTaskStore store, const char* ref_name, const char* plan,

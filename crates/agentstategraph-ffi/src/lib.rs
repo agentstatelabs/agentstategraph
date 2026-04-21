@@ -196,6 +196,64 @@ pub extern "C" fn agentstategraph_branch(
     }
 }
 
+/// List branches, optionally filtered by prefix. `prefix` may be NULL or
+/// an empty string for no filter. Returns a JSON array of
+/// `{"name": String, "target": String}` objects (target = commit id hex),
+/// or `{"error": "..."}` on failure.
+#[no_mangle]
+pub extern "C" fn agentstategraph_list_branches(
+    repo: *const SgRepo,
+    prefix: *const c_char,
+) -> *mut c_char {
+    let repo = match unsafe { repo.as_ref() } {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
+    let prefix_filter: Option<String> = if prefix.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(prefix) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+    match repo.inner.list_branches(prefix_filter.as_deref()) {
+        Ok(entries) => {
+            let payload: Vec<serde_json::Value> = entries
+                .into_iter()
+                .map(|(name, id)| {
+                    serde_json::json!({
+                        "name": name,
+                        "target": id.to_string(),
+                    })
+                })
+                .collect();
+            json_ok(&payload)
+        }
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Delete a branch by name. Returns `{"deleted": true|false}` or
+/// `{"error": "..."}`. `deleted=false` means the ref didn't exist.
+#[no_mangle]
+pub extern "C" fn agentstategraph_delete_branch(
+    repo: *const SgRepo,
+    name: *const c_char,
+) -> *mut c_char {
+    let repo = match unsafe { repo.as_ref() } {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
+    let name = unsafe { c_to_str(name) };
+    match repo.inner.delete_branch(&name) {
+        Ok(deleted) => to_c_string(&format!("{{\"deleted\":{}}}", deleted)),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
 /// Diff two refs. Returns JSON string of DiffOps.
 #[no_mangle]
 pub extern "C" fn agentstategraph_diff(
@@ -535,6 +593,128 @@ pub extern "C" fn agentstategraph_taskstore_add_task(
         .inner
         .add_task(&ref_name, &plan, &title, prio, parent, blockers, assigned)
     {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Extended add_task that also threads the 0.6.0 Task extension fields
+/// through the FFI: `payload_json` (an arbitrary JSON value or NULL),
+/// `parent_change` (opaque string or NULL), `on_complete_json` (a JSON
+/// OnCompleteHook value or NULL — see agentstategraph-tasks::OnCompleteHook
+/// for the variant tags). Returns the Task as JSON or `{"error": "..."}`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn agentstategraph_taskstore_add_task_ex(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    title: *const c_char,
+    priority: *const c_char,
+    parent_id: *const c_char,
+    blockers_json: *const c_char,
+    assigned_to: *const c_char,
+    payload_json: *const c_char,
+    parent_change: *const c_char,
+    on_complete_json: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let title = unsafe { c_to_str(title) };
+    let priority_str = unsafe { c_to_str(priority) };
+    let prio = parse_priority(&priority_str);
+
+    let parent = if parent_id.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(parent_id) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(TaskId(s))
+        }
+    };
+
+    let blockers: Vec<TaskId> = if blockers_json.is_null() {
+        Vec::new()
+    } else {
+        let s = unsafe { c_to_str(blockers_json) };
+        if s.is_empty() {
+            Vec::new()
+        } else {
+            match serde_json::from_str::<Vec<String>>(&s) {
+                Ok(v) => v.into_iter().map(TaskId).collect(),
+                Err(e) => return json_err(&format!("invalid blockers_json: {e}")),
+            }
+        }
+    };
+
+    let assigned = if assigned_to.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(assigned_to) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+
+    let payload: Option<serde_json::Value> = if payload_json.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(payload_json) };
+        if s.is_empty() {
+            None
+        } else {
+            match serde_json::from_str(&s) {
+                Ok(v) => Some(v),
+                Err(e) => return json_err(&format!("invalid payload_json: {e}")),
+            }
+        }
+    };
+
+    let parent_change_opt: Option<String> = if parent_change.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(parent_change) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    };
+
+    let on_complete_opt: Option<agentstategraph_tasks::OnCompleteHook> =
+        if on_complete_json.is_null() {
+            None
+        } else {
+            let s = unsafe { c_to_str(on_complete_json) };
+            if s.is_empty() {
+                None
+            } else {
+                match serde_json::from_str(&s) {
+                    Ok(v) => Some(v),
+                    Err(e) => return json_err(&format!("invalid on_complete_json: {e}")),
+                }
+            }
+        };
+
+    match store.inner.add_task_with_extensions(
+        &ref_name,
+        &plan,
+        &title,
+        prio,
+        parent,
+        blockers,
+        assigned,
+        payload,
+        parent_change_opt,
+        on_complete_opt,
+    ) {
         Ok(t) => json_ok(&t),
         Err(e) => json_err(&e.to_string()),
     }
