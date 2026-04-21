@@ -1,56 +1,18 @@
 # AgentStateGraph — C# / .NET binding
 
-> ⚠️ **Experimental — community-maintained.** Shipped in
-> `0.7.25-beta.1` as the first-pass .NET surface. Repository
-> opens, P/Invoke layer, idiomatic wrappers, and 56 xUnit tests
-> are in place; a small number of tests fail due to a known
-> System.Text.Json polymorphism collision (see
-> [Known issues](#known-issues) below). The agentstatelabs team is
-> not actively maintaining this binding day-to-day — the
-> majority of the work is done and PRs closing the gaps are
-> warmly welcomed. The .NET CI job is set to
-> `continue-on-error: true` so the rest of the workspace isn't
-> gated on .NET fixes; when a contributor brings the suite to
-> green on all three OSes we'll flip that back to required and
-> start publishing to NuGet.
-
 AI-native versioned state store for intent-based systems. This is the
 C# binding over the native Rust implementation of AgentStateGraph,
 exposed via P/Invoke over the stable C ABI.
 
-NuGet package id: **`agentstatelabs.AgentStateGraph`** (reserved; not yet published)
-Status: **`0.7.25-beta.1`** — experimental. See the repo
+NuGet package id: **`agentstatelabs.AgentStateGraph`** (reserved; NuGet
+auto-publish is still gated as manual-only while we warm up the
+release channel). See the repo
 [`CHANGELOG.md`](../../CHANGELOG.md) for what's new.
 
-## Known issues
-
-- **`Decision` polymorphism conflict**:
-  `bindings/dotnet/AgentStateGraph/DecisionTypes.cs` declares a
-  `Kind` property on each variant record that collides with
-  System.Text.Json's `[JsonPolymorphic(TypeDiscriminatorPropertyName
-  = "kind")]` discriminator. Serialization throws
-  `InvalidOperationException: The type 'AgentStateGraph.Decision+Allow'
-  contains property 'kind' that conflicts with an existing metadata
-  property name.` Affects ~8 xUnit tests and the parity runner.
-  Fix sketch: drop the `Kind` property on the derived records
-  (the discriminator tag serves the purpose) or rename it to
-  something that doesn't collide (e.g. expose `DecisionKind` as
-  a computed read-only property that switches on type, or use
-  `[JsonIgnore]` on the property). Same fix likely needed on
-  `FallbackAction`, `Selector`, and `OnCompleteHook` for the
-  same reason.
-
-- **FFI gaps** (shared with the Go binding — not C#-specific):
-  `Repository.ListBranches` / `DeleteBranch` aren't in the 48
-  FFI externs; `TaskStore.AddTaskWithExtensions` is a stable-
-  named stub that forwards to `AddTask` and silently drops the
-  0.6.0 Task extension fields. Closing these gaps is a pre-0.7.5
-  FFI extension — a contributor could take the Rust side + the
-  C# surface in one PR.
-
-Fixes for either issue are welcome via PR. The test infrastructure
-(56 xUnit tests, a parity runner, CI on 3 OSes) is in place so
-regressions are caught.
+The binding tracks full test parity with the Python / TypeScript /
+Go / WASM / C FFI runners via the shared policy fixture and the
+xUnit suite. CI builds on Ubuntu / macOS / Windows against .NET 8
+and .NET 10.
 
 ## Target frameworks
 

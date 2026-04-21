@@ -141,6 +141,46 @@ public sealed class Repository : IDisposable
     }
 
     /// <summary>
+    /// Returns every branch whose name starts with <paramref name="prefix"/>.
+    /// Pass <c>null</c> (or an empty string) for no filter.
+    /// </summary>
+    public IReadOnlyList<BranchEntry> ListBranches(string? prefix = null)
+    {
+        ThrowIfDisposed();
+        var filter = string.IsNullOrEmpty(prefix) ? null : prefix;
+        var ptr = NativeMethods.agentstategraph_list_branches(_handle.DangerousGetHandle(), filter);
+        var raw = Strings.ConsumeUtf8(ptr);
+        return Json.Deserialize<List<BranchEntry>>(raw, "list_branches");
+    }
+
+    /// <summary>
+    /// Removes the branch <paramref name="name"/>. Returns <c>true</c> if
+    /// the branch existed, <c>false</c> if it did not (non-error).
+    /// </summary>
+    public bool DeleteBranch(string name)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(name);
+        var ptr = NativeMethods.agentstategraph_delete_branch(_handle.DangerousGetHandle(), name);
+        var raw = Json.ThrowIfError(Strings.ConsumeUtf8(ptr), "delete_branch");
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("deleted", out var deleted)
+                && deleted.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                return deleted.GetBoolean();
+            }
+            throw new AgentStateGraphException("delete_branch", $"unexpected response: {raw}");
+        }
+        catch (JsonException ex)
+        {
+            throw new AgentStateGraphException("delete_branch", $"failed to parse response: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
     /// Computes a structured diff between two refs. Returns raw JSON; the
     /// shape mirrors the Rust <c>Diff</c> type and is left undecoded here
     /// to match the Go binding's deliberate pass-through.

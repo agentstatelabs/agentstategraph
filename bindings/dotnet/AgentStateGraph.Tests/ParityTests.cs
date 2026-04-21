@@ -11,9 +11,8 @@ namespace AgentStateGraph.Tests;
 /// <summary>
 /// C# runner for <c>spec/policy_parity_fixture.json</c>. Seventh runner
 /// to join the shared fixture (Rust reference + Python + TypeScript + Go
-/// + WASM + C FFI). Must produce identical <see cref="DecisionKind"/> and
-/// matched_policy handle identity for every change_proposal + evaluate
-/// entry.
+/// + WASM + C FFI). Must produce identical Decision kind and matched
+/// policy handle identity for every change_proposal + evaluate entry.
 /// </summary>
 /// <remarks>
 /// Mirrors <c>crates/agentstategraph-policy/tests/parity_reference.rs</c>
@@ -108,14 +107,7 @@ public sealed class ParityTests
             $"could not find {FixtureRelativePath} within {MaxParentWalk} parents of {AppContext.BaseDirectory}");
     }
 
-    private static string DecisionKindTag(Decision decision) => decision.Kind switch
-    {
-        DecisionKind.Allow => "allow",
-        DecisionKind.Deny => "deny",
-        DecisionKind.RequireApproval => "require_approval",
-        DecisionKind.NoPolicyMatch => "no_policy_match",
-        _ => throw new InvalidOperationException($"unknown decision kind {decision.Kind}"),
-    };
+    private static string DecisionKindTag(Decision decision) => decision.KindTag;
 
     private static string? MatchedPolicy(Decision decision) => decision switch
     {

@@ -50,7 +50,9 @@ public sealed class DecisionPolymorphismTests
         var back = De<Decision>(json);
         // Reserialize — the two JSON representations must be identical.
         Assert.Equal(json, Ser(back));
-        Assert.Equal(original.Kind, back.Kind);
+        // Runtime type — the discriminator must route to the same variant.
+        Assert.Equal(original.GetType(), back.GetType());
+        Assert.Equal(original.KindTag, back.KindTag);
     }
 
     [Fact]

@@ -18,6 +18,14 @@ public readonly record struct CommitId(string Value)
 }
 
 /// <summary>
+/// One row returned by <see cref="Repository.ListBranches"/>. Matches the
+/// FFI's <c>[{"name":"...","target":"..."}, ...]</c> shape.
+/// </summary>
+public sealed record BranchEntry(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("target")] string Target);
+
+/// <summary>
 /// Entry in a commit log. Matches the JSON array shape emitted by
 /// <c>agentstategraph_log</c>: short id + agent + intent category / description
 /// + reasoning + confidence.

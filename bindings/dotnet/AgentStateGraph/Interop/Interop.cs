@@ -57,6 +57,16 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? from);
 
+    [DllImport(Lib, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr agentstategraph_list_branches(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? prefix);
+
+    [DllImport(Lib, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr agentstategraph_delete_branch(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
     [DllImport(Lib)]
     internal static extern IntPtr agentstategraph_diff(
         IntPtr repo,
@@ -139,6 +149,20 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? parentId,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? blockersJson,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? assignedTo);
+
+    [DllImport(Lib, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr agentstategraph_taskstore_add_task_ex(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string plan,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string title,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string priority,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? parentId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? blockersJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? assignedTo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? payloadJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? parentChange,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? onCompleteJson);
 
     [DllImport(Lib)]
     internal static extern IntPtr agentstategraph_taskstore_list_tasks(

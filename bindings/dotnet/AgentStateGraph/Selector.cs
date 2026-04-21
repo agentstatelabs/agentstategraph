@@ -24,6 +24,33 @@ namespace AgentStateGraph;
 [JsonDerivedType(typeof(Lte), typeDiscriminator: "lte")]
 public abstract record Selector
 {
+    /// <summary>
+    /// Wire-level discriminator tag, computed from runtime type. Mirrors
+    /// the rename-free approach used on <see cref="Decision"/> /
+    /// <see cref="FallbackAction"/> / <see cref="OnCompleteHook"/>:
+    /// derived records intentionally do NOT expose a sibling <c>Kind</c>
+    /// property because that would collide with the
+    /// <c>[JsonPolymorphic]</c> discriminator.
+    /// </summary>
+    [JsonIgnore]
+    public string KindTag => this switch
+    {
+        Always => "always",
+        Never => "never",
+        All => "all",
+        Any => "any",
+        Not => "not",
+        Eq => "eq",
+        Ne => "ne",
+        Matches => "matches",
+        Exists => "exists",
+        Gt => "gt",
+        Gte => "gte",
+        Lt => "lt",
+        Lte => "lte",
+        _ => "unknown",
+    };
+
     /// <summary>Matches everything.</summary>
     public sealed record Always : Selector;
 

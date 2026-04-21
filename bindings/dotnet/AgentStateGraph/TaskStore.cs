@@ -132,19 +132,17 @@ public sealed class TaskStore : IDisposable
     }
 
     /// <summary>
-    /// Convenience wrapper over <see cref="AddTask"/> that immediately
-    /// attaches the 0.6.0 task extensions (payload / parent_change /
-    /// on_complete). The core FFI does not expose a single-call form for
-    /// these yet; this helper does the add + three writes under the hood
-    /// once extension FFI lands.
+    /// Adds a task to a plan, threading the 0.6.0 <see cref="Task"/>
+    /// extensions (<see cref="Task.Payload"/>, <see cref="Task.ParentChange"/>,
+    /// <see cref="Task.OnComplete"/>) through FFI. The returned task has
+    /// these fields populated when non-null.
     /// </summary>
     /// <remarks>
-    /// FLAGGED: the §2 P/Invoke surface as shipped does not include
-    /// <c>agentstategraph_taskstore_set_payload</c> /
-    /// <c>_set_parent_change</c> / <c>_set_on_complete</c>. Until those
-    /// exist, this method just forwards to <see cref="AddTask"/> and
-    /// silently drops the extensions. Kept in the surface so callers have
-    /// a stable name; §4 tests will flag any regression.
+    /// Wraps <c>agentstategraph_taskstore_add_task_ex</c> — landed in the
+    /// Rust FFI after the 0.7.25-beta.1 ship and matched here to close
+    /// the §3 gap. Prefer <see cref="AddTask"/> when none of the
+    /// extension fields are needed; the two entry points share the same
+    /// under-the-hood commit flow on the Rust side.
     /// </remarks>
     public Task AddTaskWithExtensions(
         string refName,
@@ -156,10 +154,35 @@ public sealed class TaskStore : IDisposable
         string? parentChange = null,
         OnCompleteHook? onComplete = null)
     {
-        _ = payload;
-        _ = parentChange;
-        _ = onComplete;
-        return AddTask(refName, plan, title, priority, options);
+        ThrowIfDisposed();
+        string? blockersJson = null;
+        if (options?.Blockers is { Count: > 0 })
+        {
+            blockersJson = Json.Serialize(options.Blockers);
+        }
+
+        string? payloadJson = null;
+        if (payload is { } p && p.ValueKind != System.Text.Json.JsonValueKind.Null
+            && p.ValueKind != System.Text.Json.JsonValueKind.Undefined)
+        {
+            payloadJson = p.GetRawText();
+        }
+
+        string? onCompleteJson = onComplete is null ? null : Json.Serialize(onComplete);
+
+        var ptr = NativeMethods.agentstategraph_taskstore_add_task_ex(
+            H,
+            refName,
+            plan,
+            title,
+            PriorityWire(priority),
+            options?.ParentId,
+            blockersJson,
+            options?.AssignedTo,
+            payloadJson,
+            parentChange,
+            onCompleteJson);
+        return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "add_task_ex");
     }
 
     public IReadOnlyList<Task> ListTasks(string refName, string plan)

@@ -12,6 +12,12 @@ namespace AgentStateGraph;
 /// System.Text.Json handles the tagged union via
 /// <see cref="JsonPolymorphicAttribute"/>; the <c>"kind"</c> discriminator
 /// matches Rust's <c>#[serde(tag = "kind", rename_all = "snake_case")]</c>.
+/// The derived records do NOT expose a sibling <c>Kind</c> property —
+/// that would collide with the <c>[JsonPolymorphic]</c> discriminator and
+/// trip <see cref="System.InvalidOperationException"/> on every
+/// serialization. Consumers pattern-match on the C# type
+/// (e.g. <c>if (decision is Decision.Allow a)</c>) or read the computed
+/// <see cref="KindTag"/> string when they need the wire discriminator.
 /// </remarks>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(Allow), typeDiscriminator: "allow")]
@@ -20,27 +26,33 @@ namespace AgentStateGraph;
 [JsonDerivedType(typeof(NoPolicyMatch), typeDiscriminator: "no_policy_match")]
 public abstract record Decision
 {
-    /// <summary>Convenience accessor for the variant tag.</summary>
+    /// <summary>
+    /// Wire-level discriminator tag ("allow" / "deny" / "require_approval"
+    /// / "no_policy_match"). Computed from the runtime type — not
+    /// serialized (System.Text.Json owns the <c>kind</c> slot). Provided
+    /// for callers that want a string without type-matching.
+    /// </summary>
     [JsonIgnore]
-    public abstract DecisionKind Kind { get; }
+    public string KindTag => this switch
+    {
+        Allow => "allow",
+        Deny => "deny",
+        RequireApproval => "require_approval",
+        NoPolicyMatch => "no_policy_match",
+        _ => "unknown",
+    };
 
     /// <summary>The policy authorizes the action; preconditions are advisory.</summary>
     public sealed record Allow(
         [property: JsonPropertyName("matched_policy")] string MatchedPolicy,
         [property: JsonPropertyName("preconditions")] IReadOnlyList<string>? Preconditions = null)
-        : Decision
-    {
-        public override DecisionKind Kind => DecisionKind.Allow;
-    }
+        : Decision;
 
     /// <summary>The policy forbids the action; <see cref="Reason"/> is human-readable.</summary>
     public sealed record Deny(
         [property: JsonPropertyName("matched_policy")] string MatchedPolicy,
         [property: JsonPropertyName("reason")] string Reason)
-        : Decision
-    {
-        public override DecisionKind Kind => DecisionKind.Deny;
-    }
+        : Decision;
 
     /// <summary>The policy requires human approval before the action can proceed.</summary>
     public sealed record RequireApproval(
@@ -49,22 +61,21 @@ public abstract record Decision
         [property: JsonPropertyName("fallback")] FallbackAction Fallback,
         [property: JsonPropertyName("timeout")] ulong? Timeout = null,
         [property: JsonPropertyName("approval_task_path")] string? ApprovalTaskPath = null)
-        : Decision
-    {
-        public override DecisionKind Kind => DecisionKind.RequireApproval;
-    }
+        : Decision;
 
     /// <summary>No active policy matched; default-deny is the caller's responsibility.</summary>
-    public sealed record NoPolicyMatch : Decision
-    {
-        public override DecisionKind Kind => DecisionKind.NoPolicyMatch;
-    }
+    public sealed record NoPolicyMatch : Decision;
 }
 
 /// <summary>
 /// What to do while a change is awaiting approval (POLICY_V1.md §22.3).
 /// Five variants; tag is <c>kind</c> with snake_case discriminator.
 /// </summary>
+/// <remarks>
+/// Like <see cref="Decision"/>, variants do not expose a sibling
+/// <c>Kind</c> property; use the runtime type or <see cref="KindTag"/>
+/// when a wire discriminator is needed.
+/// </remarks>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
 [JsonDerivedType(typeof(Block), typeDiscriminator: "block")]
 [JsonDerivedType(typeof(PickAlternative), typeDiscriminator: "pick_alternative")]
@@ -73,6 +84,18 @@ public abstract record Decision
 [JsonDerivedType(typeof(DelegateTo), typeDiscriminator: "delegate_to")]
 public abstract record FallbackAction
 {
+    /// <summary>Wire-level discriminator tag, computed from runtime type.</summary>
+    [JsonIgnore]
+    public string KindTag => this switch
+    {
+        Block => "block",
+        PickAlternative => "pick_alternative",
+        LowestRiskAlternative => "lowest_risk_alternative",
+        KeepCurrentState => "keep_current_state",
+        DelegateTo => "delegate_to",
+        _ => "unknown",
+    };
+
     /// <summary>Do nothing; wait for approval.</summary>
     public sealed record Block : FallbackAction;
 

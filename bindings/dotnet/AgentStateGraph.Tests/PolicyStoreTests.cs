@@ -119,7 +119,7 @@ public sealed class PolicyStoreTests
 
         var allow = Assert.IsType<Decision.Allow>(d);
         Assert.Equal("infra/restart@1", allow.MatchedPolicy);
-        Assert.Equal(DecisionKind.Allow, d.Kind);
+        Assert.Equal("allow", d.KindTag);
     }
 
     [Fact]
@@ -168,7 +168,7 @@ public sealed class PolicyStoreTests
 
         var d = ps.Evaluate(Ref, null, "anything", "agent-1");
         Assert.IsType<Decision.NoPolicyMatch>(d);
-        Assert.Equal(DecisionKind.NoPolicyMatch, d.Kind);
+        Assert.Equal("no_policy_match", d.KindTag);
     }
 
     // -----------------------------------------------------------------------

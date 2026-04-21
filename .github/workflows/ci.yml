@@ -90,13 +90,11 @@ jobs:
         run: CGO_LDFLAGS="-L../../target/release" LD_LIBRARY_PATH="../../target/release" go test -v
 
   dotnet:
-    # Experimental — community-maintained. Known test failures (System.Text.Json
-    # polymorphism collision on Decision.Kind; see bindings/dotnet/README.md
-    # "Known issues"). continue-on-error so the rest of the workspace is
-    # not blocked on .NET fixes. Flip back to required once the suite goes
-    # green on all three OSes — likely via a community PR.
-    name: .NET (experimental)
-    continue-on-error: true
+    # C# / .NET binding. Required on all three OSes against .NET 8 + .NET 10.
+    # The polymorphism bug and FFI gaps flagged in 0.7.25-beta.1 are closed;
+    # NuGet auto-publish is still manual-only and lives in a separate release
+    # workflow.
+    name: .NET
     strategy:
       fail-fast: false
       matrix:

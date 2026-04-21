@@ -164,15 +164,13 @@ public sealed class TaskStoreTests
     }
 
     /// <summary>
-    /// AddTaskWithExtensions is a §3-flagged stub: until the three FFI
-    /// setters land (<c>set_payload</c> / <c>set_parent_change</c> /
-    /// <c>set_on_complete</c>) the method forwards to <see cref="TaskStore.AddTask"/>
-    /// and silently drops the extensions. This test asserts the CURRENT
-    /// stub behaviour (fields NOT populated) and will flip to the real
-    /// round-trip assertion in the follow-up ticket.
+    /// AddTaskWithExtensions now rides on <c>agentstategraph_taskstore_add_task_ex</c>
+    /// (landed post-0.7.25-beta.1). Asserts the positive round-trip of
+    /// every extension field — payload, parent_change, on_complete — and
+    /// mirrors the Python suite's <c>test_task_extension_fields_roundtrip</c>.
     /// </summary>
     [Fact]
-    public void AddTaskWithExtensions_CurrentlyDropsExtensions_PendingFfiGap()
+    public void AddTaskWithExtensions_RoundTripsAllExtensionFields()
     {
         using var repo = TestHelpers.FreshRepo();
         using var ts = new TaskStore(repo, "/plans", "xunit");
@@ -186,13 +184,41 @@ public sealed class TaskStoreTests
             parentChange: "spec-7@42",
             onComplete: new OnCompleteHook.PromoteChange());
 
-        // DO NOT assert payload / parent_change / on_complete populated —
-        // the method is currently a stub. When the FFI gap closes, flip
-        // these asserts to the positive form (matches the Python suite's
-        // test_task_extension_fields_roundtrip scenario).
+        Assert.Equal("with extensions", t.Title);
+        Assert.Equal("spec-7@42", t.ParentChange);
+        Assert.IsType<OnCompleteHook.PromoteChange>(t.OnComplete);
+        Assert.NotNull(t.Payload);
+        Assert.Equal(JsonValueKind.Object, t.Payload!.Value.ValueKind);
+        Assert.Equal("spec-7",
+            t.Payload.Value.GetProperty("preferred_option").GetString());
+    }
+
+    [Fact]
+    public void AddTaskWithExtensions_NamedHook_RoundTrips()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ts = new TaskStore(repo, "/plans", "xunit");
+        ts.CreatePlan(Ref, "p", null);
+
+        var t = ts.AddTaskWithExtensions(
+            Ref, "p", "named hook", Priority.Medium,
+            onComplete: new OnCompleteHook.Named("send_report"));
+
+        var named = Assert.IsType<OnCompleteHook.Named>(t.OnComplete);
+        Assert.Equal("send_report", named.Name);
+    }
+
+    [Fact]
+    public void AddTaskWithExtensions_NoExtensions_MatchesAddTask()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ts = new TaskStore(repo, "/plans", "xunit");
+        ts.CreatePlan(Ref, "p", null);
+
+        var t = ts.AddTaskWithExtensions(Ref, "p", "plain", Priority.Low);
+        Assert.Equal("plain", t.Title);
         Assert.Null(t.ParentChange);
         Assert.Null(t.OnComplete);
-        Assert.True(t.Payload is null || t.Payload?.ValueKind == JsonValueKind.Null,
-            "payload should be null until the FFI extension setters land");
+        Assert.True(t.Payload is null || t.Payload?.ValueKind == JsonValueKind.Null);
     }
 }

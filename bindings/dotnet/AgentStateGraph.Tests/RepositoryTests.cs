@@ -6,9 +6,9 @@ using Xunit;
 namespace AgentStateGraph.Tests;
 
 /// <summary>
-/// Repository-level coverage (commit storage + branching + log/diff/blame).
-/// DeleteBranch and ListBranches are deliberately omitted — they are
-/// pre-existing FFI gaps flagged in §3 of the 0.7.25-beta.1 plan.
+/// Repository-level coverage (commit storage + branching + log/diff/blame
+/// + list/delete branches). Closes the §3 FFI gap that the
+/// 0.7.25-beta.1 ship flagged as experimental.
 /// </summary>
 public sealed class RepositoryTests
 {
@@ -98,5 +98,62 @@ public sealed class RepositoryTests
         repo.Set("/blamed", "\"v\"", "plan", "set it");
         var blame = repo.Blame("/blamed");
         Assert.False(string.IsNullOrEmpty(blame));
+    }
+
+    [Fact]
+    public void ListBranches_ReturnsSeededBranches()
+    {
+        using var repo = new Repository();
+        repo.Set("/seed", "\"v\"", "plan", "seed");
+        repo.Branch("feature/alpha");
+        repo.Branch("feature/beta");
+        repo.Branch("hotfix/1");
+
+        var all = repo.ListBranches();
+        var names = all.Select(b => b.Name).ToArray();
+        Assert.Contains("feature/alpha", names);
+        Assert.Contains("feature/beta", names);
+        Assert.Contains("hotfix/1", names);
+        Assert.All(all, b => Assert.False(string.IsNullOrEmpty(b.Target)));
+    }
+
+    [Fact]
+    public void ListBranches_PrefixFilter()
+    {
+        using var repo = new Repository();
+        repo.Set("/seed", "\"v\"", "plan", "seed");
+        repo.Branch("feature/alpha");
+        repo.Branch("feature/beta");
+        repo.Branch("hotfix/1");
+
+        var feats = repo.ListBranches("feature");
+        Assert.All(feats, b => Assert.StartsWith("feature", b.Name));
+        Assert.Contains(feats, b => b.Name == "feature/alpha");
+        Assert.Contains(feats, b => b.Name == "feature/beta");
+        Assert.DoesNotContain(feats, b => b.Name == "hotfix/1");
+    }
+
+    [Fact]
+    public void DeleteBranch_Existing_ReturnsTrue()
+    {
+        using var repo = new Repository();
+        repo.Set("/seed", "\"v\"", "plan", "seed");
+        repo.Branch("temp/to-remove");
+
+        var deleted = repo.DeleteBranch("temp/to-remove");
+        Assert.True(deleted);
+
+        var remaining = repo.ListBranches();
+        Assert.DoesNotContain(remaining, b => b.Name == "temp/to-remove");
+    }
+
+    [Fact]
+    public void DeleteBranch_Missing_ReturnsFalse()
+    {
+        using var repo = new Repository();
+        repo.Set("/seed", "\"v\"", "plan", "seed");
+
+        var deleted = repo.DeleteBranch("never-existed");
+        Assert.False(deleted);
     }
 }

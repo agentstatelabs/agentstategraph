@@ -46,15 +46,6 @@ public enum ProofKind
     Text,
 }
 
-/// <summary>Variant of a <see cref="Decision"/> record.</summary>
-public enum DecisionKind
-{
-    Allow,
-    Deny,
-    RequireApproval,
-    NoPolicyMatch,
-}
-
 /// <summary>
 /// Lifecycle state of a <see cref="Session"/>. Matches the Rust wire form
 /// (PascalCase: <c>"Active"</c>, <c>"Completed"</c>, <c>"Abandoned"</c>) —
