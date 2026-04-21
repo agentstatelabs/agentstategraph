@@ -5,6 +5,83 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.5-beta.1] — 2026-04-18
+
+Theme: **advanced policy — signing + multi-tenant + external
+evaluators.** Biggest single milestone so far: ~14 section commits
+covering three features that each stand alone but compose into the
+"AI agent that knows when to act, when to ask, and what to do while
+it waits" substrate (POLICY_V1.md §22.1). Per ROADMAP D2 / D3 / D4:
+Ed25519 signing, tenant-id namespace discrimination, external-
+evaluator dispatch to Rego / Cedar / WASM.
+
+### Added
+
+- **Policy.expires_at enforcement** (§1) — deferred cleanup from
+  0.7.0-beta.1. `Policy::is_currently_active(now)` now enforces the
+  full activation window (ratified + active_from + expires_at).
+- **Policy signing** (§2) — new sibling crate
+  `agentstategraph-policy-sign` with canonical-JSON + Ed25519 signer
+  / verifier / pluggable `KeyRegistry`. `Policy.signature:
+  Option<PolicySignature>` round-trips on every policy without forcing
+  the crypto dep. `PolicyStore::with_verifier(...)`,
+  `with_require_signed(true)`. MCP tools `policy_sign` / `policy_verify`
+  (50 → 52). FFI externs `agentstategraph_policy_sign` /
+  `_verify` (51 → 53).
+- **Multi-tenant** (§3) — `Policy.tenant_id: Option<String>` +
+  `Session.scope_tenant: Option<String>`. New `_scoped` evaluator
+  methods (`active_scoped`, `evaluate_scoped`, `evaluate_change_scoped`,
+  `list_scoped`, `policies_for_situation_scoped`) taking
+  `tenant_filter: Option<&str>` with global-fallback semantics
+  (`None` tenant_id = applies to all tenants). Zero-arg variants
+  remain as back-compat wrappers.
+- **External evaluators** (§4) — `Policy.external_evaluator:
+  Option<ExternalEvaluatorRef>` (`Rego` / `Cedar` / `Wasm` variants,
+  each carrying an `EvaluatorSource` — `Inline` / `FilePath` /
+  `CommitRef`). `ExternalEvaluator` trait + `ExternalEvaluatorRegistry`.
+  Three new opt-in runner crates: `agentstategraph-policy-wasm`
+  (wasmtime host, documented ABI), `-rego` (subprocess `opa eval`),
+  `-cedar` (stub). Server builders `with_external_evaluator(...)`,
+  `with_wasm_evaluator()`, `with_rego_evaluator()`,
+  `with_cedar_evaluator()` (feature-gated). FFI extern
+  `agentstategraph_policy_set_external_evaluator` (stub, 53 → 54).
+- **Bindings** (§5a–§5e) — Python, TypeScript, Go, WASM, and C#
+  all gain the three new Policy fields, `Session.scope_tenant`,
+  `tenantFilter` / `tenant_filter` params on scoped evaluator
+  methods (client-side filter in Go / C#; Rust-side `_scoped`
+  routing in Py / TS / WASM), and `sign` / `verify` /
+  `setExternalEvaluator` stub methods returning documented error
+  envelopes until the MCP/FFI surface is threaded through.
+- **Parity fixture** (§6) — `spec/policy_parity_fixture.json`
+  extended with `extra_policies`, `ratify_extra`, `tenant_evaluate`,
+  and `external_evaluate` sections. Rust reference runner
+  exercises all three new blocks via `evaluate_scoped`. Older
+  binding runners ignore the new keys (back-compat).
+- **Docs** (§7) — new `docs/POLICY-EVALUATOR-ABI.md` documents the
+  WASM evaluator ABI (asg_alloc / asg_free / asg_evaluate exports,
+  request / response JSON shapes, memory model, error convention).
+  `docs/POLICY_GUIDE.md` gains a "0.7.5 — Advanced policy" section.
+
+### Changed
+
+- Workspace version `0.7.25-beta.2` → `0.7.5-beta.1`. Bindings
+  (Py / TS / Go / WASM / C#) track the workspace version.
+- MCP tool count 50 → 52 (+ `policy_sign`, `policy_verify`).
+- FFI extern count 51 → 54 (+ 3 signing / external-evaluator
+  externs).
+
+### Rationale
+
+Per ROADMAP defaults accepted by the principal:
+- **D2** — Ed25519 as the only signature algorithm shipped.
+- **D3** — `tenant_id` as a cheap string-keyed namespace
+  discriminator rather than a full multi-tenant storage split.
+- **D4** — External evaluators as an escape-hatch dispatcher
+  rather than re-implementing Rego / Cedar inside ASG.
+
+Key rotation + CRL semantics, authoring UX for Rego / Cedar, and
+first-class FFI dispatcher wiring are scheduled for pre-GA.
+
 ## [0.7.25-beta.2] — 2026-04-21
 
 Theme: **close the three FFI gaps + fix Decision polymorphism.**
