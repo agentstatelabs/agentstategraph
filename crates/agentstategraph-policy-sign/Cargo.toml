@@ -1,0 +1,21 @@
+[package]
+name = "agentstategraph-policy-sign"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Ed25519 signing + canonical-JSON for AgentStateGraph policies"
+
+[dependencies]
+agentstategraph-policy = { path = "../agentstategraph-policy" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+rand = { version = "0.8", features = ["std"] }
+rand_core = { version = "0.6", features = ["std"] }
+chrono = { workspace = true }

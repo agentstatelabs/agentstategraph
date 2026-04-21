@@ -6,6 +6,7 @@ members = [
     "crates/agentstategraph",
     "crates/agentstategraph-tasks",
     "crates/agentstategraph-policy",
+    "crates/agentstategraph-policy-sign",
     "crates/agentstategraph-migrate",
     "crates/agentstategraph-mcp",
     "crates/agentstategraph-ffi",
