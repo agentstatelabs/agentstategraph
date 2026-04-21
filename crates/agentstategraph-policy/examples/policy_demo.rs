@@ -221,6 +221,7 @@ fn high_cost_change_policy() -> Policy {
         supersedes: None,
         signature: None,
         tenant_id: None,
+        external_evaluator: None,
     }
 }
 

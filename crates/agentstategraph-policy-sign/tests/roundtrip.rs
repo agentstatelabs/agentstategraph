@@ -33,6 +33,7 @@ fn sample_policy() -> Policy {
         supersedes: None,
         signature: None,
         tenant_id: None,
+        external_evaluator: None,
     }
 }
 

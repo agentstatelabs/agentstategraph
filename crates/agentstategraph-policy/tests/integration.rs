@@ -10,8 +10,9 @@ use agentstategraph::Repository;
 use agentstategraph_storage::MemoryStorage;
 
 use agentstategraph_policy::{
-    ApprovalRule, AuthorizedAction, ChangeProposal, Decision, FallbackAction, Policy, PolicyError,
-    PolicyStore, ProcedureStep, Selector, Severity, Situation,
+    ApprovalRule, AuthorizedAction, ChangeProposal, Decision, EvaluatorSource, ExternalError,
+    ExternalEvaluator, ExternalEvaluatorRef, ExternalEvaluatorRegistry, FallbackAction, Policy,
+    PolicyError, PolicyStore, ProcedureStep, Selector, Severity, Situation,
 };
 use chrono::Utc;
 
@@ -47,6 +48,7 @@ fn skeleton(path: &str, selector: Selector) -> Policy {
         supersedes: None,
         signature: None,
         tenant_id: None,
+        external_evaluator: None,
     }
 }
 
@@ -1289,4 +1291,317 @@ fn test_evaluate_change_scoped_respects_tenant_filter() {
     // Back-compat path: no filter → gate still fires.
     let d = store.evaluate_change(REF, &proposal).unwrap();
     assert!(matches!(d, Decision::RequireApproval { .. }));
+}
+
+// -----------------------------------------------------------------------
+// §4a (0.7.5) — external evaluator types + dispatcher
+// -----------------------------------------------------------------------
+
+/// Closure-backed mock runner. Captures `kind()` + a closure invoked in
+/// `evaluate()`; no dependency on real runner crates (§4b).
+struct MockEvaluator {
+    kind: &'static str,
+    #[allow(clippy::type_complexity)]
+    f: Box<
+        dyn Fn(&EvaluatorSource, &Situation, &str, &str) -> Result<Decision, ExternalError>
+            + Send
+            + Sync,
+    >,
+}
+
+impl MockEvaluator {
+    fn new<F>(kind: &'static str, f: F) -> Self
+    where
+        F: Fn(&EvaluatorSource, &Situation, &str, &str) -> Result<Decision, ExternalError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            kind,
+            f: Box::new(f),
+        }
+    }
+}
+
+impl ExternalEvaluator for MockEvaluator {
+    fn kind(&self) -> &'static str {
+        self.kind
+    }
+    fn evaluate(
+        &self,
+        source: &EvaluatorSource,
+        situation: &Situation,
+        action: &str,
+        agent_id: &str,
+    ) -> Result<Decision, ExternalError> {
+        (self.f)(source, situation, action, agent_id)
+    }
+}
+
+#[test]
+fn test_external_evaluator_registry_register_and_get() {
+    let mut reg = ExternalEvaluatorRegistry::new();
+    assert!(reg.is_empty());
+    reg.register(Arc::new(MockEvaluator::new("mock", |_, _, _, _| {
+        Ok(Decision::NoPolicyMatch)
+    })));
+    assert_eq!(reg.len(), 1);
+    let runner = reg.get("mock").expect("registered runner must be present");
+    assert_eq!(runner.kind(), "mock");
+    assert!(reg.get("unknown").is_none());
+    let kinds = reg.kinds();
+    assert_eq!(kinds, vec!["mock"]);
+}
+
+#[test]
+fn test_policy_without_external_evaluator_uses_local_path() {
+    // A policy with no external_evaluator field must be evaluated by
+    // the local evaluator even when a registry is attached.
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().unwrap();
+    let mut reg = ExternalEvaluatorRegistry::new();
+    reg.register(Arc::new(MockEvaluator::new("wasm", |_, _, _, _| {
+        panic!("external runner must not be invoked for a local-only policy")
+    })));
+    let store = PolicyStore::new(repo.clone(), "/policies", "agent")
+        .with_external_evaluators(Arc::new(reg));
+
+    let mut p = skeleton("infra/local", Selector::Always);
+    p.allow = vec![allow_action("do_thing", vec![])];
+    assert!(p.external_evaluator.is_none());
+    store.propose(REF, p).unwrap();
+    store.ratify(REF, "infra/local", "alice", "ok").unwrap();
+
+    let d = store
+        .evaluate(REF, &Situation::new(), "do_thing", "a1")
+        .unwrap();
+    assert!(
+        matches!(d, Decision::Allow { .. }),
+        "local evaluator must produce the decision; got {:?}",
+        d
+    );
+}
+
+#[test]
+fn test_policy_with_external_evaluator_dispatches_to_registered_runner() {
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().unwrap();
+    let mut reg = ExternalEvaluatorRegistry::new();
+    reg.register(Arc::new(MockEvaluator::new(
+        "wasm",
+        |source, _, action, _| {
+            // Verify the runner sees the expected source + action.
+            assert!(matches!(source, EvaluatorSource::Inline { body } if body == "allow-all"));
+            assert_eq!(action, "do_thing");
+            Ok(Decision::Allow {
+                matched_policy: "external/wasm@1".to_string(),
+                preconditions: vec![],
+            })
+        },
+    )));
+    let store = PolicyStore::new(repo.clone(), "/policies", "agent")
+        .with_external_evaluators(Arc::new(reg));
+
+    let mut p = skeleton("external/wasm", Selector::Always);
+    p.external_evaluator = Some(ExternalEvaluatorRef::Wasm {
+        source: EvaluatorSource::Inline {
+            body: "allow-all".to_string(),
+        },
+    });
+    store.propose(REF, p).unwrap();
+    store.ratify(REF, "external/wasm", "alice", "ok").unwrap();
+
+    let d = store
+        .evaluate(REF, &Situation::new(), "do_thing", "a1")
+        .unwrap();
+    match d {
+        Decision::Allow { matched_policy, .. } => {
+            assert_eq!(matched_policy, "external/wasm@1");
+        }
+        other => panic!("expected Allow from external runner, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_policy_with_unregistered_external_kind_is_skipped() {
+    // Registry has only wasm, but the policy references rego → the
+    // policy is skipped (treated as not-matching). If it's the only
+    // matching policy, result is NoPolicyMatch.
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().unwrap();
+    let mut reg = ExternalEvaluatorRegistry::new();
+    reg.register(Arc::new(MockEvaluator::new("wasm", |_, _, _, _| {
+        panic!("wasm runner must not be invoked for a rego-scoped policy")
+    })));
+    let store = PolicyStore::new(repo.clone(), "/policies", "agent")
+        .with_external_evaluators(Arc::new(reg));
+
+    let mut p = skeleton("external/rego", Selector::Always);
+    p.external_evaluator = Some(ExternalEvaluatorRef::Rego {
+        source: EvaluatorSource::Inline {
+            body: "package x".to_string(),
+        },
+    });
+    // Also give it a local allow to prove the external ref forces a skip
+    // rather than falling back to local evaluation.
+    p.allow = vec![allow_action("do_thing", vec![])];
+    store.propose(REF, p).unwrap();
+    store.ratify(REF, "external/rego", "alice", "ok").unwrap();
+
+    let d = store
+        .evaluate(REF, &Situation::new(), "do_thing", "a1")
+        .unwrap();
+    assert_eq!(
+        d,
+        Decision::NoPolicyMatch,
+        "policy with unregistered external kind must be skipped"
+    );
+}
+
+#[test]
+fn test_external_evaluator_precedence_deny_wins() {
+    // Two matched policies: the external one returns Allow, the local
+    // one returns Deny. Deny must still win.
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().unwrap();
+    let mut reg = ExternalEvaluatorRegistry::new();
+    reg.register(Arc::new(MockEvaluator::new("wasm", |_, _, _, _| {
+        Ok(Decision::Allow {
+            matched_policy: "external/allow@1".to_string(),
+            preconditions: vec![],
+        })
+    })));
+    let store = PolicyStore::new(repo.clone(), "/policies", "agent")
+        .with_external_evaluators(Arc::new(reg));
+
+    let mut external_p = skeleton("external/allow", Selector::Always);
+    external_p.external_evaluator = Some(ExternalEvaluatorRef::Wasm {
+        source: EvaluatorSource::Inline {
+            body: "allow".to_string(),
+        },
+    });
+    store.propose(REF, external_p).unwrap();
+    store.ratify(REF, "external/allow", "alice", "ok").unwrap();
+
+    let mut local_p = skeleton("local/deny", Selector::Always);
+    local_p.deny = vec![deny_action("do_thing", "hard no")];
+    store.propose(REF, local_p).unwrap();
+    store.ratify(REF, "local/deny", "alice", "ok").unwrap();
+
+    let d = store
+        .evaluate(REF, &Situation::new(), "do_thing", "a1")
+        .unwrap();
+    match d {
+        Decision::Deny {
+            matched_policy,
+            reason,
+        } => {
+            assert_eq!(matched_policy, "local/deny@1");
+            assert_eq!(reason, "hard no");
+        }
+        other => panic!("deny must beat external allow; got {:?}", other),
+    }
+
+    // Symmetric: an external Deny also beats a local Allow.
+    let mut reg2 = ExternalEvaluatorRegistry::new();
+    reg2.register(Arc::new(MockEvaluator::new("wasm", |_, _, _, _| {
+        Ok(Decision::Deny {
+            matched_policy: "external/deny@1".to_string(),
+            reason: "external says no".to_string(),
+        })
+    })));
+    let repo2 = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo2.init().unwrap();
+    let store2 =
+        PolicyStore::new(repo2, "/policies", "agent").with_external_evaluators(Arc::new(reg2));
+
+    let mut allow_p = skeleton("local/allow", Selector::Always);
+    allow_p.allow = vec![allow_action("do_thing", vec![])];
+    store2.propose(REF, allow_p).unwrap();
+    store2.ratify(REF, "local/allow", "alice", "ok").unwrap();
+
+    let mut deny_p = skeleton("external/deny", Selector::Always);
+    deny_p.external_evaluator = Some(ExternalEvaluatorRef::Wasm {
+        source: EvaluatorSource::Inline {
+            body: "deny".to_string(),
+        },
+    });
+    store2.propose(REF, deny_p).unwrap();
+    store2.ratify(REF, "external/deny", "alice", "ok").unwrap();
+
+    let d = store2
+        .evaluate(REF, &Situation::new(), "do_thing", "a1")
+        .unwrap();
+    assert!(
+        matches!(d, Decision::Deny { .. }),
+        "external deny must beat local allow; got {:?}",
+        d
+    );
+}
+
+#[test]
+fn test_external_evaluator_source_variants_round_trip() {
+    use std::path::PathBuf;
+
+    let variants = vec![
+        ExternalEvaluatorRef::Rego {
+            source: EvaluatorSource::Inline {
+                body: "package foo".to_string(),
+            },
+        },
+        ExternalEvaluatorRef::Cedar {
+            source: EvaluatorSource::FilePath {
+                path: PathBuf::from("/etc/policies/rule.cedar"),
+            },
+        },
+        ExternalEvaluatorRef::Wasm {
+            source: EvaluatorSource::CommitRef {
+                path: "/policies/wasm/module".to_string(),
+            },
+        },
+    ];
+
+    for v in variants {
+        let j = serde_json::to_value(&v).expect("serialize");
+        assert!(
+            j.get("kind").is_some(),
+            "ExternalEvaluatorRef must be tagged by kind: {}",
+            j
+        );
+        assert!(
+            j.get("source").and_then(|s| s.get("kind")).is_some(),
+            "EvaluatorSource must be tagged by kind: {}",
+            j
+        );
+        let back: ExternalEvaluatorRef = serde_json::from_value(j).expect("deserialize");
+        assert_eq!(back, v, "round-trip mismatch for {:?}", v);
+    }
+
+    // Confirm the three source-kind tags serialize under snake_case.
+    let inline = serde_json::to_value(EvaluatorSource::Inline {
+        body: "x".to_string(),
+    })
+    .unwrap();
+    assert_eq!(inline["kind"], "inline");
+    let file_path = serde_json::to_value(EvaluatorSource::FilePath {
+        path: PathBuf::from("/tmp/a"),
+    })
+    .unwrap();
+    assert_eq!(file_path["kind"], "file_path");
+    let commit_ref = serde_json::to_value(EvaluatorSource::CommitRef {
+        path: "/p".to_string(),
+    })
+    .unwrap();
+    assert_eq!(commit_ref["kind"], "commit_ref");
+
+    // Confirm policy.external_evaluator is omitted when None.
+    let p = skeleton("x/y", Selector::Always);
+    assert!(p.external_evaluator.is_none());
+    let s = serde_json::to_string(&p).unwrap();
+    assert!(
+        !s.contains("external_evaluator"),
+        "external_evaluator must be omitted when None, got {}",
+        s
+    );
 }

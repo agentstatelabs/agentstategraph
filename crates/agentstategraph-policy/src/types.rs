@@ -84,6 +84,47 @@ pub struct Policy {
     /// the cheap-namespace-discriminator rationale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+
+    /// External evaluator escape-hatch (0.7.5 §4). When `Some(_)` and
+    /// the `PolicyStore` has a matching runner registered via
+    /// `with_external_evaluators`, the dispatcher routes the policy to
+    /// the external rule engine (Rego / Cedar / WASM) instead of the
+    /// local evaluator. Policies referencing a runner kind that is not
+    /// registered are treated as not-matching. See POLICY_V1.md §18
+    /// and ROADMAP D4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_evaluator: Option<ExternalEvaluatorRef>,
+}
+
+/// Reference to an external policy evaluator (0.7.5 §4). Tagged serde
+/// union keyed by `kind`; each variant carries an [`EvaluatorSource`]
+/// that the dispatcher resolves at evaluation time.
+///
+/// Concrete runners live in optional sibling crates
+/// (`agentstategraph-policy-wasm` / `-rego` / `-cedar` — §4b). The
+/// main policy crate only carries the ref + trait; unregistered kinds
+/// cause the policy to be skipped during evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExternalEvaluatorRef {
+    Rego { source: EvaluatorSource },
+    Cedar { source: EvaluatorSource },
+    Wasm { source: EvaluatorSource },
+}
+
+/// Source location for the body of an external evaluator (0.7.5 §4).
+/// Tagged serde union keyed by `kind`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvaluatorSource {
+    /// Rego / Cedar / WASM source embedded directly in the policy.
+    Inline { body: String },
+    /// Absolute or server-relative filesystem path.
+    FilePath { path: std::path::PathBuf },
+    /// A path within the state tree on the same repo — the dispatcher
+    /// loads the value stored there and treats it as the evaluator
+    /// source.
+    CommitRef { path: String },
 }
 
 /// Detached signature carried on a [`Policy`]. Tagged serde union keyed

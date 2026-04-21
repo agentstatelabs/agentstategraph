@@ -13,9 +13,10 @@ use chrono::Utc;
 
 use crate::error::PolicyError;
 use crate::evaluator;
+use crate::external::ExternalEvaluatorRegistry;
 use crate::paths;
 use crate::selector::Situation;
-use crate::types::{ChangeProposal, Decision, Policy, PolicySignature};
+use crate::types::{ChangeProposal, Decision, ExternalEvaluatorRef, Policy, PolicySignature};
 use crate::verifier::SignatureVerifier;
 
 /// Handle bound to a `Repository` + path prefix. Mirrors the
@@ -33,6 +34,11 @@ pub struct PolicyStore {
     /// an unratified proposal is. Defaults to `false` so unsigned
     /// policies remain live.
     require_signed: bool,
+    /// Optional registry of external-evaluator runners (0.7.5 §4a).
+    /// When set, policies whose `external_evaluator.kind` matches a
+    /// registered runner are dispatched through it instead of the
+    /// local evaluator. Unregistered kinds are treated as skipped.
+    external_evaluators: Option<Arc<ExternalEvaluatorRegistry>>,
 }
 
 impl PolicyStore {
@@ -51,6 +57,7 @@ impl PolicyStore {
             agent_id: agent_id.into(),
             verifier: None,
             require_signed: false,
+            external_evaluators: None,
         }
     }
 
@@ -70,6 +77,18 @@ impl PolicyStore {
     /// live in pass-through mode.
     pub fn with_require_signed(mut self, require_signed: bool) -> Self {
         self.require_signed = require_signed;
+        self
+    }
+
+    /// Install an external-evaluator registry (0.7.5 §4a). Policies
+    /// whose `external_evaluator.kind` matches a registered runner are
+    /// dispatched through it inside `evaluate_scoped` /
+    /// `evaluate_change_scoped`; policies with an unregistered kind
+    /// are silently skipped (treated as not-matching). Pass-through
+    /// when never called — every policy goes through the local
+    /// evaluator.
+    pub fn with_external_evaluators(mut self, registry: Arc<ExternalEvaluatorRegistry>) -> Self {
+        self.external_evaluators = Some(registry);
         self
     }
 
@@ -484,6 +503,13 @@ impl PolicyStore {
     /// through [`Self::policies_for_situation_scoped`] so only policies
     /// with `tenant_id == Some(tid)` or `tenant_id == None` contribute
     /// to the decision.
+    ///
+    /// External-evaluator dispatch (0.7.5 §4a): matched policies carrying
+    /// an `external_evaluator` whose kind is registered in the store's
+    /// registry are routed to the external runner; their decisions are
+    /// combined with the local evaluator's verdict under the existing
+    /// `deny > require_approval > allow` precedence. Policies whose
+    /// external kind is not registered are skipped.
     pub fn evaluate_scoped(
         &self,
         ref_name: &str,
@@ -493,8 +519,12 @@ impl PolicyStore {
         tenant_filter: Option<&str>,
     ) -> Result<Decision, PolicyError> {
         let matched = self.policies_for_situation_scoped(ref_name, situation, tenant_filter)?;
-        let refs: Vec<&Policy> = matched.iter().collect();
-        Ok(evaluator::evaluate_matched(&refs, action, agent_id))
+        let (locals, externals) = self.partition_for_dispatch(&matched);
+
+        let external_decisions = self.run_externals(&externals, situation, action, agent_id);
+        let local_decision = evaluator::evaluate_matched(&locals, action, agent_id);
+
+        Ok(combine_decisions(external_decisions, local_decision))
     }
 
     /// Change-proposal evaluation — POLICY_V1.md §22.2.
@@ -508,6 +538,16 @@ impl PolicyStore {
 
     /// Tenant-scoped variant of [`Self::evaluate_change`] (0.7.5 §3b).
     /// Routes through [`Self::active_scoped`].
+    ///
+    /// External-evaluator dispatch (0.7.5 §4a): matched policies carrying
+    /// an `external_evaluator` whose kind is registered in the store's
+    /// registry are routed to the external runner for *their* portion of
+    /// the decision; their decisions are combined with the local
+    /// change-evaluator's verdict under `deny > require_approval > allow`
+    /// precedence. Policies whose external kind is not registered are
+    /// skipped. External runners see `proposal.action` / `proposal.agent_id`
+    /// and an empty [`Situation`] — the change-proposal flow does not
+    /// carry a situation context of its own.
     pub fn evaluate_change_scoped(
         &self,
         ref_name: &str,
@@ -515,8 +555,96 @@ impl PolicyStore {
         tenant_filter: Option<&str>,
     ) -> Result<Decision, PolicyError> {
         let actives = self.active_scoped(ref_name, None, tenant_filter)?;
-        let refs: Vec<&Policy> = actives.iter().collect();
-        Ok(evaluator::evaluate_change(&refs, proposal))
+        let (locals, externals) = self.partition_for_dispatch(&actives);
+
+        // External runners don't consume `ChangeProposal` (that's a
+        // policy-crate-specific concept). Route them through
+        // `evaluate(action, agent_id)` against an empty situation; this
+        // mirrors what a Rego / Cedar runner would see in §4b.
+        let empty_situation = Situation::new();
+        let external_decisions = self.run_externals(
+            &externals,
+            &empty_situation,
+            &proposal.action,
+            &proposal.agent_id,
+        );
+        let local_decision = evaluator::evaluate_change(&locals, proposal);
+
+        Ok(combine_decisions(external_decisions, local_decision))
+    }
+
+    // -----------------------------------------------------------------
+    // External-evaluator dispatch helpers (0.7.5 §4a)
+    // -----------------------------------------------------------------
+
+    /// Split `policies` into `(local, external)` by inspecting each
+    /// policy's `external_evaluator` field against the registered
+    /// runner kinds.
+    ///
+    /// - Policies with `external_evaluator == None` go into `local` —
+    ///   they are evaluated by the local evaluator.
+    /// - Policies with `external_evaluator == Some(ref_)` where
+    ///   `ref_.kind()` is present in the registry go into `external`.
+    /// - Policies with an external ref whose kind is NOT registered
+    ///   are dropped (skipped; treated as not-matching).
+    /// - If no registry is installed, every policy falls through the
+    ///   local path regardless of the `external_evaluator` field.
+    fn partition_for_dispatch<'a>(
+        &self,
+        policies: &'a [Policy],
+    ) -> (Vec<&'a Policy>, Vec<&'a Policy>) {
+        let Some(registry) = self.external_evaluators.as_ref() else {
+            // No registry → everything is local regardless of field.
+            return (policies.iter().collect(), Vec::new());
+        };
+        let mut locals = Vec::with_capacity(policies.len());
+        let mut externals = Vec::new();
+        for p in policies {
+            match p.external_evaluator.as_ref() {
+                None => locals.push(p),
+                Some(ref_) => {
+                    if registry.get(external_kind(ref_)).is_some() {
+                        externals.push(p);
+                    }
+                    // else: unregistered kind → skip
+                }
+            }
+        }
+        (locals, externals)
+    }
+
+    /// Invoke each external policy's runner and collect the decisions.
+    /// Runner failures are swallowed: a policy whose runner errors is
+    /// treated like an unregistered kind (skipped), preserving the
+    /// POLICY_V1.md §11 soft-model guarantee that a misbehaving
+    /// runner never crashes evaluation.
+    fn run_externals(
+        &self,
+        policies: &[&Policy],
+        situation: &Situation,
+        action: &str,
+        agent_id: &str,
+    ) -> Vec<Decision> {
+        let Some(registry) = self.external_evaluators.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(policies.len());
+        for p in policies {
+            let Some(ref_) = p.external_evaluator.as_ref() else {
+                continue;
+            };
+            let Some(runner) = registry.get(external_kind(ref_)) else {
+                continue;
+            };
+            let source = external_source(ref_);
+            match runner.evaluate(source, situation, action, agent_id) {
+                Ok(d) => out.push(d),
+                // Runner errors: skip this policy. Future work (§4c)
+                // may surface these through a structured log.
+                Err(_) => continue,
+            }
+        }
+        out
     }
 
     // -----------------------------------------------------------------
@@ -554,6 +682,62 @@ impl PolicyStore {
 
 fn is_path_not_found(e: &agentstategraph::RepoError) -> bool {
     matches!(e, agentstategraph::RepoError::Tree(_))
+}
+
+/// Kind tag for an [`ExternalEvaluatorRef`] — matches the runner's
+/// `ExternalEvaluator::kind()` return for lookup in the registry.
+fn external_kind(ref_: &ExternalEvaluatorRef) -> &'static str {
+    match ref_ {
+        ExternalEvaluatorRef::Rego { .. } => "rego",
+        ExternalEvaluatorRef::Cedar { .. } => "cedar",
+        ExternalEvaluatorRef::Wasm { .. } => "wasm",
+    }
+}
+
+/// Extract the `source` field out of an [`ExternalEvaluatorRef`].
+fn external_source(ref_: &ExternalEvaluatorRef) -> &crate::types::EvaluatorSource {
+    match ref_ {
+        ExternalEvaluatorRef::Rego { source }
+        | ExternalEvaluatorRef::Cedar { source }
+        | ExternalEvaluatorRef::Wasm { source } => source,
+    }
+}
+
+/// Combine decisions from external runners with the local evaluator's
+/// verdict under the existing `deny > require_approval > allow`
+/// precedence (POLICY_V1.md §5).
+///
+/// External policies' decisions are considered *before* the local
+/// decision at each precedence band so a deny from an external policy
+/// beats an allow from the local path (and vice versa — a local deny
+/// also beats an external allow). Within external decisions, first-win
+/// at each band is enough because the final precedence ladder
+/// (deny → approval → allow) is applied across the full set.
+fn combine_decisions(externals: Vec<Decision>, local: Decision) -> Decision {
+    let all: Vec<Decision> = externals
+        .into_iter()
+        .chain(std::iter::once(local))
+        .collect();
+
+    // Pass 1: any Deny wins.
+    for d in &all {
+        if matches!(d, Decision::Deny { .. }) {
+            return d.clone();
+        }
+    }
+    // Pass 2: any RequireApproval wins over Allow / NoPolicyMatch.
+    for d in &all {
+        if matches!(d, Decision::RequireApproval { .. }) {
+            return d.clone();
+        }
+    }
+    // Pass 3: any Allow wins over NoPolicyMatch.
+    for d in &all {
+        if matches!(d, Decision::Allow { .. }) {
+            return d.clone();
+        }
+    }
+    Decision::NoPolicyMatch
 }
 
 /// Tenant-scope predicate shared by every `_scoped` read path (0.7.5 §3b).

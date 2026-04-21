@@ -40,6 +40,7 @@
 
 pub mod error;
 pub mod evaluator;
+pub mod external;
 pub mod paths;
 pub mod selector;
 pub mod store;
@@ -47,10 +48,11 @@ pub mod types;
 pub mod verifier;
 
 pub use error::PolicyError;
+pub use external::{ExternalError, ExternalEvaluator, ExternalEvaluatorRegistry};
 pub use selector::{Selector, Situation};
 pub use store::PolicyStore;
 pub use types::{
-    ApprovalRule, AuthorizedAction, ChangeProposal, Decision, FallbackAction, Policy,
-    PolicySignature, ProcedureStep, Severity,
+    ApprovalRule, AuthorizedAction, ChangeProposal, Decision, EvaluatorSource,
+    ExternalEvaluatorRef, FallbackAction, Policy, PolicySignature, ProcedureStep, Severity,
 };
 pub use verifier::{SignatureVerificationError, SignatureVerifier};
