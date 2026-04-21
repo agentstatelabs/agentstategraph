@@ -5,6 +5,106 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.6.0-beta.1] — 2026-04-21
+
+### Added
+
+- **New crate `agentstategraph-policy`** — the fourth primitive in the family
+  (alongside memory, tasks, and migrate). Implements the authorization model
+  specified in `strategy/POLICY_V1.md` v1.1: `Policy` with `allow` /
+  `deny` / `require_approval` rules over (situation, action, agent_id)
+  triples; situation selectors (`Selector::{All, Any, Not, Eq, Ne, Matches,
+  Exists, Gt, Gte, Lt, Lte}`); `Decision::{Allow, Deny, RequireApproval,
+  NoPolicyMatch}` with `deny > require_approval > allow` precedence;
+  proposal → ratify → supersede lifecycle with chained versions; policies
+  stored at `/policies/<domain>/<subdomain>/<slug>` as peer to `/plans/`.
+  **Proposals are never consulted by the evaluator** — only ratified
+  policies are active. 54 tests (17 unit + 36 integration + 1 doctest).
+
+- **Cost-of-change dimension on `Policy`** — new fields
+  `triggers: Vec<String>`, `required_fields: Vec<String>`, `severity: Severity`
+  per `POLICY_V1.md` §22.2. A `ChangeProposal` carries tokens (e.g.
+  `destructive`, `schema-change`, `reindex`, `migration`, `ref-rewrite`,
+  `large`) that match against a policy's `triggers`. Missing required
+  fields short-circuit to `RequireApproval`.
+
+- **`FallbackAction` enum** (`Block`, `PickAlternative`,
+  `LowestRiskAlternative`, `KeepCurrentState`, `DelegateTo`) on every
+  `ApprovalRule` per §22.3. This is the "what to do while it waits"
+  primitive — policies that require approval can now prescribe a safe
+  fallback the agent applies immediately, so operations keep running
+  while the approval gate is open.
+
+- **`Task` extensions** (`agentstategraph-tasks`): `payload`,
+  `parent_change`, `on_complete: Option<OnCompleteHook>` (variants
+  `PromoteChange` / `Named`). Enables the fallback workflow to create
+  approval tasks that carry the deferred `ChangeProposal` payload and a
+  parent-change back-reference. All fields are `#[serde(default,
+  skip_serializing_if = "Option::is_none")]` so legacy tasks deserialize
+  unchanged and tasks that don't use them serialize byte-identically to
+  the prior shape. 7 new tests including a hardcoded legacy-JSON fixture.
+
+- **9 new MCP tools** in `agentstategraph-mcp`: `policy_propose`,
+  `policy_ratify`, `policy_supersede`, `policy_list`, `policy_show`,
+  `policy_history`, `policy_evaluate`, `policy_evaluate_change`,
+  `policy_check_tokens`. Brings the tool count from 35 to **44**.
+
+- **`commit_spec` gate on policy evaluation** — the speculation promotion
+  tool now builds a `ChangeProposal` from the spec handle (with inferred
+  tokens from the diff), calls `PolicyStore::evaluate_change`, and only
+  promotes on `Allow` or `NoPolicyMatch`. `Deny` and `RequireApproval`
+  short-circuit the promotion and return the `Decision` JSON so callers
+  can apply the fallback branch. Token inference helpers
+  (`infer_change_tokens`, `infer_tokens_from_diff`) are exposed for
+  testing and are application logic that lives in the MCP crate, not the
+  policy engine.
+
+- **Fail-safe translation at the MCP layer** — new `with_fail_safe(..)`
+  server config (default `"deny"`). The engine returns `NoPolicyMatch`
+  verbatim; the MCP layer translates per config before returning, while
+  still surfacing the original `no_policy_match` kind so callers can
+  distinguish "authorized by an explicit allow" from "default policy
+  applied."
+
+- **Docs**: `spec/POLICY-IMPLEMENTATION-PLAN.md` (execution plan);
+  `docs/POLICY_GUIDE.md` user-facing guide covering authoring,
+  ratification, the fallback pattern, composition with speculation, and
+  the soft-enforcement model.
+
+### Changed
+
+- Workspace bumped from `0.5.0-beta.1` to `0.6.0-beta.1`. New primitive
+  warrants a minor bump.
+- Python + TypeScript binding `Cargo.toml` and `package.json` aligned
+  to `0.6.0-beta.1`.
+- Root `README.md` lists Policy alongside Memory / Tasks / Migrate as
+  an engine-level primitive.
+
+### Security / design notes
+
+- **Soft enforcement only** (`POLICY_V1.md` §11). ASG cannot physically
+  stop a misbehaving agent — the evaluator tells the agent what's
+  allowed; the agent still has to respect the decision. The value is
+  clarity of boundary, blame trail, and composition with hard
+  enforcement (OPA / Cedar / IAM) at the infrastructure layer. Do not
+  market this as "stops rogue agents."
+- The thesis line (`POLICY_V1.md` §22.1): _an AI agent that knows when
+  to act, when to ask, and what to do while it waits — and all of it
+  recorded, auditable, transparent, and sealed for export._
+
+### Deferred to follow-ups
+
+- Bindings for policy types across Py / TS / Go / WASM / C FFI (same
+  pattern as the `-tasks` roll-out).
+- AgentStateConsole / CTXone / Lens UI surfaces for proposal review and
+  the approval task queue.
+- `ctx policy` CLI subcommand.
+- External Rego / Cedar file references as an escape hatch for complex
+  rules.
+- Time-based activation (`active_from` scheduled go-live).
+- Multi-tenant namespace isolation for policies.
+- Cryptographic signing of policies.
+
 ## [0.5.0-beta.1] — 2026-04-17
 
 ### Changed

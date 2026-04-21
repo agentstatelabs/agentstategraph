@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentstategraph"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-ffi"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-mcp"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -70,7 +70,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-napi"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-python"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph-core",
  "deadpool-postgres",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-wasm"
-version = "0.5.0-beta.1"
+version = "0.6.0-beta.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
