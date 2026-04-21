@@ -12,6 +12,7 @@
 
 typedef void* SgRepo;
 typedef void* SgTaskStore;
+typedef void* SgPolicyStore;
 
 /* Repository */
 extern SgRepo agentstategraph_new_memory();
@@ -68,6 +69,24 @@ extern char* agentstategraph_taskstore_next_task_for(SgTaskStore store, const ch
     const char* agent, uint8_t include_unassigned);
 extern char* agentstategraph_taskstore_derived_status(SgTaskStore store, const char* ref_name, const char* plan,
     const char* parent_id);
+
+/* PolicyStore */
+extern SgPolicyStore agentstategraph_policy_store_new(SgRepo repo, const char* prefix, const char* agent_id);
+extern void agentstategraph_policy_store_free(SgPolicyStore store);
+extern char* agentstategraph_policy_propose(SgPolicyStore store, const char* ref_name, const char* policy_json);
+extern char* agentstategraph_policy_ratify(SgPolicyStore store, const char* ref_name, const char* path,
+    const char* ratifier, const char* reasoning);
+extern char* agentstategraph_policy_supersede(SgPolicyStore store, const char* ref_name, const char* path,
+    const char* new_policy_json);
+extern char* agentstategraph_policy_list(SgPolicyStore store, const char* ref_name, const char* prefix_or_null);
+extern char* agentstategraph_policy_active(SgPolicyStore store, const char* ref_name, const char* prefix_or_null);
+extern char* agentstategraph_policy_get(SgPolicyStore store, const char* ref_name, const char* path);
+extern char* agentstategraph_policy_history(SgPolicyStore store, const char* ref_name, const char* path);
+extern char* agentstategraph_policy_evaluate(SgPolicyStore store, const char* ref_name, const char* situation_json,
+    const char* action, const char* agent_id);
+extern char* agentstategraph_policy_evaluate_change(SgPolicyStore store, const char* ref_name,
+    const char* proposal_json);
+extern char* agentstategraph_policy_check_tokens(SgPolicyStore store, const char* ref_name, const char* tokens_json);
 
 /* Migrate */
 extern char* agentstategraph_migrate_check(SgRepo repo, const char* ref_name, const char* target);

@@ -14,6 +14,7 @@ agentstategraph = { path = "../agentstategraph" }
 agentstategraph-core = { path = "../agentstategraph-core" }
 agentstategraph-storage = { path = "../agentstategraph-storage" }
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
+agentstategraph-policy = { path = "../agentstategraph-policy" }
 agentstategraph-migrate = { path = "../agentstategraph-migrate" }
 semver = "1"
 serde = { workspace = true }

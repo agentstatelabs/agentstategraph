@@ -24,6 +24,7 @@ use std::sync::Arc;
 use agentstategraph::{CommitOptions, Repository, SCHEMA_VERSION};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
+use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore, Situation};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskId, TaskStore};
 use semver::Version;
@@ -37,6 +38,11 @@ pub struct SgRepo {
 /// Opaque handle to a TaskStore.
 pub struct SgTaskStore {
     inner: TaskStore,
+}
+
+/// Opaque handle to a PolicyStore.
+pub struct SgPolicyStore {
+    inner: PolicyStore,
 }
 
 /// Create a new in-memory AgentStateGraph repository.
@@ -838,6 +844,307 @@ pub extern "C" fn agentstategraph_taskstore_derived_status(
         Ok(s) => json_ok(&s),
         Err(e) => json_err(&e.to_string()),
     }
+}
+
+// ===========================================================================
+// PolicyStore FFI
+// ===========================================================================
+
+/// Create a new PolicyStore handle bound to the given repository, path
+/// prefix, and agent id. The returned pointer must be freed with
+/// `agentstategraph_policy_store_free`. The underlying repository is
+/// shared (refcounted); freeing the PolicyStore does NOT free the
+/// repository.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_store_new(
+    repo: *const SgRepo,
+    prefix: *const c_char,
+    agent_id: *const c_char,
+) -> *mut SgPolicyStore {
+    let repo = unsafe { repo.as_ref() };
+    let repo = match repo {
+        Some(r) => r,
+        None => return ptr::null_mut(),
+    };
+    let prefix = unsafe { c_to_str(prefix) };
+    let agent_id = unsafe { c_to_str(agent_id) };
+    if prefix.is_empty() || agent_id.is_empty() {
+        return ptr::null_mut();
+    }
+    let store = PolicyStore::new(repo.inner.clone(), prefix, agent_id);
+    Box::into_raw(Box::new(SgPolicyStore { inner: store }))
+}
+
+/// Free a PolicyStore handle.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_store_free(store: *mut SgPolicyStore) {
+    if !store.is_null() {
+        unsafe {
+            drop(Box::from_raw(store));
+        }
+    }
+}
+
+fn policystore_ref<'a>(store: *const SgPolicyStore) -> Option<&'a SgPolicyStore> {
+    unsafe { store.as_ref() }
+}
+
+fn opt_c_to_str(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(ptr) };
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
+/// Propose a new (unratified) policy. `policy_json` is a JSON object
+/// matching the `Policy` schema. Returns a JSON string `"path@version"`
+/// handle on success, or `{"error": ...}` JSON on failure.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_propose(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    policy_json: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let policy_str = unsafe { c_to_str(policy_json) };
+    let policy: Policy = match serde_json::from_str(&policy_str) {
+        Ok(p) => p,
+        Err(e) => return json_err(&format!("invalid policy: {e}")),
+    };
+    match store.inner.propose(&ref_name, policy) {
+        Ok(handle) => json_ok(&handle),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Ratify an unratified proposal at `path`. Returns `{"ok":true}` on
+/// success, `{"error": ...}` on failure.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_ratify(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    path: *const c_char,
+    ratifier: *const c_char,
+    reasoning: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let ratifier = unsafe { c_to_str(ratifier) };
+    let reasoning = unsafe { c_to_str(reasoning) };
+    match store.inner.ratify(&ref_name, &path, &ratifier, &reasoning) {
+        Ok(()) => to_c_string("{\"ok\":true}"),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Replace the active policy at `path` with `new_policy_json`. Returns
+/// JSON `"path@new_version"` handle on success.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_supersede(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    path: *const c_char,
+    new_policy_json: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let policy_str = unsafe { c_to_str(new_policy_json) };
+    let policy: Policy = match serde_json::from_str(&policy_str) {
+        Ok(p) => p,
+        Err(e) => return json_err(&format!("invalid policy: {e}")),
+    };
+    match store.inner.supersede(&ref_name, &path, policy) {
+        Ok(handle) => json_ok(&handle),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// List policies whose path starts with `prefix_or_null` (NULL or empty
+/// = no filter). Returns JSON array of policies.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_list(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    prefix_or_null: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let filter = opt_c_to_str(prefix_or_null);
+    match store.inner.list(&ref_name, filter.as_deref()) {
+        Ok(ps) => json_ok(&ps),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// List currently-active (ratified and `active_from <= now`) policies.
+/// `prefix_or_null` filters by path prefix (NULL/empty = all). Returns
+/// JSON array.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_active(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    prefix_or_null: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let filter = opt_c_to_str(prefix_or_null);
+    match store.inner.active(&ref_name, filter.as_deref()) {
+        Ok(ps) => json_ok(&ps),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Fetch the active policy at `path`. Returns JSON policy object.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_get(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    match store.inner.get(&ref_name, &path, None) {
+        Ok(p) => json_ok(&p),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Walk the supersedes chain for `path`. Returns JSON array, oldest
+/// first through the current active version.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_history(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    match store.inner.history(&ref_name, &path) {
+        Ok(ps) => json_ok(&ps),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Authorization evaluation (POLICY_V1.md §5). `situation_json` is a
+/// flat `{string: string}` JSON object, or `{"facts": {...}}` wrapper.
+/// Returns JSON `Decision`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_evaluate(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    situation_json: *const c_char,
+    action: *const c_char,
+    agent_id: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let situation_str = unsafe { c_to_str(situation_json) };
+    let action = unsafe { c_to_str(action) };
+    let agent_id = unsafe { c_to_str(agent_id) };
+    let situation = match parse_situation(&situation_str) {
+        Ok(s) => s,
+        Err(e) => return json_err(&format!("invalid situation: {e}")),
+    };
+    match store
+        .inner
+        .evaluate(&ref_name, &situation, &action, &agent_id)
+    {
+        Ok(d) => json_ok(&d),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Change-proposal evaluation (POLICY_V1.md §22.2). `proposal_json` is
+/// a JSON `ChangeProposal`. Returns JSON `Decision`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_evaluate_change(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    proposal_json: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let proposal_str = unsafe { c_to_str(proposal_json) };
+    let proposal: ChangeProposal = match serde_json::from_str(&proposal_str) {
+        Ok(p) => p,
+        Err(e) => return json_err(&format!("invalid proposal: {e}")),
+    };
+    match store.inner.evaluate_change(&ref_name, &proposal) {
+        Ok(d) => json_ok(&d),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// List active policies whose `triggers` intersect `tokens_json` (a JSON
+/// array of strings). Binding-level helper mirroring the internal filter
+/// used by `evaluate_change`. Returns JSON array of policies.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_check_tokens(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    tokens_json: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let tokens_str = unsafe { c_to_str(tokens_json) };
+    let tokens: Vec<String> = if tokens_str.is_empty() {
+        Vec::new()
+    } else {
+        match serde_json::from_str(&tokens_str) {
+            Ok(v) => v,
+            Err(e) => return json_err(&format!("invalid tokens_json: {e}")),
+        }
+    };
+    let actives = match store.inner.active(&ref_name, None) {
+        Ok(v) => v,
+        Err(e) => return json_err(&e.to_string()),
+    };
+    let token_set: std::collections::HashSet<&str> = tokens.iter().map(|s| s.as_str()).collect();
+    let matched: Vec<&Policy> = actives
+        .iter()
+        .filter(|p| p.triggers.iter().any(|t| token_set.contains(t.as_str())))
+        .collect();
+    json_ok(&matched)
+}
+
+fn parse_situation(s: &str) -> Result<Situation, serde_json::Error> {
+    if s.is_empty() {
+        return Ok(Situation::default());
+    }
+    // Situation is `#[serde(transparent)]` over HashMap<String, String>,
+    // so a flat {"k": "v"} JSON object deserializes directly.
+    serde_json::from_str(s)
 }
 
 // ===========================================================================
