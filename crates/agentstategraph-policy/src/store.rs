@@ -286,6 +286,22 @@ impl PolicyStore {
         ref_name: &str,
         prefix_filter: Option<&str>,
     ) -> Result<Vec<Policy>, PolicyError> {
+        self.list_scoped(ref_name, prefix_filter, None)
+    }
+
+    /// Tenant-scoped variant of [`Self::list`] (0.7.5 §3b).
+    ///
+    /// `tenant_filter` semantics:
+    /// - `None` → no filter; every policy (globals + all tenants) is visible.
+    ///   This is the back-compat path used by [`Self::list`].
+    /// - `Some(tid)` → only policies with `tenant_id == Some(tid)` or
+    ///   `tenant_id == None` (globals always apply) are returned.
+    pub fn list_scoped(
+        &self,
+        ref_name: &str,
+        prefix_filter: Option<&str>,
+        tenant_filter: Option<&str>,
+    ) -> Result<Vec<Policy>, PolicyError> {
         let leaves = match self.repo.list_paths(ref_name, &self.prefix, None) {
             Ok(v) => v,
             Err(e) if is_path_not_found(&e) => return Ok(Vec::new()),
@@ -328,7 +344,12 @@ impl PolicyStore {
         let mut out = Vec::with_capacity(policy_paths.len());
         for p in policy_paths {
             match self.load_active(ref_name, &p) {
-                Ok(policy) => out.push(policy),
+                Ok(policy) => {
+                    if !tenant_matches(&policy, tenant_filter) {
+                        continue;
+                    }
+                    out.push(policy);
+                }
                 Err(PolicyError::NotFound(_)) => continue,
                 Err(e) => return Err(e),
             }
@@ -352,9 +373,28 @@ impl PolicyStore {
         ref_name: &str,
         prefix_filter: Option<&str>,
     ) -> Result<Vec<Policy>, PolicyError> {
+        self.active_scoped(ref_name, prefix_filter, None)
+    }
+
+    /// Tenant-scoped variant of [`Self::active`] (0.7.5 §3b).
+    ///
+    /// Applies the tenant filter *after* the signature filter so
+    /// signature-rejected policies are never surfaced regardless of
+    /// the tenant. `tenant_filter` semantics match [`Self::list_scoped`]:
+    /// `None` is no filter; `Some(tid)` keeps policies with
+    /// `tenant_id == Some(tid)` OR `tenant_id == None` (globals always
+    /// apply). `policies_for_situation_scoped`, `evaluate_scoped`, and
+    /// `evaluate_change_scoped` all route through this method, so they
+    /// inherit the filter for free.
+    pub fn active_scoped(
+        &self,
+        ref_name: &str,
+        prefix_filter: Option<&str>,
+        tenant_filter: Option<&str>,
+    ) -> Result<Vec<Policy>, PolicyError> {
         let now = Utc::now();
         Ok(self
-            .list(ref_name, prefix_filter)?
+            .list_scoped(ref_name, prefix_filter, tenant_filter)?
             .into_iter()
             .filter(|p| p.is_currently_active(now))
             .filter(|p| self.signature_passes(p))
@@ -406,8 +446,20 @@ impl PolicyStore {
         ref_name: &str,
         situation: &Situation,
     ) -> Result<Vec<Policy>, PolicyError> {
+        self.policies_for_situation_scoped(ref_name, situation, None)
+    }
+
+    /// Tenant-scoped variant of [`Self::policies_for_situation`]
+    /// (0.7.5 §3b). Delegates to [`Self::active_scoped`] so the tenant
+    /// filter is inherited.
+    pub fn policies_for_situation_scoped(
+        &self,
+        ref_name: &str,
+        situation: &Situation,
+        tenant_filter: Option<&str>,
+    ) -> Result<Vec<Policy>, PolicyError> {
         Ok(self
-            .active(ref_name, None)?
+            .active_scoped(ref_name, None, tenant_filter)?
             .into_iter()
             .filter(|p| p.situation_selector.matches(situation))
             .collect())
@@ -425,7 +477,22 @@ impl PolicyStore {
         action: &str,
         agent_id: &str,
     ) -> Result<Decision, PolicyError> {
-        let matched = self.policies_for_situation(ref_name, situation)?;
+        self.evaluate_scoped(ref_name, situation, action, agent_id, None)
+    }
+
+    /// Tenant-scoped variant of [`Self::evaluate`] (0.7.5 §3b). Routes
+    /// through [`Self::policies_for_situation_scoped`] so only policies
+    /// with `tenant_id == Some(tid)` or `tenant_id == None` contribute
+    /// to the decision.
+    pub fn evaluate_scoped(
+        &self,
+        ref_name: &str,
+        situation: &Situation,
+        action: &str,
+        agent_id: &str,
+        tenant_filter: Option<&str>,
+    ) -> Result<Decision, PolicyError> {
+        let matched = self.policies_for_situation_scoped(ref_name, situation, tenant_filter)?;
         let refs: Vec<&Policy> = matched.iter().collect();
         Ok(evaluator::evaluate_matched(&refs, action, agent_id))
     }
@@ -436,7 +503,18 @@ impl PolicyStore {
         ref_name: &str,
         proposal: &ChangeProposal,
     ) -> Result<Decision, PolicyError> {
-        let actives = self.active(ref_name, None)?;
+        self.evaluate_change_scoped(ref_name, proposal, None)
+    }
+
+    /// Tenant-scoped variant of [`Self::evaluate_change`] (0.7.5 §3b).
+    /// Routes through [`Self::active_scoped`].
+    pub fn evaluate_change_scoped(
+        &self,
+        ref_name: &str,
+        proposal: &ChangeProposal,
+        tenant_filter: Option<&str>,
+    ) -> Result<Decision, PolicyError> {
+        let actives = self.active_scoped(ref_name, None, tenant_filter)?;
         let refs: Vec<&Policy> = actives.iter().collect();
         Ok(evaluator::evaluate_change(&refs, proposal))
     }
@@ -476,4 +554,21 @@ impl PolicyStore {
 
 fn is_path_not_found(e: &agentstategraph::RepoError) -> bool {
     matches!(e, agentstategraph::RepoError::Tree(_))
+}
+
+/// Tenant-scope predicate shared by every `_scoped` read path (0.7.5 §3b).
+///
+/// - `tenant_filter == None` → unconditional pass (back-compat).
+/// - `tenant_filter == Some(tid)` → keep policies with
+///   `tenant_id == None` (globals always apply) OR
+///   `tenant_id == Some(tid)`. Policies scoped to a different tenant
+///   are filtered out the same way an unratified proposal is.
+fn tenant_matches(policy: &Policy, tenant_filter: Option<&str>) -> bool {
+    match tenant_filter {
+        None => true,
+        Some(tid) => match policy.tenant_id.as_deref() {
+            None => true,
+            Some(p_tid) => p_tid == tid,
+        },
+    }
 }

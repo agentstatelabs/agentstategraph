@@ -378,6 +378,12 @@ pub struct PolicyListParams {
     pub prefix: Option<String>,
     /// One of `"active"`, `"proposed"`, `"all"`. Default: `"active"`.
     pub status: Option<String>,
+    /// Optional tenant scope (0.7.5 §3b). `None` returns every policy
+    /// regardless of `tenant_id`; `Some(tid)` returns only policies with
+    /// `tenant_id == Some(tid)` or `tenant_id == None` (globals always
+    /// apply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_filter: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -403,6 +409,11 @@ pub struct PolicyEvaluateParams {
     pub situation: std::collections::HashMap<String, String>,
     pub action: String,
     pub agent_id: String,
+    /// Optional tenant scope (0.7.5 §3b). `None` is no filter;
+    /// `Some(tid)` consults only policies with `tenant_id == Some(tid)`
+    /// or `tenant_id == None` (globals always apply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_filter: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -411,6 +422,11 @@ pub struct PolicyEvaluateChangeParams {
     pub r#ref: String,
     /// Full `ChangeProposal` JSON — POLICY_V1.md §22.2.2.
     pub proposal: serde_json::Value,
+    /// Optional tenant scope (0.7.5 §3b). `None` is no filter;
+    /// `Some(tid)` consults only policies with `tenant_id == Some(tid)`
+    /// or `tenant_id == None` (globals always apply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_filter: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1542,18 +1558,23 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "List policies. Filter by path prefix and status (\"active\", \"proposed\", or \"all\" — default \"active\")."
+        description = "List policies. Filter by path prefix and status (\"active\", \"proposed\", or \"all\" — default \"active\"). Optional `tenant_filter` (0.7.5 §3b): when set, only policies with tenant_id matching or tenant_id=None (globals) are returned; when omitted, all policies are visible."
     )]
     async fn agentstategraph_policy_list(&self, params: Parameters<PolicyListParams>) -> String {
         let p = params.0;
         let status = p.status.as_deref().unwrap_or("active").to_lowercase();
+        let tenant = p.tenant_filter.as_deref();
         let result = match status.as_str() {
             "proposed" => self
                 .policies
-                .list(&p.r#ref, p.prefix.as_deref())
+                .list_scoped(&p.r#ref, p.prefix.as_deref(), tenant)
                 .map(|ps| ps.into_iter().filter(|p| !p.is_ratified()).collect()),
-            "all" => self.policies.list(&p.r#ref, p.prefix.as_deref()),
-            _ => self.policies.active(&p.r#ref, p.prefix.as_deref()),
+            "all" => self
+                .policies
+                .list_scoped(&p.r#ref, p.prefix.as_deref(), tenant),
+            _ => self
+                .policies
+                .active_scoped(&p.r#ref, p.prefix.as_deref(), tenant),
         };
         match result {
             Ok(policies) => serde_json::to_string_pretty(&policies).unwrap_or_default(),
@@ -1587,7 +1608,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Authorization evaluation. Given a situation (flat string map), a proposed action, and the agent id, returns a Decision (Allow / Deny / RequireApproval / NoPolicyMatch). NoPolicyMatch is translated per the server's fail-safe config (default: deny); the original kind is surfaced in the response."
+        description = "Authorization evaluation. Given a situation (flat string map), a proposed action, and the agent id, returns a Decision (Allow / Deny / RequireApproval / NoPolicyMatch). NoPolicyMatch is translated per the server's fail-safe config (default: deny); the original kind is surfaced in the response. Optional `tenant_filter` (0.7.5 §3b): when set, only policies with tenant_id matching or tenant_id=None (globals) contribute to the decision."
     )]
     async fn agentstategraph_policy_evaluate(
         &self,
@@ -1595,17 +1616,20 @@ impl AgentStateGraphServer {
     ) -> String {
         let p = params.0;
         let situation = Situation(p.situation);
-        match self
-            .policies
-            .evaluate(&p.r#ref, &situation, &p.action, &p.agent_id)
-        {
+        match self.policies.evaluate_scoped(
+            &p.r#ref,
+            &situation,
+            &p.action,
+            &p.agent_id,
+            p.tenant_filter.as_deref(),
+        ) {
             Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
             Err(e) => format!("Error: {}", e),
         }
     }
 
     #[tool(
-        description = "Change-proposal evaluation. Takes a full ChangeProposal (action, agent_id, intent, preferred_option, alternatives, tokens, attached_fields) and returns a Decision with a fallback when RequireApproval. NoPolicyMatch is translated per the server's fail-safe config (default: deny)."
+        description = "Change-proposal evaluation. Takes a full ChangeProposal (action, agent_id, intent, preferred_option, alternatives, tokens, attached_fields) and returns a Decision with a fallback when RequireApproval. NoPolicyMatch is translated per the server's fail-safe config (default: deny). Optional `tenant_filter` (0.7.5 §3b): when set, only policies with tenant_id matching or tenant_id=None (globals) are consulted."
     )]
     async fn agentstategraph_policy_evaluate_change(
         &self,
@@ -1616,7 +1640,10 @@ impl AgentStateGraphServer {
             Ok(p) => p,
             Err(e) => return format!("Error: invalid ChangeProposal JSON: {}", e),
         };
-        match self.policies.evaluate_change(&p.r#ref, &proposal) {
+        match self
+            .policies
+            .evaluate_change_scoped(&p.r#ref, &proposal, p.tenant_filter.as_deref())
+        {
             Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
             Err(e) => format!("Error: {}", e),
         }

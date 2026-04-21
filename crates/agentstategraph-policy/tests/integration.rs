@@ -1134,3 +1134,159 @@ fn test_policy_tenant_id_omitted_when_none() {
         s
     );
 }
+
+// -----------------------------------------------------------------------
+// §3b (0.7.5) — tenant_filter on _scoped evaluator methods
+// -----------------------------------------------------------------------
+
+/// Build and ratify a policy with the given tenant scope.
+fn seed_scoped_policy(
+    store: &PolicyStore,
+    path: &str,
+    tenant_id: Option<&str>,
+    apply: impl FnOnce(&mut Policy),
+) {
+    let mut p = skeleton(path, Selector::Always);
+    p.tenant_id = tenant_id.map(str::to_string);
+    apply(&mut p);
+    store.propose(REF, p).unwrap();
+    store.ratify(REF, path, "alice", "ok").unwrap();
+}
+
+#[test]
+fn test_tenant_filter_none_sees_all_policies() {
+    let (_r, store) = make_store("/policies");
+    seed_scoped_policy(&store, "global/p", None, |p| {
+        p.allow = vec![allow_action("x", vec![])];
+    });
+    seed_scoped_policy(&store, "acme/p", Some("acme"), |p| {
+        p.allow = vec![allow_action("x", vec![])];
+    });
+
+    let actives = store.active_scoped(REF, None, None).unwrap();
+    assert_eq!(
+        actives.len(),
+        2,
+        "tenant_filter=None must surface every policy; got {:?}",
+        actives.iter().map(|p| &p.path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_tenant_filter_matches_scoped_policy() {
+    let (_r, store) = make_store("/policies");
+    seed_scoped_policy(&store, "acme/p", Some("acme"), |p| {
+        p.allow = vec![allow_action("x", vec![])];
+    });
+
+    let actives = store.active_scoped(REF, None, Some("acme")).unwrap();
+    assert_eq!(actives.len(), 1);
+    assert_eq!(actives[0].path, "acme/p");
+    assert_eq!(actives[0].tenant_id.as_deref(), Some("acme"));
+}
+
+#[test]
+fn test_tenant_filter_excludes_other_tenant_policies() {
+    let (_r, store) = make_store("/policies");
+    seed_scoped_policy(&store, "acme/p", Some("acme"), |p| {
+        p.allow = vec![allow_action("x", vec![])];
+    });
+
+    let actives = store.active_scoped(REF, None, Some("other")).unwrap();
+    assert!(
+        actives.is_empty(),
+        "acme-scoped policy must not surface under tenant_filter=Some(\"other\"); got {:?}",
+        actives.iter().map(|p| &p.path).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_tenant_filter_always_includes_globals() {
+    let (_r, store) = make_store("/policies");
+    seed_scoped_policy(&store, "global/p", None, |p| {
+        p.allow = vec![allow_action("x", vec![])];
+    });
+    seed_scoped_policy(&store, "acme/p", Some("acme"), |p| {
+        p.allow = vec![allow_action("x", vec![])];
+    });
+
+    let actives = store.active_scoped(REF, None, Some("other")).unwrap();
+    assert_eq!(
+        actives.len(),
+        1,
+        "globals must remain visible under any tenant_filter"
+    );
+    assert_eq!(actives[0].path, "global/p");
+    assert!(actives[0].tenant_id.is_none());
+}
+
+#[test]
+fn test_evaluate_scoped_respects_tenant_filter() {
+    let (_r, store) = make_store("/policies");
+    seed_scoped_policy(&store, "acme/deny", Some("acme"), |p| {
+        p.deny = vec![deny_action("restart_pod", "acme-only deny")];
+    });
+
+    // Matching tenant → the scoped deny fires.
+    let d = store
+        .evaluate_scoped(REF, &Situation::new(), "restart_pod", "a1", Some("acme"))
+        .unwrap();
+    match d {
+        Decision::Deny {
+            matched_policy,
+            reason,
+        } => {
+            assert_eq!(matched_policy, "acme/deny@1");
+            assert_eq!(reason, "acme-only deny");
+        }
+        other => panic!("expected Deny under tenant_filter=acme, got {:?}", other),
+    }
+
+    // Different tenant → the scoped deny is filtered out.
+    let d = store
+        .evaluate_scoped(REF, &Situation::new(), "restart_pod", "a1", Some("other"))
+        .unwrap();
+    assert_eq!(
+        d,
+        Decision::NoPolicyMatch,
+        "acme-scoped policy must not contribute under tenant_filter=other"
+    );
+
+    // Back-compat path: no filter → scoped policy still fires.
+    let d = store
+        .evaluate(REF, &Situation::new(), "restart_pod", "a1")
+        .unwrap();
+    assert!(matches!(d, Decision::Deny { .. }));
+}
+
+#[test]
+fn test_evaluate_change_scoped_respects_tenant_filter() {
+    let (_r, store) = make_store("/policies");
+    seed_scoped_policy(&store, "acme/change", Some("acme"), |p| {
+        p.triggers = vec!["reindex".into()];
+        p.require_approval = vec![approval("*", FallbackAction::Block)];
+    });
+
+    let proposal = ChangeProposal::new("promote", "a1", "merge", "spec-7").with_tokens(["reindex"]);
+
+    // Matching tenant → approval gate fires.
+    let d = store
+        .evaluate_change_scoped(REF, &proposal, Some("acme"))
+        .unwrap();
+    match d {
+        Decision::RequireApproval { matched_policy, .. } => {
+            assert_eq!(matched_policy, "acme/change@1");
+        }
+        other => panic!("expected RequireApproval, got {:?}", other),
+    }
+
+    // Different tenant → no match.
+    let d = store
+        .evaluate_change_scoped(REF, &proposal, Some("other"))
+        .unwrap();
+    assert_eq!(d, Decision::NoPolicyMatch);
+
+    // Back-compat path: no filter → gate still fires.
+    let d = store.evaluate_change(REF, &proposal).unwrap();
+    assert!(matches!(d, Decision::RequireApproval { .. }));
+}
