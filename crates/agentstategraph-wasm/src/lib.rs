@@ -15,12 +15,14 @@ use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 
+use agentstategraph::session::SessionStatus;
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository, SCHEMA_VERSION};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
+use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore as PolicyBackend, Situation};
 use agentstategraph_storage::IndexedDbStorage;
-use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskId, TaskStore};
+use agentstategraph_tasks::{OnCompleteHook, Priority, Proof, ProofKind, TaskId, TaskStore};
 use semver::Version;
 
 fn parse_category(s: &str) -> IntentCategory {
@@ -490,6 +492,67 @@ impl WasmAgentStateGraph {
         serde_json::to_string(&task).map_err(js_err)
     }
 
+    /// Add a task with the 0.6.0 extension fields (`payload`,
+    /// `parent_change`, `on_complete`). All three are JSON strings; pass
+    /// `None` / null for unset. `payload` is an arbitrary JSON value,
+    /// `parent_change` a `"spec-id@version"` handle, `on_complete` a
+    /// JSON-serialized `OnCompleteHook`.
+    #[wasm_bindgen(js_name = tasksAddTaskWithExtensions)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tasks_add_task_with_extensions(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        title: &str,
+        priority: &str,
+        parent_id: Option<String>,
+        blockers_json: Option<String>,
+        assigned_to: Option<String>,
+        payload_json: Option<String>,
+        parent_change: Option<String>,
+        on_complete_json: Option<String>,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let prio = parse_priority(priority);
+        let parent = parent_id.filter(|s| !s.is_empty()).map(TaskId);
+        let blockers: Vec<TaskId> = match blockers_json {
+            None => Vec::new(),
+            Some(s) if s.is_empty() => Vec::new(),
+            Some(s) => serde_json::from_str::<Vec<String>>(&s)
+                .map_err(js_err)?
+                .into_iter()
+                .map(TaskId)
+                .collect(),
+        };
+        let payload: Option<serde_json::Value> = match payload_json {
+            None => None,
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(serde_json::from_str(&s).map_err(js_err)?),
+        };
+        let on_complete: Option<OnCompleteHook> = match on_complete_json {
+            None => None,
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(serde_json::from_str(&s).map_err(js_err)?),
+        };
+        let task = store
+            .add_task_with_extensions(
+                ref_name,
+                plan,
+                title,
+                prio,
+                parent,
+                blockers,
+                assigned_to,
+                payload,
+                parent_change,
+                on_complete,
+            )
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = tasksListTasks)]
     pub fn tasks_list_tasks(
         &self,
@@ -762,6 +825,74 @@ impl WasmAgentStateGraph {
         Ok(report_json(&r))
     }
 
+    // -----------------------------------------------------------------
+    // Session surface (audit per §6: Session / SessionStatus moved to
+    // agentstategraph-core in 0.6.5). The existing `agentstategraph`
+    // facade re-exports both via `agentstategraph::session::{Session,
+    // SessionStatus}`, and `Repository::sessions()` still returns a
+    // `SessionManager`. We surface the same shape the Python binding
+    // does so JS consumers can round-trip Session records.
+    // -----------------------------------------------------------------
+
+    /// Create a durable session record. Returns the Session as JSON.
+    #[wasm_bindgen(js_name = createSession)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_session(
+        &self,
+        agent_id: &str,
+        working_branch: Option<String>,
+        parent_session: Option<String>,
+        delegated_intent: Option<String>,
+        report_to: Option<String>,
+        path_scope: Option<String>,
+    ) -> Result<String, JsValue> {
+        let branch = working_branch.unwrap_or_else(|| "main".to_string());
+        let log = self.repo.log(&branch, 1).map_err(js_err)?;
+        let head = log
+            .into_iter()
+            .next()
+            .map(|c| c.id)
+            .ok_or_else(|| JsValue::from_str(&format!("ref {branch:?} empty")))?;
+        let mgr = self.repo.sessions();
+        let s = mgr
+            .create(
+                agent_id,
+                &branch,
+                head,
+                parent_session,
+                delegated_intent,
+                report_to,
+                path_scope,
+            )
+            .map_err(js_err)?;
+        serde_json::to_string(&s).map_err(js_err)
+    }
+
+    /// Fetch a session by id. Returns JSON, or "null" if not found.
+    #[wasm_bindgen(js_name = getSession)]
+    pub fn get_session(&self, id: &str) -> Result<String, JsValue> {
+        let mgr = self.repo.sessions();
+        let s = mgr.get(id).map_err(js_err)?;
+        serde_json::to_string(&s).map_err(js_err)
+    }
+
+    /// List sessions, optionally filtered by agent_id.
+    #[wasm_bindgen(js_name = listSessions)]
+    pub fn list_sessions(&self, agent_filter: Option<String>) -> Result<String, JsValue> {
+        let mgr = self.repo.sessions();
+        let sessions = mgr.list(agent_filter.as_deref()).map_err(js_err)?;
+        serde_json::to_string(&sessions).map_err(js_err)
+    }
+
+    /// End a session. `status` is "active" | "completed" | "abandoned".
+    #[wasm_bindgen(js_name = endSession)]
+    pub fn end_session(&self, id: &str, status: &str) -> Result<(), JsValue> {
+        let st = parse_session_status(status)
+            .ok_or_else(|| JsValue::from_str(&format!("invalid session status: {status}")))?;
+        let mgr = self.repo.sessions();
+        mgr.end(id, st).map_err(js_err)
+    }
+
     /// List epochs. Returns JSON.
     pub fn list_epochs(&self) -> Result<String, JsValue> {
         let entries = self
@@ -780,6 +911,158 @@ impl WasmAgentStateGraph {
             })
             .collect();
         Ok(serde_json::to_string(&json).unwrap_or_default())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PolicyStore surface
+//
+// Mirrors the Python (§2) / TS (§3) idiom: complex types (Policy,
+// Decision, ChangeProposal, Situation, Selector, ...) cross the
+// boundary as JSON strings. Consumers `JSON.parse` on the JS side.
+// See `agentstategraph-policy` for schemas.
+// ---------------------------------------------------------------------------
+
+/// PolicyStore — situation-matching authorization + change-cost
+/// policies. Wraps `agentstategraph_policy::PolicyStore`.
+///
+/// Construct from a `WasmAgentStateGraph`, a path prefix (e.g.
+/// `/policies`), and an agent id.
+#[wasm_bindgen]
+pub struct WasmPolicyStore {
+    inner: PolicyBackend,
+}
+
+impl WasmPolicyStore {
+    /// Construct directly from a `Repository` handle. Used by the
+    /// integration tests that run under wasm-bindgen-test and need a
+    /// MemoryStorage-backed store rather than the IndexedDB-backed
+    /// `WasmAgentStateGraph`. Not exported to JS (plain Rust `impl`).
+    #[doc(hidden)]
+    pub fn from_repo(repo: Arc<Repository>, prefix: &str, agent_id: &str) -> Self {
+        Self {
+            inner: PolicyBackend::new(repo, prefix, agent_id),
+        }
+    }
+}
+
+#[wasm_bindgen]
+impl WasmPolicyStore {
+    /// Create a PolicyStore bound to an AgentStateGraph instance.
+    #[wasm_bindgen(constructor)]
+    pub fn new(asg: &WasmAgentStateGraph, prefix: &str, agent_id: &str) -> WasmPolicyStore {
+        WasmPolicyStore {
+            inner: PolicyBackend::new(asg.repo.clone(), prefix, agent_id),
+        }
+    }
+
+    /// Write a proposed (unratified) policy. Returns `"path@version"`.
+    /// `policy_json` is the serialized Policy struct.
+    pub fn propose(&self, ref_name: &str, policy_json: &str) -> Result<String, JsValue> {
+        let p: Policy = serde_json::from_str(policy_json).map_err(js_err)?;
+        self.inner.propose(ref_name, p).map_err(js_err)
+    }
+
+    /// Ratify an unratified proposal at `path`.
+    pub fn ratify(
+        &self,
+        ref_name: &str,
+        path: &str,
+        ratifier: &str,
+        reasoning: &str,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .ratify(ref_name, path, ratifier, reasoning)
+            .map_err(js_err)
+    }
+
+    /// Replace the active policy at `path` with `new_policy_json`.
+    /// Returns the new `"path@version"` handle.
+    pub fn supersede(
+        &self,
+        ref_name: &str,
+        path: &str,
+        new_policy_json: &str,
+    ) -> Result<String, JsValue> {
+        let p: Policy = serde_json::from_str(new_policy_json).map_err(js_err)?;
+        self.inner.supersede(ref_name, path, p).map_err(js_err)
+    }
+
+    /// List every policy (active versions, ratified or not). Returns a
+    /// JSON array.
+    pub fn list(&self, ref_name: &str, prefix_filter: Option<String>) -> Result<String, JsValue> {
+        let policies = self
+            .inner
+            .list(ref_name, prefix_filter.as_deref())
+            .map_err(js_err)?;
+        serde_json::to_string(&policies).map_err(js_err)
+    }
+
+    /// List currently-active policies (ratified AND `active_from <= now`).
+    pub fn active(&self, ref_name: &str, prefix_filter: Option<String>) -> Result<String, JsValue> {
+        let policies = self
+            .inner
+            .active(ref_name, prefix_filter.as_deref())
+            .map_err(js_err)?;
+        serde_json::to_string(&policies).map_err(js_err)
+    }
+
+    /// Fetch a policy at `path`. If `version` is provided, returns the
+    /// pinned historical version; otherwise the current active version.
+    pub fn get(&self, ref_name: &str, path: &str, version: Option<u64>) -> Result<String, JsValue> {
+        let policy = self.inner.get(ref_name, path, version).map_err(js_err)?;
+        serde_json::to_string(&policy).map_err(js_err)
+    }
+
+    /// Walk the supersedes chain (oldest first → current).
+    pub fn history(&self, ref_name: &str, path: &str) -> Result<String, JsValue> {
+        let policies = self.inner.history(ref_name, path).map_err(js_err)?;
+        serde_json::to_string(&policies).map_err(js_err)
+    }
+
+    /// Authorization evaluation (POLICY_V1.md §5). Returns a Decision
+    /// JSON object.
+    pub fn evaluate(
+        &self,
+        ref_name: &str,
+        situation_json: &str,
+        action: &str,
+        agent_id: &str,
+    ) -> Result<String, JsValue> {
+        let sit: Situation = serde_json::from_str(situation_json).map_err(js_err)?;
+        let decision = self
+            .inner
+            .evaluate(ref_name, &sit, action, agent_id)
+            .map_err(js_err)?;
+        serde_json::to_string(&decision).map_err(js_err)
+    }
+
+    /// Change-proposal evaluation (POLICY_V1.md §22.2). Returns a
+    /// Decision JSON object.
+    #[wasm_bindgen(js_name = evaluateChange)]
+    pub fn evaluate_change(&self, ref_name: &str, proposal_json: &str) -> Result<String, JsValue> {
+        let prop: ChangeProposal = serde_json::from_str(proposal_json).map_err(js_err)?;
+        let decision = self
+            .inner
+            .evaluate_change(ref_name, &prop)
+            .map_err(js_err)?;
+        serde_json::to_string(&decision).map_err(js_err)
+    }
+
+    /// List ratified policies whose `triggers` intersect `tokens_json`
+    /// (a JSON array of strings). Convenience wrapper exposing the
+    /// filter `evaluate_change` uses internally.
+    #[wasm_bindgen(js_name = checkTokens)]
+    pub fn check_tokens(&self, ref_name: &str, tokens_json: &str) -> Result<String, JsValue> {
+        let tokens: Vec<String> = serde_json::from_str(tokens_json).map_err(js_err)?;
+        let token_set: std::collections::HashSet<&str> =
+            tokens.iter().map(|s| s.as_str()).collect();
+        let actives = self.inner.active(ref_name, None).map_err(js_err)?;
+        let matched: Vec<Policy> = actives
+            .into_iter()
+            .filter(|p| p.triggers.iter().any(|t| token_set.contains(t.as_str())))
+            .collect();
+        serde_json::to_string(&matched).map_err(js_err)
     }
 }
 
@@ -805,6 +1088,15 @@ fn parse_plan_status(s: &str) -> Option<agentstategraph_tasks::PlanStatus> {
         "active" => Some(agentstategraph_tasks::PlanStatus::Active),
         "completed" => Some(agentstategraph_tasks::PlanStatus::Completed),
         "archived" => Some(agentstategraph_tasks::PlanStatus::Archived),
+        _ => None,
+    }
+}
+
+fn parse_session_status(s: &str) -> Option<SessionStatus> {
+    match s.to_lowercase().as_str() {
+        "active" => Some(SessionStatus::Active),
+        "completed" => Some(SessionStatus::Completed),
+        "abandoned" => Some(SessionStatus::Abandoned),
         _ => None,
     }
 }
