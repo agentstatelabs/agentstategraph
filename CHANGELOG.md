@@ -5,6 +5,100 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.6.75-beta.1] — 2026-04-21
+
+Theme: **complete the 0.6 line.** Every deferral flagged in 0.6.0 +
+0.6.5 is now closed. Six engineering sections plus a release commit,
+each on its own commit per the ROADMAP.md section-granular rule.
+
+### Added
+
+- **Postgres `EpochStore` + `SessionStore`** implementations replace
+  the 0.6.5-beta.1 stubs. Schema mirrors SQLite exactly (JSON-as-TEXT);
+  tenant isolation via the existing `tenant_id` column pattern; four
+  new indexes (`idx_epochs_tenant_status`,
+  `idx_sessions_tenant_agent`, `idx_commits_tenant_epoch`,
+  `idx_commits_tenant_session`); `ADD COLUMN IF NOT EXISTS` for
+  migration safety on `commits.epoch_id` / `session_id`. Seal
+  enforcement + session-ended guards identical to SQLite.
+
+- **IndexedDB `EpochStore` + `SessionStore`** implementations
+  replace the 0.6.5-beta.1 stubs with the write-through-queue
+  pattern. Four new pending queues (`pending_epochs`,
+  `pending_sessions`, `pending_commit_epochs`,
+  `pending_commit_sessions`) plus four new JS-side load methods
+  (`load_epochs`, `load_sessions`, `load_commit_epochs`,
+  `load_commit_sessions`). Migration: onupgradeneeded bump from
+  IDB v1 → v2 for the four new object stores. 6 new wasm-native
+  unit tests.
+
+- **Four new MCP tools**: `enter_epoch`, `exit_epoch`,
+  `enter_session`, `exit_session`. Tool count 44 → 48. Thin
+  wrappers over the `Repository::{set_,}active_epoch` plumbing
+  shipped in 0.6.5 (`05b82af`). `enter_epoch` refuses sealed /
+  archived epochs; `enter_session` refuses non-Active sessions.
+  Each returns the previous active id for restore-on-scope-exit
+  patterns. Typical flow documented in
+  `crates/agentstategraph-mcp/README.md` §"Epoch + session
+  scoping".
+
+- **`docs/SESSION-API.md`**: audit outcome + migration guide for
+  the 0.6.5 `SessionManager::{create, list, get, end}` →
+  `Result` break. Contract for downstream bindings when the
+  0.7.0 "bring all bindings current" milestone exposes Session
+  through Python / TS / Go / WASM / C FFI.
+
+- **`examples/policy_demo.rs`** in `agentstategraph-policy` — a
+  runnable walkthrough of the POLICY_V1.md §22.7 OpenSearch
+  scenario. Seeds the `/change-control/high-cost-change` policy,
+  evaluates three candidate proposals (scores 3/7/9), prints
+  the full fallback + approval-task playbook, closes with the
+  thesis line and a first-class commit log. Run with
+  `cargo run --example policy_demo -p agentstategraph-policy`.
+
+- **`compare` MCP tool now emits `tokens` per handle.** Uses the
+  same `infer_tokens_from_diff` helper that `commit_spec` uses
+  internally. Agents pre-flighting a promotion can see which
+  handles will trip which policies *before* calling `commit_spec`.
+  New test `test_compare_tokens_match_commit_spec_inference`
+  guards the parity contract.
+
+### Changed
+
+- **Clippy baseline restored: `-D warnings` across the workspace.**
+  Pre-existing debt in `agentstategraph-core` (merge / diff /
+  object), `agentstategraph-storage` (indexeddb `is_multiple_of`),
+  `agentstategraph` (speculation unused bindings, repo test
+  binding), and every example fixed. Binding glue crates
+  (`bindings/typescript`, `agentstategraph-wasm`) carry a
+  crate-level `#![allow(clippy::too_many_arguments)]` with an
+  inline comment — exported napi/wasm-bindgen functions mirror the
+  JS call shape and can't collapse args. CI `clippy` job loses its
+  `continue-on-error` and stops excluding `agentstategraph-wasm` /
+  `agentstategraph-napi`. From this release on, `cargo clippy
+  --workspace --exclude agentstategraph-python --all-targets --
+  -D warnings` is mandatory in CI.
+
+- Workspace bumped `0.6.5-beta.1` → `0.6.75-beta.1` per the
+  **0.0.25 cadence** (amended from 0.0.5 on 2026-04-21; see
+  `spec/ROADMAP.md`). Python + TypeScript binding `Cargo.toml` /
+  `package.json` aligned.
+
+### Fixed
+
+- None of the listed clippy fixes altered behaviour; test counts
+  unchanged from 0.6.5-beta.1 modulo the new tests added in this
+  release.
+
+### Deferred to follow-ups (all scheduled)
+
+- Policy surface on Py / TS / Go / WASM / C FFI — 0.7.0-beta.1
+- C# / .NET binding — 0.7.25-beta.1
+- Advanced policy (signing, multi-tenant, external evaluator) —
+  0.7.5-beta.1
+- Watch API — 0.7.75-beta.1
+- AgentStateConsole Phase 1 support — 0.8.0-beta.1
+
 ## [0.6.5-beta.1] — 2026-04-21
 
 ### Added
