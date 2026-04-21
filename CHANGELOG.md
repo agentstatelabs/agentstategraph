@@ -5,6 +5,77 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.6.5-beta.1] — 2026-04-21
+
+### Added
+
+- **Persistent epochs and sessions.** Epochs previously lived in a
+  `RwLock<Vec<Epoch>>` on `Repository` and sessions in a
+  `RwLock<HashMap>` on `SessionManager`; both vanished on MCP process
+  restart. A sealed epoch that doesn't survive a restart defeats the
+  compliance story — that's fixed in this release.
+- **New storage traits** `EpochStore` and `SessionStore` in
+  `agentstategraph-storage` with methods for
+  `create` / `seal` / `list` / `get` / `set_commit_epoch` /
+  `set_commit_session` / `end_session`. `SqliteStorage` and
+  `MemoryStorage` implement both.
+- **`commits.epoch_id` and `commits.session_id`** — new nullable
+  columns on the commits table so an auditor can roll commits up to
+  the epoch or session they landed in. Added via migration-safe
+  `ALTER TABLE ADD COLUMN` using a `PRAGMA table_info` check-and-add
+  pattern; existing databases open unchanged.
+- **Persisted seal enforcement.** `epochs.sealed_commits` is now
+  stored (JSON blob). The V8 "no ref mutation to sealed commits"
+  guard keeps working across restart.
+- **`Repository::active_epoch` / `active_session`** — new
+  `RwLock<Option<String>>` knobs with getter + setter. On commit
+  finalisation, if an active id is set, the new `set_commit_epoch`
+  / `set_commit_session` calls wire the association. MCP tool-level
+  `enter_epoch` / `exit_epoch` helpers are a follow-up.
+- **`Session` and `SessionStatus` moved into `agentstategraph-core`**
+  so the storage crate can reference the types without depending on
+  the repo crate. `Epoch` was already there.
+- **14 new tests** across four files covering round-trip, restart
+  survival, seal enforcement, and migration safety on both SQLite
+  and in-memory backends. Workspace now at 357 passing tests.
+
+### Changed
+
+- Workspace bumped from `0.6.0-beta.1` to `0.6.5-beta.1` per the
+  0.0.5-increment cadence.
+- Python + TypeScript binding `Cargo.toml` / `package.json` aligned
+  to `0.6.5-beta.1`.
+- **`SessionManager::{create, list, get, end}` now return `Result`**
+  so callers can surface `StorageError`. Internal callers (MCP
+  server, TypeScript binding, `multi_agent` example) were updated.
+  External consumers will need to add `?` / `.unwrap()` on session
+  calls — call sites outside the repo haven't been audited.
+
+### Deferred
+
+- **Postgres** and **IndexedDB** backends have stub `EpochStore` +
+  `SessionStore` implementations that return
+  `StorageError::Backend("not yet implemented")`. Both compile
+  cleanly; actual persistence slated for a later milestone (browser
+  WASM and Postgres deployments rarely need epoch/session audit
+  today).
+- MCP tools `enter_epoch` / `exit_epoch` / `enter_session` /
+  `exit_session` for setting the active ids from a client. The
+  plumbing exists; the tool wrappers are follow-up.
+- Auto-rolled dashboards (Stack Viewer, Lens) consuming the new
+  columns — server-side readiness is here; front-end work lives in
+  AgentStateConsole.
+
+### Security / design notes
+
+- `PERSISTENCE_SPEC.md` and `PERSISTENCE-IMPLEMENTATION-PLAN.md` both
+  live in `spec/`. The first is the canonical design; the second
+  records what we actually built.
+- Speculations stay in-memory by design — they're ephemeral handles
+  that become real commits on `commit_spec` promotion.
+- Plans and policies were already persisted via the state tree at
+  `/plans/*` and `/policies/*`. No change.
+
 ## [0.6.0-beta.1] — 2026-04-21
 
 ### Added
