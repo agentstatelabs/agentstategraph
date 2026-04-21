@@ -18,6 +18,7 @@ path = "src/main.rs"
 agentstategraph = { path = "../agentstategraph" }
 agentstategraph-core = { path = "../agentstategraph-core" }
 agentstategraph-migrate = { path = "../agentstategraph-migrate" }
+agentstategraph-tasks = { path = "../agentstategraph-tasks" }
 semver = "1"
 agentstategraph-storage = { path = "../agentstategraph-storage", features = ["postgres"] }
 rmcp = { version = "1", features = ["server", "transport-io", "macros"] }

@@ -11,11 +11,13 @@ use serde::Deserialize;
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object, QueryFilters};
+use agentstategraph_tasks::{TaskStore, Priority, Proof, ProofKind, TaskId};
 
 /// The AgentStateGraph MCP server.
 #[derive(Clone)]
 pub struct AgentStateGraphServer {
     repo: Arc<Repository>,
+    tasks: Arc<TaskStore>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -283,13 +285,120 @@ fn default_graph_depth() -> usize {
     50
 }
 
+// -- Plan/Task parameter types --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreatePlanParams {
+    /// Branch (default: "main").
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Plan name (e.g., "cluster-drift-reconciliation").
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListPlansParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Optional status filter: Active, Completed, Archived.
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetPlanParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AddTaskParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    /// Plan name.
+    pub plan: String,
+    /// Task title.
+    pub title: String,
+    /// Priority: Low, Medium, High, Critical (default: Medium).
+    pub priority: Option<String>,
+    /// Parent task ID for subtasks (e.g., "t-001").
+    pub parent_id: Option<String>,
+    /// Task IDs this task is blocked by.
+    pub blocked_by: Option<Vec<String>>,
+    /// Agent this task is assigned to.
+    pub assigned_to: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListTasksParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub plan: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaskActionParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub plan: String,
+    /// Task ID (e.g., "t-001").
+    pub task_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CompleteTaskParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub plan: String,
+    pub task_id: String,
+    /// Proof kind: Commit, File, Test, or Text.
+    pub proof_kind: String,
+    /// Proof value (commit hash, file path, test name, or text).
+    pub proof_value: String,
+    /// Optional proof note.
+    pub proof_note: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AbandonTaskParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub plan: String,
+    pub task_id: String,
+    /// Reason for abandoning.
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AssignTaskParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub plan: String,
+    pub task_id: String,
+    /// Agent to assign to.
+    pub agent: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NextTaskParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub plan: String,
+    /// Optional agent filter — get next task for a specific agent.
+    pub agent: Option<String>,
+}
+
 // -- Tool implementations --
 
 #[tool_router]
 impl AgentStateGraphServer {
     pub fn new(repo: Arc<Repository>) -> Self {
+        let tasks = Arc::new(TaskStore::new(repo.clone(), "/plans", "mcp-agent"));
         Self {
             repo,
+            tasks,
             tool_router: Self::tool_router(),
         }
     }
@@ -443,7 +552,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Create a lightweight speculation from a ref. O(1) creation. Use to explore approaches before committing."
+        description = "Create a lightweight speculation from a ref. Returns a numeric handle_id (e.g. 1, 2, 3) that you MUST use with spec_modify, compare, commit_spec, and discard. Speculations are in-memory — do NOT use agentstategraph_set with a spec ref. Instead, use agentstategraph_spec_modify with the handle_id to make changes within the speculation."
     )]
     async fn agentstategraph_speculate(&self, params: Parameters<SpeculateParams>) -> String {
         let p = params.0;
@@ -459,7 +568,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Modify state within a speculation. Changes are isolated until committed."
+        description = "Modify state within a speculation using its numeric handle_id (from agentstategraph_speculate). Pass operations as [{\"op\": \"set\", \"path\": \"/my/path\", \"value\": \"myvalue\"}]. Changes are isolated until you call commit_spec. Do NOT use agentstategraph_set for speculation changes — use this tool instead."
     )]
     async fn agentstategraph_spec_modify(&self, params: Parameters<SpecModifyParams>) -> String {
         let p = params.0;
@@ -493,7 +602,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Compare multiple speculations. Returns diffs showing how each diverges from base."
+        description = "Compare multiple speculations side-by-side using their numeric handle_ids (from agentstategraph_speculate). Returns diffs showing how each diverges from base. Use after spec_modify to see differences before promoting a winner with commit_spec."
     )]
     async fn agentstategraph_compare(&self, params: Parameters<CompareParams>) -> String {
         let p = params.0;
@@ -523,7 +632,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Promote a speculation to a real commit on its base branch. The speculation is consumed."
+        description = "Promote a speculation to a real commit on its base branch using its numeric handle_id. The speculation is consumed (handle becomes invalid). This is how you 'pick the winner' after comparing speculations."
     )]
     async fn agentstategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
         let p = params.0;
@@ -542,7 +651,7 @@ impl AgentStateGraphServer {
         }
     }
 
-    #[tool(description = "Discard a speculation. All changes freed immediately.")]
+    #[tool(description = "Discard a speculation by its numeric handle_id. All changes freed immediately. Use this for the 'losers' after promoting a winner with commit_spec.")]
     async fn agentstategraph_discard(&self, params: Parameters<DiscardParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
@@ -757,6 +866,210 @@ impl AgentStateGraphServer {
         let p = params.0;
         match self.repo.intent_tree(&p.r#ref, p.root_commit_id.as_deref()) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    // -- Plan & Task tools --
+
+    #[tool(
+        description = "Create a new plan — a named container for tasks with a state machine. Plans track structured work: drift reconciliation, upgrades, incident response."
+    )]
+    async fn agentstategraph_create_plan(&self, params: Parameters<CreatePlanParams>) -> String {
+        let p = params.0;
+        match self.tasks.create_plan(&p.r#ref, &p.name, p.description) {
+            Ok(plan) => serde_json::to_string_pretty(&serde_json::json!({
+                "name": plan.name,
+                "status": format!("{:?}", plan.status),
+                "created_at": plan.created_at.to_rfc3339(),
+                "created_by": plan.created_by,
+            })).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "List all plans, optionally filtered by status (Active, Completed, Archived)."
+    )]
+    async fn agentstategraph_list_plans(&self, params: Parameters<ListPlansParams>) -> String {
+        let p = params.0;
+        let status = p.status.map(|s| match s.to_lowercase().as_str() {
+            "active" => agentstategraph_tasks::PlanStatus::Active,
+            "completed" => agentstategraph_tasks::PlanStatus::Completed,
+            "archived" => agentstategraph_tasks::PlanStatus::Archived,
+            _ => agentstategraph_tasks::PlanStatus::Active,
+        });
+        match self.tasks.list_plans_by_status(&p.r#ref, status) {
+            Ok(plans) => {
+                let json: Vec<serde_json::Value> = plans.iter().map(|p| serde_json::json!({
+                    "name": p.name,
+                    "description": p.description,
+                    "status": format!("{:?}", p.status),
+                    "created_at": p.created_at.to_rfc3339(),
+                })).collect();
+                format!("{} plans:\n{}", json.len(), serde_json::to_string_pretty(&json).unwrap_or_default())
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Get a plan's details including status and task summary."
+    )]
+    async fn agentstategraph_get_plan(&self, params: Parameters<GetPlanParams>) -> String {
+        let p = params.0;
+        match self.tasks.get_plan(&p.r#ref, &p.name) {
+            Ok(plan) => {
+                let tasks = self.tasks.list_tasks(&p.r#ref, &p.name).unwrap_or_default();
+                let pending = tasks.iter().filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Pending)).count();
+                let in_progress = tasks.iter().filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::InProgress)).count();
+                let done = tasks.iter().filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Done)).count();
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "name": plan.name,
+                    "description": plan.description,
+                    "status": format!("{:?}", plan.status),
+                    "created_at": plan.created_at.to_rfc3339(),
+                    "task_count": tasks.len(),
+                    "pending": pending,
+                    "in_progress": in_progress,
+                    "done": done,
+                })).unwrap_or_default()
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Add a task to a plan. Tasks have a strict state machine: pending → in_progress → done. Supports priority, blockers, parent tasks, and agent assignment."
+    )]
+    async fn agentstategraph_add_task(&self, params: Parameters<AddTaskParams>) -> String {
+        let p = params.0;
+        let priority = match p.priority.as_deref().unwrap_or("Medium").to_lowercase().as_str() {
+            "low" => Priority::Low,
+            "high" => Priority::High,
+            "critical" => Priority::Critical,
+            _ => Priority::Medium,
+        };
+        let parent_id = p.parent_id.map(TaskId);
+        let blocked_by = p.blocked_by.unwrap_or_default().into_iter().map(TaskId).collect();
+        match self.tasks.add_task(&p.r#ref, &p.plan, &p.title, priority, parent_id, blocked_by, p.assigned_to) {
+            Ok(task) => serde_json::to_string_pretty(&serde_json::json!({
+                "id": task.id.as_str(),
+                "title": task.title,
+                "status": format!("{:?}", task.status),
+                "priority": format!("{:?}", task.priority),
+                "assigned_to": task.assigned_to,
+            })).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "List all tasks in a plan with their status, priority, assignment, and proof."
+    )]
+    async fn agentstategraph_list_tasks(&self, params: Parameters<ListTasksParams>) -> String {
+        let p = params.0;
+        match self.tasks.list_tasks(&p.r#ref, &p.plan) {
+            Ok(tasks) => {
+                let json: Vec<serde_json::Value> = tasks.iter().map(|t| {
+                    let mut v = serde_json::json!({
+                        "id": t.id.as_str(),
+                        "title": t.title,
+                        "status": format!("{:?}", t.status),
+                        "priority": format!("{:?}", t.priority),
+                        "assigned_to": t.assigned_to,
+                        "blocked_by": t.blocked_by.iter().map(|b| b.as_str().to_string()).collect::<Vec<_>>(),
+                    });
+                    if let Some(ref proof) = t.proof {
+                        v["proof"] = serde_json::json!({
+                            "kind": format!("{:?}", proof.kind),
+                            "value": proof.value,
+                            "note": proof.note,
+                        });
+                    }
+                    v
+                }).collect();
+                format!("{} tasks:\n{}", json.len(), serde_json::to_string_pretty(&json).unwrap_or_default())
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Start a task — transition from pending to in_progress. Validates that all blockers are resolved."
+    )]
+    async fn agentstategraph_start_task(&self, params: Parameters<TaskActionParams>) -> String {
+        let p = params.0;
+        match self.tasks.start_task(&p.r#ref, &p.plan, &TaskId(p.task_id)) {
+            Ok(task) => format!("Task {} started (was: Pending → now: InProgress)", task.id.as_str()),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Complete a task with proof. Proof documents what was accomplished: a commit hash, file path, test name, or text description. Auto-completes the plan when the last task finishes."
+    )]
+    async fn agentstategraph_complete_task(&self, params: Parameters<CompleteTaskParams>) -> String {
+        let p = params.0;
+        let proof = match p.proof_kind.to_lowercase().as_str() {
+            "commit" => Proof::commit(p.proof_value),
+            "file" => Proof::file(p.proof_value),
+            "test" => Proof::test(p.proof_value),
+            _ => Proof::text(p.proof_value),
+        };
+        let proof = if let Some(note) = p.proof_note {
+            proof.with_note(note)
+        } else {
+            proof
+        };
+        match self.tasks.complete_task(&p.r#ref, &p.plan, &TaskId(p.task_id), proof) {
+            Ok(task) => format!("Task {} completed (InProgress → Done)", task.id.as_str()),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Abandon a task with a reason. Terminal state — cannot be restarted."
+    )]
+    async fn agentstategraph_abandon_task(&self, params: Parameters<AbandonTaskParams>) -> String {
+        let p = params.0;
+        match self.tasks.abandon_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.reason) {
+            Ok(task) => format!("Task {} abandoned: {}", task.id.as_str(), p.reason),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Assign a task to an agent. The agent can then query for their next task."
+    )]
+    async fn agentstategraph_assign_task(&self, params: Parameters<AssignTaskParams>) -> String {
+        let p = params.0;
+        match self.tasks.assign_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.agent) {
+            Ok(task) => format!("Task {} assigned to {}", task.id.as_str(), p.agent),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Get the next pending task in a plan, optionally filtered by assigned agent. Returns the highest-priority unblocked task."
+    )]
+    async fn agentstategraph_next_task(&self, params: Parameters<NextTaskParams>) -> String {
+        let p = params.0;
+        let result = if let Some(agent) = p.agent {
+            self.tasks.next_task_for(&p.r#ref, &p.plan, Some(&agent), true)
+        } else {
+            self.tasks.next_task(&p.r#ref, &p.plan)
+        };
+        match result {
+            Ok(Some(task)) => serde_json::to_string_pretty(&serde_json::json!({
+                "id": task.id.as_str(),
+                "title": task.title,
+                "status": format!("{:?}", task.status),
+                "priority": format!("{:?}", task.priority),
+                "assigned_to": task.assigned_to,
+                "blocked_by": task.blocked_by.iter().map(|b| b.as_str().to_string()).collect::<Vec<_>>(),
+            })).unwrap_or_default(),
+            Ok(None) => "No pending tasks".to_string(),
             Err(e) => format!("Error: {}", e),
         }
     }

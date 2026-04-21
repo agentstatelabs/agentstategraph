@@ -49,6 +49,7 @@ dependencies = [
  "agentstategraph-core",
  "agentstategraph-migrate",
  "agentstategraph-storage",
+ "agentstategraph-tasks",
  "axum",
  "chrono",
  "governor",
