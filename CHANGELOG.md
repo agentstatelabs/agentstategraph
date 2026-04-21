@@ -5,6 +5,103 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.25-beta.1] — 2026-04-21
+
+Theme: **C# / .NET binding.** Brand-new language binding joining
+Python / TypeScript / Go / WASM / C FFI. Everything lives under
+`bindings/dotnet/`; zero changes to the Rust workspace or any
+other binding. Six engineering sections plus a release commit.
+
+### Added
+
+- **`bindings/dotnet/`** — new NuGet-ready C# binding targeting
+  **.NET 10 LTS** (current) with a **.NET 8 LTS** floor. Package
+  id `agentstatelabs.AgentStateGraph`. Windows / macOS / Linux via
+  P/Invoke over the stable `agentstategraph_ffi` C ABI.
+
+- **Project skeleton**: `AgentStateGraph.sln`,
+  `AgentStateGraph.csproj` (multi-target net10.0 + net8.0),
+  xUnit test project, `.gitignore`, `README.md`. A
+  `NativeLibrary.cs` `ModuleInitializer` registers a
+  `DllImportResolver` that searches `AGENTSTATEGRAPH_FFI_PATH`
+  (env override), the NuGet `runtimes/<rid>/native/`
+  convention, and the cargo target dir (dev walk). Resolver
+  short-circuits for any library other than
+  `agentstategraph_ffi`.
+
+- **P/Invoke interop layer**: `Interop/{Interop.cs, Handles.cs,
+  Strings.cs}` — all **48** `[DllImport]` declarations matching
+  the public `agentstategraph.h` surface (12 Repository + 22
+  TaskStore + 12 PolicyStore + 2 Migrate). `SafeRepoHandle` /
+  `SafeTaskStoreHandle` / `SafePolicyStoreHandle` wrap opaque
+  pointers for GC-safe cleanup. UTF-8 marshalling + the
+  `agentstategraph_free_string` free convention are hidden
+  behind `Strings.ConsumeUtf8`.
+
+- **Idiomatic C# surface**: `Repository` / `TaskStore` /
+  `PolicyStore` as `IDisposable` classes, `Commit` / `Decision`
+  / `FallbackAction` / `ChangeProposal` / `Policy` / `Task` /
+  `Plan` / `OnCompleteHook` / `Epoch` / `Session` /
+  `AuthorizedAction` / `ApprovalRule` / `ProcedureStep` /
+  `Selector` as records. Decision / FallbackAction / Selector /
+  OnCompleteHook use `System.Text.Json`'s polymorphic
+  discriminator (`[JsonPolymorphic(TypeDiscriminatorPropertyName
+  = "kind")]`) to match the Rust serde-tagged enums.
+  `Situation` is `IReadOnlyDictionary<string, string>` — mirrors
+  the Rust `#[serde(transparent)]` shape. PolicyStore exposes
+  the 10 methods: `Propose`, `Ratify`, `Supersede`, `List`,
+  `Active`, `Get`, `History`, `Evaluate`, `EvaluateChange`,
+  `CheckTokens`. `CheckTokens` is binding-level (filters
+  `Active()` by trigger intersection) — same pattern as every
+  other binding. Errors from the native layer surface as
+  `AgentStateGraphException`.
+
+- **56 xUnit tests** across seven files (PolicyStore, TaskStore,
+  Repository, Decision polymorphism, lifetime / SafeHandle,
+  NativeLibrary loader, parity). Mirrors the 14 Python scenarios
+  one-to-one plus C#-native IDisposable and SafeHandle checks.
+
+- **Seventh parity runner** on
+  `spec/policy_parity_fixture.json`. Joins the existing six
+  (Rust reference + Python + TS + Go + WASM + C FFI); all seven
+  produce identical `Decision.Kind` + `matched_policy` for the
+  same inputs.
+
+- **CI `dotnet` job** on `ubuntu-latest`, `macos-latest`,
+  `windows-latest` with `fail-fast: false`. Builds the FFI in
+  release mode, then `dotnet restore / build / test`.
+  `AGENTSTATEGRAPH_FFI_PATH` points at the cargo target dir.
+  Both net10.0 and net8.0 exercised per target framework.
+
+### Changed
+
+- Workspace bumped `0.7.0-beta.1` → `0.7.25-beta.1` per the
+  0.0.25 cadence. Python + TypeScript binding `Cargo.toml` /
+  `package.json` + `AgentStateGraph.csproj` `<Version>` aligned.
+
+### Known limitations (pre-existing FFI gaps; affect Go binding too)
+
+- **`Repository.ListBranches` / `DeleteBranch`** are not
+  declared in the 48 FFI extern functions. The C# binding has
+  create-only branch support; list + delete are stubbed in the
+  plan but not surfaced. Closing these gaps is a pre-0.7.5 FFI
+  extension.
+- **`TaskStore.AddTaskWithExtensions`** is a stable-named stub
+  that forwards to `AddTask` — the FFI's `add_task` doesn't
+  accept the 0.6.0 Task extension fields (`payload`,
+  `parent_change`, `on_complete`). Python / TS / WASM bypass
+  the FFI and surface these directly; closing the Go + C# gap
+  is tracked for the same FFI extension.
+
+### Deferred to follow-ups (all scheduled per ROADMAP.md)
+
+- NuGet auto-publish (currently manual approval only) — when
+  the FFI gaps above close.
+- Advanced policy features (signing, multi-tenant, external
+  evaluator) — 0.7.5-beta.1. Will be automatically available
+  through C# via the same FFI since C# rides on the C ABI.
+- Watch API exposure in C# — 0.7.75-beta.1.
+
 ## [0.7.0-beta.1] — 2026-04-21
 
 Theme: **bring all existing bindings current.** The policy primitive
