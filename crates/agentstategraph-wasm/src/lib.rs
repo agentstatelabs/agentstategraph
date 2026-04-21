@@ -992,19 +992,37 @@ impl WasmPolicyStore {
 
     /// List every policy (active versions, ratified or not). Returns a
     /// JSON array.
-    pub fn list(&self, ref_name: &str, prefix_filter: Option<String>) -> Result<String, JsValue> {
+    ///
+    /// `tenantFilter` (0.7.5 §3b / §5d): `None`/undefined keeps
+    /// back-compat (all policies considered). When provided, routes
+    /// through the Rust `list_scoped` variant so only policies whose
+    /// `tenant_id` is unset (global) or equal to the filter are
+    /// returned.
+    pub fn list(
+        &self,
+        ref_name: &str,
+        prefix_filter: Option<String>,
+        tenant_filter: Option<String>,
+    ) -> Result<String, JsValue> {
         let policies = self
             .inner
-            .list(ref_name, prefix_filter.as_deref())
+            .list_scoped(ref_name, prefix_filter.as_deref(), tenant_filter.as_deref())
             .map_err(js_err)?;
         serde_json::to_string(&policies).map_err(js_err)
     }
 
     /// List currently-active policies (ratified AND `active_from <= now`).
-    pub fn active(&self, ref_name: &str, prefix_filter: Option<String>) -> Result<String, JsValue> {
+    ///
+    /// `tenantFilter` (0.7.5 §3b / §5d) matches [`Self::list`] semantics.
+    pub fn active(
+        &self,
+        ref_name: &str,
+        prefix_filter: Option<String>,
+        tenant_filter: Option<String>,
+    ) -> Result<String, JsValue> {
         let policies = self
             .inner
-            .active(ref_name, prefix_filter.as_deref())
+            .active_scoped(ref_name, prefix_filter.as_deref(), tenant_filter.as_deref())
             .map_err(js_err)?;
         serde_json::to_string(&policies).map_err(js_err)
     }
@@ -1024,31 +1042,111 @@ impl WasmPolicyStore {
 
     /// Authorization evaluation (POLICY_V1.md §5). Returns a Decision
     /// JSON object.
+    ///
+    /// `tenantFilter` (0.7.5 §3b / §5d) routes through the Rust
+    /// `evaluate_scoped` variant: `None`/undefined considers every
+    /// policy (back-compat); `Some("acme")` restricts matching to
+    /// policies whose `tenant_id` is unset (global) or equal to
+    /// `"acme"`.
     pub fn evaluate(
         &self,
         ref_name: &str,
         situation_json: &str,
         action: &str,
         agent_id: &str,
+        tenant_filter: Option<String>,
     ) -> Result<String, JsValue> {
         let sit: Situation = serde_json::from_str(situation_json).map_err(js_err)?;
         let decision = self
             .inner
-            .evaluate(ref_name, &sit, action, agent_id)
+            .evaluate_scoped(ref_name, &sit, action, agent_id, tenant_filter.as_deref())
             .map_err(js_err)?;
         serde_json::to_string(&decision).map_err(js_err)
     }
 
     /// Change-proposal evaluation (POLICY_V1.md §22.2). Returns a
     /// Decision JSON object.
+    ///
+    /// `tenantFilter` (0.7.5 §3b / §5d) matches [`Self::evaluate`] semantics.
     #[wasm_bindgen(js_name = evaluateChange)]
-    pub fn evaluate_change(&self, ref_name: &str, proposal_json: &str) -> Result<String, JsValue> {
+    pub fn evaluate_change(
+        &self,
+        ref_name: &str,
+        proposal_json: &str,
+        tenant_filter: Option<String>,
+    ) -> Result<String, JsValue> {
         let prop: ChangeProposal = serde_json::from_str(proposal_json).map_err(js_err)?;
         let decision = self
             .inner
-            .evaluate_change(ref_name, &prop)
+            .evaluate_change_scoped(ref_name, &prop, tenant_filter.as_deref())
             .map_err(js_err)?;
         serde_json::to_string(&decision).map_err(js_err)
+    }
+
+    // ---- 0.7.5 §5d: sign / verify / set_external_evaluator stubs ----
+    //
+    // Mirrors the Python §5a stubs (5ddcd58). Real signing /
+    // verification / external-evaluator wiring lives in
+    // `agentstategraph-policy-sign` and the runtime-side mutators; the
+    // WASM boundary doesn't surface that machinery yet. These stubs
+    // keep the API shape stable so callers can pattern-match on the
+    // `{"error": "not yet wired"}` envelope without exception-handling
+    // gymnastics. In the meantime, the `signature` / `tenant_id` /
+    // `external_evaluator` Policy fields round-trip through the JSON
+    // boundary, so callers can construct them elsewhere and attach via
+    // `propose` / `supersede`.
+
+    /// Sign the policy at `path` (stub). Returns a JSON string
+    /// `{"error": "not yet wired", "hint": "..."}`. Real signing will
+    /// land as a follow-up once a WASM signer wrapper ships; in the
+    /// meantime attach a `signature` object directly on the policy
+    /// JSON before `propose` / `supersede` — the field is preserved
+    /// through the round-trip.
+    #[allow(unused_variables)]
+    pub fn sign(
+        &self,
+        ref_name: &str,
+        path: &str,
+        signer_key_id: Option<String>,
+    ) -> Result<String, JsValue> {
+        let envelope = serde_json::json!({
+            "error": "not yet wired",
+            "hint": "use MCP tool policy_sign or attach a signature object via propose/supersede",
+        });
+        serde_json::to_string(&envelope).map_err(js_err)
+    }
+
+    /// Verify the signature on the policy at `path` (stub). Returns a
+    /// JSON string `{"error": "not yet wired", "hint": "..."}`. Real
+    /// verification routes through `agentstategraph-policy-sign`; it
+    /// lands as a follow-up.
+    #[allow(unused_variables)]
+    pub fn verify(&self, ref_name: &str, path: &str) -> Result<String, JsValue> {
+        let envelope = serde_json::json!({
+            "error": "not yet wired",
+            "hint": "use MCP tool policy_verify",
+        });
+        serde_json::to_string(&envelope).map_err(js_err)
+    }
+
+    /// Attach or update the external evaluator reference on the
+    /// policy at `path` (stub). Returns the same envelope as `sign` /
+    /// `verify`. Until the runtime-side mutator lands, callers can set
+    /// `external_evaluator` on the policy JSON before propose /
+    /// supersede — the field is preserved by serde round-trip.
+    #[wasm_bindgen(js_name = setExternalEvaluator)]
+    #[allow(unused_variables)]
+    pub fn set_external_evaluator(
+        &self,
+        ref_name: &str,
+        path: &str,
+        config_json: Option<String>,
+    ) -> Result<String, JsValue> {
+        let envelope = serde_json::json!({
+            "error": "not yet wired",
+            "hint": "set policy.external_evaluator before propose/supersede",
+        });
+        serde_json::to_string(&envelope).map_err(js_err)
     }
 
     /// List ratified policies whose `triggers` intersect `tokens_json`

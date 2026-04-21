@@ -64,7 +64,7 @@ fn parity_fixture_matches_through_wasm() {
         let label = entry["label"].as_str().unwrap_or("<unlabelled>");
         let expected_kind = entry["expected_decision_kind"].as_str().unwrap();
         let out = ps
-            .evaluate_change(ref_name, &entry["proposal"].to_string())
+            .evaluate_change(ref_name, &entry["proposal"].to_string(), None)
             .unwrap_or_else(|e| panic!("evaluate_change {label}: {e:?}"));
         let d: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
@@ -93,6 +93,7 @@ fn parity_fixture_matches_through_wasm() {
                 &entry["situation"].to_string(),
                 entry["action"].as_str().unwrap(),
                 entry["agent_id"].as_str().unwrap(),
+                None,
             )
             .unwrap_or_else(|e| panic!("evaluate {label}: {e:?}"));
         let d: Value = serde_json::from_str(&out).unwrap();

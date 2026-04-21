@@ -160,6 +160,7 @@ fn evaluate_allow() {
             &serde_json::json!({"namespace": "prod"}).to_string(),
             "restart_pod",
             "agent-1",
+            None,
         )
         .unwrap();
     let d: serde_json::Value = serde_json::from_str(&d_json).unwrap();
@@ -180,9 +181,11 @@ fn evaluate_deny() {
     .unwrap();
     ps.ratify("main", "infra/no-delete", "ops", "ok").unwrap();
 
-    let d: serde_json::Value =
-        serde_json::from_str(&ps.evaluate("main", "{}", "delete_node", "agent-1").unwrap())
-            .unwrap();
+    let d: serde_json::Value = serde_json::from_str(
+        &ps.evaluate("main", "{}", "delete_node", "agent-1", None)
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(d["kind"], "deny");
 }
 
@@ -206,7 +209,7 @@ fn evaluate_require_approval() {
     ps.ratify("main", "infra/risky", "ops", "ok").unwrap();
 
     let d: serde_json::Value = serde_json::from_str(
-        &ps.evaluate("main", "{}", "truncate_index", "agent-1")
+        &ps.evaluate("main", "{}", "truncate_index", "agent-1", None)
             .unwrap(),
     )
     .unwrap();
@@ -218,8 +221,11 @@ fn evaluate_require_approval() {
 #[wasm_bindgen_test]
 fn evaluate_no_match() {
     let ps = new_store();
-    let d: serde_json::Value =
-        serde_json::from_str(&ps.evaluate("main", "{}", "anything", "agent-1").unwrap()).unwrap();
+    let d: serde_json::Value = serde_json::from_str(
+        &ps.evaluate("main", "{}", "anything", "agent-1", None)
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(d["kind"], "no_policy_match");
 }
 
@@ -263,7 +269,7 @@ fn evaluate_change_with_triggers_and_fallback() {
     .to_string();
 
     let d: serde_json::Value =
-        serde_json::from_str(&ps.evaluate_change("main", &proposal).unwrap()).unwrap();
+        serde_json::from_str(&ps.evaluate_change("main", &proposal, None).unwrap()).unwrap();
     assert_eq!(d["kind"], "require_approval");
     assert_eq!(d["fallback"]["kind"], "lowest_risk_alternative");
 }
@@ -324,7 +330,7 @@ fn list_and_active_filters() {
     ps.ratify("main", "infra/b", "ops", "ok").unwrap();
 
     let listed: Vec<serde_json::Value> =
-        serde_json::from_str(&ps.list("main", None).unwrap()).unwrap();
+        serde_json::from_str(&ps.list("main", None, None).unwrap()).unwrap();
     let mut listed_paths: Vec<String> = listed
         .iter()
         .map(|p| p["path"].as_str().unwrap().to_string())
@@ -333,7 +339,7 @@ fn list_and_active_filters() {
     assert_eq!(listed_paths, vec!["infra/a", "infra/b"]);
 
     let actives: Vec<serde_json::Value> =
-        serde_json::from_str(&ps.active("main", None).unwrap()).unwrap();
+        serde_json::from_str(&ps.active("main", None, None).unwrap()).unwrap();
     let active_paths: Vec<String> = actives
         .iter()
         .map(|p| p["path"].as_str().unwrap().to_string())
@@ -359,11 +365,12 @@ fn evaluate_ignores_not_yet_active_policy() {
         .unwrap();
 
     let d: serde_json::Value =
-        serde_json::from_str(&ps.evaluate("main", "{}", "do_it", "agent-1").unwrap()).unwrap();
+        serde_json::from_str(&ps.evaluate("main", "{}", "do_it", "agent-1", None).unwrap())
+            .unwrap();
     assert_eq!(d["kind"], "no_policy_match");
 
     let actives: Vec<serde_json::Value> =
-        serde_json::from_str(&ps.active("main", None).unwrap()).unwrap();
+        serde_json::from_str(&ps.active("main", None, None).unwrap()).unwrap();
     assert!(actives
         .iter()
         .all(|p| p["path"].as_str().unwrap() != "infra/future"));
@@ -484,4 +491,259 @@ fn task_extension_fields_roundtrip() {
     assert!(dec3["payload"].is_null());
     assert!(dec3["parent_change"].is_null());
     assert!(dec3["on_complete"].is_null());
+}
+
+// ---------------------------------------------------------------------------
+// §5d: WASM pass-through for signing + multi-tenant + external evaluator.
+//
+// Mirrors the Python §5a pattern (5ddcd58). The three new optional
+// Policy fields (`signature`, `tenant_id`, `external_evaluator`) and
+// `Session.scope_tenant` auto-round-trip through serde because the
+// WASM boundary is a JSON-string. `sign` / `verify` /
+// `set_external_evaluator` are stubs returning `{"error": "not yet
+// wired"}` envelopes; `evaluate` / `evaluate_change` / `active` /
+// `list` gain an optional `tenant_filter` argument routed to the
+// Rust `_scoped` variants.
+// ---------------------------------------------------------------------------
+
+#[wasm_bindgen_test]
+fn test_wasm_policy_signature_field_round_trips() {
+    let ps = new_store();
+    let sig = serde_json::json!({
+        "algorithm": "ed25519",
+        "key_id": "ops-root-2026",
+        "signature_b64": "YWJjZGVm",
+        "signed_at": "2026-04-18T00:00:00Z",
+    });
+    let pol = policy_json(
+        "infra/signed",
+        serde_json::json!({ "signature": sig.clone() }),
+    );
+    ps.propose("main", &pol).unwrap();
+    let fetched: serde_json::Value =
+        serde_json::from_str(&ps.get("main", "infra/signed", None).unwrap()).unwrap();
+    assert_eq!(fetched["signature"], sig);
+    assert_eq!(fetched["signature"]["algorithm"], "ed25519");
+    assert_eq!(fetched["signature"]["key_id"], "ops-root-2026");
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_policy_tenant_id_field_round_trips() {
+    let ps = new_store();
+    ps.propose(
+        "main",
+        &policy_json(
+            "infra/acme-only",
+            serde_json::json!({ "tenant_id": "acme" }),
+        ),
+    )
+    .unwrap();
+    let fetched: serde_json::Value =
+        serde_json::from_str(&ps.get("main", "infra/acme-only", None).unwrap()).unwrap();
+    assert_eq!(fetched["tenant_id"], "acme");
+
+    // Global fallback: unset tenant_id serializes as null / missing.
+    ps.propose("main", &policy_json("infra/global", serde_json::json!({})))
+        .unwrap();
+    let fetched2: serde_json::Value =
+        serde_json::from_str(&ps.get("main", "infra/global", None).unwrap()).unwrap();
+    assert!(
+        fetched2["tenant_id"].is_null() || !fetched2.as_object().unwrap().contains_key("tenant_id"),
+        "global policy should have no tenant_id, got {fetched2:?}"
+    );
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_policy_external_evaluator_field_round_trips() {
+    let ps = new_store();
+    let ext = serde_json::json!({
+        "kind": "webhook",
+        "endpoint": "https://policy.example.com/evaluate",
+        "timeout_ms": 2500,
+    });
+    ps.propose(
+        "main",
+        &policy_json(
+            "infra/ext",
+            serde_json::json!({ "external_evaluator": ext.clone() }),
+        ),
+    )
+    .unwrap();
+    let fetched: serde_json::Value =
+        serde_json::from_str(&ps.get("main", "infra/ext", None).unwrap()).unwrap();
+    assert_eq!(fetched["external_evaluator"], ext);
+    assert_eq!(fetched["external_evaluator"]["kind"], "webhook");
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_evaluate_with_tenant_filter_scoped_policy() {
+    // Policy scoped to `acme` should only be consulted when
+    // tenant_filter is None or "acme"; filtering to a different tenant
+    // excludes it, yielding no_policy_match.
+    let ps = new_store();
+    ps.propose(
+        "main",
+        &policy_json(
+            "infra/acme-restart",
+            serde_json::json!({
+                "allow": [{"action": "restart_pod"}],
+                "tenant_id": "acme",
+            }),
+        ),
+    )
+    .unwrap();
+    ps.ratify("main", "infra/acme-restart", "ops", "ok")
+        .unwrap();
+
+    // Filter == "acme" → matches.
+    let d: serde_json::Value = serde_json::from_str(
+        &ps.evaluate(
+            "main",
+            "{}",
+            "restart_pod",
+            "agent-1",
+            Some("acme".to_string()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(d["kind"], "allow");
+    assert_eq!(d["matched_policy"], "infra/acme-restart@1");
+
+    // Filter == "globex" → excluded (tenant mismatch).
+    let d2: serde_json::Value = serde_json::from_str(
+        &ps.evaluate(
+            "main",
+            "{}",
+            "restart_pod",
+            "agent-1",
+            Some("globex".to_string()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(d2["kind"], "no_policy_match");
+
+    // Filter == None → back-compat, all policies considered.
+    let d3: serde_json::Value = serde_json::from_str(
+        &ps.evaluate("main", "{}", "restart_pod", "agent-1", None)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(d3["kind"], "allow");
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_evaluate_with_tenant_filter_global_fallback() {
+    // A global policy (no tenant_id) must still apply under any
+    // tenant filter — the _scoped variant treats tenant_id == None as
+    // applicable everywhere.
+    let ps = new_store();
+    ps.propose(
+        "main",
+        &policy_json(
+            "infra/global-allow",
+            serde_json::json!({
+                "allow": [{"action": "read_config"}],
+                // tenant_id intentionally omitted -> global policy.
+            }),
+        ),
+    )
+    .unwrap();
+    ps.ratify("main", "infra/global-allow", "ops", "ok")
+        .unwrap();
+
+    for filter in [None, Some("acme".to_string()), Some("globex".to_string())] {
+        let d: serde_json::Value = serde_json::from_str(
+            &ps.evaluate("main", "{}", "read_config", "agent-1", filter.clone())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            d["kind"], "allow",
+            "global policy should match under filter {filter:?}"
+        );
+    }
+
+    // And `active` with tenant_filter still surfaces the global row.
+    let actives_acme: Vec<serde_json::Value> =
+        serde_json::from_str(&ps.active("main", None, Some("acme".to_string())).unwrap()).unwrap();
+    let paths: Vec<&str> = actives_acme
+        .iter()
+        .map(|p| p["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"infra/global-allow"));
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_session_scope_tenant_field_round_trips() {
+    // Session.scope_tenant landed alongside Policy.tenant_id in 0.7.5;
+    // a ratification path that scopes a session to a tenant must
+    // survive the JSON wire form JS sees via `createSession` /
+    // `getSession`. We exercise the same manager path those wrappers
+    // use (§6 audit test does similar for ended-at).
+    use agentstategraph_core::Session;
+    let repo = new_repo();
+    let mgr = repo.sessions();
+    let head = repo.log("main", 1).unwrap().into_iter().next().unwrap().id;
+    let mut s: Session = mgr
+        .create("agent/tenant-worker", "main", head, None, None, None, None)
+        .unwrap();
+    // No scope_tenant set initially → null on the wire.
+    let encoded = serde_json::to_string(&s).unwrap();
+    let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+    assert!(
+        decoded["scope_tenant"].is_null()
+            || !decoded.as_object().unwrap().contains_key("scope_tenant"),
+        "unset scope_tenant should be null/absent, got {decoded:?}"
+    );
+
+    // Set scope_tenant and re-serialize — the field must round-trip.
+    s.scope_tenant = Some("acme".to_string());
+    let encoded2 = serde_json::to_string(&s).unwrap();
+    let decoded2: serde_json::Value = serde_json::from_str(&encoded2).unwrap();
+    assert_eq!(decoded2["scope_tenant"], "acme");
+
+    // And deserialization back into a Session preserves it.
+    let reparsed: Session = serde_json::from_str(&encoded2).unwrap();
+    assert_eq!(reparsed.scope_tenant.as_deref(), Some("acme"));
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_policystore_sign_returns_stub_envelope() {
+    // All three §5d stubs return the same `{"error": "not yet wired",
+    // "hint": "..."}` envelope shape so callers can pattern-match
+    // without try/catch. Exercise each.
+    let ps = new_store();
+    ps.propose("main", &policy_json("infra/to-sign", serde_json::json!({})))
+        .unwrap();
+
+    let sign_env: serde_json::Value =
+        serde_json::from_str(&ps.sign("main", "infra/to-sign", None).unwrap()).unwrap();
+    assert_eq!(sign_env["error"], "not yet wired");
+    assert!(sign_env["hint"].is_string());
+
+    let sign_env_with_key: serde_json::Value = serde_json::from_str(
+        &ps.sign("main", "infra/to-sign", Some("ops-root-2026".to_string()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sign_env_with_key["error"], "not yet wired");
+
+    let verify_env: serde_json::Value =
+        serde_json::from_str(&ps.verify("main", "infra/to-sign").unwrap()).unwrap();
+    assert_eq!(verify_env["error"], "not yet wired");
+    assert!(verify_env["hint"].is_string());
+
+    let ext_env: serde_json::Value = serde_json::from_str(
+        &ps.set_external_evaluator(
+            "main",
+            "infra/to-sign",
+            Some(r#"{"kind":"webhook","endpoint":"https://x/"}"#.to_string()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ext_env["error"], "not yet wired");
+    assert!(ext_env["hint"].is_string());
 }
