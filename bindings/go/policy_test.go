@@ -392,6 +392,270 @@ func TestPolicy_ListAndActiveFilters(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 0.7.5-beta.1 §5c — signing + multi-tenant + external evaluator
+// ---------------------------------------------------------------------------
+
+// strPtr is a tiny helper for the *string fields on the new Policy
+// additions (Signature, TenantID, ExternalEvaluator sources, etc.).
+func strPtr(s string) *string { return &s }
+
+// TestPolicy_SignatureFieldRoundTrips exercises the new
+// Policy.Signature *PolicySignature field through the full
+// Propose -> Get -> unmarshal cycle.
+func TestPolicy_SignatureFieldRoundTrips(t *testing.T) {
+	_, ps := newStore(t)
+	p := newPolicy("infra/signed")
+	p.Signature = &PolicySignature{
+		Algorithm:    "ed25519",
+		SignerKeyID:  "test-key-1",
+		SignatureHex: "deadbeefcafef00d",
+	}
+	if _, err := ps.Propose("main", p); err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	got, err := ps.Get("main", "infra/signed")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Signature == nil {
+		t.Fatalf("Signature round-trip dropped: %+v", got)
+	}
+	if got.Signature.Algorithm != "ed25519" ||
+		got.Signature.SignerKeyID != "test-key-1" ||
+		got.Signature.SignatureHex != "deadbeefcafef00d" {
+		t.Fatalf("Signature fields mismatch: %+v", got.Signature)
+	}
+}
+
+// TestPolicy_TenantIDFieldRoundTrips asserts that the new *string
+// TenantID field on Policy survives the FFI round-trip with
+// json:",omitempty" semantics (nil stays nil).
+func TestPolicy_TenantIDFieldRoundTrips(t *testing.T) {
+	_, ps := newStore(t)
+
+	tenantless := newPolicy("infra/no-tenant")
+	if _, err := ps.Propose("main", tenantless); err != nil {
+		t.Fatalf("Propose tenantless: %v", err)
+	}
+	gotNil, err := ps.Get("main", "infra/no-tenant")
+	if err != nil {
+		t.Fatalf("Get tenantless: %v", err)
+	}
+	if gotNil.TenantID != nil {
+		t.Fatalf("expected nil TenantID, got %v", *gotNil.TenantID)
+	}
+
+	scoped := newPolicy("infra/scoped")
+	scoped.TenantID = strPtr("acme")
+	if _, err := ps.Propose("main", scoped); err != nil {
+		t.Fatalf("Propose scoped: %v", err)
+	}
+	gotScoped, err := ps.Get("main", "infra/scoped")
+	if err != nil {
+		t.Fatalf("Get scoped: %v", err)
+	}
+	if gotScoped.TenantID == nil || *gotScoped.TenantID != "acme" {
+		t.Fatalf("TenantID round-trip: %+v", gotScoped.TenantID)
+	}
+}
+
+// TestPolicy_ExternalEvaluatorFieldRoundTrips exercises every
+// permutation of ExternalEvaluatorRef.Kind (rego/cedar/wasm) and
+// EvaluatorSource.Kind (inline/file_path/commit_ref) through the
+// FFI JSON round-trip.
+func TestPolicy_ExternalEvaluatorFieldRoundTrips(t *testing.T) {
+	_, ps := newStore(t)
+
+	cases := []struct {
+		name string
+		ref  ExternalEvaluatorRef
+	}{
+		{
+			name: "rego-inline",
+			ref: ExternalEvaluatorRef{
+				Kind:   "rego",
+				Source: EvaluatorSource{Kind: "inline", Body: strPtr("package x\nallow = true")},
+			},
+		},
+		{
+			name: "cedar-file",
+			ref: ExternalEvaluatorRef{
+				Kind:   "cedar",
+				Source: EvaluatorSource{Kind: "file_path", Path: strPtr("/etc/policy.cedar")},
+			},
+		},
+		{
+			name: "wasm-commit",
+			ref: ExternalEvaluatorRef{
+				Kind:   "wasm",
+				Source: EvaluatorSource{Kind: "commit_ref", Path: strPtr("policies/gate.wasm")},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "infra/ext-" + tc.name
+			p := newPolicy(path)
+			p.ExternalEvaluator = &tc.ref
+			if _, err := ps.Propose("main", p); err != nil {
+				t.Fatalf("Propose: %v", err)
+			}
+			got, err := ps.Get("main", path)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.ExternalEvaluator == nil {
+				t.Fatalf("ExternalEvaluator dropped in round-trip")
+			}
+			if got.ExternalEvaluator.Kind != tc.ref.Kind {
+				t.Fatalf("evaluator kind: got %q want %q",
+					got.ExternalEvaluator.Kind, tc.ref.Kind)
+			}
+			if got.ExternalEvaluator.Source.Kind != tc.ref.Source.Kind {
+				t.Fatalf("source kind: got %q want %q",
+					got.ExternalEvaluator.Source.Kind, tc.ref.Source.Kind)
+			}
+			// Body / Path should survive per-variant.
+			if tc.ref.Source.Body != nil {
+				if got.ExternalEvaluator.Source.Body == nil ||
+					*got.ExternalEvaluator.Source.Body != *tc.ref.Source.Body {
+					t.Fatalf("source body mismatch: %+v", got.ExternalEvaluator.Source)
+				}
+			}
+			if tc.ref.Source.Path != nil {
+				if got.ExternalEvaluator.Source.Path == nil ||
+					*got.ExternalEvaluator.Source.Path != *tc.ref.Source.Path {
+					t.Fatalf("source path mismatch: %+v", got.ExternalEvaluator.Source)
+				}
+			}
+		})
+	}
+}
+
+// TestPolicy_SignStubEnvelope verifies that Sign + Verify return the
+// raw JSON envelope produced by the FFI stub (either an {"error":...}
+// envelope or a signature payload) without wrapping it into a Go
+// error. The test only asserts that a non-empty string comes back —
+// the exact shape is owned by the Rust side and is allowed to evolve.
+func TestPolicy_SignStubEnvelope(t *testing.T) {
+	_, ps := newStore(t)
+	if _, err := ps.Propose("main", newPolicy("infra/to-sign")); err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+
+	raw, err := ps.Sign("main", "infra/to-sign", strPtr("test-key"))
+	if err != nil {
+		t.Fatalf("Sign FFI call failed: %v", err)
+	}
+	if raw == "" {
+		t.Fatalf("Sign returned empty envelope")
+	}
+	// Must be valid JSON regardless of stub vs real impl.
+	var any map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &any); err != nil {
+		t.Fatalf("Sign envelope not JSON: %v (%q)", err, raw)
+	}
+
+	vraw, err := ps.Verify("main", "infra/to-sign")
+	if err != nil {
+		t.Fatalf("Verify FFI call failed: %v", err)
+	}
+	if err := json.Unmarshal([]byte(vraw), &any); err != nil {
+		t.Fatalf("Verify envelope not JSON: %v (%q)", err, vraw)
+	}
+}
+
+// TestPolicy_SetExternalEvaluatorStubEnvelope verifies that
+// SetExternalEvaluator returns the FFI stub's JSON envelope
+// unmodified. The current Rust impl returns `{"error": "..."}`; the
+// wrapper must NOT translate that into a Go error.
+func TestPolicy_SetExternalEvaluatorStubEnvelope(t *testing.T) {
+	_, ps := newStore(t)
+	cfg := `{"kind":"rego","source":{"kind":"inline","body":"package x"}}`
+	raw, err := ps.SetExternalEvaluator(cfg)
+	if err != nil {
+		t.Fatalf("SetExternalEvaluator FFI call failed: %v", err)
+	}
+	if raw == "" {
+		t.Fatalf("SetExternalEvaluator returned empty envelope")
+	}
+	var any map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &any); err != nil {
+		t.Fatalf("envelope not JSON: %v (%q)", err, raw)
+	}
+}
+
+// TestPolicy_EvaluateScopedFiltersByTenant proves the Go-side tenant
+// filter rewrites a matched-policy decision into `no_policy_match`
+// when the session's scope_tenant differs from the policy's
+// tenant_id, and passes the decision through unchanged when they
+// match (or when the policy has no tenant).
+func TestPolicy_EvaluateScopedFiltersByTenant(t *testing.T) {
+	_, ps := newStore(t)
+
+	// Construct a simple always-match allow policy scoped to tenant
+	// "acme". The situation selector is `{"kind":"always"}` from
+	// newPolicy(), and we add an explicit allow rule so evaluate()
+	// returns DecisionAllow with matched_policy set.
+	p := newPolicy("infra/tenanted")
+	p.TenantID = strPtr("acme")
+	p.Allow = []AuthorizedAction{{Action: "read"}}
+	handle, err := ps.Propose("main", p)
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if err := ps.Ratify("main", "infra/tenanted", "tester", "ok"); err != nil {
+		t.Fatalf("Ratify %s: %v", handle, err)
+	}
+
+	// Baseline (no filter) should allow.
+	d, err := ps.Evaluate("main", nil, "read", "agent-1")
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if d.Kind != DecisionAllow {
+		t.Fatalf("baseline decision: got %q want allow", d.Kind)
+	}
+
+	// Matching tenant filter — decision preserved.
+	acme := strPtr("acme")
+	dm, err := ps.EvaluateScoped("main", nil, "read", "agent-1", acme)
+	if err != nil {
+		t.Fatalf("EvaluateScoped acme: %v", err)
+	}
+	if dm.Kind != DecisionAllow {
+		t.Fatalf("acme decision: got %q want allow", dm.Kind)
+	}
+
+	// Mismatched tenant — rewritten to no_policy_match.
+	other := strPtr("evilcorp")
+	dn, err := ps.EvaluateScoped("main", nil, "read", "agent-1", other)
+	if err != nil {
+		t.Fatalf("EvaluateScoped evilcorp: %v", err)
+	}
+	if dn.Kind != DecisionNoPolicyMatch {
+		t.Fatalf("evilcorp decision: got %q want no_policy_match", dn.Kind)
+	}
+
+	// ListScoped / ActiveScoped should also filter.
+	listed, err := ps.ListScoped("main", "infra", other)
+	if err != nil {
+		t.Fatalf("ListScoped: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("ListScoped evilcorp: expected 0, got %d", len(listed))
+	}
+	actives, err := ps.ActiveScoped("main", "infra", acme)
+	if err != nil {
+		t.Fatalf("ActiveScoped: %v", err)
+	}
+	if len(actives) != 1 || actives[0].Path != "infra/tenanted" {
+		t.Fatalf("ActiveScoped acme: %+v", actives)
+	}
+}
+
 func TestPolicy_RatifyEmptyRatifierRejected(t *testing.T) {
 	// PolicyStore::ratify rejects an empty ratifier (the trimmed
 	// string must have content). Empty reasoning is stored as None

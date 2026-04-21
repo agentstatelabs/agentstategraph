@@ -57,6 +57,36 @@ type ProcedureStep struct {
 	IfPreviousFailed *string `json:"if_previous_failed,omitempty"`
 }
 
+// PolicySignature — optional detached signature metadata recorded on a
+// Policy when `agentstategraph_policy_sign` is invoked (POLICY_V1.md
+// §5c signing). The fields mirror the Rust `PolicySignature` serde
+// payload produced by the FFI.
+type PolicySignature struct {
+	Algorithm    string `json:"algorithm"`
+	SignerKeyID  string `json:"signer_key_id"`
+	SignatureHex string `json:"signature_hex"`
+}
+
+// EvaluatorSource — tagged union describing where an external
+// evaluator's body comes from. `Kind` selects one of:
+//   - "inline":      Body is set to the evaluator source text.
+//   - "file_path":   Path is set to a filesystem path.
+//   - "commit_ref":  Path is set to a repo-relative path resolved
+//                    against a commit.
+type EvaluatorSource struct {
+	Kind string  `json:"kind"`
+	Body *string `json:"body,omitempty"`
+	Path *string `json:"path,omitempty"`
+}
+
+// ExternalEvaluatorRef — optional reference to an external evaluator
+// engine that replaces the built-in rule matcher for a Policy. `Kind`
+// is one of "rego", "cedar", "wasm"; `Source` locates the body.
+type ExternalEvaluatorRef struct {
+	Kind   string          `json:"kind"`
+	Source EvaluatorSource `json:"source"`
+}
+
 // Policy — the unit of authorization + procedure. Matches
 // agentstategraph-policy::Policy.
 type Policy struct {
@@ -79,6 +109,25 @@ type Policy struct {
 	ActiveFrom        string             `json:"active_from"`
 	ExpiresAt         *string            `json:"expires_at,omitempty"`
 	Supersedes        *string            `json:"supersedes,omitempty"`
+	// Signature — optional detached signature (0.7.5-beta.1 §5c).
+	Signature *PolicySignature `json:"signature,omitempty"`
+	// TenantID — optional multi-tenant scope. When set, the policy is
+	// only evaluated for sessions whose `scope_tenant` matches.
+	TenantID *string `json:"tenant_id,omitempty"`
+	// ExternalEvaluator — optional pointer to an external evaluator
+	// (Rego/Cedar/Wasm) that replaces the built-in matcher.
+	ExternalEvaluator *ExternalEvaluatorRef `json:"external_evaluator,omitempty"`
+}
+
+// Session — advisory session context carried by higher-level
+// transports (MCP, REST) when invoking policy evaluation. The Go FFI
+// externs don't yet accept a Session directly; this struct is provided
+// for callers who marshal their own session-scoped payloads or
+// post-filter results themselves.
+type Session struct {
+	// ScopeTenant — tenant id used to filter policies whose
+	// `tenant_id` is non-nil. A nil value means "no filter".
+	ScopeTenant *string `json:"scope_tenant,omitempty"`
 }
 
 // DecisionKind — one of the four Decision variants.
@@ -380,6 +429,166 @@ func (ps *PolicyStore) EvaluateChange(ref string, proposal ChangeProposal) (*Dec
 		return nil, err
 	}
 	return &d, nil
+}
+
+// Sign invokes the `agentstategraph_policy_sign` FFI extern, which
+// (as of 0.7.5-beta.1) returns a stub JSON envelope describing the
+// signature that would be computed. The raw JSON string is returned
+// unchanged so callers can parse whichever shape the FFI ships with
+// (either `{"signature": {...}}` or `{"error": "..."}`).
+//
+// signerKeyID is optional; pass nil to let the FFI pick a default.
+func (ps *PolicyStore) Sign(ref, path string, signerKeyID *string) (string, error) {
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	var cKey *C.char
+	if signerKeyID != nil {
+		cKey = C.CString(*signerKeyID)
+		defer C.free(unsafe.Pointer(cKey))
+	}
+	raw, err := consume(
+		C.agentstategraph_policy_sign(ps.handle, cRef, cPath, cKey),
+		"policy_sign",
+	)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// Verify invokes the `agentstategraph_policy_verify` FFI extern. The
+// raw JSON envelope is returned unchanged; callers parse the shape
+// that matches the currently-shipped stub.
+func (ps *PolicyStore) Verify(ref, path string) (string, error) {
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	raw, err := consume(
+		C.agentstategraph_policy_verify(ps.handle, cRef, cPath),
+		"policy_verify",
+	)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// SetExternalEvaluator invokes the
+// `agentstategraph_policy_set_external_evaluator` FFI extern. The
+// current Rust implementation is a stub that returns an
+// `{"error": "..."}` envelope; the raw string is returned unchanged.
+func (ps *PolicyStore) SetExternalEvaluator(configJSON string) (string, error) {
+	cCfg := C.CString(configJSON)
+	defer C.free(unsafe.Pointer(cCfg))
+	raw, err := consume(
+		C.agentstategraph_policy_set_external_evaluator(ps.handle, cCfg),
+		"policy_set_external_evaluator",
+	)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-scoped variants (0.7.5-beta.1 §5c)
+//
+// The FFI externs for evaluate / evaluate_change / list / active do
+// not yet accept a `tenant_filter` argument — only the Rust MCP layer
+// consumes it today. As a pass-through, the Scoped variants call the
+// existing externs and filter Go-side by `tenant_id`.
+//
+// A policy matches the filter when:
+//   - tenantFilter is nil (no filter), OR
+//   - policy.TenantID is nil (policy applies to all tenants), OR
+//   - *policy.TenantID == *tenantFilter.
+//
+// TODO(0.7.6+): when the FFI grows tenant-aware externs, switch these
+// methods to pass tenantFilter through the C ABI directly.
+// ---------------------------------------------------------------------------
+
+// tenantMatches returns true iff `p` is visible under `filter`.
+func tenantMatches(p *Policy, filter *string) bool {
+	if filter == nil || p.TenantID == nil {
+		return true
+	}
+	return *p.TenantID == *filter
+}
+
+// EvaluateScoped wraps Evaluate. When `tenantFilter` is non-nil and
+// the decision references a `matched_policy` whose stored `tenant_id`
+// does not match, the result is rewritten to `no_policy_match`.
+func (ps *PolicyStore) EvaluateScoped(ref string, situation map[string]string, action, agentID string, tenantFilter *string) (*Decision, error) {
+	d, err := ps.Evaluate(ref, situation, action, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if tenantFilter == nil || d.MatchedPolicy == "" {
+		return d, nil
+	}
+	matched, err := ps.Get(ref, d.MatchedPolicy)
+	if err != nil || matched == nil {
+		return d, nil
+	}
+	if tenantMatches(matched, tenantFilter) {
+		return d, nil
+	}
+	return &Decision{Kind: DecisionNoPolicyMatch, Reason: "policy filtered by tenant scope"}, nil
+}
+
+// EvaluateChangeScoped wraps EvaluateChange with the same post-load
+// tenant filter rules as EvaluateScoped.
+func (ps *PolicyStore) EvaluateChangeScoped(ref string, proposal ChangeProposal, tenantFilter *string) (*Decision, error) {
+	d, err := ps.EvaluateChange(ref, proposal)
+	if err != nil {
+		return nil, err
+	}
+	if tenantFilter == nil || d.MatchedPolicy == "" {
+		return d, nil
+	}
+	matched, err := ps.Get(ref, d.MatchedPolicy)
+	if err != nil || matched == nil {
+		return d, nil
+	}
+	if tenantMatches(matched, tenantFilter) {
+		return d, nil
+	}
+	return &Decision{Kind: DecisionNoPolicyMatch, Reason: "policy filtered by tenant scope"}, nil
+}
+
+// ActiveScoped wraps Active and drops policies whose `tenant_id` is
+// non-nil and does not match `tenantFilter`.
+func (ps *PolicyStore) ActiveScoped(ref, prefix string, tenantFilter *string) ([]Policy, error) {
+	all, err := ps.Active(ref, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return filterByTenant(all, tenantFilter), nil
+}
+
+// ListScoped wraps List with the same post-load tenant filter.
+func (ps *PolicyStore) ListScoped(ref, prefix string, tenantFilter *string) ([]Policy, error) {
+	all, err := ps.List(ref, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return filterByTenant(all, tenantFilter), nil
+}
+
+func filterByTenant(in []Policy, filter *string) []Policy {
+	if filter == nil {
+		return in
+	}
+	out := make([]Policy, 0, len(in))
+	for i := range in {
+		if tenantMatches(&in[i], filter) {
+			out = append(out, in[i])
+		}
+	}
+	return out
 }
 
 // CheckTokens returns the active policies whose `triggers` intersect
