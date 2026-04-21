@@ -57,9 +57,13 @@ version = "0.7.25-beta.2"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
+ "agentstategraph-ffi",
  "agentstategraph-migrate",
  "agentstategraph-policy",
+ "agentstategraph-policy-cedar",
+ "agentstategraph-policy-rego",
  "agentstategraph-policy-sign",
+ "agentstategraph-policy-wasm",
  "agentstategraph-storage",
  "agentstategraph-tasks",
  "axum",

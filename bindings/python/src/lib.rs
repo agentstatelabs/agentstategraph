@@ -11,6 +11,12 @@
 //!   asg.diff("main", "feature")
 //!   asg.merge("feature", "main", description="merge feature")
 
+// Binding glue: exported PyO3 methods mirror the Python-side call
+// shape which has no natural way to collapse into fewer args (kwargs
+// are distinct parameters at the Rust boundary). Allow crate-wide
+// rather than wrapping every export.
+#![allow(clippy::too_many_arguments)]
+
 use std::sync::Arc;
 
 use pyo3::exceptions::PyRuntimeError;
@@ -557,7 +563,7 @@ impl AgentStateGraph {
         };
         let registry = Registry::builtin();
 
-        let result = check(&*self.repo, r#ref, &target, &registry)
+        let result = check(&self.repo, r#ref, &target, &registry)
             .map_err(|e| PyRuntimeError::new_err(format!("check failed: {e}")))?;
 
         let dict = pyo3::types::PyDict::new(py);
@@ -639,7 +645,7 @@ impl AgentStateGraph {
         };
         let registry = Registry::builtin();
         let report = registry
-            .run(&*self.repo, r#ref, &target, run_mode)
+            .run(&self.repo, r#ref, &target, run_mode)
             .map_err(|e| PyRuntimeError::new_err(format!("migrate failed: {e}")))?;
 
         let dict = pyo3::types::PyDict::new(py);
@@ -1308,31 +1314,39 @@ impl PolicyStore {
 
     /// List every policy (active versions, ratified or not) whose path
     /// starts with `prefix_filter`. `None` lists everything.
-    #[pyo3(signature = (ref_name, prefix_filter=None))]
+    ///
+    /// `tenant_filter` (0.7.5 §3b): `None` keeps back-compat (all
+    /// policies pass); `Some(tid)` keeps only policies with
+    /// `tenant_id == Some(tid)` or `tenant_id == None`.
+    #[pyo3(signature = (ref_name, prefix_filter=None, tenant_filter=None))]
     fn list(
         &self,
         py: Python<'_>,
         ref_name: &str,
         prefix_filter: Option<&str>,
+        tenant_filter: Option<&str>,
     ) -> PyResult<PyObject> {
         let policies = self
             .inner
-            .list(ref_name, prefix_filter)
+            .list_scoped(ref_name, prefix_filter, tenant_filter)
             .map_err(policy_err)?;
         policies_to_pylist(py, &policies)
     }
 
     /// List currently-active policies (ratified AND `active_from <= now`).
-    #[pyo3(signature = (ref_name, prefix_filter=None))]
+    ///
+    /// `tenant_filter` (0.7.5 §3b) matches [`Self::list`] semantics.
+    #[pyo3(signature = (ref_name, prefix_filter=None, tenant_filter=None))]
     fn active(
         &self,
         py: Python<'_>,
         ref_name: &str,
         prefix_filter: Option<&str>,
+        tenant_filter: Option<&str>,
     ) -> PyResult<PyObject> {
         let policies = self
             .inner
-            .active(ref_name, prefix_filter)
+            .active_scoped(ref_name, prefix_filter, tenant_filter)
             .map_err(policy_err)?;
         policies_to_pylist(py, &policies)
     }
@@ -1362,6 +1376,12 @@ impl PolicyStore {
 
     /// Authorization evaluation (POLICY_V1.md §5). Returns a Decision
     /// dict with a "kind" field.
+    ///
+    /// `tenant_filter` (0.7.5 §3b) routes through the Rust
+    /// `evaluate_scoped` variant: `None` considers every policy,
+    /// `Some(tid)` restricts the candidate set to policies whose
+    /// `tenant_id == Some(tid)` or `tenant_id == None`.
+    #[pyo3(signature = (ref_name, situation, action, agent_id, tenant_filter=None))]
     fn evaluate(
         &self,
         py: Python<'_>,
@@ -1369,31 +1389,105 @@ impl PolicyStore {
         situation: &Bound<'_, PyAny>,
         action: &str,
         agent_id: &str,
+        tenant_filter: Option<&str>,
     ) -> PyResult<PyObject> {
         let sit = situation_from_py(py, situation)?;
         let decision = self
             .inner
-            .evaluate(ref_name, &sit, action, agent_id)
+            .evaluate_scoped(ref_name, &sit, action, agent_id, tenant_filter)
             .map_err(policy_err)?;
         decision_to_py(py, &decision)
     }
 
     /// Change-proposal evaluation (POLICY_V1.md §22.2). Returns a
     /// Decision dict.
+    ///
+    /// `tenant_filter` (0.7.5 §3b) matches [`Self::evaluate`] semantics.
+    #[pyo3(signature = (ref_name, proposal, tenant_filter=None))]
     fn evaluate_change(
         &self,
         py: Python<'_>,
         ref_name: &str,
         proposal: &Bound<'_, PyAny>,
+        tenant_filter: Option<&str>,
     ) -> PyResult<PyObject> {
         let json = py_any_to_json(py, proposal)?;
         let prop: ChangeProposal = serde_json::from_value(json)
             .map_err(|e| PyRuntimeError::new_err(format!("invalid proposal: {e}")))?;
         let decision = self
             .inner
-            .evaluate_change(ref_name, &prop)
+            .evaluate_change_scoped(ref_name, &prop, tenant_filter)
             .map_err(policy_err)?;
         decision_to_py(py, &decision)
+    }
+
+    // ---- 0.7.5 §5a: sign / verify / set_external_evaluator stubs ----
+    //
+    // Real Python-side signing would require a PyO3-visible signer
+    // registry, which duplicates `agentstategraph-policy-sign` machinery
+    // for little gain at this beta. The Python `Policy` surface already
+    // exposes the `signature` field as a raw dict, so callers can
+    // construct a signature elsewhere (e.g. via the MCP server or a
+    // sidecar Rust tool) and attach it via `propose`/`supersede`.
+    //
+    // These stubs return a `{"error": "..."}` envelope to keep API
+    // shape stable when the real wiring lands in a follow-up. We do
+    // NOT surface them as exceptions — the envelope lets callers
+    // pattern-match on shape without try/except gymnastics.
+
+    /// Sign the policy at `path` (stub). Returns
+    /// `{"error": "not yet wired", "hint": "..."}`. Real signing will
+    /// land as a follow-up once a PyO3 signer wrapper ships; in the
+    /// meantime attach a `signature` dict directly via `propose`/
+    /// `supersede` — the field is preserved through the round-trip.
+    #[pyo3(signature = (ref_name, path, signer_key_id=None))]
+    #[allow(unused_variables)]
+    fn sign(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        path: &str,
+        signer_key_id: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let envelope = serde_json::json!({
+            "error": "not yet wired",
+            "hint": "use MCP tool policy_sign or attach a signature dict via propose/supersede",
+        });
+        json_to_py(py, &envelope)
+    }
+
+    /// Verify the signature on the policy at `path` (stub). Returns
+    /// `{"error": "not yet wired", "hint": "..."}`. Real verification
+    /// routes through `agentstategraph-policy-sign`; it lands as a
+    /// follow-up.
+    #[allow(unused_variables)]
+    fn verify(&self, py: Python<'_>, ref_name: &str, path: &str) -> PyResult<PyObject> {
+        let envelope = serde_json::json!({
+            "error": "not yet wired",
+            "hint": "use MCP tool policy_verify",
+        });
+        json_to_py(py, &envelope)
+    }
+
+    /// Attach or update the external evaluator reference on the
+    /// policy at `path` (stub). Returns the same envelope as `sign` /
+    /// `verify`. Until the runtime-side mutator lands, callers can set
+    /// `external_evaluator` on the policy dict at propose/supersede
+    /// time — the field is preserved by serde round-trip.
+    #[pyo3(signature = (ref_name, path, config=None))]
+    #[allow(unused_variables)]
+    fn set_external_evaluator(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        path: &str,
+        config: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        let envelope = serde_json::json!({
+            "error": "not yet wired",
+            "hint": "set policy['external_evaluator'] before propose/supersede",
+        });
+        json_to_py(py, &envelope)
     }
 
     /// List ratified policies whose `triggers` intersect the given token
@@ -1481,6 +1575,9 @@ fn session_to_dict(py: Python<'_>, s: &Session) -> PyResult<PyObject> {
     d.set_item("delegated_intent", s.delegated_intent.clone())?;
     d.set_item("report_to", s.report_to.clone())?;
     d.set_item("path_scope", s.path_scope.clone())?;
+    // 0.7.5 §3a — tenant scope on the session record. Always surfaced
+    // (as None when unset) so Python callers can rely on the key.
+    d.set_item("scope_tenant", s.scope_tenant.clone())?;
     d.set_item("status", session_status_str(&s.status))?;
     d.set_item("created_at", s.created_at.to_rfc3339())?;
     d.set_item("ended_at", s.ended_at.map(|t| t.to_rfc3339()))?;

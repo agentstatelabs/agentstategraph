@@ -332,3 +332,193 @@ def test_task_extension_fields_roundtrip():
     assert t3["payload"] is None
     assert t3["parent_change"] is None
     assert t3["on_complete"] is None
+
+
+# ---------------------------------------------------------------------------
+# 0.7.5 §5a: signing + multi-tenant + external-evaluator field round-trips
+# ---------------------------------------------------------------------------
+
+
+def test_policy_signature_field_round_trips(store):
+    """§2a/b: Policy.signature is a tagged union keyed by 'algorithm'."""
+    _, ps = store
+    pol = _policy("infra/signed", allow=[{"action": "touch"}])
+    pol["signature"] = {
+        "algorithm": "ed25519",
+        "signer_key_id": "ops-root-2026",
+        "signature_hex": "aa" * 64,
+    }
+    ps.propose("main", pol)
+    fetched = ps.get("main", "infra/signed", None)
+    assert fetched["signature"] == {
+        "algorithm": "ed25519",
+        "signer_key_id": "ops-root-2026",
+        "signature_hex": "aa" * 64,
+    }
+
+
+def test_policy_tenant_id_field_round_trips(store):
+    """§3a: Policy.tenant_id is an Option<String>."""
+    _, ps = store
+    pol = _policy("infra/scoped", allow=[{"action": "touch"}])
+    pol["tenant_id"] = "tenant-acme"
+    ps.propose("main", pol)
+    fetched = ps.get("main", "infra/scoped", None)
+    assert fetched["tenant_id"] == "tenant-acme"
+
+    # None (global) policy: omit the field.
+    pol2 = _policy("infra/global", allow=[{"action": "touch"}])
+    ps.propose("main", pol2)
+    fetched2 = ps.get("main", "infra/global", None)
+    # serde skip_serializing_if=Option::is_none means absent-or-None.
+    assert fetched2.get("tenant_id") is None
+
+
+def test_policy_external_evaluator_field_round_trips(store):
+    """§4a: Policy.external_evaluator is a tagged union with three kinds
+    (rego/cedar/wasm) × three source kinds (inline/file_path/commit_ref)."""
+    _, ps = store
+    matrix = [
+        ("rego", "a", {"kind": "inline", "body": "package asg\nallow { true }"}),
+        ("cedar", "b", {"kind": "file_path", "path": "/etc/asg/policy.cedar"}),
+        ("wasm", "c", {"kind": "commit_ref", "path": "/evaluators/x.wasm"}),
+        ("rego", "d", {"kind": "file_path", "path": "/etc/asg/policy.rego"}),
+        ("cedar", "e", {"kind": "inline", "body": "permit(principal, action, resource);"}),
+        ("wasm", "f", {"kind": "inline", "body": "AGFzbQEAAAA="}),
+        ("rego", "g", {"kind": "commit_ref", "path": "/evaluators/rbac.rego"}),
+        ("cedar", "h", {"kind": "commit_ref", "path": "/evaluators/corp.cedar"}),
+        ("wasm", "i", {"kind": "file_path", "path": "/etc/asg/runner.wasm"}),
+    ]
+    for kind, suffix, source in matrix:
+        pol = _policy(f"infra/ext-{suffix}")
+        pol["external_evaluator"] = {"kind": kind, "source": source}
+        ps.propose("main", pol)
+        fetched = ps.get("main", f"infra/ext-{suffix}", None)
+        assert fetched["external_evaluator"] == {"kind": kind, "source": source}
+
+
+def test_evaluate_with_tenant_filter_scoped_policy(store):
+    """§3b: tenant_filter=Some(tid) restricts evaluate() to policies
+    whose tenant_id matches or is None."""
+    _, ps = store
+    acme = _policy(
+        "infra/acme-only",
+        allow=[{"action": "deploy"}],
+        situation_selector={"kind": "always"},
+    )
+    acme["tenant_id"] = "tenant-acme"
+    ps.propose("main", acme)
+    ps.ratify("main", "infra/acme-only", "ops", "ok")
+
+    other = _policy(
+        "infra/other-only",
+        allow=[{"action": "deploy"}],
+        situation_selector={"kind": "always"},
+    )
+    other["tenant_id"] = "tenant-other"
+    ps.propose("main", other)
+    ps.ratify("main", "infra/other-only", "ops", "ok")
+
+    # acme tenant sees only the acme policy.
+    d = ps.evaluate("main", {}, "deploy", "agent-1", tenant_filter="tenant-acme")
+    assert d["kind"] == "allow"
+    assert d["matched_policy"] == "infra/acme-only@1"
+
+    # Non-matching tenant → no match (other's policy is filtered out,
+    # and acme's policy is filtered out from the unrelated tenant).
+    d2 = ps.evaluate("main", {}, "deploy", "agent-1", tenant_filter="tenant-unknown")
+    assert d2["kind"] == "no_policy_match"
+
+    # active() with tenant_filter also agrees.
+    acme_actives = ps.active("main", None, "tenant-acme")
+    assert [p["path"] for p in acme_actives] == ["infra/acme-only"]
+
+
+def test_evaluate_with_tenant_filter_global_fallback(store):
+    """§3b: tenant_id=None policies apply under every tenant_filter."""
+    _, ps = store
+    globally = _policy(
+        "infra/global-allow",
+        allow=[{"action": "noop"}],
+        situation_selector={"kind": "always"},
+    )
+    ps.propose("main", globally)
+    ps.ratify("main", "infra/global-allow", "ops", "ok")
+
+    # Any tenant filter still sees the global policy.
+    for tf in ("tenant-a", "tenant-b", None):
+        d = ps.evaluate("main", {}, "noop", "agent-1", tenant_filter=tf)
+        assert d["kind"] == "allow", f"tenant_filter={tf!r}"
+        assert d["matched_policy"] == "infra/global-allow@1"
+
+
+def test_evaluate_change_with_tenant_filter(store):
+    """§3b: evaluate_change also accepts a tenant_filter."""
+    _, ps = store
+    pol = _policy(
+        "infra/tenant-change",
+        triggers=["reindex"],
+        require_approval=[
+            {
+                "action": "promote",
+                "approvers": ["human"],
+                "fallback": {"kind": "block"},
+            }
+        ],
+    )
+    pol["tenant_id"] = "tenant-a"
+    ps.propose("main", pol)
+    ps.ratify("main", "infra/tenant-change", "ops", "ok")
+
+    proposal = {
+        "action": "promote",
+        "agent_id": "agent-1",
+        "intent": "",
+        "preferred_option": "x",
+        "tokens": ["reindex"],
+        "attached_fields": {},
+    }
+    # Matching tenant → policy consulted.
+    d = ps.evaluate_change("main", proposal, tenant_filter="tenant-a")
+    assert d["kind"] == "require_approval"
+    # Different tenant → policy filtered out, no match.
+    d2 = ps.evaluate_change("main", proposal, tenant_filter="tenant-b")
+    assert d2["kind"] == "no_policy_match"
+
+
+def test_session_scope_tenant_field_round_trips():
+    """§3a: Session.scope_tenant surfaces in the Python dict (as None
+    when unset — SessionManager doesn't yet expose a setter)."""
+    asg = AgentStateGraph()
+    s = asg.create_session(agent_id="agent/a", working_branch="main")
+    assert "scope_tenant" in s
+    assert s["scope_tenant"] is None
+
+    fetched = asg.get_session(s["id"])
+    assert "scope_tenant" in fetched
+    assert fetched["scope_tenant"] is None
+
+    listed = asg.list_sessions(None)
+    assert all("scope_tenant" in x for x in listed)
+
+
+def test_policystore_sign_returns_stub_envelope(store):
+    """§5a: sign/verify/set_external_evaluator are stubs returning an
+    {"error": ...} envelope; real Python signing lands as a follow-up."""
+    _, ps = store
+    ps.propose("main", _policy("infra/to-sign"))
+
+    sig = ps.sign("main", "infra/to-sign", signer_key_id="key-1")
+    assert isinstance(sig, dict)
+    assert sig.get("error") == "not yet wired"
+    assert "hint" in sig
+
+    ver = ps.verify("main", "infra/to-sign")
+    assert ver.get("error") == "not yet wired"
+
+    ext = ps.set_external_evaluator(
+        "main",
+        "infra/to-sign",
+        {"kind": "rego", "source": {"kind": "inline", "body": "package x"}},
+    )
+    assert ext.get("error") == "not yet wired"
