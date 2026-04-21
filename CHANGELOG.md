@@ -5,6 +5,67 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.25-beta.2] — 2026-04-21
+
+Theme: **close the three FFI gaps + fix Decision polymorphism.**
+Small patch release on top of 0.7.25-beta.1 that promotes the
+C# binding from experimental to first-class.
+
+### Added
+
+- **3 new extern C functions** in `agentstategraph-ffi`
+  (DllImport count 48 → 51):
+  - `agentstategraph_list_branches(repo, prefix)` — JSON array
+    of `{name, target}`; prefix `NULL` for no filter
+  - `agentstategraph_delete_branch(repo, name)` —
+    `{"deleted": true|false}` or `{"error": "..."}`
+  - `agentstategraph_taskstore_add_task_ex(...)` — extended
+    `add_task` threading the 0.6.0 Task extension fields
+    (`payload`, `parent_change`, `on_complete`). Routes to the
+    Rust `TaskStore::add_task_with_extensions` method that's
+    existed since 0.6.0 but was unreachable over the FFI.
+- **Go binding**: `AgentStateGraph.ListBranches(prefix) ->
+  []BranchEntry`, `AgentStateGraph.DeleteBranch(name) -> bool`,
+  `TaskStore.AddTaskWithExtensions(ref, plan, title, priority,
+  opts *AddTaskExtOptions) -> (*Task, error)`. `Task` struct
+  gains `Payload` / `ParentChange` / `OnComplete`. 3 new tests.
+- **C# binding**: `Repository.ListBranches(prefix?)`,
+  `Repository.DeleteBranch(name)`,
+  `TaskStore.AddTaskWithExtensions(...)` — all real, no more
+  stubs. New `BranchEntry` record. 6 new / 4 flipped tests.
+
+### Fixed
+
+- **C# `Decision` polymorphism collision**: the derived records
+  had a `Kind` property that collided with
+  `[JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]`.
+  Every serialization threw `InvalidOperationException`.
+  Fix: removed the redundant `Kind` property from variant
+  records on `Decision` and `FallbackAction` (the discriminator
+  carries the tag). Added a computed `KindTag` read-only
+  property on each abstract polymorphic base (Decision,
+  FallbackAction, Selector, OnCompleteHook) for consumers that
+  want the string tag without type-matching. Dead
+  `DecisionKind` enum removed. The ~8 xUnit tests + parity
+  runner that were failing in 0.7.25-beta.1 now pass.
+
+### Changed
+
+- **C# binding promoted from experimental.** `bindings/dotnet/
+  README.md` drops the experimental banner and "Known issues"
+  section. `.github/workflows/ci.yml` dotnet job drops
+  `continue-on-error: true` and the `(experimental)` label.
+  NuGet auto-publish is still manual-only — flip after one full
+  green CI pass.
+- Workspace bumped `0.7.25-beta.1` → `0.7.25-beta.2`. Python,
+  TypeScript, and C# binding versions aligned.
+
+### Security / design notes
+
+- Every FFI extension is purely additive — existing extern
+  declarations are unchanged, so every consumer compiling against
+  0.7.25-beta.1 continues to compile.
+
 ## [0.7.25-beta.1] — 2026-04-21
 
 Theme: **C# / .NET binding (experimental).** Brand-new language
