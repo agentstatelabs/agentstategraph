@@ -3,16 +3,21 @@
 //! Uses the browser's IndexedDB to store objects, commits, and refs.
 //! Data survives page refreshes and browser restarts.
 //!
-//! **Note on epochs/sessions**: as of 0.6.5-beta.1 the IndexedDB backend
-//! only persists objects/commits/refs. The `EpochStore` and
-//! `SessionStore` impls return `StorageError::Backend("not yet
-//! implemented")`. Browser-side durable epochs + sessions are slated
-//! for a later milestone.
+//! As of 0.6.75-beta.1 this backend also persists epochs and sessions,
+//! using the same write-through-queue pattern as objects/commits/refs.
 //!
-//! Three IndexedDB object stores:
-//!   "objects"  → ObjectId (hex string) → Object (JSON)
-//!   "commits"  → ObjectId (hex string) → Commit (JSON)
-//!   "refs"     → name (string)         → ObjectId (hex string)
+//! Seven IndexedDB object stores:
+//!   "objects"         → ObjectId (hex string) → Object (JSON)
+//!   "commits"         → ObjectId (hex string) → Commit (JSON)
+//!   "refs"            → name (string)         → ObjectId (hex string)
+//!   "epochs"          → epoch id (string)     → Epoch (JSON snapshot)
+//!   "sessions"        → session id (string)   → Session (JSON snapshot)
+//!   "commit_epochs"   → commit hex id         → epoch id (string or null)
+//!   "commit_sessions" → commit hex id         → session id (string or null)
+//!
+//! Migration: adding the four new stores is an onupgradeneeded version
+//! bump on the JS side (from v1 → v2). Existing objects/commits/refs
+//! records are untouched.
 //!
 //! Note: IndexedDB is async but our storage traits are sync.
 //! We use a write-through in-memory cache backed by IndexedDB:
@@ -47,6 +52,10 @@ pub struct IndexedDbStorage {
     pending_commits: RwLock<Vec<(String, String)>>, // (hex_id, json)
     pending_refs: RwLock<Vec<(String, String)>>,    // (name, hex_id)
     deleted_refs: RwLock<Vec<String>>,              // names to delete
+    pending_epochs: RwLock<Vec<(String, String)>>,  // (epoch_id, epoch_json snapshot)
+    pending_sessions: RwLock<Vec<(String, String)>>, // (session_id, session_json snapshot)
+    pending_commit_epochs: RwLock<Vec<(String, String)>>, // (commit_hex_id, epoch_id)
+    pending_commit_sessions: RwLock<Vec<(String, String)>>, // (commit_hex_id, session_id)
 }
 
 impl IndexedDbStorage {
@@ -60,6 +69,10 @@ impl IndexedDbStorage {
             pending_commits: RwLock::new(Vec::new()),
             pending_refs: RwLock::new(Vec::new()),
             deleted_refs: RwLock::new(Vec::new()),
+            pending_epochs: RwLock::new(Vec::new()),
+            pending_sessions: RwLock::new(Vec::new()),
+            pending_commit_epochs: RwLock::new(Vec::new()),
+            pending_commit_sessions: RwLock::new(Vec::new()),
         }
     }
 
@@ -125,9 +138,111 @@ impl IndexedDbStorage {
         std::mem::take(&mut *deleted)
     }
 
+    /// Load epochs from a JSON dump (called from JS after reading IndexedDB).
+    pub fn load_epochs(&self, json_pairs: &[(String, String)]) -> Result<(), StorageError> {
+        for (_id, json) in json_pairs {
+            let epoch: Epoch = serde_json::from_str(json)
+                .map_err(|e| StorageError::Serialization(format!("epoch load: {}", e)))?;
+            self.memory.create_epoch(&epoch)?;
+        }
+        Ok(())
+    }
+
+    /// Load sessions from a JSON dump.
+    pub fn load_sessions(&self, json_pairs: &[(String, String)]) -> Result<(), StorageError> {
+        for (_id, json) in json_pairs {
+            let session: Session = serde_json::from_str(json)
+                .map_err(|e| StorageError::Serialization(format!("session load: {}", e)))?;
+            self.memory.create_session(&session)?;
+        }
+        Ok(())
+    }
+
+    /// Apply commit→epoch associations loaded from IndexedDB.
+    pub fn load_commit_epochs(&self, pairs: &[(String, String)]) -> Result<(), StorageError> {
+        for (commit_hex, epoch_id) in pairs {
+            let bytes = hex_to_bytes(commit_hex)
+                .ok_or_else(|| StorageError::Serialization("invalid commit hex".to_string()))?;
+            if bytes.len() != 32 {
+                return Err(StorageError::Serialization("id must be 32 bytes".into()));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            let id = ObjectId::from_bytes(arr);
+            self.memory.set_commit_epoch(&id, epoch_id)?;
+        }
+        Ok(())
+    }
+
+    /// Apply commit→session associations loaded from IndexedDB.
+    pub fn load_commit_sessions(&self, pairs: &[(String, String)]) -> Result<(), StorageError> {
+        for (commit_hex, session_id) in pairs {
+            let bytes = hex_to_bytes(commit_hex)
+                .ok_or_else(|| StorageError::Serialization("invalid commit hex".to_string()))?;
+            if bytes.len() != 32 {
+                return Err(StorageError::Serialization("id must be 32 bytes".into()));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            let id = ObjectId::from_bytes(arr);
+            self.memory.set_commit_session(&id, session_id)?;
+        }
+        Ok(())
+    }
+
+    /// Drain pending epoch snapshots (for flushing to IndexedDB from JS).
+    pub fn drain_pending_epochs(&self) -> Vec<(String, String)> {
+        let mut pending = self.pending_epochs.write().unwrap();
+        std::mem::take(&mut *pending)
+    }
+
+    /// Drain pending session snapshots.
+    pub fn drain_pending_sessions(&self) -> Vec<(String, String)> {
+        let mut pending = self.pending_sessions.write().unwrap();
+        std::mem::take(&mut *pending)
+    }
+
+    /// Drain pending commit→epoch associations.
+    pub fn drain_pending_commit_epochs(&self) -> Vec<(String, String)> {
+        let mut pending = self.pending_commit_epochs.write().unwrap();
+        std::mem::take(&mut *pending)
+    }
+
+    /// Drain pending commit→session associations.
+    pub fn drain_pending_commit_sessions(&self) -> Vec<(String, String)> {
+        let mut pending = self.pending_commit_sessions.write().unwrap();
+        std::mem::take(&mut *pending)
+    }
+
     /// Get the database name.
     pub fn db_name(&self) -> &str {
         &self.db_name
+    }
+
+    /// Internal: queue the current snapshot of an epoch for flush.
+    fn queue_epoch_snapshot(&self, id: &str) -> Result<(), StorageError> {
+        if let Some(epoch) = self.memory.get_epoch(id)? {
+            let json = serde_json::to_string(&epoch)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.pending_epochs
+                .write()
+                .unwrap()
+                .push((id.to_string(), json));
+        }
+        Ok(())
+    }
+
+    /// Internal: queue the current snapshot of a session for flush.
+    fn queue_session_snapshot(&self, id: &str) -> Result<(), StorageError> {
+        if let Some(session) = self.memory.get_session(id)? {
+            let json = serde_json::to_string(&session)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.pending_sessions
+                .write()
+                .unwrap()
+                .push((id.to_string(), json));
+        }
+        Ok(())
     }
 }
 
@@ -228,61 +343,95 @@ fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Epoch + Session stubs — see module-level doc comment.
+// EpochStore — write-through to the memory cache; queue JSON snapshots
+// for the JS-side IndexedDB flush.
 // ---------------------------------------------------------------------------
 
-fn not_yet_implemented() -> StorageError {
-    StorageError::Backend("not yet implemented".into())
-}
-
 impl EpochStore for IndexedDbStorage {
-    fn create_epoch(&self, _epoch: &Epoch) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+    fn create_epoch(&self, epoch: &Epoch) -> Result<(), StorageError> {
+        self.memory.create_epoch(epoch)?;
+        self.queue_epoch_snapshot(&epoch.id)?;
+        Ok(())
     }
+
     fn seal_epoch(
         &self,
-        _id: &str,
-        _summary: &str,
-        _sealed_at: DateTime<Utc>,
-        _sealed_commits: &[ObjectId],
+        id: &str,
+        summary: &str,
+        sealed_at: DateTime<Utc>,
+        sealed_commits: &[ObjectId],
     ) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+        self.memory
+            .seal_epoch(id, summary, sealed_at, sealed_commits)?;
+        self.queue_epoch_snapshot(id)?;
+        Ok(())
     }
+
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
-        Err(not_yet_implemented())
+        self.memory.list_epochs()
     }
-    fn get_epoch(&self, _id: &str) -> Result<Option<Epoch>, StorageError> {
-        Err(not_yet_implemented())
+
+    fn get_epoch(&self, id: &str) -> Result<Option<Epoch>, StorageError> {
+        self.memory.get_epoch(id)
     }
-    fn set_commit_epoch(&self, _commit_id: &ObjectId, _epoch_id: &str) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+
+    fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
+        self.memory.set_commit_epoch(commit_id, epoch_id)?;
+        let hex = format!("{}", commit_id);
+        self.pending_commit_epochs
+            .write()
+            .unwrap()
+            .push((hex, epoch_id.to_string()));
+        // commit_count changed on the epoch — re-snapshot for flush.
+        self.queue_epoch_snapshot(epoch_id)?;
+        Ok(())
     }
 }
 
+// ---------------------------------------------------------------------------
+// SessionStore — same pattern.
+// ---------------------------------------------------------------------------
+
 impl SessionStore for IndexedDbStorage {
-    fn create_session(&self, _session: &Session) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+    fn create_session(&self, session: &Session) -> Result<(), StorageError> {
+        self.memory.create_session(session)?;
+        self.queue_session_snapshot(&session.id)?;
+        Ok(())
     }
+
     fn end_session(
         &self,
-        _id: &str,
-        _status: SessionStatus,
-        _ended_at: DateTime<Utc>,
+        id: &str,
+        status: SessionStatus,
+        ended_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+        self.memory.end_session(id, status, ended_at)?;
+        self.queue_session_snapshot(id)?;
+        Ok(())
     }
-    fn list_sessions(&self, _agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
-        Err(not_yet_implemented())
+
+    fn list_sessions(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
+        self.memory.list_sessions(agent_filter)
     }
-    fn get_session(&self, _id: &str) -> Result<Option<Session>, StorageError> {
-        Err(not_yet_implemented())
+
+    fn get_session(&self, id: &str) -> Result<Option<Session>, StorageError> {
+        self.memory.get_session(id)
     }
+
     fn set_commit_session(
         &self,
-        _commit_id: &ObjectId,
-        _session_id: &str,
+        commit_id: &ObjectId,
+        session_id: &str,
     ) -> Result<(), StorageError> {
-        Err(not_yet_implemented())
+        self.memory.set_commit_session(commit_id, session_id)?;
+        let hex = format!("{}", commit_id);
+        self.pending_commit_sessions
+            .write()
+            .unwrap()
+            .push((hex, session_id.to_string()));
+        // commit_count changed on the session — re-snapshot for flush.
+        self.queue_session_snapshot(session_id)?;
+        Ok(())
     }
 }
 
@@ -378,5 +527,143 @@ mod tests {
         store.delete_ref("temp").unwrap();
         let deleted = store.drain_deleted_refs();
         assert_eq!(deleted, vec!["temp"]);
+    }
+
+    #[test]
+    fn test_epoch_create_and_queue() {
+        let store = IndexedDbStorage::new("test-db");
+        let epoch = Epoch::new("e1", "first", vec![]);
+        store.create_epoch(&epoch).unwrap();
+
+        let pending = store.drain_pending_epochs();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "e1");
+        // Snapshot round-trips cleanly
+        let parsed: Epoch = serde_json::from_str(&pending[0].1).unwrap();
+        assert_eq!(parsed.id, "e1");
+
+        // Memory reads work immediately
+        assert!(store.get_epoch("e1").unwrap().is_some());
+        assert_eq!(store.list_epochs().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_epoch_seal_re_snapshots() {
+        let store = IndexedDbStorage::new("test-db");
+        store.create_epoch(&Epoch::new("e1", "x", vec![])).unwrap();
+        store.drain_pending_epochs(); // clear the create snapshot
+
+        store.seal_epoch("e1", "done", Utc::now(), &[]).unwrap();
+
+        let pending = store.drain_pending_epochs();
+        assert_eq!(pending.len(), 1, "seal must re-snapshot");
+        let sealed: Epoch = serde_json::from_str(&pending[0].1).unwrap();
+        assert_eq!(sealed.status, EpochStatus::Sealed);
+        assert!(sealed.sealed_at.is_some());
+    }
+
+    #[test]
+    fn test_set_commit_epoch_queues_association() {
+        let store = IndexedDbStorage::new("test-db");
+        store.create_epoch(&Epoch::new("e1", "x", vec![])).unwrap();
+        store.drain_pending_epochs();
+
+        let cid = ObjectId::hash(b"c1");
+        store.set_commit_epoch(&cid, "e1").unwrap();
+
+        let assocs = store.drain_pending_commit_epochs();
+        assert_eq!(assocs.len(), 1);
+        assert_eq!(assocs[0].1, "e1");
+
+        // Epoch is re-snapshotted because commit_count changed
+        let epoch_pending = store.drain_pending_epochs();
+        assert_eq!(epoch_pending.len(), 1);
+    }
+
+    #[test]
+    fn test_session_create_end_and_queue() {
+        let store = IndexedDbStorage::new("test-db");
+        let session = Session {
+            id: "s1".to_string(),
+            agent_id: "agent/x".to_string(),
+            working_branch: "main".to_string(),
+            head: ObjectId::hash(b"head"),
+            parent_session: None,
+            delegated_intent: None,
+            report_to: None,
+            path_scope: None,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            ended_at: None,
+        };
+        store.create_session(&session).unwrap();
+
+        assert_eq!(store.drain_pending_sessions().len(), 1);
+
+        store
+            .end_session("s1", SessionStatus::Completed, Utc::now())
+            .unwrap();
+
+        let after_end = store.drain_pending_sessions();
+        assert_eq!(after_end.len(), 1);
+        let snap: Session = serde_json::from_str(&after_end[0].1).unwrap();
+        assert_eq!(snap.status, SessionStatus::Completed);
+    }
+
+    #[test]
+    fn test_set_commit_session_queues_association() {
+        let store = IndexedDbStorage::new("test-db");
+        let session = Session {
+            id: "s1".to_string(),
+            agent_id: "agent/x".to_string(),
+            working_branch: "main".to_string(),
+            head: ObjectId::hash(b"head"),
+            parent_session: None,
+            delegated_intent: None,
+            report_to: None,
+            path_scope: None,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            ended_at: None,
+        };
+        store.create_session(&session).unwrap();
+        store.drain_pending_sessions();
+
+        let cid = ObjectId::hash(b"c1");
+        store.set_commit_session(&cid, "s1").unwrap();
+
+        let assocs = store.drain_pending_commit_sessions();
+        assert_eq!(assocs.len(), 1);
+        assert_eq!(assocs[0].1, "s1");
+    }
+
+    #[test]
+    fn test_load_epoch_round_trip() {
+        let store = IndexedDbStorage::new("test-db");
+        let epoch = Epoch::new("e1", "loaded", vec![]);
+        let json = serde_json::to_string(&epoch).unwrap();
+
+        store.load_epochs(&[("e1".to_string(), json)]).unwrap();
+
+        let got = store.get_epoch("e1").unwrap().unwrap();
+        assert_eq!(got.id, "e1");
+        assert_eq!(got.description, "loaded");
+    }
+
+    #[test]
+    fn test_load_commit_epoch_association() {
+        let store = IndexedDbStorage::new("test-db");
+        store.create_epoch(&Epoch::new("e1", "x", vec![])).unwrap();
+
+        let cid = ObjectId::hash(b"c-load");
+        let hex = format!("{}", cid);
+        store
+            .load_commit_epochs(&[(hex, "e1".to_string())])
+            .unwrap();
+
+        // Association must be applied through memory — not observable as
+        // a pending snapshot because it was a load, not a new write.
+        let assocs = store.drain_pending_commit_epochs();
+        assert!(assocs.is_empty());
     }
 }
