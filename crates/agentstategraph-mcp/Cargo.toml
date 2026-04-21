@@ -20,6 +20,9 @@ agentstategraph-core = { path = "../agentstategraph-core" }
 agentstategraph-migrate = { path = "../agentstategraph-migrate" }
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
 agentstategraph-policy = { path = "../agentstategraph-policy" }
+agentstategraph-policy-sign = { path = "../agentstategraph-policy-sign" }
+ed25519-dalek = "2"
+hex = "0.4"
 semver = "1"
 agentstategraph-storage = { path = "../agentstategraph-storage", features = ["postgres"] }
 rmcp = { version = "1", features = ["server", "transport-io", "macros"] }

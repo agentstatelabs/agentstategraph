@@ -15,7 +15,7 @@ use crate::error::PolicyError;
 use crate::evaluator;
 use crate::paths;
 use crate::selector::Situation;
-use crate::types::{ChangeProposal, Decision, Policy};
+use crate::types::{ChangeProposal, Decision, Policy, PolicySignature};
 use crate::verifier::SignatureVerifier;
 
 /// Handle bound to a `Repository` + path prefix. Mirrors the
@@ -210,6 +210,39 @@ impl PolicyStore {
             ),
         )?;
         Ok(new_policy.handle())
+    }
+
+    /// Attach (or replace) a signature on the active policy at `path`.
+    ///
+    /// Called by the MCP `policy_sign` tool (§2c of the 0.7.5 plan) after
+    /// the registered `PolicySigner` has produced the signature bytes
+    /// over the canonical form. The existing active policy is loaded,
+    /// `policy.signature` is overwritten, and the result is written back
+    /// under `IntentCategory::Custom("policy-sign")` so the commit log
+    /// stays filterable.
+    ///
+    /// This is the only writer that may mutate `Policy::signature`
+    /// post-ratification without bumping version — signatures are
+    /// detached metadata over the canonical body and the canonical body
+    /// excludes `signature` itself.
+    pub fn set_signature(
+        &self,
+        ref_name: &str,
+        path: &str,
+        signature: PolicySignature,
+    ) -> Result<(), PolicyError> {
+        let normalized = paths::normalize(path)?;
+        let mut policy = self.load_active(ref_name, &normalized)?;
+        policy.signature = Some(signature);
+        let active_path = paths::active(&self.prefix, &normalized);
+        let value = serde_json::to_value(&policy)?;
+        self.repo.set_json(
+            ref_name,
+            &active_path,
+            &value,
+            self.commit_opts("policy-sign", format!("Sign policy {}", policy.handle())),
+        )?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------

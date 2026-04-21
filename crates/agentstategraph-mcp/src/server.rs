@@ -11,7 +11,10 @@ use serde::Deserialize;
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{DiffOp, IntentCategory, Object, QueryFilters};
-use agentstategraph_policy::{ChangeProposal, Decision, Policy, PolicyStore, Situation};
+use agentstategraph_policy::{
+    ChangeProposal, Decision, Policy, PolicySignature, PolicyStore, SignatureVerifier, Situation,
+};
+use agentstategraph_policy_sign::{PolicySigner, canonicalize};
 use agentstategraph_tasks::{Priority, Proof, TaskId, TaskStore};
 
 /// Threshold above which a change is tagged `large` in token inference.
@@ -27,6 +30,19 @@ pub struct AgentStateGraphServer {
     /// flips NoPolicyMatch to Deny at the MCP layer; "allow" passes through.
     /// Configured via `AgentStateGraphServer::with_fail_safe`.
     policy_fail_safe: String,
+    /// Optional policy signer — when set, the `policy_sign` tool uses it
+    /// to produce signatures for policies at rest. Defaults to `None`:
+    /// `policy_sign` returns `{"error": "no signer registered"}`.
+    signer: Option<Arc<dyn PolicySigner>>,
+    /// Optional signature verifier wired through to the internal
+    /// `PolicyStore`. When set, `policy_verify` dispatches to it and
+    /// the store gates on `require_signed_policies`.
+    verifier: Option<Arc<dyn SignatureVerifier>>,
+    /// When true (and a verifier is registered), unsigned policies are
+    /// filtered from `active()` in the store — `evaluate` /
+    /// `evaluate_change` therefore treat them as not-currently-active.
+    /// §2c of the 0.7.5 plan.
+    require_signed_policies: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -398,6 +414,24 @@ pub struct PolicyEvaluateChangeParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct PolicySignParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    /// Optional hint passed through to the signer. `Ed25519Signer` uses
+    /// its configured `key_id` and ignores this; multi-key signers may
+    /// use it to pick which key to sign with.
+    pub signer_key_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PolicyVerifyParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct PolicyCheckTokensParams {
     #[serde(default = "default_ref")]
     pub r#ref: String,
@@ -521,8 +555,48 @@ impl AgentStateGraphServer {
             tasks,
             policies,
             policy_fail_safe: "deny".to_string(),
+            signer: None,
+            verifier: None,
+            require_signed_policies: false,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Install a `PolicySigner` used by the `policy_sign` tool. Without
+    /// this, the tool returns `{"error": "no signer registered"}`.
+    pub fn with_signer(mut self, signer: Arc<dyn PolicySigner>) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    /// Install a `SignatureVerifier` used by the `policy_verify` tool
+    /// and wired through to the internal `PolicyStore` so `evaluate` /
+    /// `evaluate_change` can gate on signature validity. The store is
+    /// rebuilt with the verifier and the current `require_signed_policies`
+    /// setting.
+    pub fn with_policy_verifier(mut self, verifier: Arc<dyn SignatureVerifier>) -> Self {
+        self.verifier = Some(verifier.clone());
+        self.policies = Arc::new(
+            PolicyStore::new(self.repo.clone(), "/policies", "mcp-agent")
+                .with_verifier(verifier)
+                .with_require_signed(self.require_signed_policies),
+        );
+        self
+    }
+
+    /// Toggle `require_signed_policies` on the internal `PolicyStore`.
+    /// Only meaningful when a verifier is also registered; with no
+    /// verifier the store is in pass-through mode.
+    pub fn with_require_signed_policies(mut self, require: bool) -> Self {
+        self.require_signed_policies = require;
+        if let Some(verifier) = self.verifier.clone() {
+            self.policies = Arc::new(
+                PolicyStore::new(self.repo.clone(), "/policies", "mcp-agent")
+                    .with_verifier(verifier)
+                    .with_require_signed(require),
+            );
+        }
+        self
     }
 
     /// Override the fail-safe translation applied to `Decision::NoPolicyMatch`
@@ -1585,6 +1659,77 @@ impl AgentStateGraphServer {
                 serde_json::to_string_pretty(&matches).unwrap_or_default()
             }
             Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Sign the active policy at `path` using the server's registered PolicySigner. Canonicalizes the policy (excluding the `signature` field), signs the canonical bytes, and writes the policy back with the signature attached. Returns {\"ok\": true, \"signature\": {...}} on success or {\"error\": \"...\"} when no signer is registered or the policy doesn't exist."
+    )]
+    async fn agentstategraph_policy_sign(&self, params: Parameters<PolicySignParams>) -> String {
+        let p = params.0;
+        let Some(signer) = self.signer.as_ref() else {
+            return serde_json::json!({ "error": "no signer registered" }).to_string();
+        };
+        let policy = match self.policies.get(&p.r#ref, &p.path, None) {
+            Ok(pol) => pol,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        let canonical = match canonicalize(&policy) {
+            Ok(c) => c,
+            Err(e) => {
+                return serde_json::json!({ "error": format!("canonicalize: {}", e) }).to_string();
+            }
+        };
+        let (key_id, sig_bytes) = match signer.sign(&canonical) {
+            Ok(pair) => pair,
+            Err(e) => return serde_json::json!({ "error": format!("sign: {}", e) }).to_string(),
+        };
+        // `signer_key_id` param is advisory — `Ed25519Signer` returns its
+        // configured key_id. We surface the one the signer actually used.
+        let _requested = p.signer_key_id;
+        let signature = PolicySignature::Ed25519 {
+            signer_key_id: key_id,
+            signature_hex: hex::encode(&sig_bytes),
+        };
+        if let Err(e) = self
+            .policies
+            .set_signature(&p.r#ref, &p.path, signature.clone())
+        {
+            return serde_json::json!({ "error": e.to_string() }).to_string();
+        }
+        serde_json::json!({
+            "ok": true,
+            "signature": signature,
+        })
+        .to_string()
+    }
+
+    #[tool(
+        description = "Verify the signature on the active policy at `path` using the server's registered SignatureVerifier. Returns {\"valid\": true} on success, {\"valid\": false, \"reason\": \"...\"} on rejection, or {\"valid\": null, \"reason\": \"no verifier registered\"} when no verifier is wired."
+    )]
+    async fn agentstategraph_policy_verify(
+        &self,
+        params: Parameters<PolicyVerifyParams>,
+    ) -> String {
+        let p = params.0;
+        let Some(verifier) = self.verifier.as_ref() else {
+            return serde_json::json!({
+                "valid": serde_json::Value::Null,
+                "reason": "no verifier registered",
+            })
+            .to_string();
+        };
+        let policy = match self.policies.get(&p.r#ref, &p.path, None) {
+            Ok(pol) => pol,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        match verifier.verify_policy(&policy) {
+            Ok(()) => serde_json::json!({ "valid": true }).to_string(),
+            Err(e) => serde_json::json!({
+                "valid": false,
+                "reason": e.to_string(),
+            })
+            .to_string(),
         }
     }
 }

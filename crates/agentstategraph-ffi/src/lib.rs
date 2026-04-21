@@ -1318,6 +1318,52 @@ pub extern "C" fn agentstategraph_policy_check_tokens(
     json_ok(&matched)
 }
 
+/// Sign the active policy at `path`. §2c of the 0.7.5-beta.1 plan.
+///
+/// Configuring a `PolicySigner` through the C ABI is deferred to a
+/// later milestone (§4c surfaces runner/signer configuration); until
+/// then this extern unconditionally returns
+/// `{"error": "no signer registered"}`. The symbol is exported so
+/// bindings can wire it up in §5 without another header bump.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_sign(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    path: *const c_char,
+    signer_key_id: *const c_char,
+) -> *mut c_char {
+    let Some(_store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let _ref_name = unsafe { c_to_str(ref_name) };
+    let _path = unsafe { c_to_str(path) };
+    let _signer_key_id = opt_c_to_str(signer_key_id);
+    // TODO(§4c): expose signer registration on SgPolicyStore.
+    to_c_string("{\"error\":\"no signer registered\"}")
+}
+
+/// Verify the signature on the active policy at `path`. §2c of the
+/// 0.7.5-beta.1 plan.
+///
+/// Configuring a `SignatureVerifier` through the C ABI is deferred —
+/// see `agentstategraph_policy_sign` above. Returns
+/// `{"valid": null, "reason": "no verifier registered"}` until
+/// configuration support lands.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_verify(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    path: *const c_char,
+) -> *mut c_char {
+    let Some(_store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let _ref_name = unsafe { c_to_str(ref_name) };
+    let _path = unsafe { c_to_str(path) };
+    // TODO(§4c): expose verifier registration on SgPolicyStore.
+    to_c_string("{\"valid\":null,\"reason\":\"no verifier registered\"}")
+}
+
 fn parse_situation(s: &str) -> Result<Situation, serde_json::Error> {
     if s.is_empty() {
         return Ok(Situation::default());

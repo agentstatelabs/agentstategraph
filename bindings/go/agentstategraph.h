@@ -93,6 +93,9 @@ extern char* agentstategraph_policy_evaluate(SgPolicyStore store, const char* re
 extern char* agentstategraph_policy_evaluate_change(SgPolicyStore store, const char* ref_name,
     const char* proposal_json);
 extern char* agentstategraph_policy_check_tokens(SgPolicyStore store, const char* ref_name, const char* tokens_json);
+extern char* agentstategraph_policy_sign(SgPolicyStore store, const char* ref_name, const char* path,
+    const char* signer_key_id);
+extern char* agentstategraph_policy_verify(SgPolicyStore store, const char* ref_name, const char* path);
 
 /* Migrate */
 extern char* agentstategraph_migrate_check(SgRepo repo, const char* ref_name, const char* target);
