@@ -1,0 +1,108 @@
+{
+  "description": "POLICY_V1.md §22.7 OpenSearch scenario — parity across bindings. Every runner (Rust reference / Python / TypeScript / Go / WASM / C FFI) loads this file, seeds the same policies, and must produce the same Decision.kind plus matched_policy handle for each proposal. Timestamps are pinned so 'not-yet-active' semantics are deterministic across time zones and test clocks.",
+  "prefix": "/policies",
+  "agent_id": "parity-runner",
+  "ref": "main",
+  "policies": [
+    {
+      "path": "change-control/high-cost-change",
+      "version": 1,
+      "situation": "Any change requiring downtime, migration, or destructive operations",
+      "situation_selector": { "kind": "eq", "key": "kind", "value": "change" },
+      "allow": [],
+      "deny": [],
+      "require_approval": [
+        {
+          "action": "*",
+          "approvers": ["platform-lead"],
+          "timeout": null,
+          "fallback": { "kind": "lowest_risk_alternative" }
+        }
+      ],
+      "triggers": ["reindex", "migration", "schema-change", "destructive", "shard-consolidation", "downtime"],
+      "required_fields": ["estimated_downtime", "rollback_plan", "approval_authority"],
+      "severity": "high",
+      "proposed_by": "parity-runner",
+      "proposed_at": "2020-01-01T00:00:00Z",
+      "active_from": "2020-01-01T00:00:00Z"
+    },
+    {
+      "path": "change-control/future-scheduled",
+      "version": 1,
+      "situation": "Placeholder for a future-dated rollout (§1 active_from enforcement).",
+      "situation_selector": { "kind": "eq", "key": "kind", "value": "change" },
+      "allow": [],
+      "deny": [{ "action": "tune_opensearch", "condition": "always" }],
+      "require_approval": [],
+      "triggers": [],
+      "required_fields": [],
+      "severity": "low",
+      "proposed_by": "parity-runner",
+      "proposed_at": "2020-01-01T00:00:00Z",
+      "active_from": "2099-01-01T00:00:00Z"
+    }
+  ],
+  "ratify": [
+    {
+      "path": "change-control/high-cost-change",
+      "ratifier": "platform-lead",
+      "reasoning": "Reviewed; matches change-control board policy. Approved for prod."
+    },
+    {
+      "path": "change-control/future-scheduled",
+      "ratifier": "platform-lead",
+      "reasoning": "Ratified but gated by active_from=2099 — must NOT be consulted."
+    }
+  ],
+  "change_proposals": [
+    {
+      "label": "Option A (no-op)",
+      "proposal": {
+        "action": "tune_opensearch",
+        "agent_id": "agent/perf-tuner",
+        "intent": "Leave heap + shard count alone. Score 3/10.",
+        "preferred_option": "spec/A",
+        "alternatives": ["spec/B", "spec/C"],
+        "tokens": [],
+        "attached_fields": {}
+      },
+      "expected_decision_kind": "no_policy_match"
+    },
+    {
+      "label": "Option B (heap only, no reindex)",
+      "proposal": {
+        "action": "tune_opensearch",
+        "agent_id": "agent/perf-tuner",
+        "intent": "Bump heap to 1GB. No reindex. Score 7/10.",
+        "preferred_option": "spec/B",
+        "alternatives": ["spec/A", "spec/C"],
+        "tokens": [],
+        "attached_fields": {}
+      },
+      "expected_decision_kind": "no_policy_match"
+    },
+    {
+      "label": "Option C (reindex — triggers high-cost-change policy)",
+      "proposal": {
+        "action": "tune_opensearch",
+        "agent_id": "agent/perf-tuner",
+        "intent": "Bump heap to 1GB + consolidate to single shard with reindex. Score 9/10.",
+        "preferred_option": "spec/C",
+        "alternatives": ["spec/A", "spec/B"],
+        "tokens": ["reindex", "destructive"],
+        "attached_fields": {}
+      },
+      "expected_decision_kind": "require_approval",
+      "expected_matched_policy_prefix": "change-control/high-cost-change@"
+    }
+  ],
+  "evaluate": [
+    {
+      "label": "situation not matched by any ratified+active policy",
+      "situation": { "topic": "unrelated" },
+      "action": "do_something_unrelated",
+      "agent_id": "agent/x",
+      "expected_decision_kind": "no_policy_match"
+    }
+  ]
+}
