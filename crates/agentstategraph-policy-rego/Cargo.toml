@@ -1,0 +1,13 @@
+[package]
+name = "agentstategraph-policy-rego"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "OPA/Rego runner implementing ExternalEvaluator for AgentStateGraph policies"
+
+[dependencies]
+agentstategraph-policy = { path = "../agentstategraph-policy" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tempfile = "3"

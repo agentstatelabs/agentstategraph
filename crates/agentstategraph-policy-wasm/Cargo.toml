@@ -1,0 +1,16 @@
+[package]
+name = "agentstategraph-policy-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "WASM host runner implementing ExternalEvaluator for AgentStateGraph policies"
+
+[dependencies]
+agentstategraph-policy = { path = "../agentstategraph-policy" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+wasmtime = "26"
+
+[dev-dependencies]
+wat = "1"
