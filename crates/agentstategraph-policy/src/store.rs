@@ -16,6 +16,7 @@ use crate::evaluator;
 use crate::paths;
 use crate::selector::Situation;
 use crate::types::{ChangeProposal, Decision, Policy};
+use crate::verifier::SignatureVerifier;
 
 /// Handle bound to a `Repository` + path prefix. Mirrors the
 /// `agentstategraph-tasks` `TaskStore` pattern.
@@ -23,6 +24,15 @@ pub struct PolicyStore {
     repo: Arc<Repository>,
     prefix: String,
     agent_id: String,
+    /// Optional signature verifier. When `None` the store is in
+    /// pass-through mode and never inspects `Policy::signature`
+    /// (back-compat with pre-0.7.5 callers).
+    verifier: Option<Arc<dyn SignatureVerifier>>,
+    /// If `true` and a verifier is registered, policies without a
+    /// `signature` field are filtered out of `active()` the same way
+    /// an unratified proposal is. Defaults to `false` so unsigned
+    /// policies remain live.
+    require_signed: bool,
 }
 
 impl PolicyStore {
@@ -39,7 +49,28 @@ impl PolicyStore {
             repo,
             prefix,
             agent_id: agent_id.into(),
+            verifier: None,
+            require_signed: false,
         }
+    }
+
+    /// Install a signature verifier. Policies whose signature fails
+    /// verification are treated as not-currently-active by
+    /// [`Self::active`] and therefore ignored by `evaluate` /
+    /// `evaluate_change`. Pass-through if never called.
+    pub fn with_verifier(mut self, verifier: Arc<dyn SignatureVerifier>) -> Self {
+        self.verifier = Some(verifier);
+        self
+    }
+
+    /// When `true` (and a verifier is registered) unsigned policies
+    /// are filtered out of [`Self::active`]. Defaults to `false`.
+    ///
+    /// No-op when no verifier is registered — unsigned policies stay
+    /// live in pass-through mode.
+    pub fn with_require_signed(mut self, require_signed: bool) -> Self {
+        self.require_signed = require_signed;
+        self
     }
 
     pub fn prefix(&self) -> &str {
@@ -272,12 +303,17 @@ impl PolicyStore {
         Ok(out)
     }
 
-    /// List currently-active policies: ratified AND `active_from <= now`.
+    /// List currently-active policies: ratified AND `active_from <= now`
+    /// AND not expired.
     ///
-    /// A ratified policy with a future `active_from` is skipped here
-    /// the same way an unratified proposal is — it's scheduled but
-    /// not yet live. `expires_at` is advisory in 0.7.0; expiry
-    /// filtering lands in 0.7.5.
+    /// A ratified policy with a future `active_from` is skipped the
+    /// same way an unratified proposal is — it's scheduled but not
+    /// yet live. When a signature verifier has been installed via
+    /// [`Self::with_verifier`], policies whose signature fails
+    /// verification — or whose signature is missing while
+    /// `require_signed` is `true` — are also filtered out with the
+    /// same not-currently-active semantics. No verifier → pass
+    /// through (back-compat).
     pub fn active(
         &self,
         ref_name: &str,
@@ -288,7 +324,23 @@ impl PolicyStore {
             .list(ref_name, prefix_filter)?
             .into_iter()
             .filter(|p| p.is_currently_active(now))
+            .filter(|p| self.signature_passes(p))
             .collect())
+    }
+
+    /// Decision tree for the verifier hook. See [`Self::active`] for
+    /// semantics. Split out so `evaluate` / `evaluate_change` inherit
+    /// the exact same filter via their call to `active()` /
+    /// `policies_for_situation`.
+    fn signature_passes(&self, policy: &Policy) -> bool {
+        let Some(verifier) = self.verifier.as_ref() else {
+            // No verifier registered → pass-through.
+            return true;
+        };
+        match policy.signature.as_ref() {
+            None => !self.require_signed,
+            Some(_) => verifier.verify_policy(policy).is_ok(),
+        }
     }
 
     /// Walk the supersedes chain. Returned oldest-first (version 1 →

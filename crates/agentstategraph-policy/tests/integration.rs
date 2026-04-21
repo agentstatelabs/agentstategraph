@@ -45,6 +45,7 @@ fn skeleton(path: &str, selector: Selector) -> Policy {
         active_from: Utc::now(),
         expires_at: None,
         supersedes: None,
+        signature: None,
     }
 }
 
@@ -878,4 +879,231 @@ fn test_is_currently_active_honors_expires_at_boundary() {
 
     p.expires_at = Some(now + chrono::Duration::seconds(1));
     assert!(p.is_currently_active(now));
+}
+
+// -----------------------------------------------------------------------
+// §2b — Policy.signature field + verifier hook
+// -----------------------------------------------------------------------
+
+mod signature_hook {
+    use super::*;
+
+    use agentstategraph_policy::{PolicySignature, SignatureVerificationError, SignatureVerifier};
+
+    type VerifyFn = dyn Fn(&Policy) -> Result<(), SignatureVerificationError> + Send + Sync;
+
+    /// Closure-backed mock verifier. Keeps the policy crate's test suite
+    /// independent of `agentstategraph-policy-sign`.
+    struct MockVerifier {
+        f: Box<VerifyFn>,
+    }
+
+    impl MockVerifier {
+        fn new<F>(f: F) -> Arc<Self>
+        where
+            F: Fn(&Policy) -> Result<(), SignatureVerificationError> + Send + Sync + 'static,
+        {
+            Arc::new(Self { f: Box::new(f) })
+        }
+    }
+
+    impl SignatureVerifier for MockVerifier {
+        fn verify_policy(&self, policy: &Policy) -> Result<(), SignatureVerificationError> {
+            (self.f)(policy)
+        }
+    }
+
+    fn ratified(path: &str) -> Policy {
+        let mut p = skeleton(path, Selector::Always);
+        p.allow = vec![allow_action("do_thing", vec![])];
+        p.ratified_by = Some("alice".into());
+        p.ratified_at = Some(Utc::now());
+        p.active_from = Utc::now() - chrono::Duration::seconds(1);
+        p
+    }
+
+    fn fake_sig(key_id: &str) -> PolicySignature {
+        PolicySignature::Ed25519 {
+            signer_key_id: key_id.into(),
+            signature_hex: "00".repeat(64),
+        }
+    }
+
+    fn build_store_with_verifier<F>(
+        prefix: &str,
+        require_signed: bool,
+        verifier_fn: F,
+    ) -> (Arc<Repository>, PolicyStore)
+    where
+        F: Fn(&Policy) -> Result<(), SignatureVerificationError> + Send + Sync + 'static,
+    {
+        let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+        repo.init().unwrap();
+        let store = PolicyStore::new(repo.clone(), prefix, "test-agent")
+            .with_verifier(MockVerifier::new(verifier_fn))
+            .with_require_signed(require_signed);
+        (repo, store)
+    }
+
+    fn build_store_no_verifier(prefix: &str) -> (Arc<Repository>, PolicyStore) {
+        let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+        repo.init().unwrap();
+        let store = PolicyStore::new(repo.clone(), prefix, "test-agent");
+        (repo, store)
+    }
+
+    /// Write `policy` directly as an already-ratified active entry,
+    /// bypassing `propose`/`ratify` (those reset the `signature`
+    /// field's siblings like `ratified_by`). Uses the same state path
+    /// layout `PolicyStore` itself uses.
+    fn seed_active(repo: &Arc<Repository>, prefix: &str, policy: &Policy) {
+        use agentstategraph::CommitOptions;
+        use agentstategraph_core::IntentCategory;
+        let path = format!(
+            "{}/{}/_meta",
+            prefix.trim_end_matches('/'),
+            policy.path.trim_start_matches('/')
+        );
+        let value = serde_json::to_value(policy).unwrap();
+        repo.set_json(
+            REF,
+            &path,
+            &value,
+            CommitOptions::new(
+                "test-agent",
+                IntentCategory::Custom("policy-seed".into()),
+                format!("seed {}", policy.handle()),
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_policy_without_verifier_accepts_any_signature_or_none() {
+        // No verifier registered → both signed and unsigned policies
+        // pass through regardless of signature content (back-compat).
+        let (repo, store) = build_store_no_verifier("/policies");
+        let mut unsigned = ratified("infra/unsigned");
+        unsigned.signature = None;
+        let mut signed = ratified("infra/signed");
+        signed.signature = Some(fake_sig("k1"));
+        seed_active(&repo, "/policies", &unsigned);
+        seed_active(&repo, "/policies", &signed);
+
+        let actives = store.active(REF, None).unwrap();
+        assert_eq!(
+            actives.len(),
+            2,
+            "pass-through mode must keep both policies; got {:?}",
+            actives.iter().map(|p| &p.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_policy_with_verifier_rejects_missing_signature_when_required() {
+        let (repo, store) = build_store_with_verifier("/policies", true, |_: &Policy| Ok(()));
+        let mut unsigned = ratified("infra/unsigned");
+        unsigned.signature = None;
+        seed_active(&repo, "/policies", &unsigned);
+
+        let actives = store.active(REF, None).unwrap();
+        assert!(
+            actives.is_empty(),
+            "require_signed=true must skip unsigned policies; got {:?}",
+            actives
+        );
+
+        // And evaluate() inherits the filter → no policy match.
+        let dec = store
+            .evaluate(REF, &Situation::new(), "do_thing", "a1")
+            .unwrap();
+        assert!(matches!(dec, Decision::NoPolicyMatch));
+    }
+
+    #[test]
+    fn test_policy_with_verifier_allows_missing_signature_when_not_required() {
+        let (repo, store) = build_store_with_verifier("/policies", false, |_: &Policy| {
+            panic!("verifier must not be called on unsigned policy")
+        });
+        let mut unsigned = ratified("infra/unsigned");
+        unsigned.signature = None;
+        seed_active(&repo, "/policies", &unsigned);
+
+        let actives = store.active(REF, None).unwrap();
+        assert_eq!(
+            actives.len(),
+            1,
+            "require_signed=false must keep unsigned policies"
+        );
+    }
+
+    #[test]
+    fn test_policy_with_verifier_keeps_valid_signature() {
+        let (repo, store) = build_store_with_verifier("/policies", true, |p: &Policy| {
+            // Assert the verifier sees the signature field.
+            assert!(p.signature.is_some());
+            Ok(())
+        });
+        let mut signed = ratified("infra/signed");
+        signed.signature = Some(fake_sig("k1"));
+        seed_active(&repo, "/policies", &signed);
+
+        let actives = store.active(REF, None).unwrap();
+        assert_eq!(actives.len(), 1);
+        assert_eq!(actives[0].path, "infra/signed");
+
+        let dec = store
+            .evaluate(REF, &Situation::new(), "do_thing", "a1")
+            .unwrap();
+        assert!(matches!(dec, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn test_policy_with_verifier_skips_invalid_signature() {
+        let (repo, store) = build_store_with_verifier("/policies", false, |_: &Policy| {
+            Err(SignatureVerificationError::Invalid("tampered bytes".into()))
+        });
+        let mut signed = ratified("infra/tampered");
+        signed.signature = Some(fake_sig("k1"));
+        seed_active(&repo, "/policies", &signed);
+
+        let actives = store.active(REF, None).unwrap();
+        assert!(
+            actives.is_empty(),
+            "invalid-signature policies must be filtered out; got {:?}",
+            actives.iter().map(|p| &p.path).collect::<Vec<_>>()
+        );
+
+        let dec = store
+            .evaluate_change(REF, &ChangeProposal::new("do_thing", "a1", "i", "opt"))
+            .unwrap();
+        assert!(matches!(dec, Decision::NoPolicyMatch));
+    }
+
+    #[test]
+    fn test_policy_signature_field_serializes_omitted_when_none() {
+        // Baseline serde roundtrip: None signature is omitted from
+        // the emitted JSON; Some is round-tripped losslessly.
+        let mut p = ratified("infra/roundtrip");
+        p.signature = None;
+        let j = serde_json::to_value(&p).unwrap();
+        assert!(
+            j.get("signature").is_none(),
+            "None signature must be omitted; got JSON: {j}"
+        );
+
+        p.signature = Some(fake_sig("k9"));
+        let j = serde_json::to_value(&p).unwrap();
+        let sig = j.get("signature").expect("Some signature must emit key");
+        assert_eq!(
+            sig.get("algorithm").and_then(|v| v.as_str()),
+            Some("ed25519")
+        );
+        assert_eq!(
+            sig.get("signer_key_id").and_then(|v| v.as_str()),
+            Some("k9")
+        );
+        let back: Policy = serde_json::from_value(j).unwrap();
+        assert_eq!(back.signature, p.signature);
+    }
 }

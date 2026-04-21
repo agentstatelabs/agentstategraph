@@ -44,11 +44,13 @@ pub mod paths;
 pub mod selector;
 pub mod store;
 pub mod types;
+pub mod verifier;
 
 pub use error::PolicyError;
 pub use selector::{Selector, Situation};
 pub use store::PolicyStore;
 pub use types::{
     ApprovalRule, AuthorizedAction, ChangeProposal, Decision, FallbackAction, Policy,
-    ProcedureStep, Severity,
+    PolicySignature, ProcedureStep, Severity,
 };
+pub use verifier::{SignatureVerificationError, SignatureVerifier};

@@ -151,6 +151,7 @@ mod tests {
             active_from: Utc::now(),
             expires_at: None,
             supersedes: None,
+            signature: None,
         }
     }
 

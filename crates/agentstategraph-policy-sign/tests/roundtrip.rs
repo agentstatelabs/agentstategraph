@@ -31,6 +31,7 @@ fn sample_policy() -> Policy {
         active_from: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 7).unwrap(),
         expires_at: None,
         supersedes: None,
+        signature: None,
     }
 }
 

@@ -67,6 +67,32 @@ pub struct Policy {
     /// Prior `path@version` string if this policy supersedes another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+
+    /// Detached signature over the canonical-JSON bytes of this policy
+    /// (with the `signature` field itself excluded from canonicalization).
+    /// Optional on every policy — unsigned policies remain valid unless
+    /// the server sets `require_signed_policies` (§2c) and a verifier
+    /// has been registered on the `PolicyStore`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<PolicySignature>,
+}
+
+/// Detached signature carried on a [`Policy`]. Tagged serde union keyed
+/// by `algorithm`; Ed25519 is the only variant shipped in 0.7.5.
+///
+/// The concrete verifier lives in `agentstategraph-policy-sign`
+/// (`Ed25519Verifier`); the main policy crate only stores + passes
+/// through the payload so unsigned policies don't pay the crypto
+/// dep cost.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "algorithm", rename_all = "snake_case")]
+pub enum PolicySignature {
+    Ed25519 {
+        /// Identifier of the key in the verifier's registry.
+        signer_key_id: String,
+        /// 128-character lowercase hex string (64 bytes decoded).
+        signature_hex: String,
+    },
 }
 
 impl Policy {
