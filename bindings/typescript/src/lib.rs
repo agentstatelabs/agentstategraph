@@ -1218,6 +1218,9 @@ fn session_to_json(s: &Session) -> serde_json::Value {
         "delegated_intent": s.delegated_intent,
         "report_to": s.report_to,
         "path_scope": s.path_scope,
+        // 0.7.5 §3a — tenant scope on the session record. Always surfaced
+        // (as null when unset) so JS callers can rely on the key.
+        "scope_tenant": s.scope_tenant,
         "status": session_status_str(&s.status),
         "created_at": s.created_at.to_rfc3339(),
         "ended_at": s.ended_at.map(|t| t.to_rfc3339()),
@@ -1295,29 +1298,45 @@ impl PolicyStore {
     // --- Read ops ---
 
     /// List policies whose path starts with `prefix_filter` (null = all).
+    ///
+    /// `tenant_filter` (0.7.5 §3b): `None` keeps back-compat (all
+    /// policies pass); `Some(tid)` keeps only policies with
+    /// `tenant_id == Some(tid)` or `tenant_id == None`.
     #[napi]
     pub fn list(
         &self,
         ref_name: String,
         prefix_filter: Option<String>,
+        tenant_filter: Option<String>,
     ) -> napi::Result<Vec<serde_json::Value>> {
         let ps = self
             .inner
-            .list(&ref_name, prefix_filter.as_deref())
+            .list_scoped(
+                &ref_name,
+                prefix_filter.as_deref(),
+                tenant_filter.as_deref(),
+            )
             .map_err(policy_err)?;
         Ok(ps.iter().map(policy_to_json).collect())
     }
 
     /// List currently-active (ratified + `active_from <= now`) policies.
+    ///
+    /// `tenant_filter` (0.7.5 §3b) matches `list` semantics.
     #[napi]
     pub fn active(
         &self,
         ref_name: String,
         prefix_filter: Option<String>,
+        tenant_filter: Option<String>,
     ) -> napi::Result<Vec<serde_json::Value>> {
         let ps = self
             .inner
-            .active(&ref_name, prefix_filter.as_deref())
+            .active_scoped(
+                &ref_name,
+                prefix_filter.as_deref(),
+                tenant_filter.as_deref(),
+            )
             .map_err(policy_err)?;
         Ok(ps.iter().map(policy_to_json).collect())
     }
@@ -1345,6 +1364,11 @@ impl PolicyStore {
 
     /// Authorization evaluation (POLICY_V1.md §5). `situation` is a
     /// flat {string: string} map.
+    ///
+    /// `tenant_filter` (0.7.5 §3b) routes through the Rust
+    /// `evaluate_scoped` variant: `None` considers every policy,
+    /// `Some(tid)` restricts candidates to policies whose
+    /// `tenant_id == Some(tid)` or `tenant_id == None`.
     #[napi]
     pub fn evaluate(
         &self,
@@ -1352,29 +1376,98 @@ impl PolicyStore {
         situation: serde_json::Value,
         action: String,
         agent_id: String,
+        tenant_filter: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let sit = situation_from_json(situation)?;
         let d = self
             .inner
-            .evaluate(&ref_name, &sit, &action, &agent_id)
+            .evaluate_scoped(
+                &ref_name,
+                &sit,
+                &action,
+                &agent_id,
+                tenant_filter.as_deref(),
+            )
             .map_err(policy_err)?;
         Ok(decision_to_json(&d))
     }
 
     /// Change-proposal evaluation (POLICY_V1.md §22.2).
+    ///
+    /// `tenant_filter` (0.7.5 §3b) matches `evaluate` semantics.
     #[napi]
     pub fn evaluate_change(
         &self,
         ref_name: String,
         proposal: serde_json::Value,
+        tenant_filter: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let prop: ChangeProposal = serde_json::from_value(proposal)
             .map_err(|e| napi::Error::from_reason(format!("invalid proposal: {e}")))?;
         let d = self
             .inner
-            .evaluate_change(&ref_name, &prop)
+            .evaluate_change_scoped(&ref_name, &prop, tenant_filter.as_deref())
             .map_err(policy_err)?;
         Ok(decision_to_json(&d))
+    }
+
+    // ---- 0.7.5 §5b: sign / verify / setExternalEvaluator stubs ----
+    //
+    // Real JS-side signing would require a napi-visible signer registry
+    // that duplicates `agentstategraph-policy-sign` machinery for little
+    // gain at this beta. The JS `Policy` surface already exposes the
+    // `signature` field as a raw object, so callers can construct a
+    // signature elsewhere (e.g. via the MCP server or a sidecar Rust
+    // tool) and attach it via `propose`/`supersede`.
+    //
+    // These stubs return a `{error: "..."}` envelope to keep the API
+    // shape stable when the real wiring lands in a follow-up.
+
+    /// Sign the policy at `path` (stub). Returns
+    /// `{error: "not yet wired", hint: ...}`. Real signing will land
+    /// as a follow-up once a napi signer wrapper ships; in the meantime
+    /// attach a `signature` object directly via `propose`/`supersede`
+    /// — the field round-trips through serde.
+    #[napi]
+    pub fn sign(
+        &self,
+        _ref_name: String,
+        _path: String,
+        _signer_key_id: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "error": "not yet wired",
+            "hint": "use MCP tool policy_sign or attach a signature object via propose/supersede",
+        }))
+    }
+
+    /// Verify the signature on the policy at `path` (stub). Returns
+    /// the same envelope shape as [`Self::sign`]. Real verification
+    /// routes through `agentstategraph-policy-sign`.
+    #[napi]
+    pub fn verify(&self, _ref_name: String, _path: String) -> napi::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "error": "not yet wired",
+            "hint": "use MCP tool policy_verify",
+        }))
+    }
+
+    /// Attach or update the external evaluator reference on the
+    /// policy at `path` (stub). Until the runtime-side mutator lands,
+    /// callers can set `external_evaluator` on the policy object at
+    /// propose/supersede time — the field is preserved by serde
+    /// round-trip.
+    #[napi]
+    pub fn set_external_evaluator(
+        &self,
+        _ref_name: String,
+        _path: String,
+        _config: Option<serde_json::Value>,
+    ) -> napi::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "error": "not yet wired",
+            "hint": "set policy.external_evaluator before propose/supersede",
+        }))
     }
 
     /// List active policies whose `triggers` intersect `tokens`.

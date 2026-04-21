@@ -299,3 +299,171 @@ test('task extension fields round-trip (promote_change / named / none)', () => {
   assert.equal(t3.parent_change ?? null, null);
   assert.equal(t3.on_complete ?? null, null);
 });
+
+// ---------------------------------------------------------------------------
+// 0.7.5 §5b: signing + multi-tenant + external-evaluator field round-trips
+// Mirrors bindings/python/tests/test_policy.py §5a.
+// ---------------------------------------------------------------------------
+
+test('policy signature field round-trips (§2a/b tagged union)', () => {
+  const { ps } = fresh();
+  const pol = policy('infra/signed', { allow: [{ action: 'touch' }] });
+  pol.signature = {
+    algorithm: 'ed25519',
+    signer_key_id: 'ops-root-2026',
+    signature_hex: 'aa'.repeat(64),
+  };
+  ps.propose('main', pol);
+  const fetched = ps.get('main', 'infra/signed', null);
+  assert.deepEqual(fetched.signature, {
+    algorithm: 'ed25519',
+    signer_key_id: 'ops-root-2026',
+    signature_hex: 'aa'.repeat(64),
+  });
+});
+
+test('policy tenant_id field round-trips (§3a Option<String>)', () => {
+  const { ps } = fresh();
+  const pol = policy('infra/scoped', { allow: [{ action: 'touch' }] });
+  pol.tenant_id = 'tenant-acme';
+  ps.propose('main', pol);
+  const fetched = ps.get('main', 'infra/scoped', null);
+  assert.equal(fetched.tenant_id, 'tenant-acme');
+
+  // Global (tenant_id omitted) — serde skip_serializing_if=Option::is_none.
+  const pol2 = policy('infra/global', { allow: [{ action: 'touch' }] });
+  ps.propose('main', pol2);
+  const fetched2 = ps.get('main', 'infra/global', null);
+  assert.equal(fetched2.tenant_id ?? null, null);
+});
+
+test('policy external_evaluator field round-trips across all 3x3 variants (§4a)', () => {
+  const { ps } = fresh();
+  const matrix = [
+    ['rego', 'a', { kind: 'inline', body: 'package asg\nallow { true }' }],
+    ['cedar', 'b', { kind: 'file_path', path: '/etc/asg/policy.cedar' }],
+    ['wasm', 'c', { kind: 'commit_ref', path: '/evaluators/x.wasm' }],
+    ['rego', 'd', { kind: 'file_path', path: '/etc/asg/policy.rego' }],
+    ['cedar', 'e', { kind: 'inline', body: 'permit(principal, action, resource);' }],
+    ['wasm', 'f', { kind: 'inline', body: 'AGFzbQEAAAA=' }],
+    ['rego', 'g', { kind: 'commit_ref', path: '/evaluators/rbac.rego' }],
+    ['cedar', 'h', { kind: 'commit_ref', path: '/evaluators/corp.cedar' }],
+    ['wasm', 'i', { kind: 'file_path', path: '/etc/asg/runner.wasm' }],
+  ];
+  for (const [kind, suffix, source] of matrix) {
+    const pol = policy(`infra/ext-${suffix}`);
+    pol.external_evaluator = { kind, source };
+    ps.propose('main', pol);
+    const fetched = ps.get('main', `infra/ext-${suffix}`, null);
+    assert.deepEqual(fetched.external_evaluator, { kind, source });
+  }
+});
+
+test('evaluate with tenantFilter restricts scoped policies (§3b)', () => {
+  const { ps } = fresh();
+  const acme = policy('infra/acme-only', {
+    allow: [{ action: 'deploy' }],
+    situation_selector: { kind: 'always' },
+  });
+  acme.tenant_id = 'tenant-acme';
+  ps.propose('main', acme);
+  ps.ratify('main', 'infra/acme-only', 'ops', 'ok');
+
+  const other = policy('infra/other-only', {
+    allow: [{ action: 'deploy' }],
+    situation_selector: { kind: 'always' },
+  });
+  other.tenant_id = 'tenant-other';
+  ps.propose('main', other);
+  ps.ratify('main', 'infra/other-only', 'ops', 'ok');
+
+  // acme tenant sees only the acme policy.
+  const d = ps.evaluate('main', {}, 'deploy', 'agent-1', 'tenant-acme');
+  assert.equal(d.kind, 'allow');
+  assert.equal(d.matched_policy, 'infra/acme-only@1');
+
+  // Unknown tenant → both scoped policies filtered out.
+  const d2 = ps.evaluate('main', {}, 'deploy', 'agent-1', 'tenant-unknown');
+  assert.equal(d2.kind, 'no_policy_match');
+
+  // active() with tenantFilter agrees.
+  const acmeActives = ps.active('main', null, 'tenant-acme');
+  assert.deepEqual(acmeActives.map((p) => p.path), ['infra/acme-only']);
+});
+
+test('evaluate with tenantFilter: global (tenant_id=null) policy applies under every tenant', () => {
+  const { ps } = fresh();
+  const globally = policy('infra/global-allow', {
+    allow: [{ action: 'noop' }],
+    situation_selector: { kind: 'always' },
+  });
+  ps.propose('main', globally);
+  ps.ratify('main', 'infra/global-allow', 'ops', 'ok');
+
+  for (const tf of ['tenant-a', 'tenant-b', null]) {
+    const d = ps.evaluate('main', {}, 'noop', 'agent-1', tf);
+    assert.equal(d.kind, 'allow', `tenantFilter=${JSON.stringify(tf)}`);
+    assert.equal(d.matched_policy, 'infra/global-allow@1');
+  }
+});
+
+test('evaluateChange accepts tenantFilter (§3b)', () => {
+  const { ps } = fresh();
+  const pol = policy('infra/tenant-change', {
+    triggers: ['reindex'],
+    require_approval: [
+      { action: 'promote', approvers: ['human'], fallback: { kind: 'block' } },
+    ],
+  });
+  pol.tenant_id = 'tenant-a';
+  ps.propose('main', pol);
+  ps.ratify('main', 'infra/tenant-change', 'ops', 'ok');
+
+  const proposal = {
+    action: 'promote',
+    agent_id: 'agent-1',
+    intent: '',
+    preferred_option: 'x',
+    tokens: ['reindex'],
+    attached_fields: {},
+  };
+  // Matching tenant → policy consulted.
+  const d = ps.evaluateChange('main', proposal, 'tenant-a');
+  assert.equal(d.kind, 'require_approval');
+  // Different tenant → filtered out, no match.
+  const d2 = ps.evaluateChange('main', proposal, 'tenant-b');
+  assert.equal(d2.kind, 'no_policy_match');
+});
+
+test('Session.scope_tenant field surfaces in JS dict (§3a)', () => {
+  const asg = new AgentStateGraph();
+  const s = asg.createSession('agent/a', 'main');
+  assert.ok('scope_tenant' in s);
+  assert.equal(s.scope_tenant ?? null, null);
+
+  const fetched = asg.getSession(s.id);
+  assert.ok('scope_tenant' in fetched);
+  assert.equal(fetched.scope_tenant ?? null, null);
+
+  const listed = asg.listSessions(null);
+  assert.ok(listed.every((x) => 'scope_tenant' in x));
+});
+
+test('PolicyStore.sign/verify/setExternalEvaluator return stub envelopes (§5b)', () => {
+  const { ps } = fresh();
+  ps.propose('main', policy('infra/to-sign'));
+
+  const sig = ps.sign('main', 'infra/to-sign', 'key-1');
+  assert.equal(typeof sig, 'object');
+  assert.equal(sig.error, 'not yet wired');
+  assert.ok(typeof sig.hint === 'string');
+
+  const ver = ps.verify('main', 'infra/to-sign');
+  assert.equal(ver.error, 'not yet wired');
+
+  const ext = ps.setExternalEvaluator('main', 'infra/to-sign', {
+    kind: 'rego',
+    source: { kind: 'inline', body: 'package x' },
+  });
+  assert.equal(ext.error, 'not yet wired');
+});
