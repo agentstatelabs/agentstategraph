@@ -104,5 +104,99 @@
       "agent_id": "agent/x",
       "expected_decision_kind": "no_policy_match"
     }
+  ],
+  "extra_policies": [
+    {
+      "path": "tenant/acme/allow-do-thing",
+      "version": 1,
+      "situation": "tenant-scoped allow for the 0.7.5 §3 multi-tenant parity scenario",
+      "situation_selector": { "kind": "eq", "key": "topic", "value": "tenant-parity" },
+      "allow": [{ "action": "do_thing", "condition": null, "preconditions": [] }],
+      "deny": [],
+      "require_approval": [],
+      "triggers": [],
+      "required_fields": [],
+      "severity": "low",
+      "proposed_by": "parity-runner",
+      "proposed_at": "2020-01-01T00:00:00Z",
+      "active_from": "2020-01-01T00:00:00Z",
+      "tenant_id": "acme"
+    },
+    {
+      "path": "tenant/global/allow-do-thing",
+      "version": 1,
+      "situation": "global fallback allow (tenant_id omitted) for the 0.7.5 §3 parity scenario",
+      "situation_selector": { "kind": "eq", "key": "topic", "value": "tenant-parity" },
+      "allow": [{ "action": "do_thing", "condition": null, "preconditions": [] }],
+      "deny": [],
+      "require_approval": [],
+      "triggers": [],
+      "required_fields": [],
+      "severity": "low",
+      "proposed_by": "parity-runner",
+      "proposed_at": "2020-01-01T00:00:00Z",
+      "active_from": "2020-01-01T00:00:00Z"
+    },
+    {
+      "path": "external/wasm-placeholder",
+      "version": 1,
+      "situation": "External-evaluator placeholder for the 0.7.5 §4 parity scenario. When no registry is installed the policy falls through the local path, but its empty allow/deny leaves it inert — runners with a WASM evaluator registered would consult the runner instead.",
+      "situation_selector": { "kind": "eq", "key": "topic", "value": "external-parity" },
+      "allow": [],
+      "deny": [],
+      "require_approval": [],
+      "triggers": [],
+      "required_fields": [],
+      "severity": "low",
+      "proposed_by": "parity-runner",
+      "proposed_at": "2020-01-01T00:00:00Z",
+      "active_from": "2020-01-01T00:00:00Z",
+      "external_evaluator": {
+        "kind": "wasm",
+        "source": { "kind": "inline", "body": "(module)" }
+      }
+    }
+  ],
+  "ratify_extra": [
+    { "path": "tenant/acme/allow-do-thing",   "ratifier": "platform-lead", "reasoning": "tenant-scoped" },
+    { "path": "tenant/global/allow-do-thing", "ratifier": "platform-lead", "reasoning": "global fallback" },
+    { "path": "external/wasm-placeholder",    "ratifier": "platform-lead", "reasoning": "external runner placeholder" }
+  ],
+  "tenant_evaluate": [
+    {
+      "label": "acme tenant sees its own tenant-scoped policy",
+      "situation": { "topic": "tenant-parity" },
+      "action": "do_thing",
+      "agent_id": "parity-runner",
+      "tenant_filter": "acme",
+      "expected_decision_kind": "allow",
+      "expected_matched_policy_prefix": "tenant/acme/allow-do-thing@"
+    },
+    {
+      "label": "other tenant falls back to the global policy",
+      "situation": { "topic": "tenant-parity" },
+      "action": "do_thing",
+      "agent_id": "parity-runner",
+      "tenant_filter": "other",
+      "expected_decision_kind": "allow",
+      "expected_matched_policy_prefix": "tenant/global/allow-do-thing@"
+    },
+    {
+      "label": "no filter sees both; first-match wins (implementation-defined)",
+      "situation": { "topic": "tenant-parity" },
+      "action": "do_thing",
+      "agent_id": "parity-runner",
+      "tenant_filter": null,
+      "expected_decision_kind": "allow"
+    }
+  ],
+  "external_evaluate": [
+    {
+      "label": "policy with unregistered external evaluator is skipped",
+      "situation": { "topic": "external-parity" },
+      "action": "do_thing",
+      "agent_id": "parity-runner",
+      "expected_decision_kind": "no_policy_match"
+    }
   ]
 }
