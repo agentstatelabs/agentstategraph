@@ -75,6 +75,17 @@ impl Policy {
         self.ratified_by.is_some()
     }
 
+    /// `true` when this policy is currently active against the given
+    /// clock: ratified AND `active_from <= now`.
+    ///
+    /// `expires_at` is advisory metadata in 0.7.0-beta.1; enforcement
+    /// is scheduled for 0.7.5. The helper's shape is stable — once
+    /// expiry enforcement lands, this method will also require
+    /// `expires_at.is_none() || expires_at > now`.
+    pub fn is_currently_active(&self, now: DateTime<Utc>) -> bool {
+        self.is_ratified() && self.active_from <= now
+    }
+
     /// Canonical `path@version` identifier.
     pub fn handle(&self) -> String {
         format!("{}@{}", self.path, self.version)

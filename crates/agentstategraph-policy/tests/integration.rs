@@ -708,3 +708,104 @@ fn test_supersede_missing_errors() {
         .unwrap_err();
     assert!(matches!(err, PolicyError::NotFound(_)));
 }
+
+// -----------------------------------------------------------------------
+// §1 (0.7.0) — active_from scheduled activation
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_evaluate_ignores_not_yet_active_policy() {
+    // A ratified policy with active_from one hour in the future is
+    // treated as not-yet-active: evaluate should skip it entirely.
+    let (_r, store) = make_store("/policies");
+
+    let mut p = skeleton("scheduled/future", Selector::Always);
+    p.allow = vec![allow_action("any", vec![])];
+    p.active_from = Utc::now() + chrono::Duration::hours(1);
+    store.propose(REF, p).unwrap();
+    store
+        .ratify(REF, "scheduled/future", "alice", "scheduled rollout")
+        .unwrap();
+
+    let sit: Situation =
+        std::collections::HashMap::from([("k".to_string(), "v".to_string())]).into();
+    let dec = store.evaluate(REF, &sit, "any", "a1").unwrap();
+    assert_eq!(
+        dec,
+        Decision::NoPolicyMatch,
+        "ratified-but-not-yet-active policy must be skipped like a proposal"
+    );
+}
+
+#[test]
+fn test_evaluate_honors_past_active_from() {
+    // A ratified policy with active_from in the past is consulted
+    // normally.
+    let (_r, store) = make_store("/policies");
+
+    let mut p = skeleton("scheduled/live", Selector::Always);
+    p.allow = vec![allow_action("any", vec![])];
+    p.active_from = Utc::now() - chrono::Duration::hours(1);
+    store.propose(REF, p).unwrap();
+    store
+        .ratify(REF, "scheduled/live", "alice", "long since live")
+        .unwrap();
+
+    let sit: Situation =
+        std::collections::HashMap::from([("k".to_string(), "v".to_string())]).into();
+    let dec = store.evaluate(REF, &sit, "any", "a1").unwrap();
+    assert!(
+        matches!(dec, Decision::Allow { .. }),
+        "past active_from must not block evaluation; got {:?}",
+        dec
+    );
+}
+
+#[test]
+fn test_evaluate_change_ignores_not_yet_active_policy() {
+    // Same rule for evaluate_change: a ratified policy with a future
+    // active_from does not contribute tokens to change-cost gating.
+    let (_r, store) = make_store("/policies");
+
+    let mut p = skeleton("scheduled/change", Selector::Always);
+    p.triggers = vec!["destructive".into()];
+    p.require_approval = vec![approval("*", FallbackAction::Block)];
+    p.active_from = Utc::now() + chrono::Duration::hours(1);
+    store.propose(REF, p).unwrap();
+    store
+        .ratify(REF, "scheduled/change", "alice", "scheduled change gate")
+        .unwrap();
+
+    let proposal = ChangeProposal::new("rm", "a1", "drop", "spec-1").with_tokens(["destructive"]);
+    assert_eq!(
+        store.evaluate_change(REF, &proposal).unwrap(),
+        Decision::NoPolicyMatch,
+        "not-yet-active change-cost policy must not fire"
+    );
+}
+
+#[test]
+fn test_is_currently_active_helper() {
+    // Unit-coverage for Policy::is_currently_active — the helper used
+    // by active() / policies_for_situation to filter.
+    let mut p = skeleton("unit/helper", Selector::Always);
+    let now = Utc::now();
+
+    // Unratified — never active.
+    p.active_from = now - chrono::Duration::hours(1);
+    assert!(!p.is_currently_active(now));
+
+    // Ratified but active_from in the future — not yet active.
+    p.ratified_by = Some("alice".into());
+    p.ratified_at = Some(now);
+    p.active_from = now + chrono::Duration::hours(1);
+    assert!(!p.is_currently_active(now));
+
+    // Ratified and active_from <= now — active.
+    p.active_from = now - chrono::Duration::hours(1);
+    assert!(p.is_currently_active(now));
+
+    // Boundary: active_from == now — inclusive, active.
+    p.active_from = now;
+    assert!(p.is_currently_active(now));
+}

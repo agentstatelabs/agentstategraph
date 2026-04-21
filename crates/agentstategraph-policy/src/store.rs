@@ -272,16 +272,22 @@ impl PolicyStore {
         Ok(out)
     }
 
-    /// List active policies (ratified only).
+    /// List currently-active policies: ratified AND `active_from <= now`.
+    ///
+    /// A ratified policy with a future `active_from` is skipped here
+    /// the same way an unratified proposal is — it's scheduled but
+    /// not yet live. `expires_at` is advisory in 0.7.0; expiry
+    /// filtering lands in 0.7.5.
     pub fn active(
         &self,
         ref_name: &str,
         prefix_filter: Option<&str>,
     ) -> Result<Vec<Policy>, PolicyError> {
+        let now = Utc::now();
         Ok(self
             .list(ref_name, prefix_filter)?
             .into_iter()
-            .filter(|p| p.is_ratified())
+            .filter(|p| p.is_currently_active(now))
             .collect())
     }
 
