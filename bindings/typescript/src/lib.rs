@@ -18,10 +18,12 @@ extern crate napi_derive;
 
 use std::sync::Arc;
 
-use agentstategraph::session::{Session, SessionStatus};
+// Session + SessionStatus moved to agentstategraph-core in 0.6.5;
+// import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_core::{Session, SessionStatus};
 use agentstategraph_policy::{
     ChangeProposal, Decision, Policy, PolicyStore as PolicyBackend, Situation,
 };

@@ -15,9 +15,11 @@ use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
 
-use agentstategraph::session::SessionStatus;
+// Session + SessionStatus moved to agentstategraph-core in 0.6.5;
+// import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository, SCHEMA_VERSION};
+use agentstategraph_core::SessionStatus;
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore as PolicyBackend, Situation};
@@ -826,12 +828,12 @@ impl WasmAgentStateGraph {
     }
 
     // -----------------------------------------------------------------
-    // Session surface (audit per §6: Session / SessionStatus moved to
-    // agentstategraph-core in 0.6.5). The existing `agentstategraph`
-    // facade re-exports both via `agentstategraph::session::{Session,
-    // SessionStatus}`, and `Repository::sessions()` still returns a
-    // `SessionManager`. We surface the same shape the Python binding
-    // does so JS consumers can round-trip Session records.
+    // Session surface. Session + SessionStatus moved to
+    // agentstategraph-core in 0.6.5; the facade still re-exports them
+    // for back-compat, but new code imports from the canonical path
+    // (see the top-of-file use statement). Repository::sessions()
+    // returns a SessionManager. We surface the same shape as the
+    // Python binding so JS consumers can round-trip Session records.
     // -----------------------------------------------------------------
 
     /// Create a durable session record. Returns the Session as JSON.

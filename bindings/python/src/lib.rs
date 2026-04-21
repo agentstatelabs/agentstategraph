@@ -16,10 +16,12 @@ use std::sync::Arc;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
-use agentstategraph::session::{Session, SessionStatus};
+// Session + SessionStatus moved to agentstategraph-core in 0.6.5;
+// import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
+use agentstategraph_core::{Session, SessionStatus};
 use agentstategraph_policy::{
     ChangeProposal, Decision, Policy, PolicyStore as PolicyBackend, Situation,
 };
@@ -1447,7 +1449,7 @@ fn situation_from_py(py: Python<'_>, situation: &Bound<'_, PyAny>) -> PyResult<S
 }
 
 // =========================================================================
-// Session — wraps agentstategraph::session::{Session, SessionStatus}
+// Session — wraps agentstategraph_core::{Session, SessionStatus}
 // =========================================================================
 
 fn session_status_str(s: &SessionStatus) -> &'static str {

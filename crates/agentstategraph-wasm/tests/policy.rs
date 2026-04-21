@@ -400,7 +400,7 @@ fn session_roundtrip_via_manager() {
     assert_eq!(decoded["status"], "Active");
     assert!(decoded["ended_at"].is_null());
 
-    mgr.end(&s.id, agentstategraph::session::SessionStatus::Completed)
+    mgr.end(&s.id, agentstategraph_core::SessionStatus::Completed)
         .unwrap();
     let reloaded = mgr.get(&s.id).unwrap().unwrap();
     let encoded2 = serde_json::to_string(&reloaded).unwrap();
