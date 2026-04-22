@@ -437,6 +437,27 @@ pub struct PolicyEvaluateChangeParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct PolicyEvaluateChangeWithTaintsParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub proposal: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_filter: Option<String>,
+    /// Paths that the proposal would affect. Each is passed through
+    /// `check_taint` and the aggregated status is returned alongside
+    /// the policy decision.
+    #[serde(default)]
+    pub affected_paths: Vec<String>,
+    /// Agent id used for the taint-check authorization pass.
+    /// Falls back to `proposal.agent_id` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Commit confidence for the review-effect gate. Default 1.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct PolicySignParams {
     #[serde(default = "default_ref")]
     pub r#ref: String,
@@ -2121,6 +2142,61 @@ impl AgentStateGraphServer {
             Ok(c) => serde_json::json!({ "ok": true, "check": c }).to_string(),
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
         }
+    }
+
+    #[tool(
+        description = "Policy × Taint composition (0.7.75 §8). Evaluates a ChangeProposal against the policy store AND checks each `affected_paths` entry for taints / quarantines. Returns `{decision: {...}, taint_status: [...], can_proceed: bool}` where `can_proceed` is the conjunction of `decision.kind != deny` and all taint checks' `can_write`."
+    )]
+    async fn agentstategraph_policy_evaluate_change_with_taints(
+        &self,
+        params: Parameters<PolicyEvaluateChangeWithTaintsParams>,
+    ) -> String {
+        let p = params.0;
+        let proposal: ChangeProposal = match serde_json::from_value(p.proposal.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                return serde_json::json!({ "error": format!("invalid ChangeProposal: {e}") })
+                    .to_string();
+            }
+        };
+        let decision = match self.policies.evaluate_change_scoped(
+            &p.r#ref,
+            &proposal,
+            p.tenant_filter.as_deref(),
+        ) {
+            Ok(d) => d,
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+        let agent_id = p
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| proposal.agent_id.clone());
+        let confidence = p.confidence.unwrap_or(1.0);
+        let mut taint_status = Vec::new();
+        let mut can_proceed = !matches!(decision, agentstategraph_policy::Decision::Deny { .. });
+        for path in &p.affected_paths {
+            match self.repo.check_taint(path, &agent_id, confidence) {
+                Ok(c) => {
+                    if !c.can_write {
+                        can_proceed = false;
+                    }
+                    taint_status.push(serde_json::json!({
+                        "path": path,
+                        "check": c,
+                    }));
+                }
+                Err(e) => {
+                    return serde_json::json!({ "error": e.to_string() }).to_string();
+                }
+            }
+        }
+        serde_json::json!({
+            "ok": true,
+            "decision": decision,
+            "taint_status": taint_status,
+            "can_proceed": can_proceed,
+        })
+        .to_string()
     }
 }
 
