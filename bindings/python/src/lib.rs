@@ -29,7 +29,7 @@ use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_core::{Session, SessionStatus};
 use agentstategraph_policy::{
-    ChangeProposal, Decision, Policy, PolicyStore as PolicyBackend, Situation,
+    ChangeProposal, Decision, Policy, PolicySignature, PolicyStore as PolicyBackend, Situation,
 };
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use agentstategraph_tasks::{
@@ -1421,52 +1421,131 @@ impl PolicyStore {
         decision_to_py(py, &decision)
     }
 
-    // ---- 0.7.5 §5a: sign / verify / set_external_evaluator stubs ----
+    // ---- 0.7.5 §5a: sign / verify / set_external_evaluator ----
     //
-    // Real Python-side signing would require a PyO3-visible signer
-    // registry, which duplicates `agentstategraph-policy-sign` machinery
-    // for little gain at this beta. The Python `Policy` surface already
-    // exposes the `signature` field as a raw dict, so callers can
-    // construct a signature elsewhere (e.g. via the MCP server or a
-    // sidecar Rust tool) and attach it via `propose`/`supersede`.
+    // `sign()` wires through to the real `PolicyStore::set_signature`
+    // Rust API. Because the Python binding's Cargo.toml does NOT
+    // currently depend on `agentstategraph-policy-sign` (+ ed25519-dalek
+    // / hex) — see "plumbing gaps" below — we can't *produce* an Ed25519
+    // signature locally from a private key. Instead, `sign()` accepts a
+    // pre-computed `signature_hex` and writes it to the policy via
+    // `set_signature`, which is the real Rust write path (it commits
+    // under IntentCategory::Custom("policy-sign")). Callers who want
+    // full end-to-end Python signing can produce the 64-byte Ed25519
+    // signature over the canonical-JSON bytes via their preferred Python
+    // crypto library and pass the hex in here.
     //
-    // These stubs return a `{"error": "..."}` envelope to keep API
-    // shape stable when the real wiring lands in a follow-up. We do
-    // NOT surface them as exceptions — the envelope lets callers
-    // pattern-match on shape without try/except gymnastics.
+    // `verify()` returns a structured {"valid": false, "reason": ...}
+    // error because PolicyStore.new() in the binding does not install a
+    // `SignatureVerifier` — the Rust API takes the verifier at
+    // construction time via `with_verifier`. Wiring a verifier through
+    // PyO3 requires the crypto deps above plus a public-key-registry
+    // wrapper class.
+    //
+    // `set_external_evaluator` remains a stub envelope — the Rust-side
+    // `PolicyStore` does not expose a runtime mutator for the
+    // per-policy `external_evaluator` field after propose/supersede.
 
-    /// Sign the policy at `path` (stub). Returns
-    /// `{"error": "not yet wired", "hint": "..."}`. Real signing will
-    /// land as a follow-up once a PyO3 signer wrapper ships; in the
-    /// meantime attach a `signature` dict directly via `propose`/
-    /// `supersede` — the field is preserved through the round-trip.
-    #[pyo3(signature = (ref_name, path, signer_key_id=None))]
-    #[allow(unused_variables)]
+    /// Write a signature onto the active policy at `path`.
+    ///
+    /// Real wiring of `PolicyStore::set_signature`. The signature bytes
+    /// must be pre-computed Ed25519 over the canonical-JSON form of the
+    /// policy (with the `signature` field omitted); see POLICY_V1.md
+    /// §5a. Returns `{"ok": true, "handle": "<path>@<version>"}` on
+    /// success, or `{"error": "..."}` on failure.
+    ///
+    /// Arguments:
+    /// - `signer_key_id` — opaque key id the verifier will look up.
+    /// - `signature_hex` — 128-char lowercase hex of 64-byte signature.
+    ///
+    /// The `private_key_hex` kwarg is accepted but currently rejected
+    /// with a structured error: local signing requires the
+    /// `agentstategraph-policy-sign` crate which is not yet a binding
+    /// dependency. Supply `signature_hex` instead.
+    #[pyo3(signature = (ref_name, path, signer_key_id, signature_hex=None, private_key_hex=None))]
     fn sign(
         &self,
         py: Python<'_>,
         ref_name: &str,
         path: &str,
-        signer_key_id: Option<&str>,
+        signer_key_id: &str,
+        signature_hex: Option<&str>,
+        private_key_hex: Option<&str>,
     ) -> PyResult<PyObject> {
-        let envelope = serde_json::json!({
-            "error": "not yet wired",
-            "hint": "use MCP tool policy_sign or attach a signature dict via propose/supersede",
-        });
-        json_to_py(py, &envelope)
+        if private_key_hex.is_some() && signature_hex.is_none() {
+            let env = serde_json::json!({
+                "error": "local signing not available",
+                "reason": "binding lacks agentstategraph-policy-sign dep",
+                "hint": "compute the 64-byte Ed25519 signature over canonical JSON and pass signature_hex",
+            });
+            return json_to_py(py, &env);
+        }
+        let Some(hex) = signature_hex else {
+            let env = serde_json::json!({
+                "error": "signature_hex required",
+                "hint": "pass the 128-char hex-encoded 64-byte Ed25519 signature",
+            });
+            return json_to_py(py, &env);
+        };
+        let sig = PolicySignature::Ed25519 {
+            signer_key_id: signer_key_id.to_string(),
+            signature_hex: hex.to_string(),
+        };
+        match self.inner.set_signature(ref_name, path, sig) {
+            Ok(()) => {
+                // Re-fetch to return the resulting handle.
+                let p = self.inner.get(ref_name, path, None).map_err(policy_err)?;
+                let env = serde_json::json!({
+                    "ok": true,
+                    "handle": p.handle(),
+                    "signer_key_id": signer_key_id,
+                });
+                json_to_py(py, &env)
+            }
+            Err(e) => {
+                let env = serde_json::json!({
+                    "error": e.to_string(),
+                });
+                json_to_py(py, &env)
+            }
+        }
     }
 
-    /// Verify the signature on the policy at `path` (stub). Returns
-    /// `{"error": "not yet wired", "hint": "..."}`. Real verification
-    /// routes through `agentstategraph-policy-sign`; it lands as a
-    /// follow-up.
-    #[allow(unused_variables)]
+    /// Verify the signature on the active policy at `path`.
+    ///
+    /// Returns `{"valid": true}` on a successful check, or
+    /// `{"valid": false, "reason": "..."}` otherwise.
+    ///
+    /// Currently returns a structured "no verifier registered" error:
+    /// `PolicyStore::new` in the binding does not install a
+    /// `SignatureVerifier` (the Rust API takes one via `with_verifier`
+    /// at construction time). Wiring a PyO3 verifier requires the
+    /// `agentstategraph-policy-sign` crate + ed25519-dalek + hex as
+    /// binding dependencies and a public-key-registry wrapper class.
     fn verify(&self, py: Python<'_>, ref_name: &str, path: &str) -> PyResult<PyObject> {
-        let envelope = serde_json::json!({
-            "error": "not yet wired",
-            "hint": "use MCP tool policy_verify",
+        // Confirm the policy exists so we return a real NotFound error
+        // when the path is wrong (not a misleading "no verifier"
+        // envelope).
+        let policy = match self.inner.get(ref_name, path, None) {
+            Ok(p) => p,
+            Err(e) => {
+                let env = serde_json::json!({ "valid": false, "reason": e.to_string() });
+                return json_to_py(py, &env);
+            }
+        };
+        if policy.signature.is_none() {
+            let env = serde_json::json!({
+                "valid": false,
+                "reason": "policy has no signature",
+            });
+            return json_to_py(py, &env);
+        }
+        let env = serde_json::json!({
+            "valid": false,
+            "reason": "no verifier registered",
+            "hint": "PolicyStore.new does not accept a verifier; needs agentstategraph-policy-sign wired into bindings/python/Cargo.toml + PyO3 key-registry wrapper",
         });
-        json_to_py(py, &envelope)
+        json_to_py(py, &env)
     }
 
     /// Attach or update the external evaluator reference on the

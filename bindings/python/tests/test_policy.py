@@ -504,19 +504,12 @@ def test_session_scope_tenant_field_round_trips():
     assert all("scope_tenant" in x for x in listed)
 
 
-def test_policystore_sign_returns_stub_envelope(store):
-    """§5a: sign/verify/set_external_evaluator are stubs returning an
-    {"error": ...} envelope; real Python signing lands as a follow-up."""
+def test_policystore_set_external_evaluator_returns_stub_envelope(store):
+    """§5a: set_external_evaluator remains a stub returning an
+    {"error": ...} envelope — PolicyStore has no post-propose mutator
+    for the per-policy external_evaluator field."""
     _, ps = store
     ps.propose("main", _policy("infra/to-sign"))
-
-    sig = ps.sign("main", "infra/to-sign", signer_key_id="key-1")
-    assert isinstance(sig, dict)
-    assert sig.get("error") == "not yet wired"
-    assert "hint" in sig
-
-    ver = ps.verify("main", "infra/to-sign")
-    assert ver.get("error") == "not yet wired"
 
     ext = ps.set_external_evaluator(
         "main",
@@ -524,3 +517,89 @@ def test_policystore_sign_returns_stub_envelope(store):
         {"kind": "rego", "source": {"kind": "inline", "body": "package x"}},
     )
     assert ext.get("error") == "not yet wired"
+
+
+def test_policystore_sign_requires_signature_hex(store):
+    """sign() without signature_hex returns a structured error — the
+    binding does not yet ship a local Ed25519 signer."""
+    _, ps = store
+    ps.propose("main", _policy("infra/to-sign"))
+
+    # No args beyond signer_key_id → error asking for signature_hex.
+    missing = ps.sign("main", "infra/to-sign", "key-1")
+    assert missing.get("error") == "signature_hex required"
+
+    # private_key_hex is accepted syntactically but currently refused
+    # until the binding grows the crypto dep.
+    refused = ps.sign(
+        "main", "infra/to-sign", "key-1", private_key_hex="ab" * 32
+    )
+    assert refused.get("error") == "local signing not available"
+    assert "hint" in refused
+
+
+def test_policy_sign_produces_valid_signature(store):
+    """propose + sign writes a PolicySignature onto the policy.
+
+    Because the binding can't produce an Ed25519 signature locally
+    (no `agentstategraph-policy-sign` dep in bindings/python/Cargo.toml
+    yet), we supply a pre-computed hex placeholder. The signature round-
+    trips through `set_signature` and re-fetch, which is what this test
+    validates.
+    """
+    _, ps = store
+    ps.propose("main", _policy("infra/sign-target"))
+
+    # Placeholder 64-byte signature. A real caller would compute this
+    # over canonical JSON via a Python crypto library.
+    sig_hex = "aa" * 64
+    key_id = "pytest-ephemeral-key"
+
+    resp = ps.sign("main", "infra/sign-target", key_id, signature_hex=sig_hex)
+    assert resp.get("ok") is True
+    assert resp["handle"] == "infra/sign-target@1"
+    assert resp["signer_key_id"] == key_id
+
+    fetched = ps.get("main", "infra/sign-target", None)
+    assert fetched["signature"] == {
+        "algorithm": "ed25519",
+        "signer_key_id": key_id,
+        "signature_hex": sig_hex,
+    }
+
+
+def test_policy_verify_round_trip(store):
+    """sign then verify returns {"valid": true}.
+
+    SKIPPED: verify() requires a registered `SignatureVerifier` on the
+    PolicyStore, which the Python binding does not install. Wiring the
+    verifier through PyO3 needs:
+      - `agentstategraph-policy-sign` + `ed25519-dalek` + `hex` added to
+        `bindings/python/Cargo.toml`
+      - a PyO3 `KeyRegistry` wrapper so Python callers can register
+        public keys by id
+      - `PolicyStore.__new__` accepting an optional verifier kwarg and
+        calling `PolicyBackend::with_verifier` at construction
+    Until that plumbing lands, verify() returns a structured
+    {"valid": false, "reason": "no verifier registered"} envelope — NOT
+    the pre-wiring stub.
+    """
+    _, ps = store
+    ps.propose("main", _policy("infra/verify-target"))
+    ps.sign(
+        "main",
+        "infra/verify-target",
+        "pytest-key",
+        signature_hex="bb" * 64,
+    )
+
+    # Sanity: the structured-error shape is what we return today.
+    result = ps.verify("main", "infra/verify-target")
+    assert result.get("valid") is False
+    assert "no verifier registered" in result.get("reason", "")
+
+    pytest.skip(
+        "verify() needs agentstategraph-policy-sign dep + PyO3 "
+        "KeyRegistry wrapper + PolicyStore.with_verifier plumbing; "
+        "see docstring above"
+    )
