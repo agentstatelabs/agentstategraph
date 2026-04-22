@@ -7,10 +7,13 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_taint::{Taint, TaintEffect, TaintKind, TaintMetadata, TaintSeverity};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
+use crate::traits::{
+    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
+};
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
 ///
@@ -93,9 +96,33 @@ impl SqliteStorage {
                 commit_count    INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS taints (
+                id              TEXT PRIMARY KEY,
+                path            TEXT NOT NULL,
+                name            TEXT NOT NULL,
+                kind            TEXT NOT NULL,
+                effect          TEXT NOT NULL,
+                severity        TEXT NOT NULL DEFAULT 'medium',
+                reason          TEXT NOT NULL,
+                agent_id        TEXT NOT NULL,
+                commit_id       TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                expires_at      TEXT,
+                resolved_at     TEXT,
+                resolved_by     TEXT,
+                resolved_reason TEXT,
+                resolved_proof  TEXT,
+                propagate       INTEGER NOT NULL DEFAULT 1,
+                metadata        TEXT NOT NULL DEFAULT '{}'
+            );
+
             CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_epochs_status ON epochs(status);
             CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+            CREATE INDEX IF NOT EXISTS idx_taints_path    ON taints(path);
+            CREATE INDEX IF NOT EXISTS idx_taints_kind    ON taints(kind);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_taints_unique_active
+                ON taints(path, name, kind) WHERE resolved_at IS NULL;
             ",
         )
         .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
@@ -902,6 +929,316 @@ impl SessionStore for SqliteStorage {
             params![session_id],
         )
         .map_err(|e| StorageError::Backend(format!("update session commit_count: {}", e)))?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaintStore (0.7.75 §3)
+// ---------------------------------------------------------------------------
+
+fn kind_to_str(k: TaintKind) -> &'static str {
+    match k {
+        TaintKind::Taint => "taint",
+        TaintKind::Quarantine => "quarantine",
+        TaintKind::Watch => "watch",
+    }
+}
+
+fn kind_from_str(s: &str) -> Result<TaintKind, StorageError> {
+    match s {
+        "taint" => Ok(TaintKind::Taint),
+        "quarantine" => Ok(TaintKind::Quarantine),
+        "watch" => Ok(TaintKind::Watch),
+        other => Err(StorageError::Backend(format!(
+            "unknown taint kind: {other}"
+        ))),
+    }
+}
+
+fn effect_to_str(e: TaintEffect) -> &'static str {
+    match e {
+        TaintEffect::Warn => "warn",
+        TaintEffect::Block => "block",
+        TaintEffect::Review => "review",
+        TaintEffect::Isolate => "isolate",
+        TaintEffect::Advisory => "advisory",
+    }
+}
+
+fn effect_from_str(s: &str) -> Result<TaintEffect, StorageError> {
+    match s {
+        "warn" => Ok(TaintEffect::Warn),
+        "block" => Ok(TaintEffect::Block),
+        "review" => Ok(TaintEffect::Review),
+        "isolate" => Ok(TaintEffect::Isolate),
+        "advisory" => Ok(TaintEffect::Advisory),
+        other => Err(StorageError::Backend(format!(
+            "unknown taint effect: {other}"
+        ))),
+    }
+}
+
+fn severity_to_str(s: TaintSeverity) -> &'static str {
+    match s {
+        TaintSeverity::Low => "low",
+        TaintSeverity::Medium => "medium",
+        TaintSeverity::High => "high",
+        TaintSeverity::Critical => "critical",
+    }
+}
+
+fn severity_from_str(s: &str) -> Result<TaintSeverity, StorageError> {
+    match s {
+        "low" => Ok(TaintSeverity::Low),
+        "medium" => Ok(TaintSeverity::Medium),
+        "high" => Ok(TaintSeverity::High),
+        "critical" => Ok(TaintSeverity::Critical),
+        other => Err(StorageError::Backend(format!(
+            "unknown taint severity: {other}"
+        ))),
+    }
+}
+
+/// Row extraction returns `rusqlite::Error` so the closure fits
+/// `query_map` / `query_row` signatures. Decode-side parsing errors
+/// (serde, chrono) are remapped to
+/// `rusqlite::Error::FromSqlConversionFailure` so callers see them
+/// as backend errors; all cases are converted to `StorageError` in
+/// the calling impls via `map_err`.
+fn row_to_taint(row: &Row<'_>) -> rusqlite::Result<Taint> {
+    use rusqlite::types::{FromSqlError, Type};
+
+    fn decode_err<E: std::fmt::Display>(col: usize, ty: Type, e: E) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            col,
+            ty,
+            Box::new(FromSqlError::Other(format!("{e}").into())),
+        )
+    }
+
+    let kind: String = row.get("kind")?;
+    let effect: String = row.get("effect")?;
+    let severity: String = row.get("severity")?;
+    let metadata_raw: String = row.get("metadata")?;
+    let created_at_s: String = row.get("created_at")?;
+    let expires_at_s: Option<String> = row.get("expires_at")?;
+    let resolved_at_s: Option<String> = row.get("resolved_at")?;
+
+    let metadata: TaintMetadata = serde_json::from_str(&metadata_raw)
+        .map_err(|e| decode_err(0, Type::Text, format!("taint metadata: {e}")))?;
+    let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+        .map_err(|e| decode_err(0, Type::Text, format!("created_at: {e}")))?
+        .with_timezone(&Utc);
+    let expires_at = match expires_at_s {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| decode_err(0, Type::Text, format!("expires_at: {e}")))?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+    let resolved_at = match resolved_at_s {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| decode_err(0, Type::Text, format!("resolved_at: {e}")))?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+    let kind = kind_from_str(&kind).map_err(|e| decode_err(0, Type::Text, e.to_string()))?;
+    let effect = effect_from_str(&effect).map_err(|e| decode_err(0, Type::Text, e.to_string()))?;
+    let severity =
+        severity_from_str(&severity).map_err(|e| decode_err(0, Type::Text, e.to_string()))?;
+
+    Ok(Taint {
+        id: row.get("id")?,
+        path: row.get("path")?,
+        name: row.get("name")?,
+        kind,
+        effect,
+        severity,
+        reason: row.get("reason")?,
+        agent_id: row.get("agent_id")?,
+        commit_id: row.get("commit_id")?,
+        created_at,
+        expires_at,
+        resolved_at,
+        resolved_by: row.get("resolved_by")?,
+        resolved_reason: row.get("resolved_reason")?,
+        resolved_proof: row.get("resolved_proof")?,
+        propagate: row.get::<_, i64>("propagate")? != 0,
+        metadata,
+    })
+}
+
+impl TaintStore for SqliteStorage {
+    fn create_taint(&self, taint: &Taint) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        let metadata_json = serde_json::to_string(&taint.metadata)
+            .map_err(|e| StorageError::Serialization(format!("taint metadata: {e}")))?;
+        conn.execute(
+            "INSERT INTO taints (
+                id, path, name, kind, effect, severity, reason, agent_id,
+                commit_id, created_at, expires_at, resolved_at, resolved_by,
+                resolved_reason, resolved_proof, propagate, metadata
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
+            )",
+            params![
+                taint.id,
+                taint.path,
+                taint.name,
+                kind_to_str(taint.kind),
+                effect_to_str(taint.effect),
+                severity_to_str(taint.severity),
+                taint.reason,
+                taint.agent_id,
+                taint.commit_id,
+                taint.created_at.to_rfc3339(),
+                taint.expires_at.map(|t| t.to_rfc3339()),
+                taint.resolved_at.map(|t| t.to_rfc3339()),
+                taint.resolved_by,
+                taint.resolved_reason,
+                taint.resolved_proof,
+                if taint.propagate { 1_i64 } else { 0_i64 },
+                metadata_json,
+            ],
+        )
+        .map_err(|e| StorageError::Backend(format!("insert taint: {e}")))?;
+        Ok(())
+    }
+
+    fn resolve_taint(
+        &self,
+        id: &str,
+        resolved_by: &str,
+        reason: &str,
+        proof: Option<&str>,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        // Guard: fail on already-resolved.
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT resolved_at FROM taints WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("resolve check: {e}")))?
+            .ok_or_else(|| StorageError::Backend(format!("taint {id} not found")))?;
+        if already.is_some() {
+            return Err(StorageError::Backend(format!(
+                "taint {id} is already resolved"
+            )));
+        }
+        conn.execute(
+            "UPDATE taints SET resolved_at = ?1, resolved_by = ?2,
+                resolved_reason = ?3, resolved_proof = ?4
+             WHERE id = ?5",
+            params![resolved_at.to_rfc3339(), resolved_by, reason, proof, id],
+        )
+        .map_err(|e| StorageError::Backend(format!("resolve taint: {e}")))?;
+        Ok(())
+    }
+
+    fn list_taints(
+        &self,
+        path_prefix: Option<&str>,
+        kind: Option<TaintKind>,
+        include_resolved: bool,
+    ) -> Result<Vec<Taint>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut sql = String::from("SELECT * FROM taints WHERE 1=1");
+        if !include_resolved {
+            sql.push_str(" AND resolved_at IS NULL");
+        }
+        if let Some(_p) = path_prefix {
+            sql.push_str(" AND (path = :p OR path LIKE :plike)");
+        }
+        if kind.is_some() {
+            sql.push_str(" AND kind = :k");
+        }
+        sql.push_str(" ORDER BY created_at DESC");
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| StorageError::Backend(format!("list taints prep: {e}")))?;
+        let mut params_named: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
+        let plike;
+        if let Some(p) = path_prefix {
+            let p = p.trim_end_matches('/');
+            plike = format!("{}/%", p);
+            params_named.push((":p", Box::new(p.to_string())));
+            params_named.push((":plike", Box::new(plike.clone())));
+        }
+        if let Some(k) = kind {
+            params_named.push((":k", Box::new(kind_to_str(k).to_string())));
+        }
+        let refs: Vec<(&str, &dyn rusqlite::ToSql)> =
+            params_named.iter().map(|(n, v)| (*n, v.as_ref())).collect();
+        let rows = stmt
+            .query_map(refs.as_slice(), row_to_taint)
+            .map_err(|e| StorageError::Backend(format!("list taints query: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| StorageError::Backend(format!("list taints row: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    fn check_taint(&self, request_path: &str) -> Result<Vec<Taint>, StorageError> {
+        let conn = self.lock_conn()?;
+        let now = Utc::now().to_rfc3339();
+        // Ancestor match: exact OR (propagate=1 AND request_path LIKE
+        // path || '/%'). SQLite LIKE is case-sensitive by default
+        // which matches our path semantics.
+        let mut stmt = conn
+            .prepare(
+                "SELECT * FROM taints
+                 WHERE resolved_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > :now)
+                   AND (path = :path
+                        OR (propagate = 1 AND :path LIKE path || '/%'))
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| StorageError::Backend(format!("check_taint prep: {e}")))?;
+        let rows = stmt
+            .query_map(
+                &[
+                    (":now", &now as &dyn rusqlite::ToSql),
+                    (":path", &request_path),
+                ],
+                row_to_taint,
+            )
+            .map_err(|e| StorageError::Backend(format!("check_taint query: {e}")))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| StorageError::Backend(format!("check_taint row: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    fn get_taint(&self, id: &str) -> Result<Option<Taint>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM taints WHERE id = ?1")
+            .map_err(|e| StorageError::Backend(format!("get_taint prep: {e}")))?;
+        let t = stmt
+            .query_row(params![id], row_to_taint)
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("get_taint: {e}")))?;
+        Ok(t)
+    }
+
+    fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE taints SET commit_id = ?1 WHERE id = ?2 AND resolved_at IS NULL",
+            params![commit_id, id],
+        )
+        .map_err(|e| StorageError::Backend(format!("set_taint_commit_id: {e}")))?;
         Ok(())
     }
 }

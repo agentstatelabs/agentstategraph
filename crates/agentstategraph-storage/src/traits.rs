@@ -171,9 +171,64 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<(), StorageError>;
 }
 
-/// Combined storage trait for convenience.
-/// A backend that implements all five sub-traits.
-pub trait Storage: ObjectStore + CommitStore + RefStore + EpochStore + SessionStore {}
+/// Durable storage of taints, quarantines, and watches (0.7.75 §3).
+/// Backends must implement CRUD + ancestor-aware lookup.
+pub trait TaintStore: Send + Sync {
+    /// Insert a freshly-created taint record. Storage must enforce
+    /// the `(path, name, kind)` uniqueness invariant among unresolved
+    /// rows — re-creating a resolved taint with the same triple is
+    /// allowed (the old one stays as an audit row).
+    fn create_taint(&self, taint: &agentstategraph_taint::Taint) -> Result<(), StorageError>;
 
-/// Blanket implementation: anything implementing all five traits is a Storage.
-impl<T: ObjectStore + CommitStore + RefStore + EpochStore + SessionStore> Storage for T {}
+    /// Mark the taint with id `id` as resolved. Returns
+    /// `StorageError::Backend` (wrapping `AlreadyResolved`) if the
+    /// record is already resolved.
+    fn resolve_taint(
+        &self,
+        id: &str,
+        resolved_by: &str,
+        reason: &str,
+        proof: Option<&str>,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+
+    /// List taints, optionally filtered by path prefix + kind +
+    /// include-resolved flag. Results are most-recently-created
+    /// first.
+    fn list_taints(
+        &self,
+        path_prefix: Option<&str>,
+        kind: Option<agentstategraph_taint::TaintKind>,
+        include_resolved: bool,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError>;
+
+    /// Return every active taint (unresolved + not expired) whose
+    /// `path` matches `request_path` exactly OR whose `path` is a
+    /// propagating ancestor of `request_path`. The caller feeds the
+    /// result into `agentstategraph_taint::evaluate_access`.
+    fn check_taint(
+        &self,
+        request_path: &str,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError>;
+
+    /// Fetch a taint by its id. Returns `None` if missing.
+    fn get_taint(&self, id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError>;
+
+    /// Back-patch the `commit_id` onto a freshly-inserted taint
+    /// after the repository has written the intent commit. A no-op
+    /// if the taint is already resolved.
+    fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError>;
+}
+
+/// Combined storage trait for convenience.
+/// A backend that implements all six sub-traits.
+pub trait Storage:
+    ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore
+{
+}
+
+/// Blanket implementation: anything implementing all six traits is a Storage.
+impl<T: ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore> Storage
+    for T
+{
+}

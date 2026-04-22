@@ -9,8 +9,11 @@ use std::sync::RwLock;
 use chrono::{DateTime, Utc};
 
 use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_taint::{Taint, TaintKind};
 
-use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
+use crate::traits::{
+    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
+};
 
 /// In-memory storage backend. Thread-safe via RwLock.
 ///
@@ -25,6 +28,9 @@ pub struct MemoryStorage {
     commit_epoch: RwLock<Vec<(ObjectId, String)>>,
     /// (commit_id, session_id) associations, in insertion order.
     commit_session: RwLock<Vec<(ObjectId, String)>>,
+    /// Taints keyed by id, insertion-ordered for deterministic
+    /// list output.
+    taints: RwLock<Vec<Taint>>,
 }
 
 impl MemoryStorage {
@@ -37,6 +43,7 @@ impl MemoryStorage {
             sessions: RwLock::new(HashMap::new()),
             commit_epoch: RwLock::new(Vec::new()),
             commit_session: RwLock::new(Vec::new()),
+            taints: RwLock::new(Vec::new()),
         }
     }
 }
@@ -345,6 +352,139 @@ impl SessionStore for MemoryStorage {
             .write()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
         assoc.push((*commit_id, session_id.to_string()));
+        Ok(())
+    }
+}
+
+impl TaintStore for MemoryStorage {
+    fn create_taint(&self, taint: &Taint) -> Result<(), StorageError> {
+        let mut list = self
+            .taints
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        // Uniqueness: no other active (unresolved) row for
+        // (path, name, kind).
+        for existing in list.iter() {
+            if existing.resolved_at.is_some() {
+                continue;
+            }
+            if existing.path == taint.path
+                && existing.name == taint.name
+                && existing.kind == taint.kind
+            {
+                return Err(StorageError::Backend(format!(
+                    "duplicate active taint ({path}, {name}, {kind:?})",
+                    path = taint.path,
+                    name = taint.name,
+                    kind = taint.kind,
+                )));
+            }
+        }
+        list.push(taint.clone());
+        Ok(())
+    }
+
+    fn resolve_taint(
+        &self,
+        id: &str,
+        resolved_by: &str,
+        reason: &str,
+        proof: Option<&str>,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut list = self
+            .taints
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let t = list
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or_else(|| StorageError::Backend(format!("taint {id} not found")))?;
+        if t.resolved_at.is_some() {
+            return Err(StorageError::Backend(format!(
+                "taint {id} is already resolved"
+            )));
+        }
+        t.resolved_at = Some(resolved_at);
+        t.resolved_by = Some(resolved_by.to_string());
+        t.resolved_reason = Some(reason.to_string());
+        t.resolved_proof = proof.map(str::to_string);
+        Ok(())
+    }
+
+    fn list_taints(
+        &self,
+        path_prefix: Option<&str>,
+        kind: Option<TaintKind>,
+        include_resolved: bool,
+    ) -> Result<Vec<Taint>, StorageError> {
+        let list = self
+            .taints
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let mut out: Vec<Taint> = list
+            .iter()
+            .filter(|t| include_resolved || t.resolved_at.is_none())
+            .filter(|t| match path_prefix {
+                None => true,
+                Some(p) => {
+                    t.path == p || t.path.starts_with(&format!("{}/", p.trim_end_matches('/')))
+                }
+            })
+            .filter(|t| kind.map(|k| k == t.kind).unwrap_or(true))
+            .cloned()
+            .collect();
+        // Most-recently-created first for deterministic ordering.
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(out)
+    }
+
+    fn check_taint(&self, request_path: &str) -> Result<Vec<Taint>, StorageError> {
+        let list = self
+            .taints
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let now = Utc::now();
+        let out: Vec<Taint> = list
+            .iter()
+            .filter(|t| t.is_active(now))
+            .filter(|t| {
+                if t.path == request_path {
+                    return true;
+                }
+                if !t.propagate {
+                    return false;
+                }
+                let prefix = if t.path.ends_with('/') {
+                    t.path.clone()
+                } else {
+                    format!("{}/", t.path)
+                };
+                request_path.starts_with(&prefix)
+            })
+            .cloned()
+            .collect();
+        Ok(out)
+    }
+
+    fn get_taint(&self, id: &str) -> Result<Option<Taint>, StorageError> {
+        let list = self
+            .taints
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(list.iter().find(|t| t.id == id).cloned())
+    }
+
+    fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError> {
+        let mut list = self
+            .taints
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let t = list
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or_else(|| StorageError::Backend(format!("taint {id} not found")))?;
+        t.commit_id = commit_id.to_string();
         Ok(())
     }
 }

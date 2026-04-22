@@ -26,5 +26,5 @@ pub use postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
 pub use traits::{
-    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, Storage, StorageError,
+    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, Storage, StorageError, TaintStore,
 };

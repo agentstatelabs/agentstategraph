@@ -201,6 +201,7 @@ name = "agentstategraph-storage"
 version = "0.7.5-beta.2"
 dependencies = [
  "agentstategraph-core",
+ "agentstategraph-taint",
  "chrono",
  "deadpool-postgres",
  "rusqlite",
@@ -209,6 +210,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "uuid",
 ]
 
 [[package]]
