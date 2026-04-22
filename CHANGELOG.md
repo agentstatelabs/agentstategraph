@@ -5,6 +5,77 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.5-beta.2] — 2026-04-21
+
+Theme: **follow-up polish on 0.7.5-beta.1.** Small patch release
+that closes the post-ship caveats — no new primitives, but the
+advanced-policy surface is now fully exercisable across every
+toolchain we have locally.
+
+### Added
+
+- **Cedar runner promoted from stub to real.** `agentstategraph-policy-cedar`
+  now shells out to `cedar authorize` with tempfile-backed policies
+  / entities / request JSON. Decision mapping `Allow` → Allow,
+  `Deny` → Deny, else NoPolicyMatch. Skip-when-missing-binary test
+  pattern mirrors the Rego runner.
+- **Scoped FFI externs.** `agentstategraph_policy_evaluate_scoped`
+  and `_evaluate_change_scoped` added so non-Rust consumers can
+  filter candidates *before* evaluation (FFI count 54 → 56). Fixes
+  a client-side post-hoc filter bug where Go couldn't redirect to
+  a global fallback when a tenant-scoped policy was first-match.
+- **Python `PolicyStore.sign()`** now calls real `set_signature`
+  (was a stub envelope in -beta.1). Accepts a pre-computed
+  Ed25519 signature hex and commits it under
+  `IntentCategory::Custom("policy-sign")`.
+- **TypeScript `PolicyStore.sign()` / `verify()`** now do full
+  end-to-end Ed25519 via the `agentstategraph-policy-sign` crate
+  (added as a napi dep). No stubs remain on the TS signing surface.
+- **`crates/agentstategraph-policy/README.md`** — long-promised
+  crate reference covering core types, workflow, 0.7.5 advanced
+  features, API quick-reference, storage layout, cross-crate map.
+- **`spec/POST-PRODUCTION-NOTES.md`** — explicit register of items
+  deferred past 0.7.5: key rotation + CRL, commit/speculation
+  signing, FFI dispatcher first-class wiring, Cedar entity-graph
+  enrichment, runner error telemetry, and the .NET test-execution
+  gap.
+
+### Fixed
+
+- **TypeScript `index.js`** pre-existing bug (since the binding
+  was added) — only re-exported `AgentStateGraph`, so
+  `PolicyStore` / `TaskStore` / `exitCodes` tests couldn't even
+  import. Now re-exports all `#[napi]`-annotated symbols.
+- **Python `test_propose_creates_unratified_policy`** asserted
+  `fetched["ratified_by"] is None` against a dict that omits the
+  key via `skip_serializing_if`. Fixed to `fetched.get(...)`.
+- **Go `EvaluateScoped` global-fallback bug** — the 0.7.5-beta.1
+  client-side post-hoc filter couldn't redirect when the
+  first-match policy failed the filter. Fixed by routing through
+  the new scoped FFI externs.
+- **WASM §5d tests** used hallucinated PolicySignature /
+  ExternalEvaluatorRef shapes. Corrected to real tagged-union
+  shapes and dropped `run_in_browser` so `wasm-pack test --node`
+  runs the suite.
+- **Parity fixture §6** — extended with `tenant_evaluate` +
+  `external_evaluate` + `extra_policies` + `ratify_extra` blocks,
+  wired into all 7 runners (Rust reference + FFI + WASM + Py + TS
+  + Go + .NET).
+
+### Verified locally
+
+| Surface | Count | Status |
+|---|---|---|
+| Rust workspace | all | pass |
+| Python pytest | 38 | 37 pass, 1 documented skip |
+| TypeScript node:test | 31 | pass |
+| Go go test | 33 | pass |
+| WASM (wasm-pack --node) | 21 | pass |
+| Cedar real subprocess | 8 | pass |
+| .NET | — | untested; experimental per 0.7.25 decision |
+
+FFI extern count 54 → 56. No MCP tool count change.
+
 ## [0.7.5-beta.1] — 2026-04-18
 
 Theme: **advanced policy — signing + multi-tenant + external
