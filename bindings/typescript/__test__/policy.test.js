@@ -449,18 +449,81 @@ test('Session.scope_tenant field surfaces in JS dict (§3a)', () => {
   assert.ok(listed.every((x) => 'scope_tenant' in x));
 });
 
-test('PolicyStore.sign/verify/setExternalEvaluator return stub envelopes (§5b)', () => {
+// ---------------------------------------------------------------------------
+// §5b: real sign/verify wiring via agentstategraph-policy-sign.
+// setExternalEvaluator remains a stub per plan §4c (FFI dispatcher is
+// post-production per docs/POLICY_GUIDE.md).
+// ---------------------------------------------------------------------------
+
+const { createPrivateKey, createPublicKey } = require('node:crypto');
+
+// Fixed 32-byte Ed25519 seed — deterministic for test reproducibility.
+// Hex form of [1u8; 32].
+const TEST_SEED_HEX = '01'.repeat(32);
+
+// Derive the matching public key from the seed via Node's crypto module.
+// ed25519 SubjectPublicKeyInfo DER prefix is 12 bytes; the last 32 bytes
+// are the raw public key. Likewise for PKCS#8 the last 32 bytes of the
+// DER are the private seed — but we already have the seed, so here we
+// only derive the public side.
+function publicHexFromSeedHex(seedHex) {
+  const seed = Buffer.from(seedHex, 'hex');
+  // Build a PKCS#8 DER envelope for an Ed25519 private key:
+  //   30 2e 02 01 00 30 05 06 03 2b 65 70 04 22 04 20 <seed...>
+  const pkcs8Prefix = Buffer.from(
+    '302e020100300506032b657004220420',
+    'hex',
+  );
+  const pkcs8 = Buffer.concat([pkcs8Prefix, seed]);
+  const privKey = createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' });
+  const pubKey = createPublicKey(privKey);
+  const spki = pubKey.export({ format: 'der', type: 'spki' });
+  // SPKI envelope is 12 bytes, followed by the 32-byte raw public key.
+  return Buffer.from(spki).subarray(-32).toString('hex');
+}
+
+test('PolicyStore.sign produces a valid signature on a proposed policy (§5b)', () => {
   const { ps } = fresh();
   ps.propose('main', policy('infra/to-sign'));
 
-  const sig = ps.sign('main', 'infra/to-sign', 'key-1');
-  assert.equal(typeof sig, 'object');
-  assert.equal(sig.error, 'not yet wired');
-  assert.ok(typeof sig.hint === 'string');
+  const result = ps.sign('main', 'infra/to-sign', 'test-key-1', TEST_SEED_HEX);
+  assert.equal(result.algorithm, 'ed25519');
+  assert.equal(result.signer_key_id, 'test-key-1');
+  assert.equal(typeof result.signature_hex, 'string');
+  assert.equal(result.signature_hex.length, 128); // 64 bytes hex
 
-  const ver = ps.verify('main', 'infra/to-sign');
-  assert.equal(ver.error, 'not yet wired');
+  const fetched = ps.get('main', 'infra/to-sign', null);
+  assert.ok(fetched.signature);
+  assert.equal(fetched.signature.algorithm, 'ed25519');
+  assert.equal(fetched.signature.signer_key_id, 'test-key-1');
+  assert.equal(fetched.signature.signature_hex, result.signature_hex);
+});
 
+test('PolicyStore.sign + verify round-trips (§5b)', () => {
+  const { ps } = fresh();
+  ps.propose('main', policy('infra/roundtrip'));
+
+  ps.sign('main', 'infra/roundtrip', 'test-key-1', TEST_SEED_HEX);
+  const publicHex = publicHexFromSeedHex(TEST_SEED_HEX);
+
+  const v = ps.verify('main', 'infra/roundtrip', publicHex);
+  assert.equal(v.valid, true);
+  assert.equal(v.algorithm, 'ed25519');
+  assert.equal(v.signer_key_id, 'test-key-1');
+});
+
+test('PolicyStore.verify on unsigned policy reports unsigned (§5b)', () => {
+  const { ps } = fresh();
+  ps.propose('main', policy('infra/unsigned'));
+  const publicHex = publicHexFromSeedHex(TEST_SEED_HEX);
+  const v = ps.verify('main', 'infra/unsigned', publicHex);
+  assert.equal(v.valid, false);
+  assert.equal(v.reason, 'unsigned');
+});
+
+test('PolicyStore.setExternalEvaluator still returns stub envelope (plan §4c)', () => {
+  const { ps } = fresh();
+  ps.propose('main', policy('infra/to-sign'));
   const ext = ps.setExternalEvaluator('main', 'infra/to-sign', {
     kind: 'rego',
     source: { kind: 'inline', body: 'package x' },

@@ -25,7 +25,10 @@ use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_core::{Session, SessionStatus};
 use agentstategraph_policy::{
-    ChangeProposal, Decision, Policy, PolicyStore as PolicyBackend, Situation,
+    ChangeProposal, Decision, Policy, PolicySignature, PolicyStore as PolicyBackend, Situation,
+};
+use agentstategraph_policy_sign::{
+    Ed25519Signer, Ed25519Verifier, InMemoryKeyRegistry, PolicySigner, PolicyVerifier, canonicalize,
 };
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use agentstategraph_tasks::{
@@ -1411,52 +1414,124 @@ impl PolicyStore {
         Ok(decision_to_json(&d))
     }
 
-    // ---- 0.7.5 §5b: sign / verify / setExternalEvaluator stubs ----
+    // ---- 0.7.5 §5b: sign / verify (real) + setExternalEvaluator (stub) ----
     //
-    // Real JS-side signing would require a napi-visible signer registry
-    // that duplicates `agentstategraph-policy-sign` machinery for little
-    // gain at this beta. The JS `Policy` surface already exposes the
-    // `signature` field as a raw object, so callers can construct a
-    // signature elsewhere (e.g. via the MCP server or a sidecar Rust
-    // tool) and attach it via `propose`/`supersede`.
+    // `sign` and `verify` route through `agentstategraph-policy-sign`
+    // (Ed25519 + canonical-JSON). The JS caller owns the key material
+    // (32-byte hex seed for sign; 32-byte hex public key for verify)
+    // so no process-wide registry is needed at the binding level.
     //
-    // These stubs return a `{error: "..."}` envelope to keep the API
-    // shape stable when the real wiring lands in a follow-up.
+    // `setExternalEvaluator` stays a stub per plan §4c — the FFI
+    // dispatcher is post-production per docs/POLICY_GUIDE.md.
 
-    /// Sign the policy at `path` (stub). Returns
-    /// `{error: "not yet wired", hint: ...}`. Real signing will land
-    /// as a follow-up once a napi signer wrapper ships; in the meantime
-    /// attach a `signature` object directly via `propose`/`supersede`
-    /// — the field round-trips through serde.
+    /// Sign the policy at `path` with an Ed25519 key. `signerKeyId`
+    /// is the opaque identifier recorded alongside the signature;
+    /// `privateKeyHex` is a 64-char hex string (the 32-byte seed).
+    /// On success the policy's `signature` field is overwritten via
+    /// `PolicyStore::set_signature` and `{algorithm, signer_key_id,
+    /// signature_hex}` is returned.
     #[napi]
     pub fn sign(
         &self,
-        _ref_name: String,
-        _path: String,
-        _signer_key_id: Option<String>,
+        ref_name: String,
+        path: String,
+        signer_key_id: String,
+        private_key_hex: String,
     ) -> napi::Result<serde_json::Value> {
+        let seed_vec = hex::decode(&private_key_hex)
+            .map_err(|e| napi::Error::from_reason(format!("invalid privateKeyHex: {e}")))?;
+        let seed: [u8; 32] = seed_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| napi::Error::from_reason("privateKeyHex must decode to 32 bytes"))?;
+        let signer = Ed25519Signer::from_bytes(signer_key_id.clone(), &seed);
+
+        let policy = self.inner.get(&ref_name, &path, None).map_err(policy_err)?;
+        let canonical =
+            canonicalize(&policy).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let (key_id, sig_bytes) = signer
+            .sign(&canonical)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let sig_hex = hex::encode(&sig_bytes);
+        let signature = PolicySignature::Ed25519 {
+            signer_key_id: key_id.clone(),
+            signature_hex: sig_hex.clone(),
+        };
+        self.inner
+            .set_signature(&ref_name, &path, signature)
+            .map_err(policy_err)?;
+
         Ok(serde_json::json!({
-            "error": "not yet wired",
-            "hint": "use MCP tool policy_sign or attach a signature object via propose/supersede",
+            "algorithm": "ed25519",
+            "signer_key_id": key_id,
+            "signature_hex": sig_hex,
         }))
     }
 
-    /// Verify the signature on the policy at `path` (stub). Returns
-    /// the same envelope shape as [`Self::sign`]. Real verification
-    /// routes through `agentstategraph-policy-sign`.
+    /// Verify the Ed25519 signature on the policy at `path` using
+    /// `publicKeyHex` (64-char hex / 32-byte key). Returns
+    /// `{valid: true}` on success, `{valid: false, reason: ...}` on
+    /// mismatch, or `{valid: false, reason: "unsigned"}` when the
+    /// policy carries no signature.
     #[napi]
-    pub fn verify(&self, _ref_name: String, _path: String) -> napi::Result<serde_json::Value> {
-        Ok(serde_json::json!({
-            "error": "not yet wired",
-            "hint": "use MCP tool policy_verify",
-        }))
+    pub fn verify(
+        &self,
+        ref_name: String,
+        path: String,
+        public_key_hex: String,
+    ) -> napi::Result<serde_json::Value> {
+        let policy = self.inner.get(&ref_name, &path, None).map_err(policy_err)?;
+        let Some(sig) = policy.signature.as_ref() else {
+            return Ok(serde_json::json!({"valid": false, "reason": "unsigned"}));
+        };
+        let PolicySignature::Ed25519 {
+            signer_key_id,
+            signature_hex,
+        } = sig;
+
+        let pk_vec = hex::decode(&public_key_hex)
+            .map_err(|e| napi::Error::from_reason(format!("invalid publicKeyHex: {e}")))?;
+        let pk_bytes: [u8; 32] = pk_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| napi::Error::from_reason("publicKeyHex must decode to 32 bytes"))?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes)
+            .map_err(|e| napi::Error::from_reason(format!("invalid verifying key: {e}")))?;
+
+        let mut registry = InMemoryKeyRegistry::new();
+        registry.insert(signer_key_id.clone(), verifying_key);
+        let verifier = Ed25519Verifier::new(registry);
+
+        let sig_bytes = match hex::decode(signature_hex) {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "valid": false,
+                    "reason": format!("invalid signature_hex: {e}"),
+                }));
+            }
+        };
+        let canonical =
+            canonicalize(&policy).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        match verifier.verify(signer_key_id, &sig_bytes, &canonical) {
+            Ok(()) => Ok(serde_json::json!({
+                "valid": true,
+                "algorithm": "ed25519",
+                "signer_key_id": signer_key_id,
+            })),
+            Err(e) => Ok(serde_json::json!({
+                "valid": false,
+                "reason": e.to_string(),
+            })),
+        }
     }
 
     /// Attach or update the external evaluator reference on the
-    /// policy at `path` (stub). Until the runtime-side mutator lands,
-    /// callers can set `external_evaluator` on the policy object at
-    /// propose/supersede time — the field is preserved by serde
-    /// round-trip.
+    /// policy at `path` (stub — plan §4c; FFI dispatcher is
+    /// post-production per docs/POLICY_GUIDE.md). Until the
+    /// runtime-side mutator lands, callers can set
+    /// `external_evaluator` on the policy object at propose/supersede
+    /// time — the field is preserved by serde round-trip.
     #[napi]
     pub fn set_external_evaluator(
         &self,

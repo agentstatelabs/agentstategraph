@@ -15,6 +15,9 @@ agentstategraph-migrate = { path = "../../crates/agentstategraph-migrate" }
 agentstategraph-storage = { path = "../../crates/agentstategraph-storage" }
 agentstategraph-tasks = { path = "../../crates/agentstategraph-tasks" }
 agentstategraph-policy = { path = "../../crates/agentstategraph-policy" }
+agentstategraph-policy-sign = { path = "../../crates/agentstategraph-policy-sign" }
+ed25519-dalek = "2"
+hex = "0.4"
 semver = "1"
 napi = { version = "2", features = ["napi9", "serde-json"] }
 napi-derive = "2"
