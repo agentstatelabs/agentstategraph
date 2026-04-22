@@ -405,7 +405,14 @@ mod tests {
     /// pre-0.7.75 ad-hoc taint events from native ones.
     #[test]
     fn custom_taint_string_still_round_trips_as_custom() {
-        for name in ["Taint", "Untaint", "Quarantine", "Unquarantine", "Watch", "Unwatch"] {
+        for name in [
+            "Taint",
+            "Untaint",
+            "Quarantine",
+            "Unquarantine",
+            "Watch",
+            "Unwatch",
+        ] {
             let c = IntentCategory::Custom(name.to_string());
             let json = serde_json::to_string(&c).unwrap();
             assert_eq!(json, format!("{{\"Custom\":\"{}\"}}", name));
@@ -416,8 +423,17 @@ mod tests {
 
     #[test]
     fn taint_variants_serialize_as_native() {
-        assert_eq!(serde_json::to_string(&IntentCategory::Taint).unwrap(), "\"Taint\"");
-        assert_eq!(serde_json::to_string(&IntentCategory::Quarantine).unwrap(), "\"Quarantine\"");
-        assert_eq!(serde_json::to_string(&IntentCategory::Watch).unwrap(), "\"Watch\"");
+        assert_eq!(
+            serde_json::to_string(&IntentCategory::Taint).unwrap(),
+            "\"Taint\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IntentCategory::Quarantine).unwrap(),
+            "\"Quarantine\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IntentCategory::Watch).unwrap(),
+            "\"Watch\""
+        );
     }
 }

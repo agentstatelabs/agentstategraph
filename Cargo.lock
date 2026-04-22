@@ -212,6 +212,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentstategraph-taint"
+version = "0.7.5-beta.2"
+dependencies = [
+ "agentstategraph-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "agentstategraph-tasks"
 version = "0.7.5-beta.2"
 dependencies = [

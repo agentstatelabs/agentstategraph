@@ -10,6 +10,7 @@ members = [
     "crates/agentstategraph-policy-wasm",
     "crates/agentstategraph-policy-rego",
     "crates/agentstategraph-policy-cedar",
+    "crates/agentstategraph-taint",
     "crates/agentstategraph-migrate",
     "crates/agentstategraph-mcp",
     "crates/agentstategraph-ffi",
