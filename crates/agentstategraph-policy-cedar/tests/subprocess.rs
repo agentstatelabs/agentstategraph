@@ -1,8 +1,10 @@
-//! Smoke tests for the [`CedarEvaluator`] stub.
+//! Smoke tests for the [`CedarEvaluator`] subprocess runner.
 //!
-//! These tests verify the stub error fires for the currently-unsupported
-//! flows without actually requiring the `cedar` binary to be installed
-//! — the stub short-circuits before invoking any subprocess.
+//! These cover the error paths that don't require a working `cedar`
+//! binary on $PATH: commit_ref source rejection, missing-binary
+//! handling, and the kind tag. The happy-path / real-subprocess
+//! tests live in the crate's unit tests and are gated behind a
+//! `requires_cedar!()` skip.
 
 use agentstategraph_policy::external::{ExternalError, ExternalEvaluator};
 use agentstategraph_policy::selector::Situation;
@@ -15,8 +17,11 @@ fn cedar_evaluator_kind_tag() {
 }
 
 #[test]
-fn cedar_evaluator_stub_errors_on_inline_source() {
-    let eval = CedarEvaluator::new();
+fn cedar_evaluator_missing_binary_reports_execution_error() {
+    // When `cedar` isn't on PATH (default config on CI without the
+    // Cedar CLI installed), evaluating any inline source should
+    // surface a clear Execution error instead of a silent miscompile.
+    let eval = CedarEvaluator::new_with_path("/definitely/not/a/real/cedar-xyzzy");
     let err = eval
         .evaluate(
             &EvaluatorSource::Inline {
@@ -26,12 +31,12 @@ fn cedar_evaluator_stub_errors_on_inline_source() {
             "deploy",
             "agent-1",
         )
-        .expect_err("stub should error");
+        .expect_err("missing binary should error");
     match err {
         ExternalError::Execution(msg) => {
             assert!(
-                msg.contains("stub") || msg.contains("Cedar"),
-                "expected stub error, got: {msg}"
+                msg.contains("cedar binary not found") || msg.contains("No such file"),
+                "expected missing-binary error, got: {msg}"
             );
         }
         other => panic!("expected Execution, got {other:?}"),
@@ -58,8 +63,8 @@ fn cedar_evaluator_rejects_commit_ref_source() {
 }
 
 #[test]
-fn cedar_evaluator_with_cedar_path_builds() {
+fn cedar_evaluator_new_with_path_builds() {
     // API compatibility — the builder should at least construct.
-    let eval = CedarEvaluator::with_cedar_path("/usr/local/bin/cedar");
+    let eval = CedarEvaluator::new_with_path("/usr/local/bin/cedar");
     assert_eq!(eval.kind(), "cedar");
 }
