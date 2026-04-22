@@ -1101,10 +1101,7 @@ impl SessionStore for PostgresStorage {
 /// every method returns a `Backend` error so callers see a clear
 /// signal instead of a silent miscompile.
 impl TaintStore for PostgresStorage {
-    fn create_taint(
-        &self,
-        _taint: &agentstategraph_taint::Taint,
-    ) -> Result<(), StorageError> {
+    fn create_taint(&self, _taint: &agentstategraph_taint::Taint) -> Result<(), StorageError> {
         Err(StorageError::Backend(
             "taint-store not yet implemented for PostgresStorage".into(),
         ))
@@ -1139,10 +1136,7 @@ impl TaintStore for PostgresStorage {
         Ok(Vec::new())
     }
 
-    fn get_taint(
-        &self,
-        _id: &str,
-    ) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
+    fn get_taint(&self, _id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
         Ok(None)
     }
 

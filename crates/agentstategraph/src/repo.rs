@@ -52,6 +52,23 @@ fn path_is_secret(path: &str) -> bool {
     path == META_SECRET_PREFIX || path.starts_with(&format!("{}/", META_SECRET_PREFIX))
 }
 
+/// Returns `true` when the intent category represents a taint /
+/// quarantine / watch lifecycle event. These commits bypass the
+/// pre-commit taint hook because they are the mechanism by which
+/// taints are created and resolved — gating them on themselves
+/// would deadlock the substrate.
+fn is_taint_lifecycle_intent(category: &IntentCategory) -> bool {
+    matches!(
+        category,
+        IntentCategory::Taint
+            | IntentCategory::Untaint
+            | IntentCategory::Quarantine
+            | IntentCategory::Unquarantine
+            | IntentCategory::Watch
+            | IntentCategory::Unwatch
+    )
+}
+
 fn check_meta_guard(path: &str, intent: &Intent) -> Result<(), RepoError> {
     if path_is_reserved(path) && intent.category != IntentCategory::Migrate {
         return Err(RepoError::ReservedPath(path.to_string()));
@@ -216,6 +233,26 @@ pub enum RepoError {
         epoch_id: String,
         unreachable_commits: Vec<ObjectId>,
     },
+
+    /// Pre-commit taint hook (0.7.75 §4) rejected a write. `taint_id`
+    /// is the storage id of the taint that caused the rejection — use
+    /// `agentstategraph_policy` / MCP `check_taint` to surface the
+    /// full context.
+    #[error("taint hook: {source}")]
+    Taint {
+        #[source]
+        source: agentstategraph_taint::TaintError,
+        taint_id: Option<String>,
+    },
+}
+
+impl From<agentstategraph_taint::TaintError> for RepoError {
+    fn from(source: agentstategraph_taint::TaintError) -> Self {
+        RepoError::Taint {
+            source,
+            taint_id: None,
+        }
+    }
 }
 
 impl Repository {
@@ -368,6 +405,14 @@ impl Repository {
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
         check_meta_guard(path, &options.intent)?;
+        // 0.7.75 §4: taint pre-commit hook. Rejects writes to blocked
+        // or quarantined paths; review-effect gate enforces the
+        // confidence threshold. Taint/Untaint/Quarantine/... commits
+        // themselves bypass the hook — they're creating the taint
+        // record and must be able to reach the path.
+        if !is_taint_lifecycle_intent(&options.intent.category) {
+            self.pre_commit_taint_check(&[path], &options)?;
+        }
         let commit_id = self.resolve_ref(ref_name)?;
         let commit = self
             .storage
@@ -413,6 +458,9 @@ impl Repository {
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
         check_meta_guard(path, &options.intent)?;
+        if !is_taint_lifecycle_intent(&options.intent.category) {
+            self.pre_commit_taint_check(&[path], &options)?;
+        }
         let commit_id = self.resolve_ref(ref_name)?;
         let commit = self
             .storage
@@ -1366,6 +1414,40 @@ impl Repository {
             self.storage.set_commit_session(&commit.id, &session_id)?;
         }
         Ok(commit)
+    }
+
+    // -----------------------------------------------------------------------
+    // Accessors used by the taint module (0.7.75 §4)
+    // -----------------------------------------------------------------------
+
+    /// Access the underlying Storage (read-only).
+    pub(crate) fn taint_storage(&self) -> &dyn Storage {
+        self.storage.as_ref()
+    }
+
+    /// Write a bare "intent-only" commit with no state-tree change —
+    /// used by the taint / quarantine / watch family to stamp an
+    /// audit commit without mutating state. Returns the new commit id.
+    pub(crate) fn write_taint_intent(
+        &self,
+        ref_name: &str,
+        category: IntentCategory,
+        description: String,
+        agent_id: &str,
+        reasoning: Option<String>,
+    ) -> Result<ObjectId, RepoError> {
+        let parent_id = self.resolve_ref(ref_name)?;
+        let parent = self
+            .storage
+            .get_commit(&parent_id)?
+            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+        let mut options = CommitOptions::new(agent_id, category, description);
+        if let Some(r) = reasoning {
+            options = options.with_reasoning(r);
+        }
+        let commit = self.create_commit(parent.state_root, vec![parent_id], options)?;
+        self.guarded_set_ref(ref_name, commit.id)?;
+        Ok(commit.id)
     }
 }
 

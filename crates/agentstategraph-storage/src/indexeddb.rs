@@ -443,10 +443,7 @@ impl SessionStore for IndexedDbStorage {
 /// pattern other sub-stores used before their persistence path was
 /// finalized — see the `queue_*_snapshot` helpers above).
 impl TaintStore for IndexedDbStorage {
-    fn create_taint(
-        &self,
-        taint: &agentstategraph_taint::Taint,
-    ) -> Result<(), StorageError> {
+    fn create_taint(&self, taint: &agentstategraph_taint::Taint) -> Result<(), StorageError> {
         self.memory.create_taint(taint)
     }
 
@@ -478,10 +475,7 @@ impl TaintStore for IndexedDbStorage {
         self.memory.check_taint(request_path)
     }
 
-    fn get_taint(
-        &self,
-        id: &str,
-    ) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
+    fn get_taint(&self, id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
         self.memory.get_taint(id)
     }
 
