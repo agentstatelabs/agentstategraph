@@ -28,7 +28,9 @@
 use std::sync::RwLock;
 
 use crate::memory::MemoryStorage;
-use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
+use crate::traits::{
+    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
+};
 use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
 use chrono::{DateTime, Utc};
 
@@ -432,6 +434,59 @@ impl SessionStore for IndexedDbStorage {
         // commit_count changed on the session — re-snapshot for flush.
         self.queue_session_snapshot(session_id)?;
         Ok(())
+    }
+}
+
+/// TaintStore impl delegates to the inner MemoryStorage. IndexedDB
+/// persistence of taints lands in a later milestone; for 0.7.75 the
+/// browser runtime gets in-session taints only (matching the
+/// pattern other sub-stores used before their persistence path was
+/// finalized — see the `queue_*_snapshot` helpers above).
+impl TaintStore for IndexedDbStorage {
+    fn create_taint(
+        &self,
+        taint: &agentstategraph_taint::Taint,
+    ) -> Result<(), StorageError> {
+        self.memory.create_taint(taint)
+    }
+
+    fn resolve_taint(
+        &self,
+        id: &str,
+        resolved_by: &str,
+        reason: &str,
+        proof: Option<&str>,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        self.memory
+            .resolve_taint(id, resolved_by, reason, proof, resolved_at)
+    }
+
+    fn list_taints(
+        &self,
+        path_prefix: Option<&str>,
+        kind: Option<agentstategraph_taint::TaintKind>,
+        include_resolved: bool,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
+        self.memory.list_taints(path_prefix, kind, include_resolved)
+    }
+
+    fn check_taint(
+        &self,
+        request_path: &str,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
+        self.memory.check_taint(request_path)
+    }
+
+    fn get_taint(
+        &self,
+        id: &str,
+    ) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
+        self.memory.get_taint(id)
+    }
+
+    fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError> {
+        self.memory.set_taint_commit_id(id, commit_id)
     }
 }
 

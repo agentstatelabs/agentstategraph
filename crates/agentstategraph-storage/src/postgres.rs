@@ -21,7 +21,9 @@ pub const DEFAULT_POOL_SIZE: usize = 32;
 use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
 use chrono::{DateTime, Utc};
 
-use crate::traits::{CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError};
+use crate::traits::{
+    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
+};
 
 /// PostgreSQL-backed storage with connection pooling and optional multi-tenancy.
 pub struct PostgresStorage {
@@ -1090,6 +1092,64 @@ impl SessionStore for PostgresStorage {
 
             Ok(())
         })
+    }
+}
+
+/// Stub TaintStore impl for Postgres. The taint substrate landed in
+/// 0.7.75 before the Postgres CI path was active; wiring the real
+/// SQL goes in the next milestone's post-production queue. For now
+/// every method returns a `Backend` error so callers see a clear
+/// signal instead of a silent miscompile.
+impl TaintStore for PostgresStorage {
+    fn create_taint(
+        &self,
+        _taint: &agentstategraph_taint::Taint,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Backend(
+            "taint-store not yet implemented for PostgresStorage".into(),
+        ))
+    }
+
+    fn resolve_taint(
+        &self,
+        _id: &str,
+        _resolved_by: &str,
+        _reason: &str,
+        _proof: Option<&str>,
+        _resolved_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Backend(
+            "taint-store not yet implemented for PostgresStorage".into(),
+        ))
+    }
+
+    fn list_taints(
+        &self,
+        _path_prefix: Option<&str>,
+        _kind: Option<agentstategraph_taint::TaintKind>,
+        _include_resolved: bool,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    fn check_taint(
+        &self,
+        _request_path: &str,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    fn get_taint(
+        &self,
+        _id: &str,
+    ) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
+        Ok(None)
+    }
+
+    fn set_taint_commit_id(&self, _id: &str, _commit_id: &str) -> Result<(), StorageError> {
+        Err(StorageError::Backend(
+            "taint-store not yet implemented for PostgresStorage".into(),
+        ))
     }
 }
 
