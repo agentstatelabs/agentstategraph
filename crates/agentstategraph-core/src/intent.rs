@@ -65,6 +65,18 @@ pub enum IntentCategory {
     /// abandonment. Used by the `agentstategraph-tasks` crate and its
     /// consumers so plan activity is natively filterable in log/blame queries.
     Plan,
+    /// Marking a path as degraded (see `agentstategraph-taint` + spec/TAINT_SPEC.md).
+    Taint,
+    /// Resolving a taint with reason / proof.
+    Untaint,
+    /// Restricting a path to an authorized-agents allowlist.
+    Quarantine,
+    /// Releasing a quarantine with audit trail.
+    Unquarantine,
+    /// Advisory marker that draws attention without restricting access.
+    Watch,
+    /// Removing an advisory watch.
+    Unwatch,
     /// Application-defined category.
     Custom(String),
 }
@@ -373,10 +385,39 @@ mod tests {
             IntentCategory::Merge,
             IntentCategory::Migrate,
             IntentCategory::Plan,
+            IntentCategory::Taint,
+            IntentCategory::Untaint,
+            IntentCategory::Quarantine,
+            IntentCategory::Unquarantine,
+            IntentCategory::Watch,
+            IntentCategory::Unwatch,
         ] {
             let json = serde_json::to_string(&c).unwrap();
             let back: IntentCategory = serde_json::from_str(&json).unwrap();
             assert_eq!(c, back, "round-trip failed for {:?}", c);
         }
+    }
+
+    /// Mirrors `custom_plan_string_still_round_trips_as_custom` for
+    /// the 0.7.75 taint variants. Pre-existing data written as
+    /// `Custom("Taint")` etc. must remain distinct from the new
+    /// native variants so consumers can unambiguously distinguish
+    /// pre-0.7.75 ad-hoc taint events from native ones.
+    #[test]
+    fn custom_taint_string_still_round_trips_as_custom() {
+        for name in ["Taint", "Untaint", "Quarantine", "Unquarantine", "Watch", "Unwatch"] {
+            let c = IntentCategory::Custom(name.to_string());
+            let json = serde_json::to_string(&c).unwrap();
+            assert_eq!(json, format!("{{\"Custom\":\"{}\"}}", name));
+            let back: IntentCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, IntentCategory::Custom(name.to_string()));
+        }
+    }
+
+    #[test]
+    fn taint_variants_serialize_as_native() {
+        assert_eq!(serde_json::to_string(&IntentCategory::Taint).unwrap(), "\"Taint\"");
+        assert_eq!(serde_json::to_string(&IntentCategory::Quarantine).unwrap(), "\"Quarantine\"");
+        assert_eq!(serde_json::to_string(&IntentCategory::Watch).unwrap(), "\"Watch\"");
     }
 }
