@@ -518,45 +518,78 @@ func tenantMatches(p *Policy, filter *string) bool {
 	return *p.TenantID == *filter
 }
 
-// EvaluateScoped wraps Evaluate. When `tenantFilter` is non-nil and
-// the decision references a `matched_policy` whose stored `tenant_id`
-// does not match, the result is rewritten to `no_policy_match`.
+// EvaluateScoped dispatches to the scoped FFI extern
+// (agentstategraph_policy_evaluate_scoped, 0.7.5 §3b). `tenantFilter
+// = nil` is equivalent to Evaluate; `tenantFilter = &"acme"` matches
+// policies whose `tenant_id` is either `"acme"` or absent (global
+// fallback). Pre-0.7.5 bindings had to post-filter a single decision
+// client-side, which couldn't redirect to a global fallback when the
+// matched policy failed the filter — this variant solves that by
+// filtering candidates before evaluation.
 func (ps *PolicyStore) EvaluateScoped(ref string, situation map[string]string, action, agentID string, tenantFilter *string) (*Decision, error) {
-	d, err := ps.Evaluate(ref, situation, action, agentID)
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	if situation == nil {
+		situation = map[string]string{}
+	}
+	sitBytes, err := json.Marshal(situation)
+	if err != nil {
+		return nil, fmt.Errorf("marshal situation: %w", err)
+	}
+	cSit := C.CString(string(sitBytes))
+	defer C.free(unsafe.Pointer(cSit))
+	cAction := C.CString(action)
+	defer C.free(unsafe.Pointer(cAction))
+	cAgent := C.CString(agentID)
+	defer C.free(unsafe.Pointer(cAgent))
+	var cTenant *C.char
+	if tenantFilter != nil {
+		cTenant = C.CString(*tenantFilter)
+		defer C.free(unsafe.Pointer(cTenant))
+	}
+	raw, err := consume(
+		C.agentstategraph_policy_evaluate_scoped(ps.handle, cRef, cSit, cAction, cAgent, cTenant),
+		"evaluate_scoped",
+	)
 	if err != nil {
 		return nil, err
 	}
-	if tenantFilter == nil || d.MatchedPolicy == "" {
-		return d, nil
+	var d Decision
+	if err := decodeOrErr(raw, &d); err != nil {
+		return nil, err
 	}
-	matched, err := ps.Get(ref, d.MatchedPolicy)
-	if err != nil || matched == nil {
-		return d, nil
-	}
-	if tenantMatches(matched, tenantFilter) {
-		return d, nil
-	}
-	return &Decision{Kind: DecisionNoPolicyMatch, Reason: "policy filtered by tenant scope"}, nil
+	return &d, nil
 }
 
-// EvaluateChangeScoped wraps EvaluateChange with the same post-load
-// tenant filter rules as EvaluateScoped.
+// EvaluateChangeScoped dispatches to the scoped FFI extern
+// (agentstategraph_policy_evaluate_change_scoped, 0.7.5 §3b). See
+// EvaluateScoped for tenantFilter semantics.
 func (ps *PolicyStore) EvaluateChangeScoped(ref string, proposal ChangeProposal, tenantFilter *string) (*Decision, error) {
-	d, err := ps.EvaluateChange(ref, proposal)
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	proposalBytes, err := json.Marshal(proposal)
+	if err != nil {
+		return nil, fmt.Errorf("marshal proposal: %w", err)
+	}
+	cProp := C.CString(string(proposalBytes))
+	defer C.free(unsafe.Pointer(cProp))
+	var cTenant *C.char
+	if tenantFilter != nil {
+		cTenant = C.CString(*tenantFilter)
+		defer C.free(unsafe.Pointer(cTenant))
+	}
+	raw, err := consume(
+		C.agentstategraph_policy_evaluate_change_scoped(ps.handle, cRef, cProp, cTenant),
+		"evaluate_change_scoped",
+	)
 	if err != nil {
 		return nil, err
 	}
-	if tenantFilter == nil || d.MatchedPolicy == "" {
-		return d, nil
+	var d Decision
+	if err := decodeOrErr(raw, &d); err != nil {
+		return nil, err
 	}
-	matched, err := ps.Get(ref, d.MatchedPolicy)
-	if err != nil || matched == nil {
-		return d, nil
-	}
-	if tenantMatches(matched, tenantFilter) {
-		return d, nil
-	}
-	return &Decision{Kind: DecisionNoPolicyMatch, Reason: "policy filtered by tenant scope"}, nil
+	return &d, nil
 }
 
 // ActiveScoped wraps Active and drops policies whose `tenant_id` is

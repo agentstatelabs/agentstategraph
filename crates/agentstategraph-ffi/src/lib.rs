@@ -1284,6 +1284,77 @@ pub extern "C" fn agentstategraph_policy_evaluate_change(
     }
 }
 
+/// Scoped evaluator (0.7.5 §3b). Variant of
+/// `agentstategraph_policy_evaluate` that accepts an optional
+/// `tenant_filter`. Pass `NULL` for no filter (equivalent to the
+/// non-scoped variant). Returns JSON `Decision`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_evaluate_scoped(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    situation_json: *const c_char,
+    action: *const c_char,
+    agent_id: *const c_char,
+    tenant_filter: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let situation_str = unsafe { c_to_str(situation_json) };
+    let action = unsafe { c_to_str(action) };
+    let agent_id = unsafe { c_to_str(agent_id) };
+    let tenant = if tenant_filter.is_null() {
+        None
+    } else {
+        Some(unsafe { c_to_str(tenant_filter) })
+    };
+    let situation = match parse_situation(&situation_str) {
+        Ok(s) => s,
+        Err(e) => return json_err(&format!("invalid situation: {e}")),
+    };
+    match store
+        .inner
+        .evaluate_scoped(&ref_name, &situation, &action, &agent_id, tenant.as_deref())
+    {
+        Ok(d) => json_ok(&d),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Scoped change-proposal evaluator (0.7.5 §3b). See
+/// `agentstategraph_policy_evaluate_scoped` for `tenant_filter`
+/// semantics.
+#[no_mangle]
+pub extern "C" fn agentstategraph_policy_evaluate_change_scoped(
+    store: *const SgPolicyStore,
+    ref_name: *const c_char,
+    proposal_json: *const c_char,
+    tenant_filter: *const c_char,
+) -> *mut c_char {
+    let Some(store) = policystore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let proposal_str = unsafe { c_to_str(proposal_json) };
+    let tenant = if tenant_filter.is_null() {
+        None
+    } else {
+        Some(unsafe { c_to_str(tenant_filter) })
+    };
+    let proposal: ChangeProposal = match serde_json::from_str(&proposal_str) {
+        Ok(p) => p,
+        Err(e) => return json_err(&format!("invalid proposal: {e}")),
+    };
+    match store
+        .inner
+        .evaluate_change_scoped(&ref_name, &proposal, tenant.as_deref())
+    {
+        Ok(d) => json_ok(&d),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
 /// List active policies whose `triggers` intersect `tokens_json` (a JSON
 /// array of strings). Binding-level helper mirroring the internal filter
 /// used by `evaluate_change`. Returns JSON array of policies.

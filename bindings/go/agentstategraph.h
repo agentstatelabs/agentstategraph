@@ -92,6 +92,11 @@ extern char* agentstategraph_policy_evaluate(SgPolicyStore store, const char* re
     const char* action, const char* agent_id);
 extern char* agentstategraph_policy_evaluate_change(SgPolicyStore store, const char* ref_name,
     const char* proposal_json);
+extern char* agentstategraph_policy_evaluate_scoped(SgPolicyStore store, const char* ref_name,
+    const char* situation_json, const char* action, const char* agent_id,
+    const char* tenant_filter_or_null);
+extern char* agentstategraph_policy_evaluate_change_scoped(SgPolicyStore store, const char* ref_name,
+    const char* proposal_json, const char* tenant_filter_or_null);
 extern char* agentstategraph_policy_check_tokens(SgPolicyStore store, const char* ref_name, const char* tokens_json);
 extern char* agentstategraph_policy_sign(SgPolicyStore store, const char* ref_name, const char* path,
     const char* signer_key_id);
