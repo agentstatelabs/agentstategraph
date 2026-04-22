@@ -198,5 +198,99 @@
       "agent_id": "parity-runner",
       "expected_decision_kind": "no_policy_match"
     }
-  ]
+  ],
+  "taint_cases": [
+    {
+      "label": "warn-effect taint allows write but surfaces on check",
+      "apply": {
+        "path": "/parity/taint/warn-case",
+        "name": "disk-pressure",
+        "effect": "warn",
+        "reason": "node under pressure",
+        "severity": "medium",
+        "propagate": true,
+        "agent_id": "parity-runner"
+      },
+      "check": {
+        "path": "/parity/taint/warn-case/child",
+        "agent_id": "parity-runner",
+        "confidence": 1.0
+      },
+      "expected": {
+        "tainted": true,
+        "can_write": true,
+        "required_confidence": 0.0
+      }
+    },
+    {
+      "label": "block-effect taint denies write",
+      "apply": {
+        "path": "/parity/taint/block-case",
+        "name": "crash-loop",
+        "effect": "block",
+        "reason": "spark-silver crash-looping",
+        "severity": "critical",
+        "propagate": true,
+        "agent_id": "parity-runner"
+      },
+      "check": {
+        "path": "/parity/taint/block-case/service",
+        "agent_id": "parity-runner",
+        "confidence": 1.0
+      },
+      "expected": {
+        "tainted": true,
+        "can_write": false
+      }
+    },
+    {
+      "label": "review-effect taint enforces confidence >= 0.9",
+      "apply": {
+        "path": "/parity/taint/review-case",
+        "name": "needs-review",
+        "effect": "review",
+        "reason": "security review required",
+        "severity": "high",
+        "propagate": true,
+        "agent_id": "parity-runner"
+      },
+      "check_low": {
+        "path": "/parity/taint/review-case/target",
+        "agent_id": "parity-runner",
+        "confidence": 0.5
+      },
+      "check_high": {
+        "path": "/parity/taint/review-case/target",
+        "agent_id": "parity-runner",
+        "confidence": 0.95
+      },
+      "expected_low_can_write": false,
+      "expected_high_can_write": true,
+      "expected_required_confidence": 0.9
+    }
+  ],
+  "quarantine_case": {
+    "label": "quarantine gates writes to authorized_agents only",
+    "apply": {
+      "path": "/parity/quarantine-case",
+      "name": "security-review",
+      "reason": "unauthorized-access pattern",
+      "severity": "critical",
+      "authorized_agents": ["agent/security"],
+      "propagate": true,
+      "agent_id": "agent/security"
+    },
+    "check_unauthorized": {
+      "path": "/parity/quarantine-case/state",
+      "agent_id": "parity-runner",
+      "confidence": 1.0
+    },
+    "check_authorized": {
+      "path": "/parity/quarantine-case/state",
+      "agent_id": "agent/security",
+      "confidence": 1.0
+    },
+    "expected_unauthorized_can_write": false,
+    "expected_authorized_can_write": true
+  }
 }
