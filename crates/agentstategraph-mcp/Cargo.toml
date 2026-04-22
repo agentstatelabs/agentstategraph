@@ -21,6 +21,7 @@ agentstategraph-migrate = { path = "../agentstategraph-migrate" }
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
 agentstategraph-policy = { path = "../agentstategraph-policy" }
 agentstategraph-policy-sign = { path = "../agentstategraph-policy-sign" }
+agentstategraph-taint = { path = "../agentstategraph-taint" }
 agentstategraph-policy-wasm = { path = "../agentstategraph-policy-wasm", optional = true }
 agentstategraph-policy-rego = { path = "../agentstategraph-policy-rego", optional = true }
 agentstategraph-policy-cedar = { path = "../agentstategraph-policy-cedar", optional = true }

@@ -66,6 +66,7 @@ dependencies = [
  "agentstategraph-policy-sign",
  "agentstategraph-policy-wasm",
  "agentstategraph-storage",
+ "agentstategraph-taint",
  "agentstategraph-tasks",
  "axum",
  "chrono",

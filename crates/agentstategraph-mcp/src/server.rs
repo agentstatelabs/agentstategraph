@@ -461,6 +461,119 @@ pub struct PolicyCheckTokensParams {
     pub tokens: Vec<String>,
 }
 
+// -- Taint / Quarantine / Watch parameter types (0.7.75 §6) --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaintApplyParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    pub name: String,
+    /// "warn" | "block" | "review" | "isolate"
+    pub effect: String,
+    pub reason: String,
+    /// "low" | "medium" | "high" | "critical". Default: "medium".
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// RFC3339; null = permanent.
+    #[serde(default)]
+    pub expires: Option<String>,
+    /// Default: true.
+    #[serde(default)]
+    pub propagate: Option<bool>,
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaintRemoveParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    pub name: String,
+    pub reason: String,
+    #[serde(default)]
+    pub proof: Option<String>,
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct QuarantineApplyParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    pub name: String,
+    pub reason: String,
+    /// Default: "high".
+    #[serde(default)]
+    pub severity: Option<String>,
+    pub authorized_agents: Vec<String>,
+    #[serde(default)]
+    pub expires: Option<String>,
+    #[serde(default)]
+    pub propagate: Option<bool>,
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WatchApplyParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    pub name: String,
+    pub reason: String,
+    #[serde(default)]
+    pub metric: Option<String>,
+    #[serde(default)]
+    pub threshold: Option<f64>,
+    /// "above" | "below". Default: "above".
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub check_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub expires: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub propagate: Option<bool>,
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct WatchRemoveParams {
+    #[serde(default = "default_ref")]
+    pub r#ref: String,
+    pub path: String,
+    pub name: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub agent_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListTaintsParams {
+    #[serde(default)]
+    pub path: Option<String>,
+    /// "taint" | "quarantine" | "watch". Default: all.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// "warn" | "block" | "review" | "isolate". Informational filter
+    /// applied client-side on the result list.
+    #[serde(default)]
+    pub effect: Option<String>,
+    #[serde(default)]
+    pub include_expired: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CheckTaintParams {
+    pub path: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+}
+
 // -- Plan/Task parameter types --
 
 #[derive(Deserialize, JsonSchema)]
@@ -709,6 +822,12 @@ impl AgentStateGraphServer {
     /// Read-only accessor for tests.
     pub fn policies(&self) -> &PolicyStore {
         &self.policies
+    }
+
+    /// Read-only accessor for tests and taint-surface callers that
+    /// need to exercise the Repository methods directly.
+    pub fn repo(&self) -> &Repository {
+        &self.repo
     }
 
     #[tool(
@@ -1836,6 +1955,173 @@ impl AgentStateGraphServer {
             .to_string(),
         }
     }
+
+    // -- Taint / Quarantine / Watch tools (0.7.75 §6) --
+
+    #[tool(
+        description = "Apply a taint to `path` with an effect that changes how agents interact with it. Effects: 'warn' (advisory), 'block' (rejects writes), 'review' (requires confidence >= 0.9), 'isolate' (excludes from query/search)."
+    )]
+    async fn agentstategraph_taint(&self, params: Parameters<TaintApplyParams>) -> String {
+        let p = params.0;
+        let effect = match parse_taint_effect(&p.effect) {
+            Some(e) => e,
+            None => {
+                return serde_json::json!({ "error": format!("unknown effect: {}", p.effect) })
+                    .to_string();
+            }
+        };
+        let params = agentstategraph_taint::TaintParams {
+            name: p.name,
+            effect,
+            reason: p.reason,
+            severity: parse_taint_severity(p.severity.as_deref()),
+            expires_at: parse_optional_rfc3339(p.expires.as_deref()),
+            propagate: p.propagate.unwrap_or(true),
+            metadata: agentstategraph_taint::TaintMetadata::new(),
+            agent_id: p.agent_id,
+        };
+        match self.repo.taint(&p.r#ref, &p.path, params) {
+            Ok(id) => serde_json::json!({ "ok": true, "id": id }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Remove a taint by name from `path`. Requires a reason; optional proof (commit id) for audit."
+    )]
+    async fn agentstategraph_untaint(&self, params: Parameters<TaintRemoveParams>) -> String {
+        let p = params.0;
+        let params = agentstategraph_taint::UntaintParams {
+            reason: p.reason,
+            proof: p.proof,
+            agent_id: p.agent_id,
+        };
+        match self.repo.untaint(&p.r#ref, &p.path, &p.name, params) {
+            Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Quarantine `path` — restricts reads and writes to the supplied `authorized_agents` list. Stronger than taint; all rejected access attempts are logged as commits."
+    )]
+    async fn agentstategraph_quarantine(
+        &self,
+        params: Parameters<QuarantineApplyParams>,
+    ) -> String {
+        let p = params.0;
+        let params = agentstategraph_taint::QuarantineParams {
+            name: p.name,
+            reason: p.reason,
+            severity: parse_taint_severity(p.severity.as_deref()),
+            authorized_agents: p.authorized_agents,
+            expires_at: parse_optional_rfc3339(p.expires.as_deref()),
+            propagate: p.propagate.unwrap_or(true),
+            agent_id: p.agent_id,
+        };
+        match self.repo.quarantine(&p.r#ref, &p.path, params) {
+            Ok(id) => serde_json::json!({ "ok": true, "id": id }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Release a quarantine. Caller should supply evidence the issue is resolved via the `proof` field."
+    )]
+    async fn agentstategraph_unquarantine(&self, params: Parameters<TaintRemoveParams>) -> String {
+        let p = params.0;
+        let params = agentstategraph_taint::UntaintParams {
+            reason: p.reason,
+            proof: p.proof,
+            agent_id: p.agent_id,
+        };
+        match self.repo.unquarantine(&p.r#ref, &p.path, &p.name, params) {
+            Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Apply an advisory watch to `path`. Lighter than taint — purely advisory, does not restrict access. Watches with a numeric `threshold` auto-escalate to a Warn-effect taint when a subsequent set_json crosses the threshold."
+    )]
+    async fn agentstategraph_watch(&self, params: Parameters<WatchApplyParams>) -> String {
+        let p = params.0;
+        let direction = match p.direction.as_deref().unwrap_or("above") {
+            "below" => agentstategraph_taint::WatchDirection::Below,
+            _ => agentstategraph_taint::WatchDirection::Above,
+        };
+        let params = agentstategraph_taint::WatchParams {
+            name: p.name,
+            reason: p.reason,
+            metric: p.metric,
+            threshold: p.threshold,
+            direction,
+            check_interval_secs: p.check_interval_secs,
+            expires_at: parse_optional_rfc3339(p.expires.as_deref()),
+            severity: parse_taint_severity(p.severity.as_deref()),
+            propagate: p.propagate.unwrap_or(true),
+            agent_id: p.agent_id,
+        };
+        match self.repo.watch_path(&p.r#ref, &p.path, params) {
+            Ok(id) => serde_json::json!({ "ok": true, "id": id }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(description = "Remove a watch by name.")]
+    async fn agentstategraph_unwatch(&self, params: Parameters<WatchRemoveParams>) -> String {
+        let p = params.0;
+        let params = agentstategraph_taint::UnwatchParams {
+            reason: p.reason,
+            agent_id: p.agent_id,
+        };
+        match self.repo.unwatch(&p.r#ref, &p.path, &p.name, params) {
+            Ok(()) => serde_json::json!({ "ok": true }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List active taints / quarantines / watches. Optional filters: `path` prefix, `kind` (taint|quarantine|watch), `effect`, `include_expired`."
+    )]
+    async fn agentstategraph_list_taints(&self, params: Parameters<ListTaintsParams>) -> String {
+        let p = params.0;
+        let kind = match p.kind.as_deref() {
+            Some("taint") => Some(agentstategraph_taint::TaintKind::Taint),
+            Some("quarantine") => Some(agentstategraph_taint::TaintKind::Quarantine),
+            Some("watch") => Some(agentstategraph_taint::TaintKind::Watch),
+            Some(other) => {
+                return serde_json::json!({ "error": format!("unknown kind: {}", other) })
+                    .to_string();
+            }
+            None => None,
+        };
+        match self
+            .repo
+            .list_taints(p.path.as_deref(), kind, p.include_expired.unwrap_or(false))
+        {
+            Ok(mut list) => {
+                if let Some(effect) = p.effect.as_deref().and_then(parse_taint_effect) {
+                    list.retain(|t| t.effect == effect);
+                }
+                serde_json::json!({ "ok": true, "taints": list }).to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Check the full taint status for `path`, including ancestor taints. Returns whether a write is allowed for the given agent at the given confidence, plus aggregated taint / quarantine / watch lists."
+    )]
+    async fn agentstategraph_check_taint(&self, params: Parameters<CheckTaintParams>) -> String {
+        let p = params.0;
+        let agent_id = p.agent_id.as_deref().unwrap_or("");
+        let confidence = p.confidence.unwrap_or(1.0);
+        match self.repo.check_taint(&p.path, agent_id, confidence) {
+            Ok(c) => serde_json::json!({ "ok": true, "check": c }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1862,6 +2148,34 @@ fn parse_category(s: &str) -> IntentCategory {
         "plan" => IntentCategory::Plan,
         other => IntentCategory::Custom(other.to_string()),
     }
+}
+
+pub fn parse_taint_effect(s: &str) -> Option<agentstategraph_taint::TaintEffect> {
+    match s.to_lowercase().as_str() {
+        "warn" => Some(agentstategraph_taint::TaintEffect::Warn),
+        "block" => Some(agentstategraph_taint::TaintEffect::Block),
+        "review" => Some(agentstategraph_taint::TaintEffect::Review),
+        "isolate" => Some(agentstategraph_taint::TaintEffect::Isolate),
+        "advisory" => Some(agentstategraph_taint::TaintEffect::Advisory),
+        _ => None,
+    }
+}
+
+pub fn parse_taint_severity(s: Option<&str>) -> agentstategraph_taint::TaintSeverity {
+    match s.unwrap_or("medium").to_lowercase().as_str() {
+        "low" => agentstategraph_taint::TaintSeverity::Low,
+        "high" => agentstategraph_taint::TaintSeverity::High,
+        "critical" => agentstategraph_taint::TaintSeverity::Critical,
+        _ => agentstategraph_taint::TaintSeverity::Medium,
+    }
+}
+
+pub fn parse_optional_rfc3339(s: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    s.and_then(|raw| {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+    })
 }
 
 /// Translate `Decision::NoPolicyMatch` per the MCP fail-safe config.
