@@ -8,6 +8,7 @@
 #ifndef AGENTSTATEGRAPH_H
 #define AGENTSTATEGRAPH_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef void* SgRepo;
@@ -102,6 +103,24 @@ extern char* agentstategraph_policy_sign(SgPolicyStore store, const char* ref_na
     const char* signer_key_id);
 extern char* agentstategraph_policy_verify(SgPolicyStore store, const char* ref_name, const char* path);
 extern char* agentstategraph_policy_set_external_evaluator(SgPolicyStore store, const char* config_json);
+
+/* Taint / Quarantine / Watch (0.7.75) */
+extern char* agentstategraph_taint_apply(SgRepo repo, const char* ref_name, const char* path,
+    const char* params_json);
+extern char* agentstategraph_taint_remove(SgRepo repo, const char* ref_name, const char* path,
+    const char* params_json);
+extern char* agentstategraph_quarantine_apply(SgRepo repo, const char* ref_name, const char* path,
+    const char* params_json);
+extern char* agentstategraph_quarantine_release(SgRepo repo, const char* ref_name, const char* path,
+    const char* params_json);
+extern char* agentstategraph_watch_apply(SgRepo repo, const char* ref_name, const char* path,
+    const char* params_json);
+extern char* agentstategraph_watch_remove(SgRepo repo, const char* ref_name, const char* path,
+    const char* params_json);
+extern char* agentstategraph_list_taints(SgRepo repo, const char* path_prefix_or_null,
+    const char* kind_or_null, bool include_resolved);
+extern char* agentstategraph_check_taint(SgRepo repo, const char* path, const char* agent_id,
+    double confidence);
 
 /* Migrate */
 extern char* agentstategraph_migrate_check(SgRepo repo, const char* ref_name, const char* target);

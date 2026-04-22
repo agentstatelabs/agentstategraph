@@ -15,7 +15,9 @@ agentstategraph-core = { path = "../agentstategraph-core" }
 agentstategraph-storage = { path = "../agentstategraph-storage" }
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
 agentstategraph-policy = { path = "../agentstategraph-policy" }
+agentstategraph-taint = { path = "../agentstategraph-taint" }
 agentstategraph-migrate = { path = "../agentstategraph-migrate" }
+chrono = { workspace = true }
 semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

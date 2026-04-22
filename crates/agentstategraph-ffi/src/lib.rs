@@ -26,6 +26,10 @@ use agentstategraph_core::IntentCategory;
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore, Situation};
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_taint::{
+    QuarantineParams, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
+    UntaintParams, UnwatchParams, WatchDirection, WatchParams,
+};
 use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskId, TaskStore};
 use semver::Version;
 use serde::Serialize;
@@ -1468,6 +1472,386 @@ pub extern "C" fn agentstategraph_policy_set_external_evaluator(
     to_c_string(
         "{\"error\":\"external evaluators not configured via FFI; use the server builder\"}",
     )
+}
+
+// ===========================================================================
+// Taint / Quarantine / Watch FFI (0.7.75 §7)
+// ===========================================================================
+
+fn parse_taint_effect_ffi(s: &str) -> Option<TaintEffect> {
+    match s.to_lowercase().as_str() {
+        "warn" => Some(TaintEffect::Warn),
+        "block" => Some(TaintEffect::Block),
+        "review" => Some(TaintEffect::Review),
+        "isolate" => Some(TaintEffect::Isolate),
+        "advisory" => Some(TaintEffect::Advisory),
+        _ => None,
+    }
+}
+
+fn parse_taint_severity_ffi(s: Option<&str>) -> TaintSeverity {
+    match s.unwrap_or("medium").to_lowercase().as_str() {
+        "low" => TaintSeverity::Low,
+        "high" => TaintSeverity::High,
+        "critical" => TaintSeverity::Critical,
+        _ => TaintSeverity::Medium,
+    }
+}
+
+fn parse_taint_kind_ffi(s: &str) -> Option<TaintKind> {
+    match s.to_lowercase().as_str() {
+        "taint" => Some(TaintKind::Taint),
+        "quarantine" => Some(TaintKind::Quarantine),
+        "watch" => Some(TaintKind::Watch),
+        _ => None,
+    }
+}
+
+/// Apply a taint. `params_json` shape:
+/// `{"name":"...","effect":"warn|block|review|isolate","reason":"...",
+/// "severity":"medium","expires":null,"propagate":true,"agent_id":"..."}`.
+/// Returns JSON `{"ok":true,"id":"<uuid>"}` or `{"error":"..."}`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taint_apply(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    path: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let params_str = unsafe { c_to_str(params_json) };
+    let v: serde_json::Value = match serde_json::from_str(&params_str) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid params: {e}")),
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()).map(str::to_string) else {
+        return json_err("missing 'name'");
+    };
+    let Some(effect) = v
+        .get("effect")
+        .and_then(|x| x.as_str())
+        .and_then(parse_taint_effect_ffi)
+    else {
+        return json_err("missing or invalid 'effect'");
+    };
+    let reason = v
+        .get("reason")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let severity = parse_taint_severity_ffi(v.get("severity").and_then(|x| x.as_str()));
+    let expires_at = v
+        .get("expires")
+        .and_then(|x| x.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+    let propagate = v.get("propagate").and_then(|x| x.as_bool()).unwrap_or(true);
+    let agent_id = v
+        .get("agent_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let params = TaintParams {
+        name,
+        effect,
+        reason,
+        severity,
+        expires_at,
+        propagate,
+        metadata: TaintMetadata::new(),
+        agent_id,
+    };
+    match repo.inner.taint(&ref_name, &path, params) {
+        Ok(id) => json_ok(&serde_json::json!({ "ok": true, "id": id })),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Remove a taint. `params_json`: `{"name":"...","reason":"...","proof":null,"agent_id":"..."}`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taint_remove(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    path: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let v: serde_json::Value = match serde_json::from_str(&unsafe { c_to_str(params_json) }) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid params: {e}")),
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()).map(str::to_string) else {
+        return json_err("missing 'name'");
+    };
+    let params = UntaintParams {
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        proof: v.get("proof").and_then(|x| x.as_str()).map(str::to_string),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    match repo.inner.untaint(&ref_name, &path, &name, params) {
+        Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Apply a quarantine. `params_json`:
+/// `{"name","reason","severity","authorized_agents":[...],"expires","propagate","agent_id"}`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_quarantine_apply(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    path: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let v: serde_json::Value = match serde_json::from_str(&unsafe { c_to_str(params_json) }) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid params: {e}")),
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()).map(str::to_string) else {
+        return json_err("missing 'name'");
+    };
+    let authorized: Vec<String> = v
+        .get("authorized_agents")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let params = QuarantineParams {
+        name,
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        severity: parse_taint_severity_ffi(v.get("severity").and_then(|x| x.as_str())),
+        authorized_agents: authorized,
+        expires_at: v
+            .get("expires")
+            .and_then(|x| x.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc)),
+        propagate: v.get("propagate").and_then(|x| x.as_bool()).unwrap_or(true),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    match repo.inner.quarantine(&ref_name, &path, params) {
+        Ok(id) => json_ok(&serde_json::json!({ "ok": true, "id": id })),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Release a quarantine. `params_json` shape matches taint_remove.
+#[no_mangle]
+pub extern "C" fn agentstategraph_quarantine_release(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    path: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let v: serde_json::Value = match serde_json::from_str(&unsafe { c_to_str(params_json) }) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid params: {e}")),
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()).map(str::to_string) else {
+        return json_err("missing 'name'");
+    };
+    let params = UntaintParams {
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        proof: v.get("proof").and_then(|x| x.as_str()).map(str::to_string),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    match repo.inner.unquarantine(&ref_name, &path, &name, params) {
+        Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Apply a watch. `params_json`:
+/// `{"name","reason","metric","threshold","direction":"above|below",
+///   "check_interval_secs","expires","severity","propagate","agent_id"}`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_watch_apply(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    path: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let v: serde_json::Value = match serde_json::from_str(&unsafe { c_to_str(params_json) }) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid params: {e}")),
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()).map(str::to_string) else {
+        return json_err("missing 'name'");
+    };
+    let direction = match v
+        .get("direction")
+        .and_then(|x| x.as_str())
+        .unwrap_or("above")
+    {
+        "below" => WatchDirection::Below,
+        _ => WatchDirection::Above,
+    };
+    let params = WatchParams {
+        name,
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        metric: v.get("metric").and_then(|x| x.as_str()).map(str::to_string),
+        threshold: v.get("threshold").and_then(|x| x.as_f64()),
+        direction,
+        check_interval_secs: v.get("check_interval_secs").and_then(|x| x.as_u64()),
+        expires_at: v
+            .get("expires")
+            .and_then(|x| x.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc)),
+        severity: parse_taint_severity_ffi(v.get("severity").and_then(|x| x.as_str())),
+        propagate: v.get("propagate").and_then(|x| x.as_bool()).unwrap_or(true),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    match repo.inner.watch_path(&ref_name, &path, params) {
+        Ok(id) => json_ok(&serde_json::json!({ "ok": true, "id": id })),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Remove a watch.
+#[no_mangle]
+pub extern "C" fn agentstategraph_watch_remove(
+    repo: *const SgRepo,
+    ref_name: *const c_char,
+    path: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let path = unsafe { c_to_str(path) };
+    let v: serde_json::Value = match serde_json::from_str(&unsafe { c_to_str(params_json) }) {
+        Ok(v) => v,
+        Err(e) => return json_err(&format!("invalid params: {e}")),
+    };
+    let Some(name) = v.get("name").and_then(|x| x.as_str()).map(str::to_string) else {
+        return json_err("missing 'name'");
+    };
+    let params = UnwatchParams {
+        reason: v.get("reason").and_then(|x| x.as_str()).map(str::to_string),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    match repo.inner.unwatch(&ref_name, &path, &name, params) {
+        Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// List active taints / quarantines / watches. `kind_or_null` accepts
+/// "taint" | "quarantine" | "watch" or NULL to list all.
+#[no_mangle]
+pub extern "C" fn agentstategraph_list_taints(
+    repo: *const SgRepo,
+    path_prefix_or_null: *const c_char,
+    kind_or_null: *const c_char,
+    include_resolved: bool,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let prefix = if path_prefix_or_null.is_null() {
+        None
+    } else {
+        Some(unsafe { c_to_str(path_prefix_or_null) })
+    };
+    let kind = if kind_or_null.is_null() {
+        None
+    } else {
+        let s = unsafe { c_to_str(kind_or_null) };
+        match parse_taint_kind_ffi(&s) {
+            Some(k) => Some(k),
+            None => return json_err(&format!("unknown kind: {s}")),
+        }
+    };
+    match repo
+        .inner
+        .list_taints(prefix.as_deref(), kind, include_resolved)
+    {
+        Ok(list) => json_ok(&serde_json::json!({ "ok": true, "taints": list })),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Check the taint status for `path` given `agent_id` + `confidence`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_check_taint(
+    repo: *const SgRepo,
+    path: *const c_char,
+    agent_id: *const c_char,
+    confidence: f64,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let path = unsafe { c_to_str(path) };
+    let agent_id = unsafe { c_to_str(agent_id) };
+    match repo.inner.check_taint(&path, &agent_id, confidence) {
+        Ok(c) => json_ok(&serde_json::json!({ "ok": true, "check": c })),
+        Err(e) => json_err(&e.to_string()),
+    }
 }
 
 fn parse_situation(s: &str) -> Result<Situation, serde_json::Error> {
