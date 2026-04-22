@@ -16,7 +16,7 @@ use agentstategraph_wasm::WasmPolicyStore;
 use serde_json::Value;
 use wasm_bindgen_test::*;
 
-wasm_bindgen_test_configure!(run_in_browser);
+// wasm_bindgen_test_configure!(run_in_browser); // drop to allow --node tests
 
 const FIXTURE: &str = include_str!("../../../spec/policy_parity_fixture.json");
 

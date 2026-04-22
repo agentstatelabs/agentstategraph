@@ -17,7 +17,7 @@ use agentstategraph_wasm::WasmPolicyStore;
 
 use wasm_bindgen_test::*;
 
-wasm_bindgen_test_configure!(run_in_browser);
+// wasm_bindgen_test_configure!(run_in_browser); // drop to allow --node tests
 
 fn new_repo() -> Arc<Repository> {
     let repo = Repository::new(Box::new(MemoryStorage::new()));
@@ -464,9 +464,9 @@ fn task_extension_fields_roundtrip() {
             None,
             None,
             None,
-            Some(agentstategraph_tasks::OnCompleteHook::Named(
-                "notify-slack".to_string(),
-            )),
+            Some(agentstategraph_tasks::OnCompleteHook::Named {
+                name: "notify-slack".to_string(),
+            }),
         )
         .unwrap();
     let enc2 = serde_json::to_string(&t2).unwrap();
@@ -509,11 +509,12 @@ fn task_extension_fields_roundtrip() {
 #[wasm_bindgen_test]
 fn test_wasm_policy_signature_field_round_trips() {
     let ps = new_store();
+    // PolicySignature is a tagged union keyed by `algorithm`; Ed25519
+    // is the only variant shipped in 0.7.5.
     let sig = serde_json::json!({
         "algorithm": "ed25519",
-        "key_id": "ops-root-2026",
-        "signature_b64": "YWJjZGVm",
-        "signed_at": "2026-04-18T00:00:00Z",
+        "signer_key_id": "ops-root-2026",
+        "signature_hex": "00".repeat(64),
     });
     let pol = policy_json(
         "infra/signed",
@@ -524,7 +525,7 @@ fn test_wasm_policy_signature_field_round_trips() {
         serde_json::from_str(&ps.get("main", "infra/signed", None).unwrap()).unwrap();
     assert_eq!(fetched["signature"], sig);
     assert_eq!(fetched["signature"]["algorithm"], "ed25519");
-    assert_eq!(fetched["signature"]["key_id"], "ops-root-2026");
+    assert_eq!(fetched["signature"]["signer_key_id"], "ops-root-2026");
 }
 
 #[wasm_bindgen_test]
@@ -556,10 +557,11 @@ fn test_wasm_policy_tenant_id_field_round_trips() {
 #[wasm_bindgen_test]
 fn test_wasm_policy_external_evaluator_field_round_trips() {
     let ps = new_store();
+    // ExternalEvaluatorRef is a tagged union keyed by `kind`
+    // (rego / cedar / wasm) and carries an `EvaluatorSource`.
     let ext = serde_json::json!({
-        "kind": "webhook",
-        "endpoint": "https://policy.example.com/evaluate",
-        "timeout_ms": 2500,
+        "kind": "wasm",
+        "source": { "kind": "inline", "body": "(module)" },
     });
     ps.propose(
         "main",
@@ -572,7 +574,7 @@ fn test_wasm_policy_external_evaluator_field_round_trips() {
     let fetched: serde_json::Value =
         serde_json::from_str(&ps.get("main", "infra/ext", None).unwrap()).unwrap();
     assert_eq!(fetched["external_evaluator"], ext);
-    assert_eq!(fetched["external_evaluator"]["kind"], "webhook");
+    assert_eq!(fetched["external_evaluator"]["kind"], "wasm");
 }
 
 #[wasm_bindgen_test]
