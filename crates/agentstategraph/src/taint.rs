@@ -346,6 +346,81 @@ impl Repository {
         Ok(warnings)
     }
 
+    /// Inspect active watches on `path` and auto-escalate any whose
+    /// numeric threshold was just crossed by the commit that wrote
+    /// `new_value`. Runs at most once per `(watch.id, commit)` pair —
+    /// if an auto-taint already exists for the same
+    /// `watch-threshold-exceeded-<watch.name>` name and is
+    /// unresolved, no new taint is created (idempotent).
+    ///
+    /// Called by `set_json` after the commit is persisted (§5).
+    pub fn auto_escalate_watches(
+        &self,
+        ref_name: &str,
+        path: &str,
+        new_value: &serde_json::Value,
+    ) -> Result<Vec<String>, RepoError> {
+        let candidates = self.taint_storage().check_taint(path)?;
+        let mut created = Vec::new();
+        for w in candidates.iter().filter(|t| t.kind == TaintKind::Watch) {
+            let metric = w.metadata.get("metric").and_then(|v| v.as_str());
+            let threshold = w.metadata.get("threshold").and_then(|v| v.as_f64());
+            let direction = w
+                .metadata
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("above");
+            let (Some(metric), Some(threshold)) = (metric, threshold) else {
+                continue;
+            };
+            let Some(current) = extract_metric(new_value, metric) else {
+                continue;
+            };
+            let crossed = match direction {
+                "below" => current < threshold,
+                _ => current > threshold,
+            };
+            if !crossed {
+                continue;
+            }
+            let auto_name = format!("watch-threshold-exceeded-{}", w.name);
+            // Idempotence: skip if an unresolved auto-taint with
+            // this name already exists on this path.
+            let existing =
+                self.taint_storage()
+                    .list_taints(Some(&w.path), Some(TaintKind::Taint), false)?;
+            if existing.iter().any(|t| t.name == auto_name) {
+                continue;
+            }
+            let reason = format!(
+                "Watch threshold exceeded: {metric} = {current} {cmp} {threshold}",
+                cmp = if direction == "below" { "<" } else { ">" }
+            );
+            let mut metadata = TaintMetadata::new();
+            metadata.insert("auto_escalated", serde_json::Value::Bool(true));
+            metadata.insert("source_watch_id", serde_json::Value::String(w.id.clone()));
+            metadata.insert("metric", serde_json::Value::String(metric.to_string()));
+            metadata.insert("threshold", serde_json::Value::from(threshold));
+            metadata.insert("observed", serde_json::Value::from(current));
+            let id = self.taint(
+                ref_name,
+                &w.path,
+                TaintParams {
+                    name: auto_name,
+                    effect: TaintEffect::Warn,
+                    reason,
+                    severity: w.severity,
+                    expires_at: None,
+                    propagate: w.propagate,
+                    metadata,
+                    agent_id: format!("watch/{}", w.id),
+                },
+            )?;
+            created.push(id);
+        }
+        Ok(created)
+    }
+
     // -----------------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------------
@@ -393,4 +468,28 @@ fn taint_err_with_id(source: TaintError, id: String) -> RepoError {
         source,
         taint_id: Some(id),
     }
+}
+
+/// Extract a numeric value for `metric` from a JSON value. Supports:
+/// - a top-level number (when `metric == ""` or the value IS the
+///   number being watched);
+/// - a flat object with a numeric field keyed by `metric`;
+/// - stringified numbers (e.g. `"82"`) commonly produced by shell
+///   scrapers.
+fn extract_metric(value: &serde_json::Value, metric: &str) -> Option<f64> {
+    if let Some(n) = value.as_f64() {
+        return Some(n);
+    }
+    if let Some(n) = value.as_str().and_then(|s| s.parse::<f64>().ok()) {
+        return Some(n);
+    }
+    if let Some(v) = value.as_object().and_then(|o| o.get(metric)) {
+        if let Some(n) = v.as_f64() {
+            return Some(n);
+        }
+        if let Some(n) = v.as_str().and_then(|s| s.parse::<f64>().ok()) {
+            return Some(n);
+        }
+    }
+    None
 }

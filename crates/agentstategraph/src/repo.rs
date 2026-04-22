@@ -447,7 +447,18 @@ impl Repository {
             .storage
             .get_object(&root_id)?
             .ok_or_else(|| RepoError::RefNotFound("value".to_string()))?;
-        self.set(ref_name, path, &obj, options)
+        // Snapshot the intent category so we can decide whether to
+        // run auto-escalation *after* the main commit (the taint
+        // lifecycle intents bypass it).
+        let is_lifecycle = is_taint_lifecycle_intent(&options.intent.category);
+        let commit_id = self.set(ref_name, path, &obj, options)?;
+        if !is_lifecycle {
+            // 0.7.75 §5: watch auto-escalation. Runs AFTER the
+            // write — threshold-crossing creates a new taint commit
+            // whose intent points at the watch-create commit.
+            let _ = self.auto_escalate_watches(ref_name, path, value)?;
+        }
+        Ok(commit_id)
     }
 
     /// Delete a value from state, creating a new commit.
