@@ -83,6 +83,53 @@ public sealed class ParityTests
                 string.Equals(actualKind, entry.ExpectedDecisionKind, StringComparison.Ordinal),
                 $"evaluate {entry.Label}: decision.kind mismatch (expected {entry.ExpectedDecisionKind}, got {actualKind})");
         }
+
+        // 5. (0.7.5 §6) Optional extra_policies + ratify_extra + tenant/external
+        //    evaluate blocks. Fixtures without these keys deserialize to null
+        //    and the null-coalescing loops below no-op.
+        foreach (var policy in fixture.ExtraPolicies ?? new List<Policy>())
+        {
+            store.Propose(fixture.Ref, policy);
+        }
+        foreach (var r in fixture.RatifyExtra ?? new List<RatifyEntry>())
+        {
+            store.Ratify(fixture.Ref, r.Path, r.Ratifier, r.Reasoning);
+        }
+
+        foreach (var entry in fixture.TenantEvaluate ?? new List<TenantEvaluateEntry>())
+        {
+            var situation = entry.Situation ?? new Dictionary<string, string>();
+            var decision = store.Evaluate(
+                fixture.Ref,
+                situation,
+                entry.Action,
+                entry.AgentId,
+                entry.TenantFilter);
+            var actualKind = DecisionKindTag(decision);
+            Assert.True(
+                string.Equals(actualKind, entry.ExpectedDecisionKind, StringComparison.Ordinal),
+                $"tenant {entry.Label}: decision.kind mismatch (expected {entry.ExpectedDecisionKind}, got {actualKind})");
+
+            if (!string.IsNullOrEmpty(entry.ExpectedMatchedPolicyPrefix))
+            {
+                var matched = MatchedPolicy(decision) ?? "";
+                Assert.True(
+                    matched.StartsWith(entry.ExpectedMatchedPolicyPrefix, StringComparison.Ordinal),
+                    $"tenant {entry.Label}: matched_policy {matched} should start with {entry.ExpectedMatchedPolicyPrefix}");
+            }
+        }
+
+        foreach (var entry in fixture.ExternalEvaluate ?? new List<EvaluateEntry>())
+        {
+            var situation = entry.Situation ?? new Dictionary<string, string>();
+            // No external runner registered → policy with external_evaluator set
+            // is skipped, falling through to no_policy_match.
+            var decision = store.Evaluate(fixture.Ref, situation, entry.Action, entry.AgentId);
+            var actualKind = DecisionKindTag(decision);
+            Assert.True(
+                string.Equals(actualKind, entry.ExpectedDecisionKind, StringComparison.Ordinal),
+                $"external {entry.Label}: decision.kind mismatch (expected {entry.ExpectedDecisionKind}, got {actualKind})");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -154,7 +201,11 @@ public sealed class ParityTests
         List<Policy> Policies,
         List<RatifyEntry>? Ratify,
         [property: JsonPropertyName("change_proposals")] List<ChangeProposalEntry> ChangeProposals,
-        List<EvaluateEntry> Evaluate);
+        List<EvaluateEntry> Evaluate,
+        [property: JsonPropertyName("extra_policies")] List<Policy>? ExtraPolicies = null,
+        [property: JsonPropertyName("ratify_extra")] List<RatifyEntry>? RatifyExtra = null,
+        [property: JsonPropertyName("tenant_evaluate")] List<TenantEvaluateEntry>? TenantEvaluate = null,
+        [property: JsonPropertyName("external_evaluate")] List<EvaluateEntry>? ExternalEvaluate = null);
 
     private sealed record RatifyEntry(
         string Path,
@@ -173,4 +224,13 @@ public sealed class ParityTests
         string Action,
         [property: JsonPropertyName("agent_id")] string AgentId,
         [property: JsonPropertyName("expected_decision_kind")] string ExpectedDecisionKind);
+
+    private sealed record TenantEvaluateEntry(
+        string Label,
+        Dictionary<string, string>? Situation,
+        string Action,
+        [property: JsonPropertyName("agent_id")] string AgentId,
+        [property: JsonPropertyName("tenant_filter")] string? TenantFilter,
+        [property: JsonPropertyName("expected_decision_kind")] string ExpectedDecisionKind,
+        [property: JsonPropertyName("expected_matched_policy_prefix")] string? ExpectedMatchedPolicyPrefix = null);
 }

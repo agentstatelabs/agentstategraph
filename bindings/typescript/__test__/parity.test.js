@@ -61,4 +61,43 @@ test('cross-binding policy parity — TypeScript runner', () => {
       `${label}: got ${JSON.stringify(d)}`,
     );
   }
+
+  // 5. (0.7.5 §6) Optional extra_policies + ratify_extra + tenant/external
+  //    evaluate blocks. Use ?? so fixtures without these keys still pass.
+  for (const pol of fixture.extra_policies ?? []) {
+    ps.propose(ref, pol);
+  }
+  for (const r of fixture.ratify_extra ?? []) {
+    ps.ratify(ref, r.path, r.ratifier, r.reasoning);
+  }
+
+  for (const entry of fixture.tenant_evaluate ?? []) {
+    const label = entry.label ?? '<unlabelled>';
+    const tenant = entry.tenant_filter ?? null;
+    const d = ps.evaluate(ref, entry.situation, entry.action, entry.agent_id, tenant);
+    assert.equal(
+      d.kind,
+      entry.expected_decision_kind,
+      `tenant ${label}: got ${JSON.stringify(d)}`,
+    );
+    if (entry.expected_matched_policy_prefix) {
+      const matched = d.matched_policy ?? '';
+      assert.ok(
+        matched.startsWith(entry.expected_matched_policy_prefix),
+        `tenant ${label}: matched_policy ${JSON.stringify(matched)} should start with ${JSON.stringify(entry.expected_matched_policy_prefix)}`,
+      );
+    }
+  }
+
+  for (const entry of fixture.external_evaluate ?? []) {
+    const label = entry.label ?? '<unlabelled>';
+    // No external runner registered → policy with external_evaluator set
+    // is skipped, falling through to no_policy_match.
+    const d = ps.evaluate(ref, entry.situation, entry.action, entry.agent_id);
+    assert.equal(
+      d.kind,
+      entry.expected_decision_kind,
+      `external ${label}: got ${JSON.stringify(d)}`,
+    );
+  }
 });

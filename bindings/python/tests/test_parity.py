@@ -57,3 +57,37 @@ def test_parity_fixture_matches_python_binding(fixture):
         expected = entry["expected_decision_kind"]
         d = ps.evaluate(ref, entry["situation"], entry["action"], entry["agent_id"])
         assert d["kind"] == expected, f"{label}: got {d}"
+
+    # 5. (0.7.5 §6) Optional extra_policies + ratify_extra + tenant/external
+    #    evaluate blocks. Use .get() so fixtures without these keys still pass.
+    for pol in fixture.get("extra_policies", []) or []:
+        ps.propose(ref, pol)
+    for r in fixture.get("ratify_extra", []) or []:
+        ps.ratify(ref, r["path"], r["ratifier"], r["reasoning"])
+
+    for entry in fixture.get("tenant_evaluate", []) or []:
+        label = entry.get("label", "<unlabelled>")
+        expected = entry["expected_decision_kind"]
+        tenant = entry.get("tenant_filter")
+        d = ps.evaluate(
+            ref,
+            entry["situation"],
+            entry["action"],
+            entry["agent_id"],
+            tenant_filter=tenant,
+        )
+        assert d["kind"] == expected, f"tenant {label}: got {d}"
+        if "expected_matched_policy_prefix" in entry:
+            matched = d.get("matched_policy") or ""
+            assert matched.startswith(entry["expected_matched_policy_prefix"]), (
+                f"tenant {label}: matched_policy {matched!r} should start with "
+                f"{entry['expected_matched_policy_prefix']!r}"
+            )
+
+    for entry in fixture.get("external_evaluate", []) or []:
+        label = entry.get("label", "<unlabelled>")
+        expected = entry["expected_decision_kind"]
+        # No external runner registered → policy with external_evaluator set
+        # is skipped, falling through to no_policy_match.
+        d = ps.evaluate(ref, entry["situation"], entry["action"], entry["agent_id"])
+        assert d["kind"] == expected, f"external {label}: got {d}"

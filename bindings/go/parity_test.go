@@ -22,13 +22,17 @@ import (
 // policy-store a struct that matches the Go binding's own types
 // without re-stating every field.
 type parityFixture struct {
-	Prefix   string          `json:"prefix"`
-	AgentID  string          `json:"agent_id"`
-	Ref      string          `json:"ref"`
-	Policies []Policy        `json:"policies"`
-	Ratify   []parityRatify  `json:"ratify"`
-	Changes  []parityChange  `json:"change_proposals"`
-	Evals    []parityEval    `json:"evaluate"`
+	Prefix         string                 `json:"prefix"`
+	AgentID        string                 `json:"agent_id"`
+	Ref            string                 `json:"ref"`
+	Policies       []Policy               `json:"policies"`
+	Ratify         []parityRatify         `json:"ratify"`
+	Changes        []parityChange         `json:"change_proposals"`
+	Evals          []parityEval           `json:"evaluate"`
+	ExtraPolicies  []Policy               `json:"extra_policies,omitempty"`
+	RatifyExtra    []parityRatify         `json:"ratify_extra,omitempty"`
+	TenantEvaluate []parityTenantEval     `json:"tenant_evaluate,omitempty"`
+	ExternalEval   []parityEval           `json:"external_evaluate,omitempty"`
 }
 
 type parityRatify struct {
@@ -50,6 +54,16 @@ type parityEval struct {
 	Action       string            `json:"action"`
 	AgentID      string            `json:"agent_id"`
 	ExpectedKind string            `json:"expected_decision_kind"`
+}
+
+type parityTenantEval struct {
+	Label                       string            `json:"label"`
+	Situation                   map[string]string `json:"situation"`
+	Action                      string            `json:"action"`
+	AgentID                     string            `json:"agent_id"`
+	TenantFilter                *string           `json:"tenant_filter"`
+	ExpectedKind                string            `json:"expected_decision_kind"`
+	ExpectedMatchedPolicyPrefix string            `json:"expected_matched_policy_prefix,omitempty"`
 }
 
 func loadParityFixture(t *testing.T) parityFixture {
@@ -130,6 +144,48 @@ func TestPolicy_ParityFixtureMatchesGoBinding(t *testing.T) {
 		}
 		if string(d.Kind) != entry.ExpectedKind {
 			t.Fatalf("%s: decision.kind = %q, want %q", entry.Label, d.Kind, entry.ExpectedKind)
+		}
+	}
+
+	// 5. (0.7.5 §6) Optional extra_policies + ratify_extra + tenant/external
+	//    evaluate blocks. Unmarshal uses omitempty so fixtures without these
+	//    keys produce nil slices and these loops no-op.
+	for _, pol := range fx.ExtraPolicies {
+		if _, err := ps.Propose(fx.Ref, pol); err != nil {
+			t.Fatalf("Propose extra %s: %v", pol.Path, err)
+		}
+	}
+	for _, r := range fx.RatifyExtra {
+		if err := ps.Ratify(fx.Ref, r.Path, r.Ratifier, r.Reasoning); err != nil {
+			t.Fatalf("Ratify extra %s: %v", r.Path, err)
+		}
+	}
+
+	for _, entry := range fx.TenantEvaluate {
+		d, err := ps.EvaluateScoped(fx.Ref, entry.Situation, entry.Action, entry.AgentID, entry.TenantFilter)
+		if err != nil {
+			t.Fatalf("EvaluateScoped %s: %v", entry.Label, err)
+		}
+		if string(d.Kind) != entry.ExpectedKind {
+			t.Fatalf("tenant %s: decision.kind = %q, want %q", entry.Label, d.Kind, entry.ExpectedKind)
+		}
+		if entry.ExpectedMatchedPolicyPrefix != "" {
+			if !strings.HasPrefix(d.MatchedPolicy, entry.ExpectedMatchedPolicyPrefix) {
+				t.Fatalf("tenant %s: matched_policy %q should start with %q",
+					entry.Label, d.MatchedPolicy, entry.ExpectedMatchedPolicyPrefix)
+			}
+		}
+	}
+
+	for _, entry := range fx.ExternalEval {
+		// No external runner registered → policy with external_evaluator set
+		// is skipped, falling through to no_policy_match.
+		d, err := ps.Evaluate(fx.Ref, entry.Situation, entry.Action, entry.AgentID)
+		if err != nil {
+			t.Fatalf("Evaluate (external) %s: %v", entry.Label, err)
+		}
+		if string(d.Kind) != entry.ExpectedKind {
+			t.Fatalf("external %s: decision.kind = %q, want %q", entry.Label, d.Kind, entry.ExpectedKind)
 		}
 	}
 }

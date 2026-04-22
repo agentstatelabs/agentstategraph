@@ -140,6 +140,80 @@ fn parity_fixture_matches_through_ffi() {
         );
     }
 
+    // 5. (0.7.5 §6) Optional extra_policies + ratify_extra + external_evaluate.
+    //    The FFI has no tenant_filter extern (no `agentstategraph_policy_evaluate_scoped`
+    //    on the C surface), so we deliberately skip the `tenant_evaluate` block
+    //    — that one is exercised by the Rust / Python / Wasm / TS / Go / .NET
+    //    runners which all have scoped-evaluate bindings.
+    if let Some(extras) = fixture.get("extra_policies").and_then(|v| v.as_array()) {
+        for pol in extras {
+            let js = c(&serde_json::to_string(pol).unwrap());
+            let out = unsafe {
+                read(agentstategraph_policy_propose(
+                    store,
+                    c_ref.as_ptr(),
+                    js.as_ptr(),
+                ))
+            };
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert!(
+                v.get("error").is_none(),
+                "propose extra {}: {out}",
+                pol["path"]
+            );
+        }
+    }
+    if let Some(rats) = fixture.get("ratify_extra").and_then(|v| v.as_array()) {
+        for r in rats {
+            let path = c(r["path"].as_str().unwrap());
+            let who = c(r["ratifier"].as_str().unwrap());
+            let why = c(r["reasoning"].as_str().unwrap());
+            let out = unsafe {
+                read(agentstategraph_policy_ratify(
+                    store,
+                    c_ref.as_ptr(),
+                    path.as_ptr(),
+                    who.as_ptr(),
+                    why.as_ptr(),
+                ))
+            };
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                v.get("ok").and_then(|b| b.as_bool()),
+                Some(true),
+                "ratify extra {}: {out}",
+                r["path"]
+            );
+        }
+    }
+
+    if let Some(exts) = fixture.get("external_evaluate").and_then(|v| v.as_array()) {
+        for entry in exts {
+            let label = entry["label"].as_str().unwrap_or("<unlabelled>");
+            let expected_kind = entry["expected_decision_kind"].as_str().unwrap();
+            let sit = c(&entry["situation"].to_string());
+            let action = c(entry["action"].as_str().unwrap());
+            let agent = c(entry["agent_id"].as_str().unwrap());
+            // No external runner registered → policy with external_evaluator
+            // set is skipped, mirroring the Rust reference runner's comment.
+            let out = unsafe {
+                read(agentstategraph_policy_evaluate(
+                    store,
+                    c_ref.as_ptr(),
+                    sit.as_ptr(),
+                    action.as_ptr(),
+                    agent.as_ptr(),
+                ))
+            };
+            let d: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                d["kind"].as_str().unwrap_or(""),
+                expected_kind,
+                "external {label}: decision.kind mismatch (got {out})"
+            );
+        }
+    }
+
     agentstategraph_policy_store_free(store);
     agentstategraph_free(repo);
 }

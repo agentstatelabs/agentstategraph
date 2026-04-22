@@ -52,7 +52,9 @@ def test_propose_creates_unratified_policy(store):
     assert handle == "infra/k8s/pod-failing@1"
     fetched = ps.get("main", "infra/k8s/pod-failing", None)
     assert fetched["version"] == 1
-    assert fetched["ratified_by"] is None
+    # `ratified_by` uses `skip_serializing_if = "Option::is_none"`, so
+    # unratified policies omit the key entirely.
+    assert fetched.get("ratified_by") is None
     assert fetched["proposed_by"] == "pytest"
 
 

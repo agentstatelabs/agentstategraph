@@ -103,4 +103,84 @@ fn parity_fixture_matches_through_wasm() {
             "{label}: decision.kind mismatch (got {out})"
         );
     }
+
+    // 5. (0.7.5 §6) Optional extra_policies + ratify_extra + tenant/external
+    //    evaluate blocks. Runners that pre-date 0.7.5 can ignore these keys.
+    if let Some(extras) = fixture.get("extra_policies").and_then(|v| v.as_array()) {
+        for pol in extras {
+            ps.propose(ref_name, &pol.to_string())
+                .unwrap_or_else(|e| panic!("propose extra {}: {e:?}", pol["path"]));
+        }
+    }
+    if let Some(rats) = fixture.get("ratify_extra").and_then(|v| v.as_array()) {
+        for r in rats {
+            ps.ratify(
+                ref_name,
+                r["path"].as_str().unwrap(),
+                r["ratifier"].as_str().unwrap(),
+                r["reasoning"].as_str().unwrap(),
+            )
+            .unwrap_or_else(|e| panic!("ratify extra {}: {e:?}", r["path"]));
+        }
+    }
+
+    if let Some(tenants) = fixture.get("tenant_evaluate").and_then(|v| v.as_array()) {
+        for entry in tenants {
+            let label = entry["label"].as_str().unwrap_or("<unlabelled>");
+            let expected_kind = entry["expected_decision_kind"].as_str().unwrap();
+            let tenant = entry
+                .get("tenant_filter")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let out = ps
+                .evaluate(
+                    ref_name,
+                    &entry["situation"].to_string(),
+                    entry["action"].as_str().unwrap(),
+                    entry["agent_id"].as_str().unwrap(),
+                    tenant,
+                )
+                .unwrap_or_else(|e| panic!("tenant evaluate {label}: {e:?}"));
+            let d: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                d["kind"].as_str().unwrap_or(""),
+                expected_kind,
+                "tenant {label}: decision.kind mismatch (got {out})"
+            );
+            if let Some(prefix_expected) = entry
+                .get("expected_matched_policy_prefix")
+                .and_then(|v| v.as_str())
+            {
+                let matched = d["matched_policy"].as_str().unwrap_or("");
+                assert!(
+                    matched.starts_with(prefix_expected),
+                    "tenant {label}: matched_policy {matched:?} should start with {prefix_expected:?}"
+                );
+            }
+        }
+    }
+
+    if let Some(exts) = fixture.get("external_evaluate").and_then(|v| v.as_array()) {
+        for entry in exts {
+            let label = entry["label"].as_str().unwrap_or("<unlabelled>");
+            let expected_kind = entry["expected_decision_kind"].as_str().unwrap();
+            // No external runner registered → policy with external_evaluator
+            // set is skipped, falling through to no_policy_match.
+            let out = ps
+                .evaluate(
+                    ref_name,
+                    &entry["situation"].to_string(),
+                    entry["action"].as_str().unwrap(),
+                    entry["agent_id"].as_str().unwrap(),
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("external evaluate {label}: {e:?}"));
+            let d: Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                d["kind"].as_str().unwrap_or(""),
+                expected_kind,
+                "external {label}: decision.kind mismatch (got {out})"
+            );
+        }
+    }
 }
