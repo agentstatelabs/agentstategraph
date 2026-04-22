@@ -15,6 +15,6 @@
   "scripts": {
     "build": "napi build --release --platform",
     "build-debug": "napi build --platform",
-    "test": "node --test __test__/"
+    "test": "node --test __test__/*.test.js"
   }
 }
