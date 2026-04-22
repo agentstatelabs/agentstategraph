@@ -343,12 +343,25 @@ Escape-hatch for Rego / Cedar / WASM policy engines. See
   0.7.5-beta.1 (returns a documented error envelope); bindings
   register runners through the MCP server's in-process builders.
 
+## Composing with taints
+
+0.7.75 added the [taint / quarantine / watch substrate](TAINT_GUIDE.md)
+— dynamic runtime markers that complement policies. Policies answer
+"what is allowed"; taints answer "what has gone wrong". Use
+`agentstategraph_policy_evaluate_change_with_taints` to get both
+verdicts in one response — `can_proceed` is the conjunction of
+`decision.kind != deny` and every affected path's
+`check_taint.can_write`.
+
 ## Related docs
 
 - `spec/AGENTSTATEGRAPH-RFC.md` — the primitive substrate
 - `spec/POLICY-IMPLEMENTATION-PLAN.md` — the 0.6.0-beta.1 execution plan
 - `spec/SECURITY-THREAT-MODEL.md` — threat surfaces across the stack
 - `spec/0.7.5-PLAN.md` — advanced policy implementation plan
+- `spec/0.7.75-PLAN.md` — taint / quarantine / watch implementation plan
 - `docs/POLICY-EVALUATOR-ABI.md` — WASM external-evaluator ABI
+- `docs/TAINT_GUIDE.md` — taint substrate user guide
 - `crates/agentstategraph-mcp/README.md` — MCP tool surface
-- `crates/agentstategraph-policy/README.md` *(forthcoming)* — crate API reference
+- `crates/agentstategraph-policy/README.md` — crate API reference
+- `crates/agentstategraph-taint/README.md` — taint crate API reference
