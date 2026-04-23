@@ -21,6 +21,9 @@ use std::sync::Arc;
 // Session + SessionStatus moved to agentstategraph-core in 0.6.5;
 // import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
+use agentstategraph::taint_types::{
+    QuarantineParams, TaintKind, TaintParams, UntaintParams, UnwatchParams, WatchParams,
+};
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_core::{Session, SessionStatus};
@@ -637,6 +640,155 @@ impl AgentStateGraph {
             "steps": steps,
         }))
     }
+
+    // =====================================================================
+    // 0.7.75 §9b — taint / quarantine / watch pass-through
+    // =====================================================================
+
+    /// Apply a taint at `path`. `params` accepts either a JSON string
+    /// or a plain JS object matching `TaintParams`:
+    /// `{name, effect, reason, severity?, expires_at?, propagate?,
+    ///   metadata?, agent_id}`. Returns the new taint id.
+    #[napi]
+    pub fn taint(
+        &self,
+        ref_name: String,
+        path: String,
+        params: serde_json::Value,
+    ) -> napi::Result<String> {
+        let p: TaintParams = parse_params(params, "TaintParams")?;
+        self.repo.taint(&ref_name, &path, p).map_err(err)
+    }
+
+    /// Resolve a taint by name.
+    #[napi]
+    pub fn untaint(
+        &self,
+        ref_name: String,
+        path: String,
+        name: String,
+        params: serde_json::Value,
+    ) -> napi::Result<()> {
+        let p: UntaintParams = parse_params(params, "UntaintParams")?;
+        self.repo.untaint(&ref_name, &path, &name, p).map_err(err)
+    }
+
+    /// Apply a quarantine at `path`. Returns the new taint id.
+    #[napi]
+    pub fn quarantine(
+        &self,
+        ref_name: String,
+        path: String,
+        params: serde_json::Value,
+    ) -> napi::Result<String> {
+        let p: QuarantineParams = parse_params(params, "QuarantineParams")?;
+        self.repo.quarantine(&ref_name, &path, p).map_err(err)
+    }
+
+    /// Release a quarantine.
+    #[napi]
+    pub fn unquarantine(
+        &self,
+        ref_name: String,
+        path: String,
+        name: String,
+        params: serde_json::Value,
+    ) -> napi::Result<()> {
+        let p: UntaintParams = parse_params(params, "UnquarantineParams")?;
+        self.repo
+            .unquarantine(&ref_name, &path, &name, p)
+            .map_err(err)
+    }
+
+    /// Apply an advisory watch at `path`. Returns the new taint id.
+    #[napi]
+    pub fn watch(
+        &self,
+        ref_name: String,
+        path: String,
+        params: serde_json::Value,
+    ) -> napi::Result<String> {
+        let p: WatchParams = parse_params(params, "WatchParams")?;
+        self.repo.watch_path(&ref_name, &path, p).map_err(err)
+    }
+
+    /// Remove a watch by name.
+    #[napi]
+    pub fn unwatch(
+        &self,
+        ref_name: String,
+        path: String,
+        name: String,
+        params: serde_json::Value,
+    ) -> napi::Result<()> {
+        let p: UnwatchParams = parse_params(params, "UnwatchParams")?;
+        self.repo.unwatch(&ref_name, &path, &name, p).map_err(err)
+    }
+
+    /// List taints / quarantines / watches. All filters optional.
+    /// `kind` is one of `"taint" | "quarantine" | "watch"`.
+    #[napi]
+    pub fn list_taints(
+        &self,
+        path_prefix: Option<String>,
+        kind: Option<String>,
+        include_resolved: Option<bool>,
+    ) -> napi::Result<Vec<serde_json::Value>> {
+        let k = match kind.as_deref() {
+            None => None,
+            Some(s) => Some(parse_taint_kind(s)?),
+        };
+        let rows = self
+            .repo
+            .list_taints(path_prefix.as_deref(), k, include_resolved.unwrap_or(false))
+            .map_err(err)?;
+        rows.iter()
+            .map(|t| serde_json::to_value(t).map_err(err))
+            .collect()
+    }
+
+    /// Aggregated taint check for `path`. Returns the full
+    /// `TaintCheck` (tainted, quarantined, watched, can_write, ...).
+    #[napi]
+    pub fn check_taint(
+        &self,
+        path: String,
+        agent_id: Option<String>,
+        confidence: Option<f64>,
+    ) -> napi::Result<serde_json::Value> {
+        let agent = agent_id.unwrap_or_else(|| "node".to_string());
+        let conf = confidence.unwrap_or(1.0);
+        let check = self.repo.check_taint(&path, &agent, conf).map_err(err)?;
+        serde_json::to_value(&check).map_err(err)
+    }
+}
+
+// Accept either a JSON string or a structured JS object (both arrive
+// as `serde_json::Value` through napi-rs). Strings are parsed as JSON.
+fn parse_params<T: serde::de::DeserializeOwned>(
+    value: serde_json::Value,
+    name: &str,
+) -> napi::Result<T> {
+    let v = match value {
+        serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(&s)
+            .map_err(|e| napi::Error::from_reason(format!("invalid {name} JSON: {e}")))?,
+        other => other,
+    };
+    serde_json::from_value::<T>(v)
+        .map_err(|e| napi::Error::from_reason(format!("invalid {name}: {e}")))
+}
+
+fn parse_taint_kind(s: &str) -> napi::Result<TaintKind> {
+    Ok(match s.to_lowercase().as_str() {
+        "taint" => TaintKind::Taint,
+        "quarantine" => TaintKind::Quarantine,
+        "watch" => TaintKind::Watch,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "invalid taint kind {other:?}; expected taint|quarantine|watch"
+            )));
+        }
+    })
 }
 
 /// Exit codes an app should use when surfacing `check_schema()` results.
