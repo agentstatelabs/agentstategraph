@@ -24,6 +24,10 @@ use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore as PolicyBackend, Situation};
 use agentstategraph_storage::IndexedDbStorage;
+use agentstategraph_taint::{
+    QuarantineParams, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
+    UntaintParams, UnwatchParams, WatchDirection, WatchParams,
+};
 use agentstategraph_tasks::{OnCompleteHook, Priority, Proof, ProofKind, TaskId, TaskStore};
 use semver::Version;
 
@@ -895,6 +899,126 @@ impl WasmAgentStateGraph {
         mgr.end(id, st).map_err(js_err)
     }
 
+    // -----------------------------------------------------------------
+    // Taint / quarantine / watch surface (0.7.75 §9d).
+    //
+    // Mirrors the FFI binding (`agentstategraph-ffi` taint functions).
+    // Each mutator takes a `params_json` string shaped like the FFI
+    // payload; we deserialize into the Rust *Params types and route to
+    // the Repository method. Returns the new taint id (for create
+    // methods) or unit (for resolve methods), serialized as a bare JSON
+    // string for id and empty Ok for unit.
+    // -----------------------------------------------------------------
+
+    /// Apply a taint. `params_json` shape:
+    /// `{"name","effect","reason","severity","expires","propagate","agent_id","metadata"}`.
+    /// Returns the new taint id.
+    pub fn taint(&self, ref_name: &str, path: &str, params_json: &str) -> Result<String, JsValue> {
+        let params = parse_taint_params(params_json)?;
+        self.repo.taint(ref_name, path, params).map_err(js_err)
+    }
+
+    /// Resolve a taint by name on `path`. `params_json` shape:
+    /// `{"reason","proof","agent_id"}`.
+    pub fn untaint(
+        &self,
+        ref_name: &str,
+        path: &str,
+        name: &str,
+        params_json: &str,
+    ) -> Result<(), JsValue> {
+        let params = parse_untaint_params(params_json)?;
+        self.repo
+            .untaint(ref_name, path, name, params)
+            .map_err(js_err)
+    }
+
+    /// Apply a quarantine. `params_json` shape:
+    /// `{"name","reason","severity","authorized_agents","expires","propagate","agent_id"}`.
+    pub fn quarantine(
+        &self,
+        ref_name: &str,
+        path: &str,
+        params_json: &str,
+    ) -> Result<String, JsValue> {
+        let params = parse_quarantine_params(params_json)?;
+        self.repo.quarantine(ref_name, path, params).map_err(js_err)
+    }
+
+    /// Release a quarantine. `params_json` shape matches `untaint`.
+    pub fn unquarantine(
+        &self,
+        ref_name: &str,
+        path: &str,
+        name: &str,
+        params_json: &str,
+    ) -> Result<(), JsValue> {
+        let params = parse_untaint_params(params_json)?;
+        self.repo
+            .unquarantine(ref_name, path, name, params)
+            .map_err(js_err)
+    }
+
+    /// Apply a watch. `params_json` shape:
+    /// `{"name","reason","metric","threshold","direction","check_interval_secs","expires",
+    ///   "severity","propagate","agent_id"}`.
+    pub fn watch(&self, ref_name: &str, path: &str, params_json: &str) -> Result<String, JsValue> {
+        let params = parse_watch_params(params_json)?;
+        self.repo.watch_path(ref_name, path, params).map_err(js_err)
+    }
+
+    /// Remove a watch. `params_json` shape: `{"reason","agent_id"}`.
+    pub fn unwatch(
+        &self,
+        ref_name: &str,
+        path: &str,
+        name: &str,
+        params_json: &str,
+    ) -> Result<(), JsValue> {
+        let params = parse_unwatch_params(params_json)?;
+        self.repo
+            .unwatch(ref_name, path, name, params)
+            .map_err(js_err)
+    }
+
+    /// List taints / quarantines / watches. Returns a JSON array of
+    /// [`Taint`] records.
+    #[wasm_bindgen(js_name = listTaints)]
+    pub fn list_taints(
+        &self,
+        path_prefix: Option<String>,
+        kind: Option<String>,
+        include_resolved: bool,
+    ) -> Result<String, JsValue> {
+        let parsed_kind = match kind.as_deref() {
+            None => None,
+            Some(s) => match parse_taint_kind_wasm(s) {
+                Some(k) => Some(k),
+                None => return Err(JsValue::from_str(&format!("unknown kind: {s}"))),
+            },
+        };
+        let list = self
+            .repo
+            .list_taints(path_prefix.as_deref(), parsed_kind, include_resolved)
+            .map_err(js_err)?;
+        serde_json::to_string(&list).map_err(js_err)
+    }
+
+    /// Check taint status for `path` given `agent_id` + `confidence`.
+    /// Returns a [`TaintCheck`] JSON object.
+    #[wasm_bindgen(js_name = checkTaint)]
+    pub fn check_taint(
+        &self,
+        path: &str,
+        agent_id: Option<String>,
+        confidence: Option<f64>,
+    ) -> Result<String, JsValue> {
+        let agent = agent_id.unwrap_or_default();
+        let conf = confidence.unwrap_or(0.0);
+        let check = self.repo.check_taint(path, &agent, conf).map_err(js_err)?;
+        serde_json::to_string(&check).map_err(js_err)
+    }
+
     /// List epochs. Returns JSON.
     pub fn list_epochs(&self) -> Result<String, JsValue> {
         let entries = self
@@ -1272,6 +1396,190 @@ fn report_json(r: &agentstategraph_migrate::Report) -> String {
         "steps": steps,
     });
     serde_json::to_string(&v).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Taint parameter parsers (mirrors the FFI taint binding). Accepts the
+// FFI-shaped payload: `{"name","effect","reason","severity","expires",
+// "propagate","agent_id","metadata"}` etc. Missing optional fields default
+// the same way the FFI does.
+// ---------------------------------------------------------------------------
+
+fn parse_taint_effect_wasm(s: &str) -> Option<TaintEffect> {
+    match s.to_lowercase().as_str() {
+        "warn" => Some(TaintEffect::Warn),
+        "block" => Some(TaintEffect::Block),
+        "review" => Some(TaintEffect::Review),
+        "isolate" => Some(TaintEffect::Isolate),
+        "advisory" => Some(TaintEffect::Advisory),
+        _ => None,
+    }
+}
+
+fn parse_taint_severity_wasm(s: Option<&str>) -> TaintSeverity {
+    match s.unwrap_or("medium").to_lowercase().as_str() {
+        "low" => TaintSeverity::Low,
+        "high" => TaintSeverity::High,
+        "critical" => TaintSeverity::Critical,
+        _ => TaintSeverity::Medium,
+    }
+}
+
+fn parse_taint_kind_wasm(s: &str) -> Option<TaintKind> {
+    match s.to_lowercase().as_str() {
+        "taint" => Some(TaintKind::Taint),
+        "quarantine" => Some(TaintKind::Quarantine),
+        "watch" => Some(TaintKind::Watch),
+        _ => None,
+    }
+}
+
+fn parse_rfc3339(v: Option<&serde_json::Value>) -> Option<chrono::DateTime<chrono::Utc>> {
+    v.and_then(|x| x.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+}
+
+fn parse_taint_params(json: &str) -> Result<TaintParams, JsValue> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| js_err(format!("invalid params: {e}")))?;
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| JsValue::from_str("missing 'name'"))?
+        .to_string();
+    let effect = v
+        .get("effect")
+        .and_then(|x| x.as_str())
+        .and_then(parse_taint_effect_wasm)
+        .ok_or_else(|| JsValue::from_str("missing or invalid 'effect'"))?;
+    let metadata: TaintMetadata = match v.get("metadata") {
+        Some(m) if !m.is_null() => serde_json::from_value(m.clone()).map_err(js_err)?,
+        _ => TaintMetadata::new(),
+    };
+    Ok(TaintParams {
+        name,
+        effect,
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        severity: parse_taint_severity_wasm(v.get("severity").and_then(|x| x.as_str())),
+        expires_at: parse_rfc3339(v.get("expires")),
+        propagate: v.get("propagate").and_then(|x| x.as_bool()).unwrap_or(true),
+        metadata,
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn parse_untaint_params(json: &str) -> Result<UntaintParams, JsValue> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| js_err(format!("invalid params: {e}")))?;
+    Ok(UntaintParams {
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        proof: v.get("proof").and_then(|x| x.as_str()).map(str::to_string),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn parse_quarantine_params(json: &str) -> Result<QuarantineParams, JsValue> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| js_err(format!("invalid params: {e}")))?;
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| JsValue::from_str("missing 'name'"))?
+        .to_string();
+    let authorized: Vec<String> = v
+        .get("authorized_agents")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(QuarantineParams {
+        name,
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        severity: parse_taint_severity_wasm(v.get("severity").and_then(|x| x.as_str())),
+        authorized_agents: authorized,
+        expires_at: parse_rfc3339(v.get("expires")),
+        propagate: v.get("propagate").and_then(|x| x.as_bool()).unwrap_or(true),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn parse_watch_params(json: &str) -> Result<WatchParams, JsValue> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| js_err(format!("invalid params: {e}")))?;
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| JsValue::from_str("missing 'name'"))?
+        .to_string();
+    let direction = match v
+        .get("direction")
+        .and_then(|x| x.as_str())
+        .unwrap_or("above")
+    {
+        "below" => WatchDirection::Below,
+        _ => WatchDirection::Above,
+    };
+    Ok(WatchParams {
+        name,
+        reason: v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        metric: v.get("metric").and_then(|x| x.as_str()).map(str::to_string),
+        threshold: v.get("threshold").and_then(|x| x.as_f64()),
+        direction,
+        check_interval_secs: v.get("check_interval_secs").and_then(|x| x.as_u64()),
+        expires_at: parse_rfc3339(v.get("expires")),
+        severity: parse_taint_severity_wasm(v.get("severity").and_then(|x| x.as_str())),
+        propagate: v.get("propagate").and_then(|x| x.as_bool()).unwrap_or(true),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn parse_unwatch_params(json: &str) -> Result<UnwatchParams, JsValue> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| js_err(format!("invalid params: {e}")))?;
+    Ok(UnwatchParams {
+        reason: v.get("reason").and_then(|x| x.as_str()).map(str::to_string),
+        agent_id: v
+            .get("agent_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 fn step_status_str(s: StepStatus) -> &'static str {

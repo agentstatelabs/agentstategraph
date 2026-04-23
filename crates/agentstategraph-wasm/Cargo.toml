@@ -14,12 +14,14 @@ agentstategraph = { path = "../agentstategraph", default-features = false }
 agentstategraph-core = { path = "../agentstategraph-core" }
 agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false, features = ["indexeddb"] }
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
+agentstategraph-taint = { path = "../agentstategraph-taint" }
 agentstategraph-policy = { path = "../agentstategraph-policy" }
 agentstategraph-migrate = { path = "../agentstategraph-migrate" }
 semver = "1"
 wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 js-sys = "0.3"
 
 [dev-dependencies]
