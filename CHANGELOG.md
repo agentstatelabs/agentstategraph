@@ -5,6 +5,100 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.75-beta.1] — 2026-04-21
+
+Theme: **taint / quarantine / watch** — dynamic runtime markers
+that bridge passive observation into enforcement. Every taint is
+a first-class commit (auditable, blameable, with full intent
+metadata) and the pre-commit hook consults the aggregated
+decision on every `set` / `set_json` / `delete` / `merge`.
+
+### Added
+
+- **New sibling crate `agentstategraph-taint`** — core types
+  (`Taint`, `TaintKind`, `TaintEffect`, `TaintSeverity`,
+  `TaintMetadata`, `TaintCheck`), parameter bundles
+  (`TaintParams`, `QuarantineParams`, `WatchParams`,
+  `UntaintParams`, `UnwatchParams`), `TaintError` enum, and the
+  pure `evaluate_access(path, agent_id, confidence, candidates,
+  now)` precedence algorithm (Quarantine > Block > Review >
+  Isolate > Warn > Advisory).
+- **Six new `IntentCategory` variants**: `Taint`, `Untaint`,
+  `Quarantine`, `Unquarantine`, `Watch`, `Unwatch` — additive,
+  preserving round-trip distinctness from `Custom("Taint")` etc.
+- **`TaintStore` trait** on `agentstategraph-storage` with 6
+  methods; `SqliteStorage` + `MemoryStorage` implement in full;
+  `PostgresStorage` returns `Backend` errors (post-production
+  wiring); `IndexedDbStorage` delegates to an inner
+  `MemoryStorage` for in-session taints. SQLite gains a `taints`
+  table with a partial unique index
+  (`WHERE resolved_at IS NULL`) so historical rows coexist with
+  fresh active ones on the same `(path, name, kind)` triple.
+- **`Repository` taint surface** — `taint`, `untaint`,
+  `quarantine`, `unquarantine`, `watch_path`, `unwatch`,
+  `list_taints`, `check_taint`. Each persists the row AND writes
+  an intent commit with the matching `IntentCategory`; the
+  commit id is patched back onto the storage row.
+- **Pre-commit taint hook** wired into `set` / `set_json` /
+  `delete`. `CommitOptions.confidence` drives the review-effect
+  gate (threshold 0.9, inclusive; default 1.0 keeps pre-0.7.75
+  call sites silent). Taint-lifecycle commits bypass the hook to
+  avoid self-deadlock.
+- **Watch auto-escalation** — a watch with a numeric
+  `threshold` + `direction` (above/below) auto-creates a
+  Warn-effect taint when `set_json` crosses the threshold. The
+  auto-taint's metadata cites `source_watch_id`, `metric`,
+  `threshold`, `observed` for blame. Idempotent: repeated
+  crossings do not re-fire.
+- **8 new MCP tools** (count 52 → 60): `agentstategraph_taint`,
+  `_untaint`, `_quarantine`, `_unquarantine`, `_watch`,
+  `_unwatch`, `_list_taints`, `_check_taint`.
+- **Policy × taint composition tool**
+  `agentstategraph_policy_evaluate_change_with_taints` (60 → 61)
+  returns `{decision, taint_status, can_proceed}` — `can_proceed`
+  is the conjunction of `decision.kind != deny` and every
+  affected path's `check_taint.can_write`.
+- **8 new FFI externs** (count 56 → 64):
+  `agentstategraph_taint_apply` / `_remove`,
+  `_quarantine_apply` / `_release`, `_watch_apply` / `_remove`,
+  `_list_taints`, `_check_taint`. All accept JSON params
+  envelopes so the C ABI stays narrow as the substrate evolves.
+- **All 5 bindings** (Py / TS / Go / WASM / C#) expose the full
+  8-method taint surface mirroring the Rust Repository signature.
+  Python binding renames pre-existing stub `ag.watch` →
+  `ag.subscribe_watch` (breaking for any consumer of the stub,
+  which unconditionally returned 0).
+- **`docs/TAINT_GUIDE.md`** — end-user guide covering effects,
+  propagation semantics, auto-escalation, policy composition,
+  storage schema.
+- **`crates/agentstategraph-taint/README.md`** — crate primer.
+- **`spec/0.7.75-PLAN.md`** — implementation plan.
+- **Parity fixture extension** — new `taint_cases` +
+  `quarantine_case` blocks exercised by a Rust reference runner
+  in `agentstategraph/tests/taint_parity.rs`.
+
+### Verified locally
+
+| Surface | Count | Status |
+|---|---|---|
+| Rust workspace | all | pass (clippy -D warnings) |
+| `agentstategraph-taint` unit tests | 18 | pass |
+| Storage conformance (Memory + SQLite) | 26 | pass |
+| Repository integration | 12 | pass |
+| Watch auto-escalation | 5 | pass |
+| MCP taint tools | 5 | pass |
+| MCP policy×taint | 3 | pass |
+| FFI smoke | 6 | pass |
+| Parity reference | 2 | pass |
+| Python pytest | 44 | 43 pass, 1 skipped (pre-existing) |
+| TypeScript node:test | 38 | pass |
+| Go go test | 39 | pass |
+| WASM wasm-pack --node | 28 | pass |
+| .NET | — | experimental; committed on trust |
+
+Counts: MCP tools 52 → 61. FFI externs 56 → 64. IntentCategory
+variants +6.
+
 ## [0.7.5-beta.2] — 2026-04-21
 
 Theme: **follow-up polish on 0.7.5-beta.1.** Small patch release

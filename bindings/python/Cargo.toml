@@ -1,6 +1,6 @@
 [package]
 name = "agentstategraph-python"
-version = "0.7.5-beta.2"
+version = "0.7.75-beta.1"
 edition = "2024"
 description = "Python bindings for AgentStateGraph — AI-native versioned state store"
 license = "BSL-1.1"

@@ -89,7 +89,9 @@ fn taint_cases_match_rust_reference() {
                 case["expected_low_can_write"].as_bool().unwrap_or(false),
                 "{label}: low-confidence can_write mismatch"
             );
-            if let Some(req) = case.get("expected_required_confidence").and_then(|v| v.as_f64())
+            if let Some(req) = case
+                .get("expected_required_confidence")
+                .and_then(|v| v.as_f64())
             {
                 assert_eq!(c.required_confidence, req, "{label}: required_confidence");
             }
@@ -141,7 +143,11 @@ fn quarantine_case_matches_rust_reference() {
     let apply = &case["apply"];
     let authorized: Vec<String> = apply["authorized_agents"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     r.quarantine(
         "main",
@@ -168,7 +174,9 @@ fn quarantine_case_matches_rust_reference() {
         .unwrap();
     assert_eq!(
         c_u.can_write,
-        case["expected_unauthorized_can_write"].as_bool().unwrap_or(false),
+        case["expected_unauthorized_can_write"]
+            .as_bool()
+            .unwrap_or(false),
         "{label}: unauthorized can_write"
     );
 
@@ -182,7 +190,9 @@ fn quarantine_case_matches_rust_reference() {
         .unwrap();
     assert_eq!(
         c_a.can_write,
-        case["expected_authorized_can_write"].as_bool().unwrap_or(true),
+        case["expected_authorized_can_write"]
+            .as_bool()
+            .unwrap_or(true),
         "{label}: authorized can_write"
     );
 }
