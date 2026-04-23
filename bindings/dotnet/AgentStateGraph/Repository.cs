@@ -17,7 +17,7 @@ namespace AgentStateGraph;
 /// hold a reference back to this instance to keep the repository alive
 /// for the lifetime of any derived store.
 /// </remarks>
-public sealed class Repository : IDisposable
+public sealed partial class Repository : IDisposable
 {
     private readonly SafeRepoHandle _handle;
     private bool _disposed;

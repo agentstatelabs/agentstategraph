@@ -356,6 +356,64 @@ internal static partial class NativeMethods
         IntPtr store,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string configJson);
 
+    /* Taint / Quarantine / Watch (0.7.75 §7) */
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_taint_apply(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string paramsJson);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_taint_remove(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string paramsJson);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_quarantine_apply(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string paramsJson);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_quarantine_release(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string paramsJson);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_watch_apply(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string paramsJson);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_watch_remove(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string paramsJson);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_list_taints(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? pathPrefixOrNull,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? kindOrNull,
+        [MarshalAs(UnmanagedType.I1)] bool includeResolved);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_check_taint(
+        IntPtr repo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string agentId,
+        double confidence);
+
     /* Migrate */
 
     [DllImport(Lib)]
