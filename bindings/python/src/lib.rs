@@ -32,11 +32,16 @@ use agentstategraph_policy::{
     ChangeProposal, Decision, Policy, PolicySignature, PolicyStore as PolicyBackend, Situation,
 };
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_taint::{
+    QuarantineParams, Taint, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
+    UntaintParams, UnwatchParams, WatchDirection, WatchParams,
+};
 use agentstategraph_tasks::{
     NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
     TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyEntry, VerifyReport,
     VerifyResult,
 };
+use chrono::{DateTime, Utc};
 
 /// Convert a Python JSON-compatible value to a AgentStateGraph Object.
 fn py_to_object(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Object> {
@@ -500,8 +505,8 @@ impl AgentStateGraph {
 
     /// Subscribe to state changes matching a path pattern. Returns subscription ID.
     /// pattern_type: "exact", "prefix", or "all"
-    #[pyo3(signature = (pattern_type="all", pattern=None))]
-    fn watch(&self, pattern_type: &str, pattern: Option<String>) -> PyResult<u64> {
+    #[pyo3(name = "subscribe_watch", signature = (pattern_type="all", pattern=None))]
+    fn subscribe_watch(&self, pattern_type: &str, pattern: Option<String>) -> PyResult<u64> {
         let pat = match pattern_type {
             "exact" => agentstategraph::PathPattern::Exact(pattern.unwrap_or_default()),
             "prefix" => agentstategraph::PathPattern::Prefix(pattern.unwrap_or_default()),
@@ -1736,6 +1741,334 @@ impl AgentStateGraph {
         let st = parse_session_status(status)?;
         let mgr = self.repo.sessions();
         mgr.end(id, st).map_err(session_err)
+    }
+}
+
+// =========================================================================
+// Taint / Quarantine / Watch — wraps agentstategraph_taint::*
+// =========================================================================
+
+fn parse_taint_effect(s: &str) -> PyResult<TaintEffect> {
+    match s.to_lowercase().as_str() {
+        "warn" => Ok(TaintEffect::Warn),
+        "block" => Ok(TaintEffect::Block),
+        "review" => Ok(TaintEffect::Review),
+        "isolate" => Ok(TaintEffect::Isolate),
+        "advisory" => Ok(TaintEffect::Advisory),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid taint effect {other:?}; expected warn|block|review|isolate|advisory"
+        ))),
+    }
+}
+
+fn parse_taint_severity(s: &str) -> PyResult<TaintSeverity> {
+    match s.to_lowercase().as_str() {
+        "low" => Ok(TaintSeverity::Low),
+        "medium" => Ok(TaintSeverity::Medium),
+        "high" => Ok(TaintSeverity::High),
+        "critical" => Ok(TaintSeverity::Critical),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid severity {other:?}; expected low|medium|high|critical"
+        ))),
+    }
+}
+
+fn parse_taint_kind(s: &str) -> PyResult<TaintKind> {
+    match s.to_lowercase().as_str() {
+        "taint" => Ok(TaintKind::Taint),
+        "quarantine" => Ok(TaintKind::Quarantine),
+        "watch" => Ok(TaintKind::Watch),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid taint kind {other:?}; expected taint|quarantine|watch"
+        ))),
+    }
+}
+
+fn parse_watch_direction(s: &str) -> PyResult<WatchDirection> {
+    match s.to_lowercase().as_str() {
+        "above" => Ok(WatchDirection::Above),
+        "below" => Ok(WatchDirection::Below),
+        other => Err(PyRuntimeError::new_err(format!(
+            "invalid watch direction {other:?}; expected above|below"
+        ))),
+    }
+}
+
+fn parse_expires(s: Option<&str>) -> PyResult<Option<DateTime<Utc>>> {
+    match s {
+        None => Ok(None),
+        Some(v) => DateTime::parse_from_rfc3339(v)
+            .map(|dt| Some(dt.with_timezone(&Utc)))
+            .map_err(|e| PyRuntimeError::new_err(format!("invalid expires (rfc3339): {e}"))),
+    }
+}
+
+fn taint_to_py(py: Python<'_>, t: &Taint) -> PyResult<PyObject> {
+    let v = serde_json::to_value(t)
+        .map_err(|e| PyRuntimeError::new_err(format!("taint serialize: {e}")))?;
+    json_to_py(py, &v)
+}
+
+fn dict_get_str<'py>(d: &Bound<'py, pyo3::types::PyDict>, key: &str) -> PyResult<Option<String>> {
+    match d.get_item(key)? {
+        Some(v) if !v.is_none() => Ok(Some(v.extract::<String>()?)),
+        _ => Ok(None),
+    }
+}
+
+fn dict_get_bool(d: &Bound<'_, pyo3::types::PyDict>, key: &str) -> PyResult<Option<bool>> {
+    match d.get_item(key)? {
+        Some(v) if !v.is_none() => Ok(Some(v.extract::<bool>()?)),
+        _ => Ok(None),
+    }
+}
+
+fn dict_get_f64(d: &Bound<'_, pyo3::types::PyDict>, key: &str) -> PyResult<Option<f64>> {
+    match d.get_item(key)? {
+        Some(v) if !v.is_none() => Ok(Some(v.extract::<f64>()?)),
+        _ => Ok(None),
+    }
+}
+
+fn dict_get_u64(d: &Bound<'_, pyo3::types::PyDict>, key: &str) -> PyResult<Option<u64>> {
+    match d.get_item(key)? {
+        Some(v) if !v.is_none() => Ok(Some(v.extract::<u64>()?)),
+        _ => Ok(None),
+    }
+}
+
+fn dict_get_vec_str(
+    d: &Bound<'_, pyo3::types::PyDict>,
+    key: &str,
+) -> PyResult<Option<Vec<String>>> {
+    match d.get_item(key)? {
+        Some(v) if !v.is_none() => Ok(Some(v.extract::<Vec<String>>()?)),
+        _ => Ok(None),
+    }
+}
+
+#[pymethods]
+impl AgentStateGraph {
+    /// Apply a taint to `path`. `params` dict keys: name, effect, reason,
+    /// severity (default "medium"), expires (RFC3339 | None),
+    /// propagate (default True), agent_id.
+    fn taint(
+        &self,
+        ref_name: &str,
+        path: &str,
+        params: &Bound<'_, pyo3::types::PyDict>,
+    ) -> PyResult<String> {
+        let name = dict_get_str(params, "name")?
+            .ok_or_else(|| PyRuntimeError::new_err("taint params: missing 'name'"))?;
+        let effect_s = dict_get_str(params, "effect")?
+            .ok_or_else(|| PyRuntimeError::new_err("taint params: missing 'effect'"))?;
+        let reason = dict_get_str(params, "reason")?.unwrap_or_default();
+        let severity = parse_taint_severity(
+            dict_get_str(params, "severity")?
+                .as_deref()
+                .unwrap_or("medium"),
+        )?;
+        let expires = parse_expires(dict_get_str(params, "expires")?.as_deref())?;
+        let propagate = dict_get_bool(params, "propagate")?.unwrap_or(true);
+        let agent_id = dict_get_str(params, "agent_id")?.unwrap_or_else(|| "python".to_string());
+        let tp = TaintParams {
+            name,
+            effect: parse_taint_effect(&effect_s)?,
+            reason,
+            severity,
+            expires_at: expires,
+            propagate,
+            metadata: TaintMetadata::new(),
+            agent_id,
+        };
+        self.repo
+            .taint(ref_name, path, tp)
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+    }
+
+    /// Resolve a taint by name at `path`.
+    fn untaint(
+        &self,
+        ref_name: &str,
+        path: &str,
+        name: &str,
+        params: &Bound<'_, pyo3::types::PyDict>,
+    ) -> PyResult<()> {
+        let reason = dict_get_str(params, "reason")?.unwrap_or_default();
+        let proof = dict_get_str(params, "proof")?;
+        let agent_id = dict_get_str(params, "agent_id")?.unwrap_or_else(|| "python".to_string());
+        self.repo
+            .untaint(
+                ref_name,
+                path,
+                name,
+                UntaintParams {
+                    reason,
+                    proof,
+                    agent_id,
+                },
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+    }
+
+    /// Apply a quarantine to `path`.
+    fn quarantine(
+        &self,
+        ref_name: &str,
+        path: &str,
+        params: &Bound<'_, pyo3::types::PyDict>,
+    ) -> PyResult<String> {
+        let name = dict_get_str(params, "name")?
+            .ok_or_else(|| PyRuntimeError::new_err("quarantine params: missing 'name'"))?;
+        let reason = dict_get_str(params, "reason")?.unwrap_or_default();
+        let severity = parse_taint_severity(
+            dict_get_str(params, "severity")?
+                .as_deref()
+                .unwrap_or("high"),
+        )?;
+        let authorized_agents = dict_get_vec_str(params, "authorized_agents")?.unwrap_or_default();
+        let expires = parse_expires(dict_get_str(params, "expires")?.as_deref())?;
+        let propagate = dict_get_bool(params, "propagate")?.unwrap_or(true);
+        let agent_id = dict_get_str(params, "agent_id")?.unwrap_or_else(|| "python".to_string());
+        let qp = QuarantineParams {
+            name,
+            reason,
+            severity,
+            authorized_agents,
+            expires_at: expires,
+            propagate,
+            agent_id,
+        };
+        self.repo
+            .quarantine(ref_name, path, qp)
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+    }
+
+    /// Release a quarantine.
+    fn unquarantine(
+        &self,
+        ref_name: &str,
+        path: &str,
+        name: &str,
+        params: &Bound<'_, pyo3::types::PyDict>,
+    ) -> PyResult<()> {
+        let reason = dict_get_str(params, "reason")?.unwrap_or_default();
+        let proof = dict_get_str(params, "proof")?;
+        let agent_id = dict_get_str(params, "agent_id")?.unwrap_or_else(|| "python".to_string());
+        self.repo
+            .unquarantine(
+                ref_name,
+                path,
+                name,
+                UntaintParams {
+                    reason,
+                    proof,
+                    agent_id,
+                },
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+    }
+
+    /// Apply an advisory watch to `path`.
+    #[pyo3(name = "watch")]
+    fn watch_taint(
+        &self,
+        ref_name: &str,
+        path: &str,
+        params: &Bound<'_, pyo3::types::PyDict>,
+    ) -> PyResult<String> {
+        let name = dict_get_str(params, "name")?
+            .ok_or_else(|| PyRuntimeError::new_err("watch params: missing 'name'"))?;
+        let reason = dict_get_str(params, "reason")?.unwrap_or_default();
+        let metric = dict_get_str(params, "metric")?;
+        let threshold = dict_get_f64(params, "threshold")?;
+        let direction = parse_watch_direction(
+            dict_get_str(params, "direction")?
+                .as_deref()
+                .unwrap_or("above"),
+        )?;
+        let check_interval_secs = dict_get_u64(params, "check_interval_secs")?;
+        let expires = parse_expires(dict_get_str(params, "expires")?.as_deref())?;
+        let severity = parse_taint_severity(
+            dict_get_str(params, "severity")?
+                .as_deref()
+                .unwrap_or("low"),
+        )?;
+        let propagate = dict_get_bool(params, "propagate")?.unwrap_or(true);
+        let agent_id = dict_get_str(params, "agent_id")?.unwrap_or_else(|| "python".to_string());
+        let wp = WatchParams {
+            name,
+            reason,
+            metric,
+            threshold,
+            direction,
+            check_interval_secs,
+            expires_at: expires,
+            severity,
+            propagate,
+            agent_id,
+        };
+        self.repo
+            .watch_path(ref_name, path, wp)
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+    }
+
+    /// Resolve a watch by name at `path`.
+    #[pyo3(name = "unwatch")]
+    fn unwatch_taint(
+        &self,
+        ref_name: &str,
+        path: &str,
+        name: &str,
+        params: &Bound<'_, pyo3::types::PyDict>,
+    ) -> PyResult<()> {
+        let reason = dict_get_str(params, "reason")?;
+        let agent_id = dict_get_str(params, "agent_id")?.unwrap_or_else(|| "python".to_string());
+        self.repo
+            .unwatch(ref_name, path, name, UnwatchParams { reason, agent_id })
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))
+    }
+
+    /// List taints, filtered by path prefix / kind / resolved state.
+    #[pyo3(signature = (path=None, kind=None, include_resolved=false))]
+    fn list_taints(
+        &self,
+        py: Python<'_>,
+        path: Option<&str>,
+        kind: Option<&str>,
+        include_resolved: bool,
+    ) -> PyResult<PyObject> {
+        let k = match kind {
+            Some(s) => Some(parse_taint_kind(s)?),
+            None => None,
+        };
+        let taints = self
+            .repo
+            .list_taints(path, k, include_resolved)
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
+        let list = pyo3::types::PyList::empty(py);
+        for t in &taints {
+            list.append(taint_to_py(py, t)?)?;
+        }
+        Ok(list.into())
+    }
+
+    /// Aggregated taint / quarantine / watch check for `path`.
+    #[pyo3(signature = (path, agent_id="", confidence=1.0))]
+    fn check_taint(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        agent_id: &str,
+        confidence: f64,
+    ) -> PyResult<PyObject> {
+        let check = self
+            .repo
+            .check_taint(path, agent_id, confidence)
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?;
+        let v = serde_json::to_value(&check)
+            .map_err(|e| PyRuntimeError::new_err(format!("check serialize: {e}")))?;
+        json_to_py(py, &v)
     }
 }
 

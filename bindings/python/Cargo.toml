@@ -16,6 +16,8 @@ agentstategraph-migrate = { path = "../../crates/agentstategraph-migrate" }
 agentstategraph-policy = { path = "../../crates/agentstategraph-policy" }
 agentstategraph-storage = { path = "../../crates/agentstategraph-storage" }
 agentstategraph-tasks = { path = "../../crates/agentstategraph-tasks" }
+agentstategraph-taint = { path = "../../crates/agentstategraph-taint" }
+chrono = { version = "0.4", features = ["serde"] }
 semver = "1"
 pyo3 = { version = "0.24", features = ["extension-module", "multiple-pymethods"] }
 serde_json = "1"
