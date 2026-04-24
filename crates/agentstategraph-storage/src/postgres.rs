@@ -144,10 +144,38 @@ impl PostgresStorage {
                     PRIMARY KEY (tenant_id, id)
                 );
 
+                CREATE TABLE IF NOT EXISTS taints (
+                    tenant_id       TEXT NOT NULL,
+                    id              TEXT NOT NULL,
+                    path            TEXT NOT NULL,
+                    name            TEXT NOT NULL,
+                    kind            TEXT NOT NULL,
+                    effect          TEXT NOT NULL,
+                    severity        TEXT NOT NULL DEFAULT 'medium',
+                    reason          TEXT NOT NULL,
+                    agent_id        TEXT NOT NULL,
+                    commit_id       TEXT NOT NULL DEFAULT '',
+                    created_at      TEXT NOT NULL,
+                    expires_at      TEXT,
+                    resolved_at     TEXT,
+                    resolved_by     TEXT,
+                    resolved_reason TEXT,
+                    resolved_proof  TEXT,
+                    propagate       BOOLEAN NOT NULL DEFAULT true,
+                    metadata        TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (tenant_id, id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_epochs_tenant_status
                     ON epochs(tenant_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sessions_tenant_agent
                     ON sessions(tenant_id, agent_id);
+                CREATE INDEX IF NOT EXISTS idx_taints_tenant_path
+                    ON taints(tenant_id, path);
+                CREATE INDEX IF NOT EXISTS idx_taints_tenant_kind
+                    ON taints(tenant_id, kind);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_taints_unique_active
+                    ON taints(tenant_id, path, name, kind) WHERE resolved_at IS NULL;
 
                 ALTER TABLE commits ADD COLUMN IF NOT EXISTS epoch_id TEXT;
                 ALTER TABLE commits ADD COLUMN IF NOT EXISTS session_id TEXT;
@@ -1095,55 +1123,410 @@ impl SessionStore for PostgresStorage {
     }
 }
 
-/// Stub TaintStore impl for Postgres. The taint substrate landed in
-/// 0.7.75 before the Postgres CI path was active; wiring the real
-/// SQL goes in the next milestone's post-production queue. For now
-/// every method returns a `Backend` error so callers see a clear
-/// signal instead of a silent miscompile.
+// ---------------------------------------------------------------------------
+// TaintStore for PostgresStorage (0.7.75-beta.2)
+// ---------------------------------------------------------------------------
+
+fn pg_kind_to_str(k: agentstategraph_taint::TaintKind) -> &'static str {
+    match k {
+        agentstategraph_taint::TaintKind::Taint => "taint",
+        agentstategraph_taint::TaintKind::Quarantine => "quarantine",
+        agentstategraph_taint::TaintKind::Watch => "watch",
+    }
+}
+
+fn pg_kind_from_str(s: &str) -> Result<agentstategraph_taint::TaintKind, StorageError> {
+    match s {
+        "taint" => Ok(agentstategraph_taint::TaintKind::Taint),
+        "quarantine" => Ok(agentstategraph_taint::TaintKind::Quarantine),
+        "watch" => Ok(agentstategraph_taint::TaintKind::Watch),
+        other => Err(StorageError::Backend(format!(
+            "unknown taint kind: {other}"
+        ))),
+    }
+}
+
+fn pg_effect_to_str(e: agentstategraph_taint::TaintEffect) -> &'static str {
+    match e {
+        agentstategraph_taint::TaintEffect::Warn => "warn",
+        agentstategraph_taint::TaintEffect::Block => "block",
+        agentstategraph_taint::TaintEffect::Review => "review",
+        agentstategraph_taint::TaintEffect::Isolate => "isolate",
+        agentstategraph_taint::TaintEffect::Advisory => "advisory",
+    }
+}
+
+fn pg_effect_from_str(s: &str) -> Result<agentstategraph_taint::TaintEffect, StorageError> {
+    match s {
+        "warn" => Ok(agentstategraph_taint::TaintEffect::Warn),
+        "block" => Ok(agentstategraph_taint::TaintEffect::Block),
+        "review" => Ok(agentstategraph_taint::TaintEffect::Review),
+        "isolate" => Ok(agentstategraph_taint::TaintEffect::Isolate),
+        "advisory" => Ok(agentstategraph_taint::TaintEffect::Advisory),
+        other => Err(StorageError::Backend(format!(
+            "unknown taint effect: {other}"
+        ))),
+    }
+}
+
+fn pg_severity_to_str(s: agentstategraph_taint::TaintSeverity) -> &'static str {
+    match s {
+        agentstategraph_taint::TaintSeverity::Low => "low",
+        agentstategraph_taint::TaintSeverity::Medium => "medium",
+        agentstategraph_taint::TaintSeverity::High => "high",
+        agentstategraph_taint::TaintSeverity::Critical => "critical",
+    }
+}
+
+fn pg_severity_from_str(s: &str) -> Result<agentstategraph_taint::TaintSeverity, StorageError> {
+    match s {
+        "low" => Ok(agentstategraph_taint::TaintSeverity::Low),
+        "medium" => Ok(agentstategraph_taint::TaintSeverity::Medium),
+        "high" => Ok(agentstategraph_taint::TaintSeverity::High),
+        "critical" => Ok(agentstategraph_taint::TaintSeverity::Critical),
+        other => Err(StorageError::Backend(format!(
+            "unknown taint severity: {other}"
+        ))),
+    }
+}
+
+fn pg_row_to_taint(
+    row: &tokio_postgres::Row,
+) -> Result<agentstategraph_taint::Taint, StorageError> {
+    use agentstategraph_taint::TaintMetadata;
+    let kind: String = row.get("kind");
+    let effect: String = row.get("effect");
+    let severity: String = row.get("severity");
+    let metadata_raw: String = row.get("metadata");
+    let created_at_s: String = row.get("created_at");
+    let expires_at_s: Option<String> = row.get("expires_at");
+    let resolved_at_s: Option<String> = row.get("resolved_at");
+
+    let metadata: TaintMetadata = serde_json::from_str(&metadata_raw)
+        .map_err(|e| StorageError::Serialization(format!("taint metadata: {e}")))?;
+    let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+        .map_err(|e| StorageError::Serialization(format!("created_at: {e}")))?
+        .with_timezone(&Utc);
+    let expires_at = match expires_at_s {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| StorageError::Serialization(format!("expires_at: {e}")))?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+    let resolved_at = match resolved_at_s {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| StorageError::Serialization(format!("resolved_at: {e}")))?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+
+    Ok(agentstategraph_taint::Taint {
+        id: row.get("id"),
+        path: row.get("path"),
+        name: row.get("name"),
+        kind: pg_kind_from_str(&kind)?,
+        effect: pg_effect_from_str(&effect)?,
+        severity: pg_severity_from_str(&severity)?,
+        reason: row.get("reason"),
+        agent_id: row.get("agent_id"),
+        commit_id: row.get("commit_id"),
+        created_at,
+        expires_at,
+        resolved_at,
+        resolved_by: row.get("resolved_by"),
+        resolved_reason: row.get("resolved_reason"),
+        resolved_proof: row.get("resolved_proof"),
+        propagate: row.get("propagate"),
+        metadata,
+    })
+}
+
 impl TaintStore for PostgresStorage {
-    fn create_taint(&self, _taint: &agentstategraph_taint::Taint) -> Result<(), StorageError> {
-        Err(StorageError::Backend(
-            "taint-store not yet implemented for PostgresStorage".into(),
-        ))
+    fn create_taint(&self, taint: &agentstategraph_taint::Taint) -> Result<(), StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let metadata_json = serde_json::to_string(&taint.metadata)
+                .map_err(|e| StorageError::Serialization(format!("taint metadata: {e}")))?;
+            let expires = taint.expires_at.map(|t| t.to_rfc3339());
+            let resolved_at = taint.resolved_at.map(|t| t.to_rfc3339());
+            client
+                .execute(
+                    "INSERT INTO taints (
+                        tenant_id, id, path, name, kind, effect, severity, reason,
+                        agent_id, commit_id, created_at, expires_at, resolved_at,
+                        resolved_by, resolved_reason, resolved_proof, propagate, metadata
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+                    &[
+                        &self.tenant_id,
+                        &taint.id,
+                        &taint.path,
+                        &taint.name,
+                        &pg_kind_to_str(taint.kind),
+                        &pg_effect_to_str(taint.effect),
+                        &pg_severity_to_str(taint.severity),
+                        &taint.reason,
+                        &taint.agent_id,
+                        &taint.commit_id,
+                        &taint.created_at.to_rfc3339(),
+                        &expires,
+                        &resolved_at,
+                        &taint.resolved_by,
+                        &taint.resolved_reason,
+                        &taint.resolved_proof,
+                        &taint.propagate,
+                        &metadata_json,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("insert taint: {e}")))?;
+            Ok(())
+        })
     }
 
     fn resolve_taint(
         &self,
-        _id: &str,
-        _resolved_by: &str,
-        _reason: &str,
-        _proof: Option<&str>,
-        _resolved_at: DateTime<Utc>,
+        id: &str,
+        resolved_by: &str,
+        reason: &str,
+        proof: Option<&str>,
+        resolved_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        Err(StorageError::Backend(
-            "taint-store not yet implemented for PostgresStorage".into(),
-        ))
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            // Guard: fail on already-resolved / not-found. Partial
+            // unique index would force failures on re-activation;
+            // we want explicit control here so the error is legible.
+            let row = client
+                .query_opt(
+                    "SELECT resolved_at FROM taints WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("resolve check: {e}")))?
+                .ok_or_else(|| StorageError::Backend(format!("taint {id} not found")))?;
+            let already: Option<String> = row.get(0);
+            if already.is_some() {
+                return Err(StorageError::Backend(format!(
+                    "taint {id} is already resolved"
+                )));
+            }
+            let proof_owned = proof.map(str::to_string);
+            client
+                .execute(
+                    "UPDATE taints
+                        SET resolved_at = $3, resolved_by = $4,
+                            resolved_reason = $5, resolved_proof = $6
+                      WHERE tenant_id = $1 AND id = $2",
+                    &[
+                        &self.tenant_id,
+                        &id,
+                        &resolved_at.to_rfc3339(),
+                        &resolved_by,
+                        &reason,
+                        &proof_owned,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("resolve taint: {e}")))?;
+            Ok(())
+        })
     }
 
     fn list_taints(
         &self,
-        _path_prefix: Option<&str>,
-        _kind: Option<agentstategraph_taint::TaintKind>,
-        _include_resolved: bool,
+        path_prefix: Option<&str>,
+        kind: Option<agentstategraph_taint::TaintKind>,
+        include_resolved: bool,
     ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
-        Ok(Vec::new())
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            // Build dynamic WHERE without sacrificing parameterization:
+            // we always pass tenant_id + optional prefix/plike/kind.
+            let prefix = path_prefix.map(|p| p.trim_end_matches('/').to_string());
+            let plike = prefix.as_ref().map(|p| format!("{p}/%"));
+            let kind_str = kind.map(|k| pg_kind_to_str(k).to_string());
+
+            let rows = match (prefix.as_ref(), kind_str.as_ref(), include_resolved) {
+                (None, None, true) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints WHERE tenant_id = $1
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id],
+                        )
+                        .await
+                }
+                (None, None, false) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints
+                              WHERE tenant_id = $1 AND resolved_at IS NULL
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id],
+                        )
+                        .await
+                }
+                (Some(p), None, true) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints
+                              WHERE tenant_id = $1 AND (path = $2 OR path LIKE $3)
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id, p, plike.as_ref().unwrap()],
+                        )
+                        .await
+                }
+                (Some(p), None, false) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints
+                              WHERE tenant_id = $1 AND resolved_at IS NULL
+                                AND (path = $2 OR path LIKE $3)
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id, p, plike.as_ref().unwrap()],
+                        )
+                        .await
+                }
+                (None, Some(k), true) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints
+                              WHERE tenant_id = $1 AND kind = $2
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id, k],
+                        )
+                        .await
+                }
+                (None, Some(k), false) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints
+                              WHERE tenant_id = $1 AND resolved_at IS NULL AND kind = $2
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id, k],
+                        )
+                        .await
+                }
+                (Some(p), Some(k), true) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints
+                              WHERE tenant_id = $1 AND kind = $2
+                                AND (path = $3 OR path LIKE $4)
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id, k, p, plike.as_ref().unwrap()],
+                        )
+                        .await
+                }
+                (Some(p), Some(k), false) => {
+                    client
+                        .query(
+                            "SELECT * FROM taints
+                              WHERE tenant_id = $1 AND resolved_at IS NULL AND kind = $2
+                                AND (path = $3 OR path LIKE $4)
+                              ORDER BY created_at DESC",
+                            &[&self.tenant_id, k, p, plike.as_ref().unwrap()],
+                        )
+                        .await
+                }
+            }
+            .map_err(|e| StorageError::Backend(format!("list_taints: {e}")))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(pg_row_to_taint(&row)?);
+            }
+            Ok(out)
+        })
     }
 
     fn check_taint(
         &self,
-        _request_path: &str,
+        request_path: &str,
     ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
-        Ok(Vec::new())
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let now = Utc::now().to_rfc3339();
+            // Ancestor match: exact OR (propagate=true AND request_path
+            // LIKE path || '/%'). Postgres LIKE is case-sensitive.
+            let rows = client
+                .query(
+                    "SELECT * FROM taints
+                      WHERE tenant_id = $1
+                        AND resolved_at IS NULL
+                        AND (expires_at IS NULL OR expires_at > $2)
+                        AND (path = $3 OR (propagate AND $3 LIKE path || '/%'))
+                      ORDER BY created_at DESC",
+                    &[&self.tenant_id, &now, &request_path],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("check_taint: {e}")))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(pg_row_to_taint(&row)?);
+            }
+            Ok(out)
+        })
     }
 
-    fn get_taint(&self, _id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
-        Ok(None)
+    fn get_taint(&self, id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let row = client
+                .query_opt(
+                    "SELECT * FROM taints WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("get_taint: {e}")))?;
+            match row {
+                Some(r) => Ok(Some(pg_row_to_taint(&r)?)),
+                None => Ok(None),
+            }
+        })
     }
 
-    fn set_taint_commit_id(&self, _id: &str, _commit_id: &str) -> Result<(), StorageError> {
-        Err(StorageError::Backend(
-            "taint-store not yet implemented for PostgresStorage".into(),
-        ))
+    fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            client
+                .execute(
+                    "UPDATE taints SET commit_id = $3
+                      WHERE tenant_id = $1 AND id = $2 AND resolved_at IS NULL",
+                    &[&self.tenant_id, &id, &commit_id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("set_taint_commit_id: {e}")))?;
+            Ok(())
+        })
     }
 }
 

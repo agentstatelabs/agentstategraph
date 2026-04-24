@@ -5,6 +5,55 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.75-beta.2] — 2026-04-24
+
+Theme: **real Postgres `TaintStore`** — unblocks CTXone Pro (and
+any other Postgres-first consumer) from the 0.7.75-beta.1 taint
+substrate.
+
+### Added
+
+- **`PostgresStorage` taint schema** — multi-tenant `taints`
+  table mirroring the SQLite shape, composite PK
+  `(tenant_id, id)`, partial unique index
+  `(tenant_id, path, name, kind) WHERE resolved_at IS NULL`.
+  Per-tenant indexes on `(tenant_id, path)` and
+  `(tenant_id, kind)`.
+- **6 real `TaintStore` impls on `PostgresStorage`** replacing
+  the 0.7.75-beta.1 stubs. SQL translations of the SQLite
+  versions, every WHERE scoped by `tenant_id = $1`. Ancestor
+  propagation uses `$N LIKE path || '/%'` — same semantics as
+  SQLite, same path-boundary safety.
+- **New integration test** `tests/postgres_taint.rs` — 2 tests
+  exercised against a live Postgres:
+  1. Full 12-assertion conformance (CRUD, duplicate rejection,
+     ancestor propagation, path-boundary safety, list filters,
+     resolve + double-resolve rejection, include_resolved
+     history, expired-taint filtering).
+  2. Cross-tenant isolation — tenant A's taints are invisible to
+     tenant B on `get_taint`, `list_taints`, `check_taint`; each
+     tenant can independently create the same
+     `(path, name, kind)` triple (partial unique index is
+     tenant-scoped).
+  Skipped unless `TEST_DATABASE_URL` is set (matches existing
+  `postgres_tenant_isolation.rs` convention).
+
+### Fixed
+
+- **Pre-existing `rt-multi-thread` build bug on `PostgresStorage`.**
+  The crate's `tokio` feature set was `["rt"]` only, but
+  `block_in_place` requires `rt-multi-thread`. Fixed Cargo.toml
+  to `["rt", "rt-multi-thread"]`. The taint-stub impls didn't
+  call `block_on`, so the bug was latent; real SQL surfaced it.
+
+### Verified locally
+
+- Homebrew `postgresql@16` + `asg_test` database.
+- Both new Postgres tests pass with `--test-threads=1` (the
+  pre-existing DDL race on parallel init_tables is documented in
+  `spec/POST-PRODUCTION-NOTES.md`).
+- All 0.7.75-beta.1 test suites continue to pass unchanged.
+
 ## [0.7.75-beta.1] — 2026-04-21
 
 Theme: **taint / quarantine / watch** — dynamic runtime markers
