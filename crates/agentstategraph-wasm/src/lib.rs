@@ -1207,50 +1207,126 @@ impl WasmPolicyStore {
         serde_json::to_string(&decision).map_err(js_err)
     }
 
-    // ---- 0.7.5 §5d: sign / verify / set_external_evaluator stubs ----
+    // ---- 0.7.75-beta.3 §9d follow-up: real sign / verify ----
     //
-    // Mirrors the Python §5a stubs (5ddcd58). Real signing /
-    // verification / external-evaluator wiring lives in
-    // `agentstategraph-policy-sign` and the runtime-side mutators; the
-    // WASM boundary doesn't surface that machinery yet. These stubs
-    // keep the API shape stable so callers can pattern-match on the
-    // `{"error": "not yet wired"}` envelope without exception-handling
-    // gymnastics. In the meantime, the `signature` / `tenant_id` /
-    // `external_evaluator` Policy fields round-trip through the JSON
-    // boundary, so callers can construct them elsewhere and attach via
-    // `propose` / `supersede`.
+    // Mirrors the TypeScript wiring from 0.7.5-beta.2 (commit 8290bf4).
+    // `set_external_evaluator` remains a stub per plan §4c — register
+    // runners via the MCP server builders instead of the binding
+    // boundary.
 
-    /// Sign the policy at `path` (stub). Returns a JSON string
-    /// `{"error": "not yet wired", "hint": "..."}`. Real signing will
-    /// land as a follow-up once a WASM signer wrapper ships; in the
-    /// meantime attach a `signature` object directly on the policy
-    /// JSON before `propose` / `supersede` — the field is preserved
-    /// through the round-trip.
-    #[allow(unused_variables)]
+    /// Sign the active policy at `path` with an Ed25519 private key.
+    /// `private_key_hex` is a 32-byte seed encoded as 64 hex chars.
+    /// Returns a JSON string `{algorithm, signer_key_id,
+    /// signature_hex}`.
     pub fn sign(
         &self,
         ref_name: &str,
         path: &str,
-        signer_key_id: Option<String>,
+        signer_key_id: &str,
+        private_key_hex: &str,
     ) -> Result<String, JsValue> {
+        use agentstategraph_policy::PolicySignature;
+        use agentstategraph_policy_sign::{canonicalize, Ed25519Signer, PolicySigner};
+
+        let seed_vec = hex::decode(private_key_hex)
+            .map_err(|e| js_err(format!("invalid private_key_hex: {e}")))?;
+        let seed: [u8; 32] = seed_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| js_err("private_key_hex must decode to 32 bytes"))?;
+        let signer = Ed25519Signer::from_bytes(signer_key_id.to_string(), &seed);
+
+        let policy = self
+            .inner
+            .get(ref_name, path, None)
+            .map_err(|e| js_err(e.to_string()))?;
+        let canonical = canonicalize(&policy).map_err(|e| js_err(e.to_string()))?;
+        let (key_id, sig_bytes) = signer.sign(&canonical).map_err(|e| js_err(e.to_string()))?;
+        let sig_hex = hex::encode(&sig_bytes);
+        let signature = PolicySignature::Ed25519 {
+            signer_key_id: key_id.clone(),
+            signature_hex: sig_hex.clone(),
+        };
+        self.inner
+            .set_signature(ref_name, path, signature)
+            .map_err(|e| js_err(e.to_string()))?;
         let envelope = serde_json::json!({
-            "error": "not yet wired",
-            "hint": "use MCP tool policy_sign or attach a signature object via propose/supersede",
+            "algorithm": "ed25519",
+            "signer_key_id": key_id,
+            "signature_hex": sig_hex,
         });
         serde_json::to_string(&envelope).map_err(js_err)
     }
 
-    /// Verify the signature on the policy at `path` (stub). Returns a
-    /// JSON string `{"error": "not yet wired", "hint": "..."}`. Real
-    /// verification routes through `agentstategraph-policy-sign`; it
-    /// lands as a follow-up.
-    #[allow(unused_variables)]
-    pub fn verify(&self, ref_name: &str, path: &str) -> Result<String, JsValue> {
-        let envelope = serde_json::json!({
-            "error": "not yet wired",
-            "hint": "use MCP tool policy_verify",
-        });
-        serde_json::to_string(&envelope).map_err(js_err)
+    /// Verify the Ed25519 signature on the policy at `path` using
+    /// `public_key_hex` (64-char hex / 32-byte key). Returns
+    /// `{valid: true, algorithm, signer_key_id}` on success,
+    /// `{valid: false, reason}` otherwise.
+    pub fn verify(
+        &self,
+        ref_name: &str,
+        path: &str,
+        public_key_hex: &str,
+    ) -> Result<String, JsValue> {
+        use agentstategraph_policy::PolicySignature;
+        use agentstategraph_policy_sign::{
+            canonicalize, Ed25519Verifier, InMemoryKeyRegistry, PolicyVerifier,
+        };
+
+        let policy = self
+            .inner
+            .get(ref_name, path, None)
+            .map_err(|e| js_err(e.to_string()))?;
+        let Some(sig) = policy.signature.as_ref() else {
+            let env = serde_json::json!({"valid": false, "reason": "unsigned"});
+            return serde_json::to_string(&env).map_err(js_err);
+        };
+        let PolicySignature::Ed25519 {
+            signer_key_id,
+            signature_hex,
+        } = sig;
+
+        let pk_vec = hex::decode(public_key_hex)
+            .map_err(|e| js_err(format!("invalid public_key_hex: {e}")))?;
+        let pk_bytes: [u8; 32] = pk_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| js_err("public_key_hex must decode to 32 bytes"))?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pk_bytes)
+            .map_err(|e| js_err(format!("invalid verifying key: {e}")))?;
+
+        let mut registry = InMemoryKeyRegistry::new();
+        registry.insert(signer_key_id.clone(), verifying_key);
+        let verifier = Ed25519Verifier::new(registry);
+
+        let sig_bytes = match hex::decode(signature_hex) {
+            Ok(b) => b,
+            Err(e) => {
+                let env = serde_json::json!({
+                    "valid": false,
+                    "reason": format!("invalid signature_hex: {e}"),
+                });
+                return serde_json::to_string(&env).map_err(js_err);
+            }
+        };
+        let canonical = canonicalize(&policy).map_err(|e| js_err(e.to_string()))?;
+        match verifier.verify(signer_key_id, &sig_bytes, &canonical) {
+            Ok(()) => {
+                let env = serde_json::json!({
+                    "valid": true,
+                    "algorithm": "ed25519",
+                    "signer_key_id": signer_key_id,
+                });
+                serde_json::to_string(&env).map_err(js_err)
+            }
+            Err(e) => {
+                let env = serde_json::json!({
+                    "valid": false,
+                    "reason": e.to_string(),
+                });
+                serde_json::to_string(&env).map_err(js_err)
+            }
+        }
     }
 
     /// Attach or update the external evaluator reference on the

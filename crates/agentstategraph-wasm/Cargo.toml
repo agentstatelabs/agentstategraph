@@ -16,7 +16,10 @@ agentstategraph-storage = { path = "../agentstategraph-storage", default-feature
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
 agentstategraph-taint = { path = "../agentstategraph-taint" }
 agentstategraph-policy = { path = "../agentstategraph-policy" }
+agentstategraph-policy-sign = { path = "../agentstategraph-policy-sign" }
 agentstategraph-migrate = { path = "../agentstategraph-migrate" }
+hex = "0.4"
+ed25519-dalek = "2"
 semver = "1"
 wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }
 serde = { workspace = true }
@@ -27,3 +30,5 @@ js-sys = "0.3"
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false }
+hex = "0.4"
+ed25519-dalek = "2"

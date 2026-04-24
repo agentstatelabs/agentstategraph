@@ -86,6 +86,69 @@ pub extern "C" fn agentstategraph_new_sqlite(path: *const c_char) -> *mut SgRepo
     }))
 }
 
+/// Create a new Postgres-backed AgentStateGraph repository.
+///
+/// Feature-gated: only exported when the `postgres` feature is
+/// enabled at build time. Pass a libpq-style connection URL
+/// (e.g. `postgresql://user@host/dbname`) and a tenant id for
+/// multi-tenant isolation — every row written by this handle is
+/// scoped to `tenant_id`. Returns NULL on connection / init
+/// failure.
+#[cfg(feature = "postgres")]
+#[no_mangle]
+pub extern "C" fn agentstategraph_new_postgres(
+    url: *const c_char,
+    tenant_id: *const c_char,
+) -> *mut SgRepo {
+    use agentstategraph_storage::PostgresStorage;
+    if url.is_null() || tenant_id.is_null() {
+        return ptr::null_mut();
+    }
+    let url = match unsafe { CStr::from_ptr(url) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return ptr::null_mut(),
+    };
+    let tenant = match unsafe { CStr::from_ptr(tenant_id) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return ptr::null_mut(),
+    };
+    // PostgresStorage::connect_tenant is async. We need a runtime
+    // to drive it, and we need the runtime to persist so later
+    // block_on calls inside the Storage impls can dispatch on it.
+    // The pattern used by SqliteStorage + MemoryStorage is
+    // fully-sync, so for Postgres we run an owned multi-thread
+    // runtime and enter() its handle on construction so the repo
+    // inherits it.
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(_) => return ptr::null_mut(),
+    };
+    let storage = match rt.block_on(PostgresStorage::connect_tenant(&url, &tenant)) {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+    // Leak the runtime: its Handle::current is needed by every
+    // subsequent Storage call on this handle. Dropping the runtime
+    // would break in-flight queries; the runtime is freed alongside
+    // the SgRepo on agentstategraph_free via the leaker going out
+    // of scope is NOT done — we deliberately keep it alive for the
+    // process lifetime. For consumers that care about clean
+    // shutdown, shut the process down gracefully (same pattern as
+    // tokio::main).
+    let _guard = rt.enter();
+    std::mem::forget(rt);
+    let repo = Repository::new(Box::new(storage));
+    if repo.init().is_err() {
+        return ptr::null_mut();
+    }
+    Box::into_raw(Box::new(SgRepo {
+        inner: Arc::new(repo),
+    }))
+}
+
 /// Free a repository handle.
 #[no_mangle]
 pub extern "C" fn agentstategraph_free(repo: *mut SgRepo) {

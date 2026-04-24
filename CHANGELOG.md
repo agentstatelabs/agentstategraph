@@ -5,6 +5,49 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.7.75-beta.3] — 2026-04-24
+
+Theme: **remaining stub closures** flagged in the 0.7.75-beta.2
+audit — FFI Postgres constructor + WASM sign/verify parity.
+
+### Added
+
+- **FFI `agentstategraph_new_postgres(url, tenant_id)`** —
+  feature-gated constructor behind `--features postgres` on the
+  FFI crate. Opens a multi-tenant Postgres-backed repository
+  through the C ABI; required for CTXone Pro and other
+  Postgres-first FFI consumers. Runtime is leaked for the process
+  lifetime (matches `tokio::main` semantics); shutdown is by
+  process exit. Symbol absent from the default `sqlite`-only
+  build — consumers targeting both modes should `dlsym`-probe.
+- **WASM `WasmPolicyStore::sign` / `verify`** — full Ed25519
+  round-trip mirroring the TypeScript wiring from 0.7.5-beta.2.
+  Caller supplies a 32-byte hex seed for `sign` and a 32-byte hex
+  public key for `verify`. Returns `{algorithm, signer_key_id,
+  signature_hex}` on sign; `{valid, algorithm, signer_key_id}` on
+  verify success; `{valid: false, reason}` on mismatch or
+  `"unsigned"` when the policy carries no signature.
+- **WASM taint tests extended** — 3 new wasm_bindgen_test
+  cases: sign/verify round-trip with deterministic seed,
+  unsigned-policy verify returns `reason: "unsigned"`,
+  `set_external_evaluator` still returns the documented stub
+  envelope (by plan §4c).
+
+### Changed
+
+- **`set_external_evaluator` on every binding is now documented
+  as "by design, not a gap"** — the five bindings' stubs match
+  plan §4c: the FFI dispatcher is intentionally thin; register
+  runners via the MCP server builders instead.
+
+### Verified locally
+
+- `cargo build --release -p agentstategraph-ffi --features postgres`
+  produces a `.a`/`.dylib` with the new extern exported.
+- `wasm-pack test --node crates/agentstategraph-wasm` — 22 policy
+  tests (was 20 in -beta.2), all pass.
+- All other 0.7.75-beta.2 suites unchanged and green.
+
 ## [0.7.75-beta.2] — 2026-04-24
 
 Theme: **real Postgres `TaintStore`** — unblocks CTXone Pro (and

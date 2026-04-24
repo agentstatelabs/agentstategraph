@@ -9,6 +9,14 @@ description = "C ABI for AgentStateGraph — enables Go, Ruby, Java, C# bindings
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+default = []
+# Enables Postgres-backed storage in the FFI — required for
+# CTXone Pro and any other Postgres-first consumer that links
+# through the C ABI. Adds the `agentstategraph_new_postgres`
+# extern.
+postgres = ["agentstategraph-storage/postgres", "dep:tokio"]
+
 [dependencies]
 agentstategraph = { path = "../agentstategraph" }
 agentstategraph-core = { path = "../agentstategraph-core" }
@@ -18,6 +26,7 @@ agentstategraph-policy = { path = "../agentstategraph-policy" }
 agentstategraph-taint = { path = "../agentstategraph-taint" }
 agentstategraph-migrate = { path = "../agentstategraph-migrate" }
 chrono = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

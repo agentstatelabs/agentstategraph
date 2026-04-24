@@ -122,6 +122,13 @@ extern char* agentstategraph_list_taints(SgRepo repo, const char* path_prefix_or
 extern char* agentstategraph_check_taint(SgRepo repo, const char* path, const char* agent_id,
     double confidence);
 
+/* Postgres constructor — only present when the FFI was built
+ * with `--features postgres`. The symbol is absent from the
+ * default `sqlite`-only build; consumers targeting both modes
+ * should dlsym-probe before calling.
+ */
+extern SgRepo agentstategraph_new_postgres(const char* url, const char* tenant_id);
+
 /* Migrate */
 extern char* agentstategraph_migrate_check(SgRepo repo, const char* ref_name, const char* target);
 extern char* agentstategraph_migrate_run(SgRepo repo, const char* ref_name, const char* target, const char* mode);

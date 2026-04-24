@@ -17,6 +17,11 @@ use agentstategraph_wasm::WasmPolicyStore;
 
 use wasm_bindgen_test::*;
 
+// Hex + ed25519_dalek pulled in for the real sign/verify tests
+// (0.7.75-beta.3). Keep the imports at file scope so the wasm-pack
+// test harness links them.
+extern crate hex;
+
 // wasm_bindgen_test_configure!(run_in_browser); // drop to allow --node tests
 
 fn new_repo() -> Arc<Repository> {
@@ -712,40 +717,84 @@ fn test_wasm_session_scope_tenant_field_round_trips() {
 }
 
 #[wasm_bindgen_test]
-fn test_wasm_policystore_sign_returns_stub_envelope() {
-    // All three §5d stubs return the same `{"error": "not yet wired",
-    // "hint": "..."}` envelope shape so callers can pattern-match
-    // without try/catch. Exercise each.
+fn test_wasm_policystore_sign_verify_round_trip() {
+    // Real Ed25519 sign/verify round-trip via the WASM binding
+    // (0.7.75-beta.3 §9d follow-up — mirrors the TS wiring).
+    // Use a deterministic seed so the test doesn't depend on RNG.
     let ps = new_store();
     ps.propose("main", &policy_json("infra/to-sign", serde_json::json!({})))
         .unwrap();
+    ps.ratify("main", "infra/to-sign", "ops", "ok").unwrap();
 
-    let sign_env: serde_json::Value =
-        serde_json::from_str(&ps.sign("main", "infra/to-sign", None).unwrap()).unwrap();
-    assert_eq!(sign_env["error"], "not yet wired");
-    assert!(sign_env["hint"].is_string());
+    let seed_hex = "a".repeat(64); // 32 bytes of 0xAA
+                                   // Derive the matching public key the same way ed25519-dalek would.
+    let seed_bytes = hex::decode(&seed_hex).unwrap();
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(&seed_bytes);
+    let sk = ed25519_dalek::SigningKey::from_bytes(&seed_arr);
+    let pk_hex = hex::encode(sk.verifying_key().to_bytes());
 
-    let sign_env_with_key: serde_json::Value = serde_json::from_str(
-        &ps.sign("main", "infra/to-sign", Some("ops-root-2026".to_string()))
+    let sign_env: serde_json::Value = serde_json::from_str(
+        &ps.sign("main", "infra/to-sign", "ops-root-2026", &seed_hex)
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(sign_env_with_key["error"], "not yet wired");
+    assert_eq!(sign_env["algorithm"], "ed25519");
+    assert_eq!(sign_env["signer_key_id"], "ops-root-2026");
+    assert!(sign_env["signature_hex"].as_str().unwrap().len() == 128);
 
+    // Fetch back — signature is persisted on the policy.
+    let fetched: serde_json::Value =
+        serde_json::from_str(&ps.get("main", "infra/to-sign", None).unwrap()).unwrap();
+    assert_eq!(fetched["signature"]["algorithm"], "ed25519");
+
+    // Verify with the matching public key → valid.
     let verify_env: serde_json::Value =
-        serde_json::from_str(&ps.verify("main", "infra/to-sign").unwrap()).unwrap();
-    assert_eq!(verify_env["error"], "not yet wired");
-    assert!(verify_env["hint"].is_string());
+        serde_json::from_str(&ps.verify("main", "infra/to-sign", &pk_hex).unwrap()).unwrap();
+    assert_eq!(verify_env["valid"], true);
+    assert_eq!(verify_env["signer_key_id"], "ops-root-2026");
 
-    let ext_env: serde_json::Value = serde_json::from_str(
+    // Verify with a different key → invalid.
+    let other_pk = "b".repeat(64);
+    let bad_env: serde_json::Value = serde_json::from_str(
+        &ps.verify("main", "infra/to-sign", &other_pk)
+            .unwrap_or_else(|e| format!("{{\"valid\":false,\"reason\":\"{e:?}\"}}")),
+    )
+    .unwrap();
+    assert_eq!(bad_env["valid"], false);
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_policystore_verify_unsigned() {
+    let ps = new_store();
+    ps.propose(
+        "main",
+        &policy_json("infra/unsigned", serde_json::json!({})),
+    )
+    .unwrap();
+    let pk_hex = "a".repeat(64);
+    let env: serde_json::Value =
+        serde_json::from_str(&ps.verify("main", "infra/unsigned", &pk_hex).unwrap()).unwrap();
+    assert_eq!(env["valid"], false);
+    assert_eq!(env["reason"], "unsigned");
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_policystore_set_external_evaluator_stays_stub() {
+    // `set_external_evaluator` remains a stub per plan §4c — the
+    // FFI dispatcher is post-production. Policies carry
+    // `external_evaluator` via propose/supersede instead.
+    let ps = new_store();
+    ps.propose("main", &policy_json("infra/to-ext", serde_json::json!({})))
+        .unwrap();
+    let env: serde_json::Value = serde_json::from_str(
         &ps.set_external_evaluator(
             "main",
-            "infra/to-sign",
-            Some(r#"{"kind":"webhook","endpoint":"https://x/"}"#.to_string()),
+            "infra/to-ext",
+            Some(r#"{"kind":"rego"}"#.to_string()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(ext_env["error"], "not yet wired");
-    assert!(ext_env["hint"].is_string());
+    assert_eq!(env["error"], "not yet wired");
 }
