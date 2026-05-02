@@ -375,4 +375,240 @@ mod tests {
         });
         assert!(!s.validate(&invalid).valid);
     }
+
+    // --- All merge hint variants ---
+
+    #[test]
+    fn test_extract_all_merge_hint_variants() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": { "x-agentstategraph-merge": "last-writer-wins" },
+                "b": { "x-agentstategraph-merge": "union-by-id" }, // default id field
+                "c": { "x-agentstategraph-merge": "union" },
+                "d": { "x-agentstategraph-merge": "sum" },
+                "e": { "x-agentstategraph-merge": "max" },
+                "f": { "x-agentstategraph-merge": "min" },
+                "g": { "x-agentstategraph-merge": "concat" },
+                "h": { "x-agentstategraph-merge": "manual" },
+                "i": { "x-agentstategraph-merge": "my-custom-resolver" }
+            }
+        });
+
+        let s = Schema::from_json_schema(schema, EnforcementMode::None);
+
+        assert_eq!(s.merge_hint_for("/a"), Some(&MergeHint::LastWriterWins));
+        // union-by-id without explicit id-field defaults to "id"
+        assert_eq!(
+            s.merge_hint_for("/b"),
+            Some(&MergeHint::UnionById("id".to_string()))
+        );
+        assert_eq!(s.merge_hint_for("/c"), Some(&MergeHint::Union));
+        assert_eq!(s.merge_hint_for("/d"), Some(&MergeHint::Sum));
+        assert_eq!(s.merge_hint_for("/e"), Some(&MergeHint::Max));
+        assert_eq!(s.merge_hint_for("/f"), Some(&MergeHint::Min));
+        assert_eq!(s.merge_hint_for("/g"), Some(&MergeHint::Concat));
+        assert_eq!(s.merge_hint_for("/h"), Some(&MergeHint::Manual));
+        assert_eq!(
+            s.merge_hint_for("/i"),
+            Some(&MergeHint::Custom("my-custom-resolver".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_merge_hint_for_unknown_path_returns_none() {
+        let schema = serde_json::json!({ "type": "object" });
+        let s = Schema::from_json_schema(schema, EnforcementMode::None);
+        assert_eq!(s.merge_hint_for("/nonexistent"), None);
+        assert_eq!(s.merge_hint_for(""), None);
+    }
+
+    #[test]
+    fn test_union_by_id_explicit_id_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "records": {
+                    "x-agentstategraph-merge": "union-by-id",
+                    "x-agentstategraph-id-field": "record_id"
+                }
+            }
+        });
+        let s = Schema::from_json_schema(schema, EnforcementMode::None);
+        assert_eq!(
+            s.merge_hint_for("/records"),
+            Some(&MergeHint::UnionById("record_id".to_string()))
+        );
+    }
+
+    // --- items/* path for array schemas ---
+
+    #[test]
+    fn test_extract_merge_hints_from_items() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "x-agentstategraph-merge": "concat",
+            "items": {
+                "x-agentstategraph-merge": "last-writer-wins"
+            }
+        });
+        let s = Schema::from_json_schema(schema, EnforcementMode::None);
+        // Root-level hint
+        assert_eq!(s.merge_hint_for(""), Some(&MergeHint::Concat));
+        // Items hint
+        assert_eq!(s.merge_hint_for("/*"), Some(&MergeHint::LastWriterWins));
+    }
+
+    // --- EnforcementMode default ---
+
+    #[test]
+    fn test_enforcement_mode_default_is_none() {
+        assert_eq!(EnforcementMode::default(), EnforcementMode::None);
+    }
+
+    // --- json_type_name coverage ---
+
+    #[test]
+    fn test_type_mismatch_null() {
+        let schema = serde_json::json!({ "type": "string" });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        let result = s.validate(&serde_json::Value::Null);
+        assert!(!result.valid);
+        let e = &result.errors[0];
+        assert_eq!(e.expected.as_deref(), Some("string"));
+        assert_eq!(e.actual.as_deref(), Some("null"));
+    }
+
+    #[test]
+    fn test_type_mismatch_boolean() {
+        let schema = serde_json::json!({ "type": "integer" });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        let result = s.validate(&serde_json::json!(true));
+        assert!(!result.valid);
+        assert_eq!(result.errors[0].actual.as_deref(), Some("boolean"));
+    }
+
+    #[test]
+    fn test_type_mismatch_array() {
+        let schema = serde_json::json!({ "type": "object" });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        let result = s.validate(&serde_json::json!([1, 2, 3]));
+        assert!(!result.valid);
+        assert_eq!(result.errors[0].actual.as_deref(), Some("array"));
+    }
+
+    #[test]
+    fn test_type_number_vs_integer() {
+        // float is "number", not "integer"
+        let schema = serde_json::json!({ "type": "number" });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        let result = s.validate(&serde_json::json!(3.14));
+        assert!(result.valid, "3.14 should satisfy type:number");
+
+        let schema = serde_json::json!({ "type": "integer" });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        let result = s.validate(&serde_json::json!(42));
+        assert!(result.valid, "42 should satisfy type:integer");
+    }
+
+    // --- Validation edge cases ---
+
+    #[test]
+    fn test_validate_empty_schema_accepts_anything() {
+        let schema = serde_json::json!({});
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        assert!(s.validate(&serde_json::json!(42)).valid);
+        assert!(s.validate(&serde_json::json!({"a": 1})).valid);
+        assert!(s.validate(&serde_json::Value::Null).valid);
+    }
+
+    #[test]
+    fn test_validate_multiple_required_fields_missing() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["a", "b", "c"]
+        });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        let result = s.validate(&serde_json::json!({"a": 1}));
+        assert!(!result.valid);
+        assert_eq!(result.errors.len(), 2, "b and c should both be reported missing");
+        let paths: Vec<_> = result.errors.iter().map(|e| e.path.as_str()).collect();
+        assert!(paths.iter().any(|p| p.contains("b")));
+        assert!(paths.iter().any(|p| p.contains("c")));
+    }
+
+    #[test]
+    fn test_validation_error_fields_populated() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "x": { "type": "string" }
+            }
+        });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+        let result = s.validate(&serde_json::json!({"x": 42}));
+        assert!(!result.valid);
+        let e = &result.errors[0];
+        assert!(!e.path.is_empty());
+        assert!(!e.message.is_empty());
+        assert!(e.expected.is_some());
+        assert!(e.actual.is_some());
+    }
+
+    #[test]
+    fn test_validate_array_items_recursively() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": { "type": "integer" }
+        });
+        let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
+
+        assert!(s.validate(&serde_json::json!([1, 2, 3])).valid);
+
+        let result = s.validate(&serde_json::json!([1, "bad", 3]));
+        assert!(!result.valid);
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].path.contains("1")); // index 1 is "bad"
+    }
+
+    // --- Schema serialization ---
+
+    #[test]
+    fn test_schema_serializes_and_deserializes() {
+        let schema = Schema::from_json_schema(
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "x-agentstategraph-merge": "sum" }
+                }
+            }),
+            EnforcementMode::Warn,
+        );
+
+        let json = serde_json::to_string(&schema).unwrap();
+        let restored: Schema = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.enforcement, EnforcementMode::Warn);
+        assert_eq!(restored.merge_hint_for("/count"), Some(&MergeHint::Sum));
+    }
+
+    #[test]
+    fn test_merge_hint_serializes_and_deserializes() {
+        let hints = vec![
+            MergeHint::LastWriterWins,
+            MergeHint::UnionById("id".to_string()),
+            MergeHint::Union,
+            MergeHint::Sum,
+            MergeHint::Max,
+            MergeHint::Min,
+            MergeHint::Concat,
+            MergeHint::Manual,
+            MergeHint::Custom("custom-fn".to_string()),
+        ];
+        for hint in hints {
+            let json = serde_json::to_string(&hint).unwrap();
+            let restored: MergeHint = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored, hint, "round-trip failed for {hint:?}");
+        }
+    }
 }
