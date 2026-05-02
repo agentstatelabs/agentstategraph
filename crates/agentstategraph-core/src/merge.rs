@@ -605,4 +605,394 @@ mod tests {
             MergeResult::Conflicts { .. } => panic!("identical changes should not conflict"),
         }
     }
+
+    // --- Set union ---
+
+    #[test]
+    fn test_set_union_no_conflict() {
+        let mut r = TestResolver::new();
+        let a = r.store(&Object::int(1));
+        let b = r.store(&Object::int(2));
+        let c = r.store(&Object::int(3));
+
+        // base: {1}, ours: {1,2}, theirs: {1,3} → merged: {1,2,3}
+        let base = r.store(&Object::set(vec![a]));
+        let ours = r.store(&Object::set(vec![a, b]));
+        let theirs = r.store(&Object::set(vec![a, c]));
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Success(merged) => {
+                if let Object::Node(Node::Set(items)) = merged {
+                    assert_eq!(items.len(), 3, "union of {{1,2}} and {{1,3}} should have 3 items");
+                    assert!(items.contains(&a));
+                    assert!(items.contains(&b));
+                    assert!(items.contains(&c));
+                } else {
+                    panic!("expected set");
+                }
+            }
+            MergeResult::Conflicts { conflicts, .. } => {
+                panic!("sets never conflict, got: {:?}", conflicts);
+            }
+            MergeResult::FastForward(_) => panic!("expected success"),
+        }
+    }
+
+    #[test]
+    fn test_set_disjoint_union() {
+        let mut r = TestResolver::new();
+        let a = r.store(&Object::int(1));
+        let b = r.store(&Object::int(2));
+        let c = r.store(&Object::int(3));
+
+        // base: {}, ours: {1,2}, theirs: {3} → merged: {1,2,3}
+        let base = r.store(&Object::set(vec![]));
+        let ours = r.store(&Object::set(vec![a, b]));
+        let theirs = r.store(&Object::set(vec![c]));
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Success(merged) => {
+                if let Object::Node(Node::Set(items)) = merged {
+                    assert_eq!(items.len(), 3);
+                } else {
+                    panic!("expected set");
+                }
+            }
+            MergeResult::Conflicts { conflicts, .. } => {
+                panic!("sets never conflict: {:?}", conflicts);
+            }
+            MergeResult::FastForward(_) => panic!("expected success"),
+        }
+    }
+
+    // --- List conflict ---
+
+    #[test]
+    fn test_list_conflict_both_sides_modify() {
+        let mut r = TestResolver::new();
+        let x = r.store(&Object::int(10));
+        let y = r.store(&Object::int(20));
+        let z = r.store(&Object::int(30));
+        let w = r.store(&Object::int(40));
+
+        let base = r.store(&Object::list(vec![x, y]));
+        let ours = r.store(&Object::list(vec![x, z])); // changed second element
+        let theirs = r.store(&Object::list(vec![x, w])); // changed second element differently
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Conflicts { conflicts, .. } => {
+                assert_eq!(conflicts.len(), 1);
+                // Conflict value should describe list lengths
+                assert!(matches!(
+                    &conflicts[0].ours,
+                    Some(ConflictValue::Complex(s)) if s.contains("list")
+                ));
+                assert!(matches!(
+                    &conflicts[0].theirs,
+                    Some(ConflictValue::Complex(s)) if s.contains("list")
+                ));
+                assert!(matches!(
+                    &conflicts[0].base,
+                    Some(ConflictValue::Complex(s)) if s.contains("list")
+                ));
+            }
+            _ => panic!("expected list conflict"),
+        }
+    }
+
+    #[test]
+    fn test_list_same_after_change_no_conflict() {
+        let mut r = TestResolver::new();
+        let x = r.store(&Object::int(10));
+        let y = r.store(&Object::int(20));
+
+        let base = r.store(&Object::list(vec![x]));
+        let ours = r.store(&Object::list(vec![x, y]));
+        let theirs = r.store(&Object::list(vec![x, y])); // both made identical change
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Success(_) | MergeResult::FastForward(_) => {}
+            MergeResult::Conflicts { conflicts, .. } => {
+                panic!("identical list changes should not conflict: {:?}", conflicts);
+            }
+        }
+    }
+
+    // --- Both-sides delete ---
+
+    #[test]
+    fn test_both_sides_delete_same_key() {
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({"a": 1, "b": 2, "c": 3}));
+        let ours = r.store_json(&serde_json::json!({"a": 1, "c": 3})); // deleted b
+        let theirs = r.store_json(&serde_json::json!({"a": 1, "c": 3})); // also deleted b
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Success(merged) => {
+                if let Object::Node(Node::Map(entries)) = merged {
+                    assert!(!entries.contains_key("b"), "b should have been deleted");
+                    assert!(entries.contains_key("a"));
+                    assert!(entries.contains_key("c"));
+                } else {
+                    panic!("expected map");
+                }
+            }
+            MergeResult::FastForward(id) => {
+                // FastForward to ours/theirs is also acceptable — both sides deleted b
+                assert!(id == ours || id == theirs);
+            }
+            MergeResult::Conflicts { conflicts, .. } => {
+                panic!("both-sides-delete should not conflict: {:?}", conflicts);
+            }
+        }
+    }
+
+    #[test]
+    fn test_one_side_deletes_unchanged_key() {
+        let mut r = TestResolver::new();
+        // ours deletes a key that theirs didn't touch — since theirs==base the engine
+        // fast-forwards to ours, which already has b removed.
+        let base = r.store_json(&serde_json::json!({"a": 1, "b": 2}));
+        let ours = r.store_json(&serde_json::json!({"a": 1})); // deleted b
+        let theirs = r.store_json(&serde_json::json!({"a": 1, "b": 2})); // unchanged == base
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::FastForward(id) => {
+                // Fast-forward to ours — correct: theirs==base so we take ours
+                assert_eq!(id, ours);
+            }
+            MergeResult::Success(merged) => {
+                if let Object::Node(Node::Map(entries)) = merged {
+                    assert!(!entries.contains_key("b"));
+                } else {
+                    panic!("expected map");
+                }
+            }
+            MergeResult::Conflicts { conflicts, .. } => {
+                panic!("clean delete should not conflict: {:?}", conflicts);
+            }
+        }
+    }
+
+    // --- Deeply nested ---
+
+    #[test]
+    fn test_deeply_nested_conflict_at_leaf() {
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({
+            "level1": {
+                "level2": {
+                    "level3": {"value": 1}
+                }
+            }
+        }));
+        let ours = r.store_json(&serde_json::json!({
+            "level1": {
+                "level2": {
+                    "level3": {"value": 42}
+                }
+            }
+        }));
+        let theirs = r.store_json(&serde_json::json!({
+            "level1": {
+                "level2": {
+                    "level3": {"value": 99}
+                }
+            }
+        }));
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Conflicts { conflicts, .. } => {
+                assert_eq!(conflicts.len(), 1);
+                assert!(
+                    conflicts[0].path.contains("value"),
+                    "conflict path should identify the leaf: {}",
+                    conflicts[0].path
+                );
+            }
+            _ => panic!("expected exactly one deep conflict"),
+        }
+    }
+
+    #[test]
+    fn test_deeply_nested_no_conflict_different_branches() {
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({
+            "a": {"x": 1, "y": 2},
+            "b": {"x": 1, "y": 2}
+        }));
+        let ours = r.store_json(&serde_json::json!({
+            "a": {"x": 99, "y": 2}, // changed a.x
+            "b": {"x": 1, "y": 2}
+        }));
+        let theirs = r.store_json(&serde_json::json!({
+            "a": {"x": 1, "y": 2},
+            "b": {"x": 1, "y": 77} // changed b.y
+        }));
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Success(_) => {}
+            MergeResult::Conflicts { conflicts, .. } => {
+                panic!("no conflicts expected: {:?}", conflicts);
+            }
+            MergeResult::FastForward(_) => panic!("expected success"),
+        }
+    }
+
+    // --- Large maps ---
+
+    #[test]
+    fn test_large_map_exact_conflict_count() {
+        let mut r = TestResolver::new();
+
+        let mut base_map = serde_json::Map::new();
+        let mut our_map = serde_json::Map::new();
+        let mut their_map = serde_json::Map::new();
+
+        for i in 0..100_i64 {
+            let key = format!("key{:03}", i);
+            base_map.insert(key.clone(), serde_json::Value::Number(i.into()));
+            if i >= 1 && i <= 5 {
+                // Keys 1-5: ours=i+1000, theirs=i+2000 → 5 distinct conflicts
+                our_map.insert(key.clone(), serde_json::Value::Number((i + 1000).into()));
+                their_map.insert(key.clone(), serde_json::Value::Number((i + 2000).into()));
+            } else {
+                our_map.insert(key.clone(), serde_json::Value::Number(i.into()));
+                their_map.insert(key.clone(), serde_json::Value::Number(i.into()));
+            }
+        }
+
+        let base = r.store_json(&serde_json::Value::Object(base_map));
+        let ours = r.store_json(&serde_json::Value::Object(our_map));
+        let theirs = r.store_json(&serde_json::Value::Object(their_map));
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Conflicts { conflicts, partial } => {
+                assert_eq!(conflicts.len(), 5, "exactly 5 conflicts expected");
+                // Partial merge should still contain all 100 keys (ours wins on conflicts)
+                if let Object::Node(Node::Map(entries)) = partial {
+                    assert_eq!(entries.len(), 100);
+                } else {
+                    panic!("expected map");
+                }
+            }
+            _ => panic!("expected exactly 5 conflicts"),
+        }
+    }
+
+    // --- Conflict value reporting ---
+
+    #[test]
+    fn test_conflict_values_populated() {
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({"x": 1}));
+        let ours = r.store_json(&serde_json::json!({"x": 2}));
+        let theirs = r.store_json(&serde_json::json!({"x": 3}));
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Conflicts { conflicts, .. } => {
+                let c = &conflicts[0];
+                assert_eq!(c.ours, Some(ConflictValue::Int(2)));
+                assert_eq!(c.theirs, Some(ConflictValue::Int(3)));
+                assert_eq!(c.base, Some(ConflictValue::Int(1)));
+                assert!(c.suggested_resolution.is_none());
+            }
+            _ => panic!("expected conflict"),
+        }
+    }
+
+    // --- ConflictValue::from_object coverage ---
+
+    #[test]
+    fn test_conflict_value_from_object_atoms() {
+        assert_eq!(ConflictValue::from_object(&Object::null()), ConflictValue::Null);
+        assert_eq!(ConflictValue::from_object(&Object::bool(true)), ConflictValue::Bool(true));
+        assert_eq!(ConflictValue::from_object(&Object::bool(false)), ConflictValue::Bool(false));
+        assert_eq!(ConflictValue::from_object(&Object::int(42)), ConflictValue::Int(42));
+        assert_eq!(ConflictValue::from_object(&Object::int(-1)), ConflictValue::Int(-1));
+        assert_eq!(
+            ConflictValue::from_object(&Object::string("hello".to_string())),
+            ConflictValue::String("hello".to_string())
+        );
+        // Bytes → "[bytes]" string
+        assert_eq!(
+            ConflictValue::from_object(&Object::bytes(vec![1, 2, 3])),
+            ConflictValue::String("[bytes]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_conflict_value_from_object_nodes() {
+        // Map
+        let map = Object::map(std::collections::BTreeMap::from([
+            ("a".to_string(), Object::int(1).id()),
+            ("b".to_string(), Object::int(2).id()),
+        ]));
+        assert_eq!(
+            ConflictValue::from_object(&map),
+            ConflictValue::Complex("{map: 2 keys}".to_string())
+        );
+
+        // List
+        let list = Object::list(vec![Object::int(1).id(), Object::int(2).id(), Object::int(3).id()]);
+        assert_eq!(
+            ConflictValue::from_object(&list),
+            ConflictValue::Complex("[list: 3 items]".to_string())
+        );
+
+        // Set
+        let set = Object::set(vec![Object::int(1).id()]);
+        assert_eq!(
+            ConflictValue::from_object(&set),
+            ConflictValue::Complex("{set: 1 items}".to_string())
+        );
+    }
+
+    // --- Fast-forward edge cases ---
+
+    #[test]
+    fn test_fast_forward_base_equals_theirs() {
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({"a": 1}));
+        let ours = r.store_json(&serde_json::json!({"a": 2}));
+
+        // base == theirs → fast-forward to ours
+        match three_way_merge(&r, &base, &ours, &base) {
+            MergeResult::FastForward(id) => assert_eq!(id, ours),
+            _ => panic!("expected fast-forward to ours"),
+        }
+    }
+
+    #[test]
+    fn test_fast_forward_ours_equals_theirs() {
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({"a": 1}));
+        let ours = r.store_json(&serde_json::json!({"a": 99}));
+        // Same content as ours — id will match
+        let theirs = ours;
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::FastForward(id) => assert_eq!(id, ours),
+            _ => panic!("expected fast-forward when ours==theirs"),
+        }
+    }
+
+    // --- Type mismatch conflict ---
+
+    #[test]
+    fn test_type_mismatch_conflict() {
+        let mut r = TestResolver::new();
+        // base: scalar, ours: map, theirs: list — type mismatch
+        let base = r.store_json(&serde_json::json!({"x": 1}));
+        let ours = r.store_json(&serde_json::json!({"x": {"nested": true}}));
+        let theirs = r.store_json(&serde_json::json!({"x": [1, 2, 3]}));
+
+        match three_way_merge(&r, &base, &ours, &theirs) {
+            MergeResult::Conflicts { conflicts, .. } => {
+                assert!(!conflicts.is_empty());
+                assert!(conflicts[0].path.contains("x"));
+            }
+            _ => panic!("expected conflict on type mismatch"),
+        }
+    }
 }
