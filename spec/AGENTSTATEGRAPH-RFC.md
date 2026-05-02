@@ -3,8 +3,10 @@
 ```
 RFC:         0001
 Title:       AgentStateGraph — AI-Native Versioned State Store
-Status:      Draft
+Status:      Stable
+Version:     0.8.0
 Created:     2026-04-04
+Updated:     2026-05-02
 Authors:     Craig Brown
 ```
 
@@ -14,7 +16,7 @@ Authors:     Craig Brown
 
 AgentStateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems. It provides AI agents and AI-native applications with a git-like state management layer that captures not just *what* changed, but *why*, *who authorized it*, *what alternatives were considered*, and *who was informed* — making every state transition auditable, reversible, and explainable.
 
-AgentStateGraph is implemented as an embeddable Rust library with language bindings for Python, TypeScript, and Go, and exposed as a Model Context Protocol (MCP) server for direct agent integration.
+AgentStateGraph is implemented as an embeddable Rust library with language bindings for Python, TypeScript, Go, and .NET, and exposed as a Model Context Protocol (MCP) server with 66 tools for direct agent integration. As of v0.8.0, the system also provides declarative authorization policy with multi-engine evaluation and Ed25519 signing, taint/quarantine/watch safety controls, pull-based reminders, and a five-level priority task system — all integrated into the same provenance-bearing commit model.
 
 ---
 
@@ -140,6 +142,28 @@ Precise definitions for all terms used in this specification. Agents and humans 
 | **CAS** | Compare-and-swap. The atomic concurrency primitive: update a ref only if it still points to the expected commit. |
 | **Principal** | An identity (human user, agent, team, or system policy) that can authorize actions or receive notifications. |
 | **DelegationLink** | A single hop in a delegation chain: principal A authorized principal B, with scope and timestamp. |
+| **Epoch** | A bounded, named segment of work. Epochs are Open while active and Sealed when closed. Sealing stamps a tamper-evident Merkle root hash and prevents further commits from being associated. Sealed epochs can be exported as self-contained audit bundles. |
+| **EpochStatus** | Open or Sealed. Attempting to associate a commit with a Sealed epoch returns `EpochAlreadySealed`. |
+| **Task** | A discrete unit of work within a Plan. Carries a status state machine (Pending → InProgress → Completed / Abandoned), optional assignment, priority, and proof-of-work. |
+| **Plan** | A named collection of Tasks. Plans are committed to the state tree under a configurable path prefix. |
+| **Taint** | A safety mark applied to a state path. Three kinds: `Taint` (suspicious data), `Quarantine` (blocks modification until reviewed), `Watch` (audit notifications). Each carries a path, name, kind, effect, severity, reason, agent\_id, expiry, and propagation flag. Taints are resolved (not deleted) to preserve the audit trail. |
+| **TaintKind** | `Taint`, `Quarantine`, or `Watch`. Determines what effect is applied when the path is accessed. |
+| **TaintEffect** | `Warn`, `Block`, `Review`, `Isolate`, or `Advisory`. The action taken when a tainted path is accessed or modified. |
+| **TaintSeverity** | `Low`, `Medium`, `High`, or `Critical`. Informational; consumers may use it to prioritize resolution. |
+| **TaintStore** | The storage sub-trait responsible for persisting taint records. Provides default no-op implementations so backends can opt in gradually. |
+| **Policy** | A named, versioned access-control or cost-of-change rule set. Policies are proposed, ratified, and optionally signed before becoming Active. Each policy carries an engine kind (builtin, Rego, WASM, Cedar) and its rule payload. |
+| **PolicyStatus** | `Proposed`, `Active`, or `Superseded`. Only Active policies are evaluated. Superseding an Active policy atomically transitions it to Superseded and activates the replacement. |
+| **PolicyEngine** | The evaluation backend for a policy: `builtin` (native rule engine), `rego` (OPA), `wasm` (any language compiled to WASM), or `cedar` (Amazon Cedar). |
+| **Ratification** | The formal act of approving a Proposed policy, transitioning it to Active. Ratification is recorded as an audit commit with `IntentCategory::PolicyRatify`. |
+| **Ed25519Signature** | A cryptographic signature over the canonical (sorted-key JSON, signature field excluded) policy body. Policies can require N-of-M signatures before ratification is permitted. |
+| **Reminder** | A scheduled future work item for an agent or user. Carries a title, instructions, priority, due time, repeating schedule, autonomous flag, soft refs, and full execution audit trail. |
+| **ReminderStatus** | `Pending`, `Due`, `AwaitingPermission`, `InProgress`, `Completed`, `Snoozed`, or `Cancelled`. `Due` and `AwaitingPermission` items are returned by `remind_me()`. |
+| **Priority** | A five-level urgency scale: `Critical` (1), `High` (2), `Medium` (3), `Low` (4), `Minimal` (5). Lower number = higher urgency. `remind_me()` returns items ordered by priority then due date. |
+| **Schedule** | The recurrence rule for a repeating Reminder: `Once` (no recurrence), `Interval` (every N seconds), `Daily` (HH:MM UTC), or `Weekly` (Weekday + HH:MM UTC). After a successful execution the next due time is computed and the Reminder resets. |
+| **ReminderRef** | A soft, advisory reference from a Reminder to another object (branch, memory, plan, task, state path, or external URL). The `label` is captured at creation time and survives renames. A stale ref does not invalidate the Reminder. |
+| **RefKind** | The type of object a ReminderRef points to: `Branch`, `Memory`, `Plan`, `Task`, `StatePath`, or `External { scheme }`. |
+| **ExecutionRecord** | An audit entry for one execution of a Reminder. Records start/end time, agent id, result (success/failed/cancelled), notes, and optional task id. Execution history accumulates; the Reminder record is never overwritten. |
+| **ReminderStore** | The storage sub-trait responsible for persisting Reminder records. Provides default no-op implementations so backends can opt in gradually. |
 
 ---
 
@@ -1110,6 +1134,18 @@ Schema changes are themselves versioned as commits with intent category `Migrate
 
 AgentStateGraph exposes its operations as a Model Context Protocol server, allowing any MCP-compatible agent to interact with state stores directly.
 
+As of v0.8.0 there are **66 tools** across seven groups: 29 core (state, branching, speculation, query/audit, epochs, sessions, explorer), 10 task management, 11 policy, 9 taint, and 7 reminders.
+
+The `intent_category` parameter accepted by write tools has been expanded to include plan/task lifecycle events, taint operations, and policy lifecycle events:
+
+```
+"Explore" | "Refine" | "Fix" | "Rollback" | "Checkpoint" | "Merge" | "Migrate"
+| "Plan"
+| "Taint" | "Untaint" | "Quarantine" | "Unquarantine" | "Watch" | "Unwatch"
+| "PolicyPropose" | "PolicyRatify" | "PolicySupersede" | "PolicySign"
+| "Custom:<value>"
+```
+
 ### 7.1 Tools
 
 #### 7.1.1 State Tools
@@ -1141,7 +1177,7 @@ AgentStateGraph exposes its operations as a Model Context Protocol server, allow
       "ref": { "type": "string", "description": "Branch to commit to" },
       "path": { "type": "string", "description": "JSON path to set" },
       "value": { "description": "The value to write (any JSON type)" },
-      "intent_category": { "type": "string", "enum": ["Explore", "Refine", "Fix", "Rollback", "Checkpoint", "Merge", "Migrate", "Custom"] },
+      "intent_category": { "type": "string", "description": "See §7.1 preamble for full enum" },
       "intent_description": { "type": "string", "description": "Why this change is being made" },
       "intent_tags": { "type": "array", "items": { "type": "string" } },
       "reasoning": { "type": "string", "description": "Optional: your reasoning for this approach" },
@@ -1162,7 +1198,7 @@ AgentStateGraph exposes its operations as a Model Context Protocol server, allow
     "properties": {
       "ref": { "type": "string" },
       "path": { "type": "string" },
-      "intent_category": { "type": "string", "enum": ["Explore", "Refine", "Fix", "Rollback", "Checkpoint", "Merge", "Migrate", "Custom"] },
+      "intent_category": { "type": "string", "description": "See §7.1 preamble for full enum" },
       "intent_description": { "type": "string" }
     },
     "required": ["ref", "path", "intent_category", "intent_description"]
@@ -1259,7 +1295,7 @@ AgentStateGraph exposes its operations as a Model Context Protocol server, allow
           "path": { "type": "string", "description": "Path pattern (e.g., '/nodes/*', '/config/network/**')" },
           "where": { "type": "string", "description": "Value filter expression (e.g., \"status == 'unhealthy'\", \"gpu_memory_mb > 8000\")" },
           "agent_id": { "type": "string" },
-          "intent_category": { "type": "string", "enum": ["Explore", "Refine", "Fix", "Rollback", "Checkpoint", "Merge", "Migrate", "Custom"] },
+          "intent_category": { "type": "string", "description": "See §7.1 preamble for full enum" },
           "tags": { "type": "array", "items": { "type": "string" } },
           "authority_principal": { "type": "string", "description": "Filter by who authorized the action" },
           "reasoning_contains": { "type": "string", "description": "Full-text search in reasoning traces" },
@@ -1552,6 +1588,433 @@ AgentStateGraph exposes its operations as a Model Context Protocol server, allow
 }
 ```
 
+#### 7.1.7 Task Management Tools
+
+Plans and tasks are persisted in the state tree. All task mutations produce audit commits.
+
+**agentstategraph_create_plan**
+```json
+{
+  "name": "agentstategraph_create_plan",
+  "description": "Create a new Plan (a named collection of Tasks).",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":         { "type": "string", "default": "main" },
+      "title":       { "type": "string" },
+      "description": { "type": "string" },
+      "tags":        { "type": "array", "items": { "type": "string" } }
+    },
+    "required": ["title"]
+  }
+}
+```
+
+**agentstategraph_add_task**
+```json
+{
+  "name": "agentstategraph_add_task",
+  "description": "Add a Task to an existing Plan.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":         { "type": "string", "default": "main" },
+      "plan_id":     { "type": "string" },
+      "title":       { "type": "string" },
+      "description": { "type": "string" },
+      "priority":    { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 },
+      "assigned_to": { "type": "string" },
+      "tags":        { "type": "array", "items": { "type": "string" } }
+    },
+    "required": ["plan_id", "title"]
+  }
+}
+```
+
+**agentstategraph_start_task** / **agentstategraph_complete_task** / **agentstategraph_abandon_task**
+```json
+{
+  "name": "agentstategraph_start_task",
+  "description": "Transition a Task from Pending to InProgress.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":     { "type": "string", "default": "main" },
+      "task_id": { "type": "string" },
+      "agent_id":{ "type": "string" }
+    },
+    "required": ["task_id"]
+  }
+}
+```
+
+*(complete_task and abandon_task share the same schema; complete_task accepts an optional `proof` string; abandon_task accepts an optional `reason` string.)*
+
+**agentstategraph_assign_task**
+```json
+{
+  "name": "agentstategraph_assign_task",
+  "description": "Assign a Task to an agent or user.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":         { "type": "string", "default": "main" },
+      "task_id":     { "type": "string" },
+      "assigned_to": { "type": "string" }
+    },
+    "required": ["task_id", "assigned_to"]
+  }
+}
+```
+
+**agentstategraph_list_tasks** / **agentstategraph_next_task** / **agentstategraph_get_plan** / **agentstategraph_list_plans**
+
+These tools list and query tasks and plans. `next_task` returns the highest-priority Pending task optionally filtered by assigned agent. `list_tasks` accepts status, priority, assigned\_to, and plan\_id filters. `get_plan` returns a plan and all its tasks. `list_plans` accepts tag and status filters.
+
+---
+
+#### 7.1.8 Policy Tools
+
+All policy mutations are audit-committed with the appropriate `PolicyPropose` / `PolicyRatify` / etc. intent category.
+
+**agentstategraph_policy_propose**
+```json
+{
+  "name": "agentstategraph_policy_propose",
+  "description": "Propose a new policy. Status is Proposed until ratified.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":         { "type": "string", "default": "main" },
+      "name":        { "type": "string" },
+      "description": { "type": "string" },
+      "engine":      { "type": "string", "enum": ["builtin", "rego", "wasm", "cedar"] },
+      "rules":       { "type": "string", "description": "Policy rules payload (engine-dependent format)" },
+      "proposed_by": { "type": "string" }
+    },
+    "required": ["name", "engine", "rules", "proposed_by"]
+  }
+}
+```
+
+**agentstategraph_policy_ratify**
+```json
+{
+  "name": "agentstategraph_policy_ratify",
+  "description": "Ratify a Proposed policy, making it Active. Fails if required signatures are missing.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":       { "type": "string", "default": "main" },
+      "policy_id": { "type": "string" },
+      "ratified_by": { "type": "string" }
+    },
+    "required": ["policy_id", "ratified_by"]
+  }
+}
+```
+
+**agentstategraph_policy_sign**
+```json
+{
+  "name": "agentstategraph_policy_sign",
+  "description": "Sign a policy with an Ed25519 private key. The signature covers the canonical (sorted-key JSON, signature field excluded) policy body.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "policy_id":   { "type": "string" },
+      "signer_id":   { "type": "string" },
+      "private_key": { "type": "string", "description": "Base64-encoded Ed25519 private key" }
+    },
+    "required": ["policy_id", "signer_id", "private_key"]
+  }
+}
+```
+
+**agentstategraph_policy_verify**
+```json
+{
+  "name": "agentstategraph_policy_verify",
+  "description": "Verify all Ed25519 signatures on a policy. Returns per-signer pass/fail.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "policy_id": { "type": "string" }
+    },
+    "required": ["policy_id"]
+  }
+}
+```
+
+**agentstategraph_policy_supersede**
+```json
+{
+  "name": "agentstategraph_policy_supersede",
+  "description": "Atomically supersede an Active policy with a new one. The old policy transitions to Superseded.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "old_policy_id": { "type": "string" },
+      "new_policy_id": { "type": "string" },
+      "superseded_by": { "type": "string" }
+    },
+    "required": ["old_policy_id", "new_policy_id", "superseded_by"]
+  }
+}
+```
+
+**agentstategraph_policy_evaluate**
+```json
+{
+  "name": "agentstategraph_policy_evaluate",
+  "description": "Evaluate a request against a specific policy. Returns Allow/Deny/Escalate/RequestApproval.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "policy_id": { "type": "string" },
+      "request":   { "type": "object", "description": "The access request context (agent_id, path, action, value, confidence, token_cost, etc.)" }
+    },
+    "required": ["policy_id", "request"]
+  }
+}
+```
+
+**agentstategraph_policy_evaluate_change** / **agentstategraph_policy_check_tokens** / **agentstategraph_policy_show** / **agentstategraph_policy_list** / **agentstategraph_policy_history**
+
+`policy_evaluate_change` combines policy + taint evaluation for a proposed state change in a single call. `policy_check_tokens` evaluates a token-cost budget against the active policy. `policy_show` returns a single policy record with its full rule payload and signature list. `policy_list` returns all policies with optional status filter. `policy_history` returns the audit commit trail for a given policy id.
+
+---
+
+#### 7.1.9 Taint, Quarantine, and Watch Tools
+
+**agentstategraph_taint**
+```json
+{
+  "name": "agentstategraph_taint",
+  "description": "Apply a Taint mark to a path. Audit-committed with IntentCategory::Taint.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":        { "type": "string", "default": "main" },
+      "path":       { "type": "string" },
+      "name":       { "type": "string", "description": "Short label (e.g., 'credential-exposure')" },
+      "effect":     { "type": "string", "enum": ["warn", "block", "review", "isolate", "advisory"] },
+      "severity":   { "type": "string", "enum": ["low", "medium", "high", "critical"], "default": "medium" },
+      "reason":     { "type": "string" },
+      "agent_id":   { "type": "string" },
+      "expires_at": { "type": "string", "format": "date-time" },
+      "propagate":  { "type": "boolean", "default": true, "description": "Apply to descendant paths" }
+    },
+    "required": ["path", "name", "effect", "reason", "agent_id"]
+  }
+}
+```
+
+**agentstategraph_untaint**
+```json
+{
+  "name": "agentstategraph_untaint",
+  "description": "Resolve a Taint mark. The record is preserved for audit; resolved_at is stamped.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":         { "type": "string", "default": "main" },
+      "path":        { "type": "string" },
+      "name":        { "type": "string" },
+      "resolved_by": { "type": "string" },
+      "reason":      { "type": "string" },
+      "proof":       { "type": "string", "description": "Optional evidence URL or commit id" }
+    },
+    "required": ["path", "name", "resolved_by", "reason"]
+  }
+}
+```
+
+**agentstategraph_quarantine** / **agentstategraph_unquarantine**
+
+Shorthand to apply / resolve a `Quarantine` taint effect. Share the same schema as `taint` / `untaint` but default `effect` to `"block"`.
+
+**agentstategraph_watch** / **agentstategraph_unwatch**
+
+Shorthand for a `Watch` taint (effect: `"advisory"`). Triggers audit notifications when the watched path is accessed.
+
+**agentstategraph_list_taints**
+```json
+{
+  "name": "agentstategraph_list_taints",
+  "description": "List taint marks, optionally filtered by path prefix, kind, and resolved status.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":              { "type": "string", "default": "main" },
+      "path_prefix":      { "type": "string" },
+      "kind":             { "type": "string", "enum": ["taint", "quarantine", "watch"] },
+      "include_resolved": { "type": "boolean", "default": false }
+    }
+  }
+}
+```
+
+**agentstategraph_check_taint**
+```json
+{
+  "name": "agentstategraph_check_taint",
+  "description": "Check whether a path is tainted (exact match or propagating ancestor). Returns all applicable active taints.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "ref":  { "type": "string", "default": "main" },
+      "path": { "type": "string" }
+    },
+    "required": ["path"]
+  }
+}
+```
+
+---
+
+#### 7.1.10 Reminder Tools
+
+**agentstategraph_reminder_create**
+```json
+{
+  "name": "agentstategraph_reminder_create",
+  "description": "Create a pull-based reminder for future work. Agents poll remind_me() at checkpoints to receive due items.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "title":        { "type": "string" },
+      "instructions": { "type": "string", "description": "Full instructions for execution time" },
+      "due_at":       { "type": "string", "format": "date-time" },
+      "schedule":     { "type": "string", "description": "'once' | 'interval:<secs>' | 'daily:HH:MM' | 'weekly:Weekday:HH:MM'" },
+      "priority":     { "type": "string", "enum": ["critical","high","medium","low","minimal"], "default": "medium" },
+      "autonomous":   { "type": "boolean", "default": false, "description": "true = execute without permission; false = AwaitingPermission until approve() called" },
+      "created_by":   { "type": "string" },
+      "commands":     { "type": "array", "items": { "type": "string" } },
+      "tags":         { "type": "array", "items": { "type": "string" } },
+      "refs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "kind":  { "type": "string", "enum": ["branch","memory","plan","task","state_path","external"] },
+            "id":    { "type": "string" },
+            "label": { "type": "string" }
+          },
+          "required": ["kind", "id"]
+        }
+      }
+    },
+    "required": ["title", "instructions", "due_at"]
+  }
+}
+```
+
+**agentstategraph_reminder_remind_me**
+```json
+{
+  "name": "agentstategraph_reminder_remind_me",
+  "description": "The core pull query. Lazily promotes past-due Pending items and expired Snoozed items to Due, then returns all Due and AwaitingPermission items ordered by priority then due date. Call at session start, task transitions, and branch switches.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "created_by": { "type": "string", "description": "Scope to a specific agent or user" }
+    }
+  }
+}
+```
+
+**agentstategraph_reminder_snooze**
+```json
+{
+  "name": "agentstategraph_reminder_snooze",
+  "description": "Defer a Due or Pending reminder until a later time.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "id":    { "type": "string" },
+      "until": { "type": "string", "format": "date-time" }
+    },
+    "required": ["id", "until"]
+  }
+}
+```
+
+**agentstategraph_reminder_approve**
+```json
+{
+  "name": "agentstategraph_reminder_approve",
+  "description": "Approve a reminder in AwaitingPermission status. Transitions it to Due so execution can proceed.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "id":          { "type": "string" },
+      "approved_by": { "type": "string" }
+    },
+    "required": ["id", "approved_by"]
+  }
+}
+```
+
+**agentstategraph_reminder_cancel**
+```json
+{
+  "name": "agentstategraph_reminder_cancel",
+  "description": "Cancel a reminder (terminal; cannot be undone).",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "id":     { "type": "string" },
+      "reason": { "type": "string" }
+    },
+    "required": ["id"]
+  }
+}
+```
+
+**agentstategraph_reminder_record_execution**
+```json
+{
+  "name": "agentstategraph_reminder_record_execution",
+  "description": "Record the result of executing a reminder. On success, if the reminder has a repeating schedule the next due time is computed and status resets to Pending (or AwaitingPermission for non-autonomous). A Once reminder transitions to Completed on success.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "id":           { "type": "string" },
+      "agent_id":     { "type": "string" },
+      "result":       { "type": "string", "enum": ["success","failed","cancelled"] },
+      "started_at":   { "type": "string", "format": "date-time" },
+      "completed_at": { "type": "string", "format": "date-time" },
+      "approved_by":  { "type": "string" },
+      "notes":        { "type": "string" },
+      "task_id":      { "type": "string" }
+    },
+    "required": ["id", "agent_id", "result", "started_at", "completed_at"]
+  }
+}
+```
+
+**agentstategraph_reminder_list**
+```json
+{
+  "name": "agentstategraph_reminder_list",
+  "description": "List reminders with optional filtering.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "status":           { "type": "string", "enum": ["Pending","Due","AwaitingPermission","InProgress","Completed","Snoozed","Cancelled"] },
+      "priority_at_most": { "type": "string", "enum": ["critical","high","medium","low","minimal"] },
+      "created_by":       { "type": "string" },
+      "due_before":       { "type": "string", "format": "date-time" },
+      "ref_id":           { "type": "string" },
+      "tags":             { "type": "array", "items": { "type": "string" } }
+    }
+  }
+}
+```
+
+---
+
 ### 7.2 Resources
 
 AgentStateGraph exposes state as MCP resources with the `agentstategraph://` URI scheme.
@@ -1583,41 +2046,313 @@ AgentStateGraph emits structured events that MCP clients can subscribe to:
 
 ---
 
-## 8. Architecture
+## 8. Taint, Quarantine, and Watch
 
-### 8.1 Crate Structure
+Mark-and-sweep safety controls that let agents and operators flag suspicious or sensitive state paths without blocking all access.
+
+### 8.1 Taint Marks
+
+A `TaintMark` attaches to a state path and carries metadata about why the path is flagged:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `String` | Unique identifier for the mark |
+| `path` | `String` | JSON-path the mark applies to (e.g., `/cluster/nodes/0/credentials`) |
+| `kind` | `TaintKind` | `Taint` \| `Quarantine` \| `Watch` |
+| `severity` | `TaintSeverity` | `Low` \| `Medium` \| `High` \| `Critical` |
+| `effect` | `TaintEffect` | `Warn` \| `Block` \| `Audit` |
+| `reason` | `String` | Human/agent-readable explanation |
+| `created_by` | `String` | Agent or user who applied the mark |
+| `created_at` | `DateTime` | Timestamp |
+| `expires_at` | `Option<DateTime>` | Optional automatic expiry |
+| `propagate` | `bool` | Whether descendants inherit the mark (default: `true`) |
+| `resolved` | `Option<TaintResolution>` | Set when the mark is resolved; never deleted |
+
+**TaintKind semantics:**
+
+| Kind | Meaning | Typical Use |
+|------|---------|-------------|
+| `Taint` | Data at this path is suspicious or unverified | Flagging externally-sourced data before review |
+| `Quarantine` | Changes to this path are blocked until resolved | Locking a path after a security incident |
+| `Watch` | All access to this path triggers an audit notification | Monitoring sensitive fields (credentials, PII) |
+
+### 8.2 Propagation
+
+Taints propagate to descendant paths by default (`propagate = true`). `check_taint` returns all applicable taints for a request path, including ancestor matches.
+
+```
+path: /cluster/nodes/0/credentials  → TaintKind::Quarantine
+check_taint(path="/cluster/nodes/0/credentials/token")
+  → returns the ancestor Quarantine mark (propagated)
+```
+
+This means a single mark on a parent path protects the entire subtree without enumerating every child.
+
+### 8.3 Resolution
+
+Taints are **resolved**, not deleted. This preserves the audit trail. A `TaintResolution` stamps the mark with:
+
+```rust
+struct TaintResolution {
+    resolved_by: String,
+    reason:      String,
+    proof:       Option<String>,  // e.g., ticket URL, commit hash
+    resolved_at: DateTime,
+}
+```
+
+Resolved taints remain visible in `list_taints` and `check_taint` responses (with `resolved` set), so auditors can see the full history of what was flagged and when.
+
+### 8.4 Policy Integration
+
+`policy_evaluate_change_with_taints` combines policy and taint evaluation in a single call:
+
+1. If any path in the request is `Quarantine`-marked, the call returns `Denied` immediately — policy evaluation is skipped entirely.
+2. Otherwise, policy evaluation proceeds normally. Active `Watch` marks generate audit notifications as a side effect.
+3. Active `Taint` marks may increase the cost-of-change score for AI token-budget policies.
+
+This layering means quarantine is a hard gate that even a permissive policy cannot bypass.
+
+### 8.5 MCP Tools
+
+9 tools: `taint_apply`, `taint_resolve`, `quarantine_apply`, `quarantine_resolve`, `watch_apply`, `watch_resolve`, `taint_list`, `taint_check`, `taint_evaluate_change_with_taints`.
+
+`quarantine_apply` and `watch_apply` are convenience shorthands for `taint_apply` with `kind = Quarantine` and `kind = Watch` respectively.
+
+---
+
+## 9. Authorization Policy
+
+Declarative, multi-engine access control with tamper-evident ratification. Policies cannot be silently modified — every transition is an audit commit.
+
+### 9.1 Policy Lifecycle
+
+```
+Proposed ──ratify()──▶ Active ──supersede()──▶ Superseded
+                              │
+                              └── policy_evaluate() queries Active policies only
+```
+
+| Status | Description |
+|--------|-------------|
+| `Proposed` | Draft submitted for review. Not yet in effect. |
+| `Active` | Ratified and enforcing. |
+| `Superseded` | Replaced by a newer policy. Retained for audit. |
+
+Every status transition creates an immutable audit commit with the agent identity, timestamp, and optional rationale.
+
+### 9.2 Evaluation Engines
+
+The engine is specified per-policy at proposal time and stored with the policy record:
+
+| Engine | Kind string | Description |
+|--------|-------------|-------------|
+| Built-in rule engine | `"builtin"` | JSON-expressed allow/deny rules; no external dependencies |
+| Rego (OPA) | `"rego"` | Open Policy Agent evaluation via embedded OPA |
+| WASM | `"wasm"` | Any language compiled to WASM; evaluated in a sandboxed WASM host |
+| Cedar | `"cedar"` | Amazon Cedar; expressive policies with explicit deny |
+
+The `agentstategraph-policy` crate dispatches to the appropriate engine at evaluation time. Adding a new engine is a crate-level extension with no changes to the storage layer or MCP tools.
+
+### 9.3 Ed25519 Signing
+
+Policies can be signed with Ed25519 keys before ratification. `policy_sign` canonicalizes the policy (sorted JSON, `signature` field excluded) before signing. `policy_verify` checks all signatures.
+
+Ratification requires valid signatures from all required signers as declared in the policy's `required_signers` list. Attempting to ratify without all signatures returns an error — the policy stays in `Proposed`.
+
+```json
+{
+  "id": "policy-001",
+  "engine": "builtin",
+  "rules": [...],
+  "required_signers": ["agent:orchestrator", "user:admin"],
+  "signatures": {
+    "agent:orchestrator": "<base64-ed25519-sig>",
+    "user:admin": "<base64-ed25519-sig>"
+  }
+}
+```
+
+### 9.4 Cost-of-Change Gating
+
+Policies can encode token-cost thresholds for AI agents operating within budget constraints:
+
+```json
+{
+  "cost_of_change": {
+    "threshold_tokens": 1000,
+    "fallback_action": "Escalate"
+  }
+}
+```
+
+When `policy_check_tokens` is called with an estimated token cost, the policy evaluates whether the cost exceeds the threshold and returns the appropriate `fallback_action`:
+
+| Fallback action | Meaning |
+|-----------------|---------|
+| `Allow` | Proceed regardless of cost |
+| `Deny` | Block the operation |
+| `Escalate` | Route to a higher-authority agent or human |
+| `RequestApproval` | Pause and require explicit approval before proceeding |
+
+This integrates naturally with the MergeProposal approval gate pattern (§12.2).
+
+### 9.5 MCP Tools
+
+11 tools: `policy_propose`, `policy_ratify`, `policy_sign`, `policy_verify`, `policy_supersede`, `policy_show`, `policy_list`, `policy_history`, `policy_evaluate`, `policy_evaluate_change`, `policy_check_tokens`.
+
+---
+
+## 10. Reminders
+
+Pull-based scheduled work for agents and users. Reminders are explicit checkpoints — agents must call `remind_me()` to receive due reminders. There are no background timers or push delivery.
+
+### 10.1 Pull Model
+
+```
+Agent starts session
+  │
+  └─▶ reminder_remind_me(agent_id=..., branch=...) ──▶ due reminders returned
+        │
+        (agent acts on reminders)
+        │
+        └─▶ reminder_record_execution(id=..., result=Success, notes=...)
+```
+
+**Lazy status promotion:** `remind_me()` scans `Pending` items and promotes past-due ones to `Due` on each call. There is no scheduler process — status is computed lazily at poll time.
+
+### 10.2 Priority and Scheduling
+
+Five priority levels control which reminders are surfaced first:
+
+| Priority | Value | Use |
+|----------|-------|-----|
+| `Critical` | 0 | Must not be missed; escalated if skipped |
+| `High` | 1 | Important; surface at every checkpoint |
+| `Medium` | 2 | Default priority |
+| `Low` | 3 | Background; surface when idle |
+| `Minimal` | 4 | Nice-to-have; surface rarely |
+
+Four schedule kinds:
+
+| Kind | Description | Example |
+|------|-------------|---------|
+| `Once` | Fire once at a specific `DateTime` | One-time migration reminder |
+| `Interval` | Fire every N seconds after last execution | Every 3600s health check |
+| `Daily` | Fire at HH:MM UTC every day | Daily summary at 09:00 |
+| `Weekly` | Fire at Weekday + HH:MM UTC | Weekly triage every Monday 08:00 |
+
+After a successful execution, the next due time is computed from the schedule and status resets to `Pending` automatically.
+
+### 10.3 Autonomous Flag
+
+Each reminder carries an `autonomous: bool` flag:
+
+- `true` — Agent executes the reminder without asking. Suitable for routine, low-risk tasks.
+- `false` — Reminder transitions to `AwaitingPermission` status. Execution is blocked until `reminder_approve()` is called by a human or higher-authority agent.
+
+This integrates with the graduated trust model (§12.5): an agent in a restricted authorization tier may have all reminders in non-autonomous mode until promoted.
+
+### 10.4 Soft References
+
+A reminder can carry advisory refs to related objects:
+
+```rust
+struct ReminderRef {
+    kind:       RefKind,   // Branch | Memory | Plan | Task | StatePath | ExternalUrl
+    target:     String,    // The ref target (branch name, plan id, URL, etc.)
+    label:      String,    // Captured at creation time; survives renames
+    stale:      bool,      // Set lazily if target can no longer be resolved
+}
+```
+
+The `stale` flag is set lazily at `remind_me()` time if the target cannot be resolved. A stale ref does not invalidate the reminder — it is informational, prompting the agent to update or clean up the dead reference.
+
+### 10.5 Execution Audit
+
+Every execution attempt is recorded in an append-only `executions` list on the reminder:
+
+```rust
+struct ExecutionRecord {
+    started_at:  DateTime,
+    finished_at: DateTime,
+    agent_id:    String,
+    result:      ExecutionResult,  // Success | Failed | Cancelled
+    notes:       Option<String>,
+    task_id:     Option<String>,   // Links to a Task if execution created one
+}
+```
+
+The reminder is never overwritten. History accumulates indefinitely, giving auditors a complete record of when the reminder was acted on and by whom.
+
+### 10.6 MCP Tools
+
+7 tools: `reminder_create`, `reminder_list`, `reminder_remind_me`, `reminder_snooze`, `reminder_approve`, `reminder_cancel`, `reminder_record_execution`.
+
+---
+
+## 11. Architecture
+
+### 11.1 Crate Structure
+
+The workspace contains 12 Rust crates organized by responsibility:
+
+| Crate | Responsibility |
+|-------|---------------|
+| `agentstategraph-core` | Object model, types, content-addressed DAG, diff, merge, BLAKE3. Zero I/O. |
+| `agentstategraph-storage` | 7-trait `Storage` supertrait + four backends: Memory, SQLite, Postgres, IndexedDB |
+| `agentstategraph` | High-level Repository API: repo, session, speculation, watch, query |
+| `agentstategraph-mcp` | MCP server (66 tools), HTTP REST API, `migrate` CLI subcommand |
+| `agentstategraph-tasks` | Shared Plan/Task state machine, proofs, assignment |
+| `agentstategraph-migrate` | Schema-evolution framework and migration registry |
+| `agentstategraph-policy` | Authorization engine: built-in rules, Rego, WASM, Cedar; cost-of-change gating |
+| `agentstategraph-policy-sign` | Ed25519 key generation, signing, and verification for policy ratification |
+| `agentstategraph-policy-wasm` | WASM host runner for WASM-compiled policy evaluation |
+| `agentstategraph-policy-cedar` | Amazon Cedar policy engine integration |
+| `agentstategraph-taint` | Taint/Quarantine/Watch mark-and-sweep safety primitives + TaintStore trait |
+| `agentstategraph-reminders` | Pull-based reminders: priority, schedules, soft refs, autonomous flag, audit |
+| `agentstategraph-ffi` | C ABI surface shared by Go and .NET bindings |
+| `agentstategraph-wasm` | wasm-bindgen bindings for browser/Deno/Node |
 
 ```
 AgentStateGraph/
 ├── crates/
-│   ├── agentstategraph-core/        # Object model, types, DAG, diff, merge, schema
-│   │                           # Zero I/O dependencies. Pure logic.
+│   ├── agentstategraph-core/        # Types, DAG, diff, merge, BLAKE3. Zero I/O.
 │   │
-│   ├── agentstategraph-storage/     # Storage traits + backend implementations
-│   │   ├── traits.rs           # ObjectStore, RefStore, SessionStore
-│   │   ├── memory.rs           # In-memory backend (default)
-│   │   ├── sqlite.rs           # SQLite backend
-│   │   └── file.rs             # File-based backend
+│   ├── agentstategraph-storage/     # Storage supertrait + backends
+│   │   ├── traits.rs           # Storage supertrait (7 sub-traits combined)
+│   │   ├── memory.rs           # In-memory backend (full supertrait)
+│   │   ├── sqlite.rs           # SQLite backend (full supertrait)
+│   │   ├── postgres.rs         # Postgres backend (full supertrait, tenant-isolated)
+│   │   └── indexeddb.rs        # IndexedDB backend (WASM, delegates to memory)
 │   │
 │   ├── agentstategraph/        # High-level API
 │   │   ├── repo.rs             # Repository handle
 │   │   ├── session.rs          # Agent sessions
 │   │   ├── speculation.rs      # Speculative execution
 │   │   ├── watch.rs            # Watch/subscribe system
-│   │   └── query.rs            # Intent queries, search, bisect
+│   │   └── query.rs            # Intent queries, search, blame
 │   │
-│   ├── agentstategraph-mcp/         # MCP server implementation
-│   ├── agentstategraph-ffi/         # C ABI surface for language bindings
-│   └── agentstategraph-wasm/        # wasm-bindgen for browser/Deno/Node
+│   ├── agentstategraph-mcp/         # MCP server: 66 tools + HTTP REST + migrate CLI
+│   ├── agentstategraph-tasks/       # Plan/Task state machine, proofs, assignment
+│   ├── agentstategraph-migrate/     # Schema-evolution framework
+│   ├── agentstategraph-policy/      # Authorization + cost-of-change gating
+│   ├── agentstategraph-policy-sign/ # Ed25519 signing for policy ratification
+│   ├── agentstategraph-policy-wasm/ # WASM host runner for policy evaluation
+│   ├── agentstategraph-policy-cedar/# Amazon Cedar engine integration
+│   ├── agentstategraph-taint/       # Taint/Quarantine/Watch + TaintStore
+│   ├── agentstategraph-reminders/   # Pull-based reminders + ReminderStore
+│   ├── agentstategraph-ffi/         # C ABI surface (Go, .NET)
+│   └── agentstategraph-wasm/        # wasm-bindgen (browser/Deno/Node)
 │
 ├── bindings/
 │   ├── python/                 # PyO3 + maturin
 │   ├── typescript/             # napi-rs
-│   └── go/                     # CGo
+│   ├── go/                     # CGo wrapping agentstategraph-ffi
+│   └── dotnet/                 # C FFI wrapping agentstategraph-ffi
 │
 ├── spec/
-│   ├── STATEGRAPH-RFC.md       # This document
-│   └── schemas/                # JSON Schema definitions for all types
+│   └── AGENTSTATEGRAPH-RFC.md  # This document
 │
 └── examples/
     ├── cluster-management/     # Multi-node cluster state (AgentStateLabs/Jetson)
@@ -1625,9 +2360,18 @@ AgentStateGraph/
     └── creative-app/           # Human-AI collaborative state editing
 ```
 
-### 8.2 Storage Traits
+### 11.2 Storage Traits
+
+The `Storage` supertrait combines 7 sub-traits. Every backend must satisfy all 7. `TaintStore` and `ReminderStore` provide default no-op implementations so custom backends can opt in gradually.
 
 ```rust
+/// The combined Storage supertrait — satisfied by all four backends.
+pub trait Storage:
+    ObjectStore + CommitStore + RefStore + EpochStore
+    + SessionStore + TaintStore + ReminderStore
+    + Send + Sync + 'static
+{}
+
 /// Content-addressed object storage
 trait ObjectStore: Send + Sync {
     fn get(&self, id: &ObjectId) -> Result<Option<Object>>;
@@ -1636,6 +2380,13 @@ trait ObjectStore: Send + Sync {
     fn batch_get(&self, ids: &[ObjectId]) -> Result<Vec<Option<Object>>>;
     fn batch_put(&self, objs: &[Object]) -> Result<Vec<ObjectId>>;
     fn gc(&self, reachable: &HashSet<ObjectId>) -> Result<usize>;
+}
+
+/// Commit storage
+trait CommitStore: Send + Sync {
+    fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>>;
+    fn put_commit(&self, commit: &Commit) -> Result<ObjectId>;
+    fn list_commits(&self, branch: &str, limit: usize) -> Result<Vec<Commit>>;
 }
 
 /// Named ref management with atomic CAS
@@ -1647,6 +2398,14 @@ trait RefStore: Send + Sync {
     fn delete_ref(&self, name: &str) -> Result<bool>;
 }
 
+/// Epoch lifecycle management
+trait EpochStore: Send + Sync {
+    fn create_epoch(&self, epoch: &Epoch) -> Result<()>;
+    fn get_epoch(&self, id: &str) -> Result<Option<Epoch>>;
+    fn seal_epoch(&self, id: &str) -> Result<()>;
+    fn list_epochs(&self) -> Result<Vec<Epoch>>;
+}
+
 /// Agent session management
 trait SessionStore: Send + Sync {
     fn create_session(&self, session: &Session) -> Result<()>;
@@ -1655,9 +2414,28 @@ trait SessionStore: Send + Sync {
     fn list_sessions(&self) -> Result<Vec<Session>>;
     fn delete_session(&self, id: &str) -> Result<bool>;
 }
+
+/// Taint/Quarantine/Watch mark-and-sweep (default: no-op)
+trait TaintStore: Send + Sync {
+    fn save_taint(&self, taint: &TaintMark) -> Result<(), TaintError> { Ok(()) }
+    fn get_taint(&self, id: &str) -> Result<Option<TaintMark>, TaintError> { Ok(None) }
+    fn list_taints(&self, filter: &TaintFilter) -> Result<Vec<TaintMark>, TaintError> { Ok(vec![]) }
+    fn resolve_taint(&self, id: &str, resolution: TaintResolution) -> Result<(), TaintError> { Ok(()) }
+}
+
+/// Pull-based reminders (default: no-op)
+trait ReminderStore: Send + Sync {
+    fn save(&self, reminder: &Reminder) -> Result<(), ReminderError> { Ok(()) }
+    fn get(&self, id: &str) -> Result<Option<Reminder>, ReminderError> { Ok(None) }
+    fn update(&self, reminder: &Reminder) -> Result<(), ReminderError> { Ok(()) }
+    fn delete(&self, id: &str) -> Result<bool, ReminderError> { Ok(false) }
+    fn list(&self, filter: &ReminderFilter) -> Result<Vec<Reminder>, ReminderError> { Ok(vec![]) }
+}
 ```
 
-### 8.3 Performance Design
+All four backends (Memory, SQLite, Postgres, IndexedDB) fully implement all 7 sub-traits. The Postgres backend is tenant-isolated: every query includes a `tenant_id` column so multiple logical stores can share a single database instance.
+
+### 11.3 Performance Design
 
 | Aspect | Target | Technique |
 |--------|--------|-----------|
@@ -1668,25 +2446,26 @@ trait SessionStore: Send + Sync {
 | Deduplication | Automatic | Content-addressing: identical subtrees share storage |
 | Batch operations | Amortized | batch_get/batch_put reduce I/O round trips |
 
-### 8.4 Language Bindings
+### 11.4 Language Bindings
 
 | Language | Technology | Distribution |
 |----------|-----------|-------------|
 | **Python** | PyO3 + maturin | `pip install agentstategraph` |
 | **TypeScript/Node** | napi-rs | `npm install agentstategraph` |
-| **Go** | CGo wrapping agentstategraph-ffi | `go get stategraph` |
-| **Browser/Deno** | wasm-bindgen (agentstategraph-wasm) | npm or direct WASM import |
-| **Any (C ABI)** | agentstategraph-ffi | Shared library (.so/.dylib/.dll) |
+| **Go** | CGo wrapping `agentstategraph-ffi` | `go get github.com/agentstatelabs/AgentStateGraph/bindings/go` |
+| **.NET** | C FFI wrapping `agentstategraph-ffi` | NuGet package `AgentStateGraph` |
+| **Browser/Deno** | wasm-bindgen (`agentstategraph-wasm`) | npm or direct WASM import |
+| **Any (C ABI)** | `agentstategraph-ffi` | Shared library (`.so`/`.dylib`/`.dll`) |
 
 ---
 
-## 9. Human-Agent Collaboration
+## 12. Human-Agent Collaboration
 
-### 9.1 Shared Interface
+### 12.1 Shared Interface
 
 Humans and agents use the same API. A human's identity is their `agent_id`. There is no separate "admin" interface — authority and intent metadata distinguish human actions from agent actions.
 
-### 9.2 Approval Gates
+### 12.2 Approval Gates
 
 The merge proposal system creates natural checkpoints where human review is required:
 
@@ -1697,7 +2476,7 @@ The merge proposal system creates natural checkpoints where human review is requ
 5. Human approves, rejects, or requests changes
 6. If approved, changes merge to `main` with full provenance
 
-### 9.3 Transparency
+### 12.3 Transparency
 
 Every state change is traceable through:
 - **Who** performed the action (`agent_id`)
@@ -1710,7 +2489,7 @@ Every state change is traceable through:
 
 This makes agent behavior auditable without requiring access to ephemeral conversation logs.
 
-### 9.4 Web UI (Future)
+### 12.4 Web UI (Future)
 
 A web interface powered by the WASM build would provide:
 - **State explorer**: browse state at any ref, navigate the tree
@@ -1720,7 +2499,7 @@ A web interface powered by the WASM build would provide:
 - **Approval queue**: pending merge proposals with resolution summaries
 - **Agent activity**: which agents are active, what they're working on, what they've done
 
-### 9.5 Graduated Trust and Enterprise Adoption
+### 12.5 Graduated Trust and Enterprise Adoption
 
 Organizations adopting agentic AI face a fundamental tension: agents are most valuable when given autonomy, but autonomy without visibility is unacceptable to compliance teams, security teams, and leadership. The typical result is that organizations either don't adopt agents or adopt them without adequate oversight.
 
@@ -1756,9 +2535,9 @@ Organizations can start at Level 1 with zero risk and progress to Level 3 as tru
 
 ---
 
-## 10. Lifecycle Management: Epochs and the Registry
+## 13. Lifecycle Management: Epochs and the Registry
 
-### 10.1 The Growth Problem
+### 13.1 The Growth Problem
 
 A long-lived AgentStateGraph instance accumulates history fast. A production cluster managed by multiple agents over weeks generates thousands of commits, hundreds of intents, and dozens of agent sessions. Without lifecycle management, the store becomes:
 
@@ -1767,7 +2546,7 @@ A long-lived AgentStateGraph instance accumulates history fast. A production clu
 - **Hard to audit** — compliance needs bounded, self-contained units of work, not an infinite scroll
 - **Risky to keep mutable** — historical records should be tamper-evident, not editable
 
-### 10.2 Epochs
+### 13.2 Epochs
 
 An **Epoch** is a bounded, sealable segment of work within a AgentStateGraph instance. It groups related commits, intents, agent sessions, and resolutions into a coherent unit that can be managed as a whole.
 
@@ -1865,7 +2644,7 @@ Archiving:
 3. Retains the epoch's registry entry, seal hash, and cross-references
 4. Epoch remains queryable via the registry ("what happened in Q1?") but full details require loading the archive
 
-### 10.3 The Registry
+### 13.3 The Registry
 
 The **Registry** is a lightweight master index stored at `/__registry__` in the state tree. It provides a navigable overview of all work in the AgentStateGraph instance without requiring agents or humans to scan the full commit history.
 
@@ -1934,7 +2713,7 @@ Epoch: "2026-04-gpu-optimization"
 
 An auditor or agent can follow this chain from the original optimization request through the incident investigation to the hardware replacement — across three sealed, independently verifiable epochs.
 
-### 10.4 MCP Tools for Lifecycle Management
+### 13.4 MCP Tools for Lifecycle Management
 
 **agentstategraph_create_epoch**
 ```json
@@ -2024,18 +2803,18 @@ An auditor or agent can follow this chain from the original optimization request
 
 ---
 
-## 11. Reference Implementation
+## 14. Reference Implementation
 
 The specification is only valuable if it can be implemented and used easily — by humans reading the spec and by AI agents reading the MCP tool schemas. This section defines the two primary deliverables beyond the spec itself.
 
-### 11.1 Principles
+### 14.1 Principles
 
 1. **Progressive complexity** — Start with the simplest useful subset. A developer or agent should be productive in minutes, not days.
 2. **Layered adoption** — Each capability layer (branching, schema, speculation, sub-agents, epochs) is independently useful. You don't need epochs to use branching. You don't need sub-agent orchestration to use intents.
 3. **Zero config to start** — The default configuration should work out of the box. SQLite storage (durable, single file), no schema, single agent. Add complexity only when needed.
 4. **Spec-faithful** — The reference implementation must match the spec exactly. It is the canonical proof that the spec is implementable and coherent.
 
-### 11.2 Rust Reference Library (`agentstategraph`)
+### 14.2 Rust Reference Library (`agentstategraph`)
 
 The core library, implemented in Rust, provides the complete AgentStateGraph API as described in this spec.
 
@@ -2063,7 +2842,7 @@ Each layer has:
 - A standalone example demonstrating the layer's capabilities
 - Documentation that can be read independently
 
-### 11.3 MCP Server (`agentstategraph-mcp`)
+### 14.3 MCP Server (`agentstategraph-mcp`)
 
 A standalone MCP server that any MCP-compatible agent (Claude, GPT, open-source agents) can connect to immediately.
 
@@ -2106,9 +2885,15 @@ That's the default — durable SQLite storage in a single file, zero external de
 }
 ```
 
-An agent connecting for the first time discovers all available tools via the MCP tool listing. The tool descriptions (Section 7) are written so that an agent reading them can understand what each tool does and how to use it without external documentation.
+An agent connecting for the first time discovers all 66 available tools via the MCP tool listing. The tool descriptions (§7) are written so that an agent reading them can understand what each tool does and how to use it without external documentation.
 
-### 11.4 Getting Started Example
+The server also ships a `migrate` CLI subcommand for applying storage schema migrations:
+
+```bash
+agentstategraph-mcp migrate --storage sqlite --path ./agentstategraph.db
+```
+
+### 14.4 Getting Started Example
 
 A complete example that demonstrates the core workflow, suitable for inclusion in the README and as an agent's first interaction with AgentStateGraph:
 
@@ -2141,49 +2926,59 @@ agentstategraph_log(ref="main", limit=5)
 
 This example works with zero configuration — SQLite storage (durable by default), no schema, single agent. Every concept introduced in the spec (branching, intents, structured diff, merge) is demonstrated in 6 tool calls. History survives restarts.
 
-### 11.5 Implementation Test Suite
+### 14.5 Implementation Test Suite
 
-The reference implementation includes a comprehensive test suite organized by spec section:
+The reference implementation includes 848+ tests across 12 crates:
 
-| Test Suite | What It Validates |
-|-----------|-------------------|
-| `test_objects` | Content-addressing, deduplication, canonical serialization |
-| `test_commits` | Commit creation, intent metadata, authority chains |
-| `test_branches` | Branch create/delete/list, namespace conventions |
-| `test_diff` | All DiffOp variants, schema-aware diffing |
-| `test_merge` | Auto-resolution, conflict detection, all merge hint strategies |
-| `test_speculation` | Create, modify, compare, commit, discard |
-| `test_sessions` | Multi-session concurrency, CAS, sync |
-| `test_delegation` | Sub-agent spawning, scoped authority, path restrictions |
-| `test_intent_tree` | Intent decomposition, lifecycle transitions, resolution reporting |
-| `test_epochs` | Create, seal, export, archive, registry queries, cross-references |
-| `test_mcp` | All MCP tools against the spec, round-trip request/response validation |
+| Test Suite | Crate | What It Validates |
+|-----------|-------|-------------------|
+| `test_objects` | `agentstategraph-core` | Content-addressing, deduplication, canonical serialization |
+| `test_commits` | `agentstategraph-core` | Commit creation, intent metadata, authority chains |
+| `test_branches` | `agentstategraph` | Branch create/delete/list, namespace conventions |
+| `test_diff` | `agentstategraph-core` | All DiffOp variants, schema-aware diffing |
+| `test_merge` | `agentstategraph-core` | Auto-resolution, conflict detection, all merge hint strategies |
+| `test_speculation` | `agentstategraph` | Create, modify, compare, commit, discard |
+| `test_sessions` | `agentstategraph` | Multi-session concurrency, CAS, sync |
+| `test_delegation` | `agentstategraph` | Sub-agent spawning, scoped authority, path restrictions |
+| `test_intent_tree` | `agentstategraph` | Intent decomposition, lifecycle transitions, resolution reporting |
+| `test_epochs` | `agentstategraph-storage` | Create, seal, export, archive, registry queries, cross-references |
+| `test_storage_backends` | `agentstategraph-storage` | Memory, SQLite, Postgres — full supertrait coverage per backend |
+| `test_tasks` | `agentstategraph-tasks` | Plan/Task state machine, proofs, assignment, next-task selection |
+| `test_policy` | `agentstategraph-policy` | Propose/ratify/supersede lifecycle, built-in + Rego + WASM + Cedar engines |
+| `test_policy_sign` | `agentstategraph-policy-sign` | Ed25519 key generation, signing, verification, ratification gating |
+| `test_taint` | `agentstategraph-taint` | Apply/resolve marks, propagation, quarantine blocking, watch audit |
+| `test_reminders` | `agentstategraph-reminders` | Create/list/snooze/approve, priority filtering, schedule next-due computation |
+| `test_mcp` | `agentstategraph-mcp` | All 66 MCP tools against the spec, round-trip request/response validation |
 
 A conformance test suite is also provided for third-party implementations: any implementation that passes the conformance suite is spec-compliant.
 
 ---
 
-## 12. Open Questions
+## 15. Open Questions
 
 These questions are deferred for resolution during implementation or future RFCs.
+
+**Resolved in v0.8.0:**
+
+- ~~**Commit signing** (#3)~~ — Resolved via `agentstategraph-policy-sign`: Ed25519 signing is applied to *policies* (which govern the entire delegation chain) rather than individual commits. Policy ratification requires valid signatures from all required signers; the ratification event itself is an audit commit. This provides cryptographic agent identity verification without per-commit signing overhead.
+
+- ~~**Access control** (#7)~~ — Resolved via `agentstategraph-policy`: declarative, multi-engine authorization (built-in, Rego, WASM, Cedar) with tamper-evident ratification and cost-of-change gating. Per-path quarantine via `agentstategraph-taint` provides a hard gate beyond policy evaluation.
+
+**Active:**
 
 1. **Hash function pluggability**: Should BLAKE3 be fixed, or should the hash function be configurable? Fixed simplifies interoperability; pluggable accommodates regulatory requirements (FIPS).
 
 2. **Large value handling**: What is the inline size threshold for objects? Should large values (files, images, model weights) use a chunked storage model similar to git LFS?
 
-3. **Commit signing**: Should commits support Ed25519 signatures for cryptographic agent identity verification? This would enable trustless verification of the delegation chain.
+3. **Remote sync protocol**: How do distributed AgentStateGraph instances synchronize? A protocol similar to git's pack-based transfer but operating on structured objects rather than files.
 
-4. **Remote sync protocol**: How do distributed AgentStateGraph instances synchronize? A protocol similar to git's pack-based transfer but operating on structured objects rather than files.
+4. **Time-travel queries**: Should `query_at(ref, path, timestamp)` be supported natively? This requires temporal indexing and has storage cost implications.
 
-5. **Time-travel queries**: Should `query_at(ref, path, timestamp)` be supported natively? This requires temporal indexing and has storage cost implications.
+5. **History compaction**: For long-running agents generating thousands of commits, should AgentStateGraph support squashing or pruning history while preserving key checkpoints?
 
-6. **History compaction**: For long-running agents generating thousands of commits, should AgentStateGraph support squashing or pruning history while preserving key checkpoints?
+6. **Event sourcing bridge**: Should AgentStateGraph emit events compatible with existing event sourcing infrastructure (Kafka, EventStore), enabling integration with streaming architectures?
 
-7. **Access control**: For multi-tenant deployments, should per-branch or per-path permissions be enforced at the storage layer?
-
-8. **Event sourcing bridge**: Should AgentStateGraph emit events compatible with existing event sourcing infrastructure (Kafka, EventStore), enabling integration with streaming architectures?
-
-9. **Relationship to app-state systems**: AgentStateGraph targets agent workflows. A companion project (exploratory-state-system, Swift) targets AI-native creative applications with simpler versioning semantics. Should there be a shared specification for the overlapping subset?
+7. **Relationship to app-state systems**: AgentStateGraph targets agent workflows. A companion project (exploratory-state-system, Swift) targets AI-native creative applications with simpler versioning semantics. Should there be a shared specification for the overlapping subset?
 
 ---
 
