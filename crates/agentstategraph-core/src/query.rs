@@ -330,4 +330,238 @@ mod tests {
         );
         assert_eq!(filtered.len(), 1);
     }
+
+    // --- Empty filters pass everything ---
+
+    #[test]
+    fn test_empty_filters_returns_all() {
+        let commits = vec![
+            test_commit("a", IntentCategory::Explore, "x"),
+            test_commit("b", IntentCategory::Fix, "y"),
+            test_commit("c", IntentCategory::Checkpoint, "z"),
+        ];
+        let filtered = filter_commits(&commits, &QueryFilters::default());
+        assert_eq!(filtered.len(), 3);
+    }
+
+    // --- Tags filter ---
+
+    #[test]
+    fn test_filter_by_tags_all_must_match() {
+        use crate::intent::Intent;
+        let make = |tags: &[&str]| {
+            CommitBuilder::new(
+                ObjectId::hash(b"s"),
+                "a",
+                Authority::simple("a"),
+                Intent::new(IntentCategory::Explore, "x")
+                    .with_tags(tags.iter().map(|s| s.to_string()).collect()),
+            )
+            .build()
+        };
+
+        let commits = vec![
+            make(&["gpu", "node-3"]),
+            make(&["gpu"]),
+            make(&["cpu", "node-3"]),
+        ];
+
+        // Both tags must match — only the first commit qualifies
+        let filtered = filter_commits(
+            &commits,
+            &QueryFilters {
+                tags: Some(vec!["gpu".to_string(), "node-3".to_string()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+    }
+
+    // --- Authority principal filter ---
+
+    #[test]
+    fn test_filter_by_authority_principal() {
+        let commits = vec![
+            CommitBuilder::new(
+                ObjectId::hash(b"s"),
+                "a",
+                Authority::simple("human/alice"),
+                Intent::new(IntentCategory::Explore, "by alice"),
+            )
+            .build(),
+            CommitBuilder::new(
+                ObjectId::hash(b"s"),
+                "a",
+                Authority::simple("human/bob"),
+                Intent::new(IntentCategory::Explore, "by bob"),
+            )
+            .build(),
+        ];
+
+        let filtered = filter_commits(
+            &commits,
+            &QueryFilters {
+                authority_principal: Some("human/alice".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].intent.description.contains("alice"));
+    }
+
+    // --- Confidence range: None confidence excluded ---
+
+    #[test]
+    fn test_confidence_range_excludes_none_confidence() {
+        let commits = vec![
+            {
+                let mut c = test_commit("a", IntentCategory::Explore, "has confidence");
+                c.confidence = Some(0.8);
+                c
+            },
+            // No confidence set — should be excluded by any confidence_range filter
+            test_commit("a", IntentCategory::Explore, "no confidence"),
+        ];
+
+        let filtered = filter_commits(
+            &commits,
+            &QueryFilters {
+                confidence_range: Some((0.0, 1.0)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].intent.description, "has confidence");
+    }
+
+    // --- Intent category filter: case-insensitive ---
+
+    #[test]
+    fn test_category_filter_case_insensitive() {
+        let commits = vec![
+            test_commit("a", IntentCategory::Explore, "x"),
+            test_commit("a", IntentCategory::Fix, "y"),
+        ];
+
+        // "explore" lowercase should match "Explore" category
+        let filtered = filter_commits(
+            &commits,
+            &QueryFilters {
+                intent_category: Some("explore".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+    }
+
+    // --- Date range ---
+
+    #[test]
+    fn test_filter_by_date_range() {
+        use chrono::Duration;
+        let now = Utc::now();
+
+        let mut past = test_commit("a", IntentCategory::Explore, "old");
+        past.timestamp = now - Duration::days(10);
+
+        let mut recent = test_commit("a", IntentCategory::Explore, "recent");
+        recent.timestamp = now - Duration::days(1);
+
+        let mut future = test_commit("a", IntentCategory::Explore, "future");
+        future.timestamp = now + Duration::days(1);
+
+        let commits = vec![past.clone(), recent.clone(), future.clone()];
+
+        // Only commits within last 7 days
+        let from = now - Duration::days(7);
+        let to = now + Duration::minutes(1);
+
+        let filtered = filter_commits(
+            &commits,
+            &QueryFilters {
+                date_from: Some(from),
+                date_to: Some(to),
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].intent.description, "recent");
+    }
+
+    // --- has_deviations ---
+
+    #[test]
+    fn test_filter_by_has_deviations() {
+        use crate::intent::{Deviation, DeviationImpact, Intent, Outcome, Resolution};
+
+        let make_with_deviation = |desc: &str| {
+            let mut intent = Intent::new(IntentCategory::Explore, desc);
+            intent.lifecycle.resolution = Some(Resolution {
+                summary: "completed with deviation".into(),
+                outcome: Outcome::PartiallyFulfilled,
+                deviations: vec![Deviation {
+                    description: "unexpected value".into(),
+                    reason: "state diverged".into(),
+                    impact: DeviationImpact::Medium,
+                    follow_up: None,
+                }],
+                commits: Vec::new(),
+                branches_explored: Vec::new(),
+                confidence: 0.7,
+            });
+            CommitBuilder::new(
+                ObjectId::hash(desc.as_bytes()),
+                "a",
+                Authority::simple("a"),
+                intent,
+            )
+            .build()
+        };
+
+        let commits = vec![
+            make_with_deviation("has deviation"),
+            test_commit("a", IntentCategory::Explore, "no deviation"),
+        ];
+
+        let filtered = filter_commits(
+            &commits,
+            &QueryFilters {
+                has_deviations: Some(true),
+                ..Default::default()
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].intent.description, "has deviation");
+    }
+
+    // --- Serialization ---
+
+    #[test]
+    fn test_query_filters_serializes_and_deserializes() {
+        let f = QueryFilters {
+            path: Some("/nodes/*".into()),
+            agent_id: Some("agent/a".into()),
+            confidence_range: Some((0.5, 0.9)),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: QueryFilters = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.path.as_deref(), Some("/nodes/*"));
+        assert_eq!(back.confidence_range, Some((0.5, 0.9)));
+    }
+
+    #[test]
+    fn test_query_target_round_trips() {
+        for t in [
+            QueryTarget::State,
+            QueryTarget::Commits,
+            QueryTarget::Intents,
+            QueryTarget::Agents,
+            QueryTarget::Epochs,
+        ] {
+            let j = serde_json::to_value(&t).unwrap();
+            let back: QueryTarget = serde_json::from_value(j).unwrap();
+            assert_eq!(back, t);
+        }
+    }
 }

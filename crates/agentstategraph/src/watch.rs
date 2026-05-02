@@ -241,4 +241,97 @@ mod tests {
     }
 
     use agentstategraph_core::object::ObjectId;
+
+    #[test]
+    fn test_multiple_subscribers_independent() {
+        let mgr = WatchManager::new();
+        let sub1 = mgr.subscribe(PathPattern::Exact("/a".to_string()));
+        let sub2 = mgr.subscribe(PathPattern::Exact("/b".to_string()));
+
+        mgr.notify(
+            ObjectId::hash(b"c1"),
+            &["/a".to_string(), "/b".to_string()],
+            "agent/test",
+            &test_intent(),
+        );
+
+        let e1 = mgr.drain_events(sub1);
+        let e2 = mgr.drain_events(sub2);
+        assert_eq!(e1.len(), 1, "sub1 should get /a event");
+        assert_eq!(e2.len(), 1, "sub2 should get /b event");
+        assert_eq!(e1[0].path, "/a");
+        assert_eq!(e2[0].path, "/b");
+    }
+
+    #[test]
+    fn test_events_accumulate_across_notifies() {
+        let mgr = WatchManager::new();
+        let sub = mgr.subscribe(PathPattern::All);
+
+        mgr.notify(
+            ObjectId::hash(b"c1"),
+            &["/x".to_string()],
+            "agent/test",
+            &test_intent(),
+        );
+        mgr.notify(
+            ObjectId::hash(b"c2"),
+            &["/y".to_string()],
+            "agent/test",
+            &test_intent(),
+        );
+
+        assert_eq!(mgr.pending_count(sub), 2);
+        let events = mgr.drain_events(sub);
+        assert_eq!(events.len(), 2);
+        assert_eq!(mgr.pending_count(sub), 0);
+    }
+
+    #[test]
+    fn test_pending_count_unknown_subscription() {
+        let mgr = WatchManager::new();
+        let sub = mgr.subscribe(PathPattern::All);
+        mgr.unsubscribe(sub);
+        // Should return 0, not panic
+        assert_eq!(mgr.pending_count(sub), 0);
+    }
+
+    #[test]
+    fn test_drain_unknown_subscription_returns_empty() {
+        let mgr = WatchManager::new();
+        let sub = mgr.subscribe(PathPattern::All);
+        mgr.unsubscribe(sub);
+        let events = mgr.drain_events(sub);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_watch_event_fields_populated() {
+        let mgr = WatchManager::new();
+        let sub = mgr.subscribe(PathPattern::All);
+        let commit = ObjectId::hash(b"c1");
+
+        mgr.notify(commit, &["/test/path".to_string()], "agent/watcher", &test_intent());
+
+        let events = mgr.drain_events(sub);
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.commit_id, commit);
+        assert_eq!(e.path, "/test/path");
+        assert_eq!(e.agent_id, "agent/watcher");
+        assert!(!e.intent_description.is_empty());
+        assert!(!e.intent_category.is_empty());
+        assert!(!e.timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_path_pattern_matches() {
+        assert!(PathPattern::Exact("/a/b".to_string()).matches("/a/b"));
+        assert!(!PathPattern::Exact("/a/b".to_string()).matches("/a/b/c"));
+        assert!(PathPattern::Prefix("/a/".to_string()).matches("/a/b"));
+        assert!(PathPattern::Prefix("/a/".to_string()).matches("/a/b/c"));
+        assert!(!PathPattern::Prefix("/a/".to_string()).matches("/b"));
+        assert!(PathPattern::All.matches("/anything"));
+        assert!(PathPattern::All.matches(""));
+    }
 }
