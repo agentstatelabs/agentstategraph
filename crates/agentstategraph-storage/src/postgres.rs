@@ -170,12 +170,40 @@ impl PostgresStorage {
                     ON epochs(tenant_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sessions_tenant_agent
                     ON sessions(tenant_id, agent_id);
+                CREATE TABLE IF NOT EXISTS reminders (
+                    tenant_id       TEXT NOT NULL,
+                    id              TEXT NOT NULL,
+                    title           TEXT NOT NULL,
+                    instructions    TEXT NOT NULL,
+                    commands        TEXT NOT NULL DEFAULT '[]',
+                    refs            TEXT NOT NULL DEFAULT '[]',
+                    priority        INTEGER NOT NULL DEFAULT 3,
+                    due_at          TEXT NOT NULL,
+                    schedule        TEXT,
+                    autonomous      BOOLEAN NOT NULL DEFAULT true,
+                    created_by      TEXT NOT NULL,
+                    created_at      TEXT NOT NULL,
+                    status          TEXT NOT NULL DEFAULT 'pending',
+                    snoozed_until   TEXT,
+                    executions      TEXT NOT NULL DEFAULT '[]',
+                    tags            TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY (tenant_id, id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_taints_tenant_path
                     ON taints(tenant_id, path);
                 CREATE INDEX IF NOT EXISTS idx_taints_tenant_kind
                     ON taints(tenant_id, kind);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_taints_unique_active
                     ON taints(tenant_id, path, name, kind) WHERE resolved_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_reminders_tenant_status
+                    ON reminders(tenant_id, status);
+                CREATE INDEX IF NOT EXISTS idx_reminders_tenant_due
+                    ON reminders(tenant_id, due_at);
+                CREATE INDEX IF NOT EXISTS idx_reminders_tenant_priority
+                    ON reminders(tenant_id, priority);
+                CREATE INDEX IF NOT EXISTS idx_reminders_tenant_created_by
+                    ON reminders(tenant_id, created_by);
 
                 ALTER TABLE commits ADD COLUMN IF NOT EXISTS epoch_id TEXT;
                 ALTER TABLE commits ADD COLUMN IF NOT EXISTS session_id TEXT;
@@ -1530,9 +1558,399 @@ impl TaintStore for PostgresStorage {
     }
 }
 
-/// Postgres does not yet implement durable reminder storage; all methods
-/// fall back to the default no-op trait implementations.
-impl agentstategraph_reminders::ReminderStore for PostgresStorage {}
+// ---------------------------------------------------------------------------
+// ReminderStore — durable Postgres reminder storage
+// ---------------------------------------------------------------------------
+
+fn pg_reminder_status_to_str(
+    s: agentstategraph_reminders::types::ReminderStatus,
+) -> &'static str {
+    use agentstategraph_reminders::types::ReminderStatus;
+    match s {
+        ReminderStatus::Pending => "pending",
+        ReminderStatus::Due => "due",
+        ReminderStatus::AwaitingPermission => "awaiting_permission",
+        ReminderStatus::InProgress => "in_progress",
+        ReminderStatus::Completed => "completed",
+        ReminderStatus::Snoozed => "snoozed",
+        ReminderStatus::Cancelled => "cancelled",
+    }
+}
+
+fn pg_reminder_status_from_str(
+    s: &str,
+) -> Result<agentstategraph_reminders::types::ReminderStatus, StorageError> {
+    use agentstategraph_reminders::types::ReminderStatus;
+    match s {
+        "pending" => Ok(ReminderStatus::Pending),
+        "due" => Ok(ReminderStatus::Due),
+        "awaiting_permission" => Ok(ReminderStatus::AwaitingPermission),
+        "in_progress" => Ok(ReminderStatus::InProgress),
+        "completed" => Ok(ReminderStatus::Completed),
+        "snoozed" => Ok(ReminderStatus::Snoozed),
+        "cancelled" => Ok(ReminderStatus::Cancelled),
+        other => Err(StorageError::Backend(format!(
+            "unknown reminder status: {other}"
+        ))),
+    }
+}
+
+fn pg_priority_to_i32(p: agentstategraph_reminders::types::Priority) -> i32 {
+    p.as_u8() as i32
+}
+
+fn pg_priority_from_i32(
+    n: i32,
+) -> Result<agentstategraph_reminders::types::Priority, StorageError> {
+    use agentstategraph_reminders::types::Priority;
+    match n {
+        1 => Ok(Priority::Critical),
+        2 => Ok(Priority::High),
+        3 => Ok(Priority::Medium),
+        4 => Ok(Priority::Low),
+        5 => Ok(Priority::Minimal),
+        other => Err(StorageError::Backend(format!(
+            "unknown priority value: {other}"
+        ))),
+    }
+}
+
+fn pg_row_to_reminder(
+    row: &tokio_postgres::Row,
+) -> Result<agentstategraph_reminders::Reminder, StorageError> {
+    use agentstategraph_reminders::types::ExecutionRecord;
+    use agentstategraph_reminders::{Reminder, types::ReminderRef, types::Schedule};
+
+    let status_s: String = row.get("status");
+    let priority_n: i32 = row.get("priority");
+    let due_at_s: String = row.get("due_at");
+    let created_at_s: String = row.get("created_at");
+    let snoozed_until_s: Option<String> = row.get("snoozed_until");
+    let commands_s: String = row.get("commands");
+    let refs_s: String = row.get("refs");
+    let schedule_s: Option<String> = row.get("schedule");
+    let executions_s: String = row.get("executions");
+    let tags_s: String = row.get("tags");
+    let autonomous: bool = row.get("autonomous");
+
+    let status = pg_reminder_status_from_str(&status_s)?;
+    let priority = pg_priority_from_i32(priority_n)?;
+    let due_at = DateTime::parse_from_rfc3339(&due_at_s)
+        .map_err(|e| StorageError::Serialization(format!("due_at: {e}")))?
+        .with_timezone(&Utc);
+    let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+        .map_err(|e| StorageError::Serialization(format!("created_at: {e}")))?
+        .with_timezone(&Utc);
+    let snoozed_until = match snoozed_until_s {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| StorageError::Serialization(format!("snoozed_until: {e}")))?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+    let commands: Vec<String> = serde_json::from_str(&commands_s)
+        .map_err(|e| StorageError::Serialization(format!("commands: {e}")))?;
+    let refs: Vec<ReminderRef> = serde_json::from_str(&refs_s)
+        .map_err(|e| StorageError::Serialization(format!("refs: {e}")))?;
+    let schedule: Option<Schedule> = match schedule_s {
+        Some(s) => Some(
+            serde_json::from_str(&s)
+                .map_err(|e| StorageError::Serialization(format!("schedule: {e}")))?,
+        ),
+        None => None,
+    };
+    let executions: Vec<ExecutionRecord> = serde_json::from_str(&executions_s)
+        .map_err(|e| StorageError::Serialization(format!("executions: {e}")))?;
+    let tags: Vec<String> = serde_json::from_str(&tags_s)
+        .map_err(|e| StorageError::Serialization(format!("tags: {e}")))?;
+
+    Ok(Reminder {
+        id: row.get("id"),
+        title: row.get("title"),
+        instructions: row.get("instructions"),
+        commands,
+        refs,
+        priority,
+        due_at,
+        schedule,
+        autonomous,
+        created_by: row.get("created_by"),
+        created_at,
+        status,
+        snoozed_until,
+        executions,
+        tags,
+    })
+}
+
+impl agentstategraph_reminders::ReminderStore for PostgresStorage {
+    fn save(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
+        let commands_json = serde_json::to_string(&reminder.commands)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("commands: {e}")))?;
+        let refs_json = serde_json::to_string(&reminder.refs)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("refs: {e}")))?;
+        let schedule_json = reminder
+            .schedule
+            .as_ref()
+            .map(|s| serde_json::to_string(s))
+            .transpose()
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("schedule: {e}")))?;
+        let executions_json = serde_json::to_string(&reminder.executions)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("executions: {e}")))?;
+        let tags_json = serde_json::to_string(&reminder.tags)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("tags: {e}")))?;
+        let priority = pg_priority_to_i32(reminder.priority);
+        let status = pg_reminder_status_to_str(reminder.status).to_string();
+        let due_at = reminder.due_at.to_rfc3339();
+        let created_at = reminder.created_at.to_rfc3339();
+        let snoozed_until = reminder.snoozed_until.map(|t| t.to_rfc3339());
+
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            client
+                .execute(
+                    "INSERT INTO reminders (
+                        tenant_id, id, title, instructions, commands, refs,
+                        priority, due_at, schedule, autonomous, created_by,
+                        created_at, status, snoozed_until, executions, tags
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+                    &[
+                        &self.tenant_id,
+                        &reminder.id,
+                        &reminder.title,
+                        &reminder.instructions,
+                        &commands_json,
+                        &refs_json,
+                        &priority,
+                        &due_at,
+                        &schedule_json,
+                        &reminder.autonomous,
+                        &reminder.created_by,
+                        &created_at,
+                        &status,
+                        &snoozed_until,
+                        &executions_json,
+                        &tags_json,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("insert reminder: {e}")))?;
+            Ok(())
+        })
+        .map_err(|e| agentstategraph_reminders::ReminderError::Store(e.to_string()))
+    }
+
+    fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let row = client
+                .query_opt(
+                    "SELECT * FROM reminders WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("get reminder: {e}")))?;
+            match row {
+                Some(r) => Ok(Some(pg_row_to_reminder(&r)?)),
+                None => Ok(None),
+            }
+        })
+        .map_err(|e| agentstategraph_reminders::ReminderError::Store(e.to_string()))
+    }
+
+    fn update(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
+        let commands_json = serde_json::to_string(&reminder.commands)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("commands: {e}")))?;
+        let refs_json = serde_json::to_string(&reminder.refs)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("refs: {e}")))?;
+        let schedule_json = reminder
+            .schedule
+            .as_ref()
+            .map(|s| serde_json::to_string(s))
+            .transpose()
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("schedule: {e}")))?;
+        let executions_json = serde_json::to_string(&reminder.executions)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("executions: {e}")))?;
+        let tags_json = serde_json::to_string(&reminder.tags)
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("tags: {e}")))?;
+        let priority = pg_priority_to_i32(reminder.priority);
+        let status = pg_reminder_status_to_str(reminder.status).to_string();
+        let due_at = reminder.due_at.to_rfc3339();
+        let created_at = reminder.created_at.to_rfc3339();
+        let snoozed_until = reminder.snoozed_until.map(|t| t.to_rfc3339());
+        let id = reminder.id.clone();
+
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let n = client
+                .execute(
+                    "UPDATE reminders SET
+                        title = $3, instructions = $4, commands = $5, refs = $6,
+                        priority = $7, due_at = $8, schedule = $9, autonomous = $10,
+                        created_by = $11, created_at = $12, status = $13,
+                        snoozed_until = $14, executions = $15, tags = $16
+                     WHERE tenant_id = $1 AND id = $2",
+                    &[
+                        &self.tenant_id,
+                        &id,
+                        &reminder.title,
+                        &reminder.instructions,
+                        &commands_json,
+                        &refs_json,
+                        &priority,
+                        &due_at,
+                        &schedule_json,
+                        &reminder.autonomous,
+                        &reminder.created_by,
+                        &created_at,
+                        &status,
+                        &snoozed_until,
+                        &executions_json,
+                        &tags_json,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("update reminder: {e}")))?;
+            if n == 0 {
+                return Err(StorageError::Backend(format!("reminder {id} not found")));
+            }
+            Ok(())
+        })
+        .map_err(|e| {
+            if e.to_string().contains("not found") {
+                agentstategraph_reminders::ReminderError::NotFound(reminder.id.clone())
+            } else {
+                agentstategraph_reminders::ReminderError::Store(e.to_string())
+            }
+        })
+    }
+
+    fn delete(
+        &self,
+        id: &str,
+    ) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let n = client
+                .execute(
+                    "DELETE FROM reminders WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("delete reminder: {e}")))?;
+            Ok(n > 0)
+        })
+        .map_err(|e| agentstategraph_reminders::ReminderError::Store(e.to_string()))
+    }
+
+    fn list(
+        &self,
+        filter: &agentstategraph_reminders::ReminderFilter,
+    ) -> Result<Vec<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
+        // Pre-compute owned values so they outlive the async block.
+        let status_str = filter
+            .status
+            .map(|s| pg_reminder_status_to_str(s).to_string());
+        let priority_val: Option<i32> = filter.priority_at_most.map(pg_priority_to_i32);
+        let created_by = filter.created_by.clone();
+        let due_before = filter.due_before.map(|d| d.to_rfc3339());
+        let ref_id = filter.ref_id.clone();
+        let tags = filter.tags.clone();
+
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+
+            let mut sql =
+                "SELECT * FROM reminders WHERE tenant_id = $1".to_string();
+            let mut idx = 2usize;
+            if status_str.is_some() {
+                sql.push_str(&format!(" AND status = ${idx}"));
+                idx += 1;
+            }
+            if priority_val.is_some() {
+                sql.push_str(&format!(" AND priority <= ${idx}"));
+                idx += 1;
+            }
+            if created_by.is_some() {
+                sql.push_str(&format!(" AND created_by = ${idx}"));
+                idx += 1;
+            }
+            if due_before.is_some() {
+                sql.push_str(&format!(" AND due_at <= ${idx}"));
+                // idx not needed after this
+            }
+            sql.push_str(" ORDER BY priority ASC, due_at ASC");
+
+            let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                vec![&self.tenant_id];
+            if let Some(ref s) = status_str {
+                params.push(s);
+            }
+            if let Some(ref p) = priority_val {
+                params.push(p);
+            }
+            if let Some(ref c) = created_by {
+                params.push(c);
+            }
+            if let Some(ref d) = due_before {
+                params.push(d);
+            }
+
+            let rows = client
+                .query(&sql, &params)
+                .await
+                .map_err(|e| StorageError::Backend(format!("list reminders: {e}")))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let reminder = pg_row_to_reminder(&row)?;
+                if let Some(ref rid) = ref_id {
+                    if !reminder.refs.iter().any(|rf| &rf.id == rid) {
+                        continue;
+                    }
+                }
+                if tags.iter().any(|tag| !reminder.tags.contains(tag)) {
+                    continue;
+                }
+                out.push(reminder);
+            }
+            Ok(out)
+        })
+        .map_err(|e| agentstategraph_reminders::ReminderError::Store(e.to_string()))
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1561,5 +1979,74 @@ mod tests {
     #[test]
     fn default_pool_size_is_32() {
         assert_eq!(DEFAULT_POOL_SIZE, 32);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReminderStore helper unit tests (no live Postgres connection needed)
+    // -----------------------------------------------------------------------
+
+    use agentstategraph_reminders::types::{Priority, ReminderStatus};
+
+    #[test]
+    fn pg_reminder_status_round_trip() {
+        let statuses = [
+            ReminderStatus::Pending,
+            ReminderStatus::Due,
+            ReminderStatus::AwaitingPermission,
+            ReminderStatus::InProgress,
+            ReminderStatus::Completed,
+            ReminderStatus::Snoozed,
+            ReminderStatus::Cancelled,
+        ];
+        for s in statuses {
+            let encoded = pg_reminder_status_to_str(s);
+            let decoded = pg_reminder_status_from_str(encoded)
+                .unwrap_or_else(|e| panic!("decode failed for {s:?}: {e}"));
+            assert_eq!(decoded, s, "status round-trip failed for {s:?}");
+        }
+    }
+
+    #[test]
+    fn pg_reminder_status_from_str_rejects_unknown() {
+        assert!(pg_reminder_status_from_str("bogus").is_err());
+    }
+
+    #[test]
+    fn pg_priority_round_trip() {
+        let priorities = [
+            Priority::Critical,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low,
+            Priority::Minimal,
+        ];
+        for p in priorities {
+            let encoded = pg_priority_to_i32(p);
+            let decoded = pg_priority_from_i32(encoded)
+                .unwrap_or_else(|e| panic!("decode failed for {p:?}: {e}"));
+            assert_eq!(decoded, p, "priority round-trip failed for {p:?}");
+        }
+    }
+
+    #[test]
+    fn pg_priority_from_i32_rejects_out_of_range() {
+        assert!(pg_priority_from_i32(0).is_err());
+        assert!(pg_priority_from_i32(6).is_err());
+        assert!(pg_priority_from_i32(-1).is_err());
+    }
+
+    #[test]
+    fn pg_priority_values_match_ordinal() {
+        assert_eq!(pg_priority_to_i32(Priority::Critical), 1);
+        assert_eq!(pg_priority_to_i32(Priority::High), 2);
+        assert_eq!(pg_priority_to_i32(Priority::Medium), 3);
+        assert_eq!(pg_priority_to_i32(Priority::Low), 4);
+        assert_eq!(pg_priority_to_i32(Priority::Minimal), 5);
+    }
+
+    #[test]
+    fn pg_reminder_status_strings_are_snake_case() {
+        assert_eq!(pg_reminder_status_to_str(ReminderStatus::AwaitingPermission), "awaiting_permission");
+        assert_eq!(pg_reminder_status_to_str(ReminderStatus::InProgress), "in_progress");
     }
 }
