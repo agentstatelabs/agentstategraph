@@ -9,6 +9,7 @@ use std::sync::RwLock;
 use chrono::{DateTime, Utc};
 
 use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_reminders::{MemoryReminderStore, Reminder, ReminderError, ReminderFilter, ReminderStore};
 use agentstategraph_taint::{Taint, TaintKind};
 
 use crate::traits::{
@@ -31,6 +32,8 @@ pub struct MemoryStorage {
     /// Taints keyed by id, insertion-ordered for deterministic
     /// list output.
     taints: RwLock<Vec<Taint>>,
+    /// Reminders delegated to the in-crate memory store.
+    pub(crate) reminders: MemoryReminderStore,
 }
 
 impl MemoryStorage {
@@ -44,6 +47,7 @@ impl MemoryStorage {
             commit_epoch: RwLock::new(Vec::new()),
             commit_session: RwLock::new(Vec::new()),
             taints: RwLock::new(Vec::new()),
+            reminders: MemoryReminderStore::new(),
         }
     }
 }
@@ -486,6 +490,24 @@ impl TaintStore for MemoryStorage {
             .ok_or_else(|| StorageError::Backend(format!("taint {id} not found")))?;
         t.commit_id = commit_id.to_string();
         Ok(())
+    }
+}
+
+impl ReminderStore for MemoryStorage {
+    fn save(&self, reminder: &Reminder) -> Result<(), ReminderError> {
+        self.reminders.save(reminder)
+    }
+    fn get(&self, id: &str) -> Result<Option<Reminder>, ReminderError> {
+        self.reminders.get(id)
+    }
+    fn update(&self, reminder: &Reminder) -> Result<(), ReminderError> {
+        self.reminders.update(reminder)
+    }
+    fn delete(&self, id: &str) -> Result<bool, ReminderError> {
+        self.reminders.delete(id)
+    }
+    fn list(&self, filter: &ReminderFilter) -> Result<Vec<Reminder>, ReminderError> {
+        self.reminders.list(filter)
     }
 }
 

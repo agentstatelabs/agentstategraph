@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_reminders::ReminderStore;
 use agentstategraph_taint::{Taint, TaintEffect, TaintKind, TaintMetadata, TaintSeverity};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -1242,6 +1243,11 @@ impl TaintStore for SqliteStorage {
         Ok(())
     }
 }
+
+/// SQLite does not yet implement durable reminder storage.
+/// Consumers that need persistence should use the PostgreSQL backend
+/// or wrap a `MemoryReminderStore` separately.
+impl ReminderStore for SqliteStorage {}
 
 #[cfg(test)]
 mod tests {

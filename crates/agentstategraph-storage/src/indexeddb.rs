@@ -32,6 +32,7 @@ use crate::traits::{
     CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
 };
 use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_reminders::ReminderStore;
 use chrono::{DateTime, Utc};
 
 /// IndexedDB-backed storage with in-memory cache.
@@ -481,6 +482,25 @@ impl TaintStore for IndexedDbStorage {
 
     fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError> {
         self.memory.set_taint_commit_id(id, commit_id)
+    }
+}
+
+/// IndexedDB delegates reminders to the in-memory store it already wraps.
+impl ReminderStore for IndexedDbStorage {
+    fn save(&self, reminder: &agentstategraph_reminders::Reminder) -> Result<(), agentstategraph_reminders::ReminderError> {
+        self.memory.reminders.save(reminder)
+    }
+    fn get(&self, id: &str) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError> {
+        self.memory.reminders.get(id)
+    }
+    fn update(&self, reminder: &agentstategraph_reminders::Reminder) -> Result<(), agentstategraph_reminders::ReminderError> {
+        self.memory.reminders.update(reminder)
+    }
+    fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        self.memory.reminders.delete(id)
+    }
+    fn list(&self, filter: &agentstategraph_reminders::ReminderFilter) -> Result<Vec<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError> {
+        self.memory.reminders.list(filter)
     }
 }
 

@@ -1,9 +1,9 @@
 ---
 title: MCP Tools Reference
-description: Complete reference for all 27 AgentStateGraph MCP tools with parameters and examples.
+description: Complete reference for all AgentStateGraph MCP tools with parameters and examples.
 ---
 
-> **59 tools** — 29 core (state, branching, speculation, query/audit, epochs, sessions, explorer) + 10 tasks + 11 policy + 9 taint. Also available as [22 HTTP REST endpoints](/guides/mcp-server/#http-rest-api) via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
+> **66 tools** — 29 core (state, branching, speculation, query/audit, epochs, sessions, explorer) + 10 tasks + 11 policy + 9 taint + 7 reminders. Also available as [22 HTTP REST endpoints](/guides/mcp-server/#http-rest-api) via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
 
 ## State Operations
 
@@ -1608,4 +1608,173 @@ Evaluate a proposed change against the active policy and any taint marks on the 
 ```
 Decision: Deny
 Reason: Path '/cluster/credentials' is under Quarantine (High severity) — policy evaluation blocked
+```
+
+---
+
+## Reminders (7 tools)
+
+Pull-based reminders let agents and users schedule future work with priority, repeating schedules, soft object references, and an optional autonomous execution flag. Agents call `remind_me` at checkpoints (session start, task transitions, branch switches) to receive all currently due items.
+
+**Schedule string format:** `"once"` | `"interval:<seconds>"` | `"daily:HH:MM"` | `"weekly:Weekday:HH:MM"` (e.g. `"weekly:Monday:09:00"`).
+
+**Priority values:** `"critical"` | `"high"` | `"medium"` (default) | `"low"` | `"minimal"`.
+
+**Ref kind values:** `"branch"` | `"memory"` | `"plan"` | `"task"` | `"state_path"` | `"external:<scheme>"`.
+
+---
+
+### agentstategraph_reminder_create
+
+Create a new reminder.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `title` | string | yes | | Short human-readable title |
+| `instructions` | string | yes | | What to do when due |
+| `due_at` | string | yes | | ISO 8601 due timestamp |
+| `schedule` | string | no | `"once"` | Schedule string (see above) |
+| `priority` | string | no | `"medium"` | Priority (see above) |
+| `autonomous` | bool | no | `false` | Execute without asking permission |
+| `created_by` | string | no | | Agent or user id creating this |
+| `commands` | string[] | no | | CLI commands to run at execution time |
+| `tags` | string[] | no | | Arbitrary tags for filtering |
+| `refs` | object[] | no | | Soft refs: `[{"kind":"branch","id":"main","label":"main branch"}]` |
+
+**Example input:**
+```json
+{
+  "title": "Stop local web server",
+  "instructions": "The dev server started for PR review may still be running. Check and terminate it.",
+  "due_at": "2026-05-03T09:00:00Z",
+  "priority": "high",
+  "autonomous": false,
+  "created_by": "agent/dev",
+  "tags": ["cleanup", "server"]
+}
+```
+
+**Example output:**
+```json
+{ "id": "rem-0193a4f2-...", "status": "Pending" }
+```
+
+---
+
+### agentstategraph_reminder_list
+
+List reminders with optional filtering.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `status` | string | no | | Filter by status: `Pending`, `Due`, `AwaitingPermission`, `InProgress`, `Completed`, `Snoozed`, `Cancelled` |
+| `priority_at_most` | string | no | | Only return items at this priority or higher (e.g. `"high"` returns Critical + High) |
+| `created_by` | string | no | | Filter by creator id |
+| `due_before` | string | no | | Only items due before this ISO 8601 timestamp |
+| `ref_id` | string | no | | Only items that reference this object id |
+| `tags` | string[] | no | | Items that have ALL of these tags |
+
+**Example input:**
+```json
+{ "status": "Due", "priority_at_most": "high" }
+```
+
+---
+
+### agentstategraph_reminder_remind_me
+
+The core pull-based query. Lazily promotes past-due `Pending` items and expired `Snoozed` items to `Due`, then returns all `Due` and `AwaitingPermission` items ordered by priority then due date. Call this at checkpoints.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `created_by` | string | no | | Scope to a specific agent or user |
+
+**Example output:**
+```json
+[
+  {
+    "id": "rem-0193a4f2-...",
+    "title": "Stop local web server",
+    "status": "Due",
+    "priority": "High",
+    "due_at": "2026-05-03T09:00:00Z",
+    "autonomous": false
+  }
+]
+```
+
+---
+
+### agentstategraph_reminder_snooze
+
+Defer a `Due` or `Pending` reminder until a later time.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Reminder id |
+| `until` | string | yes | | ISO 8601 timestamp to snooze until |
+
+---
+
+### agentstategraph_reminder_approve
+
+Approve a reminder that is in `AwaitingPermission` status (created with `autonomous: false`). Transitions it to `Due` so the agent can proceed.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Reminder id |
+| `approved_by` | string | yes | | User or agent id granting approval |
+
+---
+
+### agentstategraph_reminder_cancel
+
+Cancel a reminder (terminal state; cannot be undone).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Reminder id |
+| `reason` | string | no | | Why it is being cancelled |
+
+---
+
+### agentstategraph_reminder_record_execution
+
+Record the result of executing a reminder. If the reminder has a repeating schedule and the result is `success`, the next due time is computed and the reminder resets to `Pending` (or `AwaitingPermission` for non-autonomous). A `once` reminder transitions to `Completed` on success.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Reminder id |
+| `agent_id` | string | yes | | Agent that executed the reminder |
+| `result` | string | yes | | `success`, `failed`, or `cancelled` |
+| `started_at` | string | yes | | ISO 8601 execution start time |
+| `completed_at` | string | yes | | ISO 8601 execution end time |
+| `approved_by` | string | no | | Who approved execution (for non-autonomous) |
+| `notes` | string | no | | Free-form execution notes |
+| `task_id` | string | no | | Id of the task created for this execution |
+
+**Example input:**
+```json
+{
+  "id": "rem-0193a4f2-...",
+  "agent_id": "agent/dev",
+  "result": "success",
+  "started_at": "2026-05-03T09:01:00Z",
+  "completed_at": "2026-05-03T09:01:05Z",
+  "notes": "Server process was not running; nothing to terminate."
+}
 ```

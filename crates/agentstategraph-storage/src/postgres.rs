@@ -1530,6 +1530,10 @@ impl TaintStore for PostgresStorage {
     }
 }
 
+/// Postgres does not yet implement durable reminder storage; all methods
+/// fall back to the default no-op trait implementations.
+impl agentstategraph_reminders::ReminderStore for PostgresStorage {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

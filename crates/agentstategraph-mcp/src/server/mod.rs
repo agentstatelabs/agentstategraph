@@ -1,6 +1,7 @@
 //! AgentStateGraph MCP Server — exposes AgentStateGraph operations as MCP tools.
 
 mod policy;
+mod reminders;
 mod taint;
 mod tasks;
 
@@ -20,6 +21,7 @@ use agentstategraph_policy::{
     PolicyStore, SignatureVerifier,
 };
 use agentstategraph_policy_sign::PolicySigner;
+use agentstategraph_reminders::ReminderManager;
 use agentstategraph_tasks::TaskStore;
 
 /// Threshold above which a change is tagged `large` in token inference.
@@ -54,6 +56,7 @@ pub struct AgentStateGraphServer {
     /// dispatched through it. `None` means no external runners — every
     /// policy goes through the local evaluator.
     external_evaluators: Option<Arc<ExternalEvaluatorRegistry>>,
+    reminders: Arc<ReminderManager>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -704,17 +707,107 @@ pub struct NextTaskParams {
     pub agent: Option<String>,
 }
 
+// -- Reminder parameter types --
+
+/// Input ref for a soft reminder reference.
+#[derive(Deserialize, JsonSchema)]
+pub struct ReminderRefInput {
+    /// Kind: branch, memory, plan, task, state_path, or any scheme for external.
+    pub kind: String,
+    /// Stable identifier (branch name, task ID, path, URL…).
+    pub id: String,
+    /// Optional human-readable label captured at creation time.
+    pub label: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReminderCreateParams {
+    /// Short descriptive title.
+    pub title: String,
+    /// Full instructions for the agent at execution time.
+    pub instructions: String,
+    /// RFC3339 datetime when the reminder should fire.
+    pub due_at: String,
+    /// Who is creating this reminder (agent ID or "user").
+    pub created_by: String,
+    /// Priority: critical, high, medium (default), low, minimal.
+    pub priority: Option<String>,
+    /// Schedule: "once" (default), "interval:<secs>", "daily:HH:MM", "weekly:Weekday:HH:MM".
+    pub schedule: Option<String>,
+    /// If false, agent must call reminder_approve before executing. Default: true.
+    pub autonomous: Option<bool>,
+    /// Optional shell/tool commands to run at execution time.
+    pub commands: Option<Vec<String>>,
+    /// Soft references to branches, memories, plans, tasks, or external resources.
+    pub refs: Option<Vec<ReminderRefInput>>,
+    /// Queryable tags.
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReminderListParams {
+    /// Filter by status: pending, due, awaiting_permission, in_progress, completed, snoozed, cancelled.
+    pub status: Option<String>,
+    /// Filter by creator agent ID.
+    pub created_by: Option<String>,
+    /// Return only reminders that reference this object ID.
+    pub ref_id: Option<String>,
+    /// Tags that must all be present.
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReminderSnoozeParams {
+    /// Reminder ID.
+    pub id: String,
+    /// RFC3339 datetime to wake the reminder.
+    pub until: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReminderApproveParams {
+    /// Reminder ID.
+    pub id: String,
+    /// Who is approving (e.g., "human/alice").
+    pub approved_by: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReminderCancelParams {
+    /// Reminder ID.
+    pub id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ReminderRecordParams {
+    /// Reminder ID.
+    pub id: String,
+    /// Agent that executed the reminder.
+    pub agent_id: String,
+    /// Execution result: success, failed, deferred, snoozed, cancelled.
+    pub result: String,
+    /// Who approved (if non-autonomous).
+    pub approved_by: Option<String>,
+    /// Free-form notes about what happened.
+    pub notes: Option<Vec<String>>,
+    /// Task ID created during this execution, if any.
+    pub task_id: Option<String>,
+}
+
 // -- Tool implementations --
 
 #[tool_router]
 impl AgentStateGraphServer {
     pub fn new(repo: Arc<Repository>) -> Self {
+        use agentstategraph_reminders::MemoryReminderStore;
         let tasks = Arc::new(TaskStore::new(repo.clone(), "/plans", "mcp-agent"));
         let policies = Arc::new(PolicyStore::new(repo.clone(), "/policies", "mcp-agent"));
+        let reminders = Arc::new(ReminderManager::new(Arc::new(MemoryReminderStore::new())));
         Self {
             repo,
             tasks,
             policies,
+            reminders,
             policy_fail_safe: "deny".to_string(),
             signer: None,
             verifier: None,
@@ -1702,6 +1795,75 @@ impl AgentStateGraphServer {
         params: Parameters<PolicyEvaluateChangeWithTaintsParams>,
     ) -> String {
         self.impl_policy_evaluate_change_with_taints(params.0)
+    }
+
+    // -- Reminder tools --
+
+    #[tool(
+        description = "Create a new reminder. Reminders are pull-based: agents call reminder_remind_me at checkpoints to retrieve due items. Use `schedule` for repeating reminders (once/interval:<secs>/daily:HH:MM/weekly:Weekday:HH:MM). Set `autonomous: false` to require user approval before execution."
+    )]
+    async fn agentstategraph_reminder_create(
+        &self,
+        params: Parameters<ReminderCreateParams>,
+    ) -> String {
+        self.impl_reminder_create(params.0)
+    }
+
+    #[tool(
+        description = "List reminders with optional filters. Filter by status (pending/due/awaiting_permission/in_progress/completed/snoozed/cancelled), creator, ref_id (returns reminders referencing that object), or tags."
+    )]
+    async fn agentstategraph_reminder_list(
+        &self,
+        params: Parameters<ReminderListParams>,
+    ) -> String {
+        self.impl_reminder_list(params.0)
+    }
+
+    #[tool(
+        description = "Get all currently due reminders ordered by priority. Automatically promotes past-due pending reminders and wakes expired snoozed reminders. Call this at the start of each session or after completing major tasks."
+    )]
+    async fn agentstategraph_reminder_remind_me(&self) -> String {
+        self.impl_reminder_remind_me()
+    }
+
+    #[tool(
+        description = "Snooze a reminder until a later time (RFC3339). The reminder will re-appear in remind_me after that time."
+    )]
+    async fn agentstategraph_reminder_snooze(
+        &self,
+        params: Parameters<ReminderSnoozeParams>,
+    ) -> String {
+        self.impl_reminder_snooze(params.0)
+    }
+
+    #[tool(
+        description = "Approve a non-autonomous reminder for execution. Required for reminders created with autonomous=false. Records who approved."
+    )]
+    async fn agentstategraph_reminder_approve(
+        &self,
+        params: Parameters<ReminderApproveParams>,
+    ) -> String {
+        self.impl_reminder_approve(params.0)
+    }
+
+    #[tool(
+        description = "Cancel a reminder permanently. Use this when a reminder is no longer relevant (e.g., the task it referenced is already done)."
+    )]
+    async fn agentstategraph_reminder_cancel(
+        &self,
+        params: Parameters<ReminderCancelParams>,
+    ) -> String {
+        self.impl_reminder_cancel(params.0)
+    }
+
+    #[tool(
+        description = "Record the result of executing a reminder. Result must be one of: success, failed, deferred, snoozed, cancelled. On success, repeating reminders are automatically rescheduled. Optionally attach the task_id created for this execution."
+    )]
+    async fn agentstategraph_reminder_record_execution(
+        &self,
+        params: Parameters<ReminderRecordParams>,
+    ) -> String {
+        self.impl_reminder_record(params.0)
     }
 }
 

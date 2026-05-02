@@ -15,6 +15,7 @@ indexeddb = []
 [dependencies]
 agentstategraph-core = { path = "../agentstategraph-core" }
 agentstategraph-taint = { path = "../agentstategraph-taint" }
+agentstategraph-reminders = { path = "../agentstategraph-reminders" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

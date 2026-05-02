@@ -68,6 +68,7 @@ dependencies = [
  "agentstategraph-policy-rego",
  "agentstategraph-policy-sign",
  "agentstategraph-policy-wasm",
+ "agentstategraph-reminders",
  "agentstategraph-storage",
  "agentstategraph-taint",
  "agentstategraph-tasks",
@@ -206,10 +207,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentstategraph-reminders"
+version = "0.7.75-beta.3"
+dependencies = [
+ "agentstategraph-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "agentstategraph-storage"
 version = "0.7.75-beta.3"
 dependencies = [
  "agentstategraph-core",
+ "agentstategraph-reminders",
  "agentstategraph-taint",
  "chrono",
  "deadpool-postgres",

@@ -62,3 +62,15 @@ Bounded segments of work that can be sealed (made immutable) and exported as tam
 ## Sessions
 
 Working contexts for sub-agent orchestration. Each session has an agent identity, working branch, parent session, delegated intent, and optional path scope restriction.
+
+## Reminders
+
+Pull-based reminders let agents and users schedule future work without background timers. An agent calls `remind_me()` at checkpoints (branch switches, session starts, task transitions) and receives all items that are currently due. Key properties:
+
+- **Priority** — Critical (1) through Minimal (5); `remind_me()` returns items ordered by priority then due date
+- **Autonomous flag** — `true` means the agent executes immediately; `false` transitions the reminder to `AwaitingPermission` and requires an explicit `approve()` call before execution
+- **Soft refs** — reminders can hold advisory references to branches, memories, plans, tasks, state paths, or external resources. The `label` is captured at creation time so the reminder stays meaningful even if the target is renamed or deleted
+- **Repeating schedules** — `Once`, `Interval`, `Daily`, or `Weekly`; after a successful execution the next due time is computed and the reminder resets automatically
+- **Execution history** — every run is recorded with start/end times, agent id, result, and an optional task id linking to the created task
+
+Status lifecycle: `Pending` → `Due` (promoted lazily by `remind_me()`) → `InProgress` → `Completed` (or back to `Due` / `AwaitingPermission` for repeating reminders).

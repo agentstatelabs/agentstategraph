@@ -11,6 +11,7 @@ members = [
     "crates/agentstategraph-policy-rego",
     "crates/agentstategraph-policy-cedar",
     "crates/agentstategraph-taint",
+    "crates/agentstategraph-reminders",
     "crates/agentstategraph-migrate",
     "crates/agentstategraph-mcp",
     "crates/agentstategraph-ffi",

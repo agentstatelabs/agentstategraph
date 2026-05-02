@@ -5,6 +5,7 @@
 //! can be added by implementing these traits.
 
 use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_reminders::ReminderStore;
 use chrono::{DateTime, Utc};
 
 /// Errors from storage operations.
@@ -238,14 +239,14 @@ pub trait TaintStore: Send + Sync {
 }
 
 /// Combined storage trait for convenience.
-/// A backend that implements all six sub-traits.
+/// A backend that implements all seven sub-traits.
 pub trait Storage:
-    ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore
+    ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore + ReminderStore
 {
 }
 
-/// Blanket implementation: anything implementing all six traits is a Storage.
-impl<T: ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore> Storage
-    for T
+/// Blanket implementation: anything implementing all seven traits is a Storage.
+impl<T: ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore + ReminderStore>
+    Storage for T
 {
 }
