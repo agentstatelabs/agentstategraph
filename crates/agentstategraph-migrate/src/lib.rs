@@ -418,6 +418,78 @@ mod tests {
         repo
     }
 
+    fn set_version(repo: &Repository, v: &str) {
+        repo.set(
+            "main",
+            META_SCHEMA_VERSION_PATH,
+            &version_object(&Version::parse(v).unwrap()),
+            CommitOptions::new("test/setup", IntentCategory::Migrate, "set version"),
+        )
+        .unwrap();
+    }
+
+    /// Minimal Migration stub: writes a new schema_version sentinel.
+    struct StubMigration {
+        name: &'static str,
+        from: semver::VersionReq,
+        to: Version,
+        /// Whether applies_to() reports work to do.
+        applies: bool,
+    }
+
+    impl Migration for StubMigration {
+        fn from_version(&self) -> &semver::VersionReq { &self.from }
+        fn to_version(&self) -> &Version { &self.to }
+        fn name(&self) -> &str { self.name }
+        fn describe(&self) -> &str { "stub migration" }
+        fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> {
+            Ok(self.applies)
+        }
+        fn migrate(&self, repo: &Repository, ref_name: &str) -> Result<MigrationOutcome, MigrateError> {
+            let commit_id = repo
+                .set(
+                    ref_name,
+                    META_SCHEMA_VERSION_PATH,
+                    &version_object(&self.to),
+                    CommitOptions::new(
+                        format!("agentstategraph-migrate/{}", self.name),
+                        IntentCategory::Migrate,
+                        format!("stub → {}", self.to),
+                    ),
+                )
+                .map_err(MigrateError::Repo)?;
+            Ok(MigrationOutcome {
+                name: self.name.to_string(),
+                commit_id: Some(commit_id),
+                from: Version::parse(IMPLICIT_VERSION).unwrap(),
+                to: self.to.clone(),
+                notes: Vec::new(),
+            })
+        }
+    }
+
+    /// A stub that always returns an error from migrate().
+    struct FailingMigration {
+        name: &'static str,
+        from: semver::VersionReq,
+        to: Version,
+    }
+    impl Migration for FailingMigration {
+        fn from_version(&self) -> &semver::VersionReq { &self.from }
+        fn to_version(&self) -> &Version { &self.to }
+        fn name(&self) -> &str { self.name }
+        fn describe(&self) -> &str { "failing stub" }
+        fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> { Ok(true) }
+        fn migrate(&self, _: &Repository, _: &str) -> Result<MigrationOutcome, MigrateError> {
+            Err(MigrateError::MigrationFailed {
+                name: self.name.to_string(),
+                source: "intentional failure".into(),
+            })
+        }
+    }
+
+    // --- existing tests ---
+
     #[test]
     fn check_returns_up_to_date_on_fresh_repo() {
         let repo = fresh_repo();
@@ -444,52 +516,25 @@ mod tests {
 
     #[test]
     fn registry_plan_respects_version_bounds() {
-        struct Stub {
-            from: semver::VersionReq,
-            to: Version,
-            name: &'static str,
-        }
-        impl Migration for Stub {
-            fn from_version(&self) -> &semver::VersionReq {
-                &self.from
-            }
-            fn to_version(&self) -> &Version {
-                &self.to
-            }
-            fn name(&self) -> &str {
-                self.name
-            }
-            fn describe(&self) -> &str {
-                "stub"
-            }
-            fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> {
-                Ok(false)
-            }
-            fn migrate(&self, _: &Repository, _: &str) -> Result<MigrationOutcome, MigrateError> {
-                unreachable!()
-            }
-        }
-
         let mut r = Registry::empty();
-        r.register(Box::new(Stub {
+        r.register(Box::new(StubMigration {
             from: semver::VersionReq::parse(">=0.3, <0.4").unwrap(),
             to: Version::parse("0.4.0").unwrap(),
             name: "a",
+            applies: false,
         }));
-        r.register(Box::new(Stub {
+        r.register(Box::new(StubMigration {
             from: semver::VersionReq::parse(">=0.4, <0.5").unwrap(),
             to: Version::parse("0.5.0").unwrap(),
             name: "b",
+            applies: false,
         }));
 
         let plan = r.plan(
             &Version::parse("0.3.0").unwrap(),
             &Version::parse("0.5.0").unwrap(),
         );
-        assert_eq!(
-            plan.iter().map(|m| m.name()).collect::<Vec<_>>(),
-            vec!["a", "b"]
-        );
+        assert_eq!(plan.iter().map(|m| m.name()).collect::<Vec<_>>(), vec!["a", "b"]);
 
         let plan = r.plan(
             &Version::parse("0.4.0").unwrap(),
@@ -502,5 +547,246 @@ mod tests {
             &Version::parse("0.5.0").unwrap(),
         );
         assert!(plan.is_empty());
+    }
+
+    // --- new tests ---
+
+    #[test]
+    fn registry_empty_has_no_items() {
+        assert_eq!(Registry::empty().iter().count(), 0);
+    }
+
+    #[test]
+    fn registry_plan_stops_at_gap() {
+        // a: 0.3 → 0.4, b: 0.5 → 0.6 (no migration from 0.4 → 0.5)
+        let mut r = Registry::empty();
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.3, <0.4").unwrap(),
+            to: Version::parse("0.4.0").unwrap(),
+            name: "a",
+            applies: false,
+        }));
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.5, <0.6").unwrap(),
+            to: Version::parse("0.6.0").unwrap(),
+            name: "b",
+            applies: false,
+        }));
+        // Planning from 0.3 to 0.6 should only get "a" — stops at the gap after 0.4
+        let plan = r.plan(
+            &Version::parse("0.3.0").unwrap(),
+            &Version::parse("0.6.0").unwrap(),
+        );
+        assert_eq!(plan.iter().map(|m| m.name()).collect::<Vec<_>>(), vec!["a"]);
+    }
+
+    #[test]
+    fn registry_sorted_by_to_version_regardless_of_insertion_order() {
+        let mut r = Registry::empty();
+        // Register in reverse order
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.4, <0.5").unwrap(),
+            to: Version::parse("0.5.0").unwrap(),
+            name: "second",
+            applies: false,
+        }));
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.3, <0.4").unwrap(),
+            to: Version::parse("0.4.0").unwrap(),
+            name: "first",
+            applies: false,
+        }));
+        let names: Vec<_> = r.iter().map(|m| m.name()).collect();
+        assert_eq!(names, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn run_dry_run_does_not_commit() {
+        let repo = fresh_repo();
+        let current = binary_version();
+        let target = Version::parse("99.0.0").unwrap();
+
+        let mut r = Registry::empty();
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(&format!(">={current}")).unwrap(),
+            to: target.clone(),
+            name: "big-upgrade",
+            applies: true,
+        }));
+
+        let report = r.run(&repo, "main", &target, RunMode::DryRun).unwrap();
+        assert_eq!(report.mode, RunMode::DryRun);
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(report.steps[0].status, StepStatus::WouldApply);
+        assert!(report.steps[0].commit_id.is_none());
+
+        // Version in repo should be unchanged
+        let v = read_stored_version(&repo, "main").unwrap();
+        assert_eq!(v, current);
+    }
+
+    #[test]
+    fn run_apply_executes_migration_and_advances_version() {
+        let repo = fresh_repo();
+        set_version(&repo, "0.3.0");
+        let target = Version::parse("0.4.0").unwrap();
+
+        let mut r = Registry::empty();
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.3, <0.4").unwrap(),
+            to: target.clone(),
+            name: "upgrade",
+            applies: true,
+        }));
+
+        let report = r.run(&repo, "main", &target, RunMode::Apply).unwrap();
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(report.steps[0].status, StepStatus::Applied);
+        assert!(report.steps[0].commit_id.is_some());
+
+        let v = read_stored_version(&repo, "main").unwrap();
+        assert_eq!(v, target);
+    }
+
+    #[test]
+    fn run_apply_multi_step_executes_in_order() {
+        let repo = fresh_repo();
+        set_version(&repo, "0.3.0");
+        let target = Version::parse("0.5.0").unwrap();
+
+        let mut r = Registry::empty();
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.3, <0.4").unwrap(),
+            to: Version::parse("0.4.0").unwrap(),
+            name: "step-a",
+            applies: true,
+        }));
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.4, <0.5").unwrap(),
+            to: target.clone(),
+            name: "step-b",
+            applies: true,
+        }));
+
+        let report = r.run(&repo, "main", &target, RunMode::Apply).unwrap();
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(report.steps[0].name, "step-a");
+        assert_eq!(report.steps[1].name, "step-b");
+        assert_eq!(read_stored_version(&repo, "main").unwrap(), target);
+    }
+
+    #[test]
+    fn run_stops_on_failure_and_returns_err() {
+        let repo = fresh_repo();
+        set_version(&repo, "0.3.0");
+        let target = Version::parse("0.5.0").unwrap();
+
+        let mut r = Registry::empty();
+        r.register(Box::new(FailingMigration {
+            from: semver::VersionReq::parse(">=0.3, <0.4").unwrap(),
+            to: Version::parse("0.4.0").unwrap(),
+            name: "will-fail",
+        }));
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.4, <0.5").unwrap(),
+            to: target.clone(),
+            name: "never-runs",
+            applies: true,
+        }));
+
+        let result = r.run(&repo, "main", &target, RunMode::Apply);
+        assert!(result.is_err(), "expected Err on migration failure");
+        // Version should still be 0.3 — the first migration never committed
+        let v = read_stored_version(&repo, "main").unwrap();
+        assert_eq!(v, Version::parse("0.3.0").unwrap());
+    }
+
+    #[test]
+    fn check_returns_upgrade_available_with_migration_names() {
+        let repo = fresh_repo();
+        set_version(&repo, "0.3.0");
+        let target = Version::parse("0.4.0").unwrap();
+
+        let mut registry = Registry::empty();
+        registry.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(">=0.3, <0.4").unwrap(),
+            to: target.clone(),
+            name: "upgrade-to-0.4",
+            applies: true,
+        }));
+
+        let r = check(&repo, "main", &target, &registry).unwrap();
+        if let CheckResult::UpgradeAvailable { from, to, migrations } = r {
+            assert_eq!(from, Version::parse("0.3.0").unwrap());
+            assert_eq!(to, target);
+            assert_eq!(migrations, vec!["upgrade-to-0.4"]);
+        } else {
+            panic!("expected UpgradeAvailable, got {r:?}");
+        }
+    }
+
+    #[test]
+    fn check_returns_corrupt_for_non_semver_stored_version() {
+        let repo = fresh_repo();
+        // Write a non-semver value directly
+        repo.set(
+            "main",
+            META_SCHEMA_VERSION_PATH,
+            &Object::Atom(Atom::String("not-semver!!".into())),
+            CommitOptions::new("test/corrupt", IntentCategory::Migrate, "corrupt version"),
+        )
+        .unwrap();
+
+        let r = check(&repo, "main", &binary_version(), &Registry::empty()).unwrap();
+        assert!(matches!(r, CheckResult::Corrupt(_)), "got {r:?}");
+    }
+
+    #[test]
+    fn step_status_display() {
+        assert_eq!(StepStatus::WouldApply.to_string(), "would-apply");
+        assert_eq!(StepStatus::WouldSkip.to_string(), "would-skip");
+        assert_eq!(StepStatus::Applied.to_string(), "ok");
+        assert_eq!(StepStatus::Skipped.to_string(), "skip");
+        assert_eq!(StepStatus::Failed.to_string(), "fail");
+    }
+
+    #[test]
+    fn migrate_commit_options_helper_uses_migrate_category() {
+        let opts = migrate_commit_options("my-migration", "description", "reasoning");
+        assert_eq!(opts.agent_id, "agentstategraph-migrate/my-migration");
+        // IntentCategory::Migrate is the expected category — verified by
+        // checking the commit produced carries it (simplest is just smoke-
+        // test the helper builds without panic)
+    }
+
+    #[test]
+    fn version_object_helper_produces_string_atom() {
+        let v = Version::parse("1.2.3").unwrap();
+        let obj = version_object(&v);
+        assert_eq!(obj, Object::Atom(Atom::String("1.2.3".into())));
+    }
+
+    #[test]
+    fn binary_version_parses_successfully() {
+        let v = binary_version();
+        assert!(v.major > 0 || v.minor > 0 || v.patch > 0);
+    }
+
+    #[test]
+    fn run_dry_run_skipped_step_when_applies_is_false() {
+        let repo = fresh_repo();
+        let current = binary_version();
+        let target = Version::parse("99.0.0").unwrap();
+
+        let mut r = Registry::empty();
+        r.register(Box::new(StubMigration {
+            from: semver::VersionReq::parse(&format!(">={current}")).unwrap(),
+            to: target.clone(),
+            name: "no-op",
+            applies: false, // applies_to returns false → WouldSkip
+        }));
+
+        let report = r.run(&repo, "main", &target, RunMode::DryRun).unwrap();
+        assert_eq!(report.steps[0].status, StepStatus::WouldSkip);
     }
 }

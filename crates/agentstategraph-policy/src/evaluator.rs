@@ -206,4 +206,217 @@ mod tests {
         let d = evaluate_matched(&[&allow_p, &appr_p], "x", "a1");
         assert!(matches!(d, Decision::RequireApproval { .. }));
     }
+
+    #[test]
+    fn wildcard_action_matches_any_action_in_allow() {
+        let mut p = base("a");
+        p.allow = vec![AuthorizedAction {
+            action: "*".into(),
+            condition: None,
+            preconditions: vec![],
+        }];
+        let d = evaluate_matched(&[&p], "anything_at_all", "a1");
+        assert!(matches!(d, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn wildcard_action_matches_any_action_in_deny() {
+        let mut p = base("a");
+        p.deny = vec![AuthorizedAction {
+            action: "*".into(),
+            condition: Some("blanket deny".into()),
+            preconditions: vec![],
+        }];
+        let d = evaluate_matched(&[&p], "some_action", "a1");
+        assert!(matches!(d, Decision::Deny { .. }));
+    }
+
+    #[test]
+    fn wildcard_in_require_approval_matches_any_action() {
+        let mut p = base("a");
+        p.require_approval = vec![ApprovalRule {
+            action: "*".into(),
+            approvers: vec!["lead".into()],
+            timeout: None,
+            fallback: FallbackAction::Block,
+        }];
+        let d = evaluate_matched(&[&p], "deploy", "a1");
+        assert!(matches!(d, Decision::RequireApproval { .. }));
+    }
+
+    #[test]
+    fn deny_condition_none_uses_policy_path_in_reason() {
+        let mut p = base("infra/firewall");
+        p.deny = vec![AuthorizedAction {
+            action: "open_port".into(),
+            condition: None,
+            preconditions: vec![],
+        }];
+        let d = evaluate_matched(&[&p], "open_port", "a1");
+        if let Decision::Deny { reason, .. } = d {
+            assert!(reason.contains("infra/firewall"), "reason: {reason}");
+        } else {
+            panic!("expected Deny");
+        }
+    }
+
+    #[test]
+    fn deny_condition_some_uses_condition_as_reason() {
+        let mut p = base("a");
+        p.deny = vec![AuthorizedAction {
+            action: "x".into(),
+            condition: Some("no external writes".into()),
+            preconditions: vec![],
+        }];
+        let d = evaluate_matched(&[&p], "x", "a1");
+        if let Decision::Deny { reason, .. } = d {
+            assert_eq!(reason, "no external writes");
+        } else {
+            panic!("expected Deny");
+        }
+    }
+
+    #[test]
+    fn allow_returns_preconditions() {
+        let mut p = base("a");
+        p.allow = vec![AuthorizedAction {
+            action: "deploy".into(),
+            condition: None,
+            preconditions: vec!["tests_green".into(), "review_approved".into()],
+        }];
+        let d = evaluate_matched(&[&p], "deploy", "a1");
+        if let Decision::Allow { preconditions, .. } = d {
+            assert_eq!(preconditions, vec!["tests_green", "review_approved"]);
+        } else {
+            panic!("expected Allow");
+        }
+    }
+
+    #[test]
+    fn unknown_action_in_populated_policy_returns_no_match() {
+        let mut p = base("a");
+        p.allow = vec![AuthorizedAction {
+            action: "specific_action".into(),
+            condition: None,
+            preconditions: vec![],
+        }];
+        let d = evaluate_matched(&[&p], "other_action", "a1");
+        assert_eq!(d, Decision::NoPolicyMatch);
+    }
+
+    // --- evaluate_change ---
+
+    fn change(action: &str, tokens: &[&str]) -> ChangeProposal {
+        ChangeProposal::new(action, "agent-1", "intent", "option-A")
+            .with_tokens(tokens.iter().copied())
+    }
+
+    #[test]
+    fn evaluate_change_no_token_intersection_returns_no_match() {
+        let mut p = base("a");
+        p.triggers = vec!["destructive".into()];
+        p.allow = vec![AuthorizedAction {
+            action: "*".into(),
+            condition: None,
+            preconditions: vec![],
+        }];
+        let proposal = change("delete", &["reindex"]);
+        let d = evaluate_change(&[&p], &proposal);
+        assert_eq!(d, Decision::NoPolicyMatch);
+    }
+
+    #[test]
+    fn evaluate_change_token_match_consults_policy() {
+        let mut p = base("a");
+        p.triggers = vec!["destructive".into()];
+        p.allow = vec![AuthorizedAction {
+            action: "delete".into(),
+            condition: None,
+            preconditions: vec![],
+        }];
+        let proposal = change("delete", &["destructive"]);
+        let d = evaluate_change(&[&p], &proposal);
+        assert!(matches!(d, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn evaluate_change_missing_required_field_short_circuits() {
+        let mut p = base("a");
+        p.triggers = vec!["schema-change".into()];
+        p.required_fields = vec!["justification".into()];
+        p.allow = vec![AuthorizedAction {
+            action: "migrate".into(),
+            condition: None,
+            preconditions: vec![],
+        }];
+        let proposal = change("migrate", &["schema-change"]); // no attached fields
+        let d = evaluate_change(&[&p], &proposal);
+        assert!(matches!(d, Decision::RequireApproval { .. }));
+    }
+
+    #[test]
+    fn evaluate_change_all_required_fields_present_proceeds_to_evaluate() {
+        let mut p = base("a");
+        p.triggers = vec!["schema-change".into()];
+        p.required_fields = vec!["justification".into()];
+        p.allow = vec![AuthorizedAction {
+            action: "migrate".into(),
+            condition: None,
+            preconditions: vec![],
+        }];
+        let proposal = change("migrate", &["schema-change"])
+            .with_field("justification", "upgrade for v2");
+        let d = evaluate_change(&[&p], &proposal);
+        assert!(matches!(d, Decision::Allow { .. }));
+    }
+
+    #[test]
+    fn evaluate_change_missing_field_uses_matching_approval_rule_hint() {
+        let mut p = base("a");
+        p.triggers = vec!["large".into()];
+        p.required_fields = vec!["runbook".into()];
+        p.require_approval = vec![ApprovalRule {
+            action: "bulk_update".into(),
+            approvers: vec!["ops-team".into()],
+            timeout: None,
+            fallback: FallbackAction::Block,
+        }];
+        let proposal = change("bulk_update", &["large"]); // missing runbook
+        let d = evaluate_change(&[&p], &proposal);
+        if let Decision::RequireApproval { approvers, .. } = d {
+            assert_eq!(approvers, vec!["ops-team"]);
+        } else {
+            panic!("expected RequireApproval, got {d:?}");
+        }
+    }
+
+    #[test]
+    fn evaluate_change_missing_field_no_approval_rule_falls_back_to_human() {
+        let mut p = base("a");
+        p.triggers = vec!["large".into()];
+        p.required_fields = vec!["runbook".into()];
+        // No require_approval rules
+        let proposal = change("bulk_update", &["large"]);
+        let d = evaluate_change(&[&p], &proposal);
+        if let Decision::RequireApproval { approvers, .. } = d {
+            assert_eq!(approvers, vec!["human"]);
+        } else {
+            panic!("expected RequireApproval, got {d:?}");
+        }
+    }
+
+    #[test]
+    fn evaluate_change_multiple_tokens_any_intersection_triggers_policy() {
+        let mut p = base("a");
+        p.triggers = vec!["migration".into()];
+        p.deny = vec![AuthorizedAction {
+            action: "rollback".into(),
+            condition: Some("no rollback during migration".into()),
+            preconditions: vec![],
+        }];
+        // proposal has several tokens; "migration" is one of them
+        let proposal = change("rollback", &["large", "migration", "reindex"]);
+        let d = evaluate_change(&[&p], &proposal);
+        assert!(matches!(d, Decision::Deny { .. }));
+    }
 }

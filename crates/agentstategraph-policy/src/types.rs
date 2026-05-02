@@ -393,4 +393,196 @@ mod tests {
         );
         assert_eq!(p.attached_fields.get("estimated_downtime").unwrap(), "5m");
     }
+
+    // --- Policy lifecycle helpers ---
+
+    fn base_policy(path: &str) -> Policy {
+        use crate::selector::Selector;
+        Policy {
+            path: path.into(),
+            version: 1,
+            situation: "test".into(),
+            situation_selector: Selector::Always,
+            allow: vec![],
+            deny: vec![],
+            require_approval: vec![],
+            procedure: None,
+            triggers: vec![],
+            required_fields: vec![],
+            severity: Severity::default(),
+            proposed_by: "claude".into(),
+            proposed_at: Utc::now(),
+            ratified_by: None,
+            ratified_at: None,
+            ratification_reasoning: None,
+            active_from: Utc::now(),
+            expires_at: None,
+            supersedes: None,
+            signature: None,
+            tenant_id: None,
+            external_evaluator: None,
+        }
+    }
+
+    #[test]
+    fn is_ratified_true_when_ratified_by_set() {
+        let mut p = base_policy("a");
+        p.ratified_by = Some("alice".into());
+        assert!(p.is_ratified());
+    }
+
+    #[test]
+    fn is_ratified_false_when_none() {
+        assert!(!base_policy("a").is_ratified());
+    }
+
+    #[test]
+    fn is_currently_active_requires_ratification() {
+        let p = base_policy("a");
+        assert!(!p.is_currently_active(Utc::now()));
+    }
+
+    #[test]
+    fn is_currently_active_true_when_ratified_and_in_window() {
+        use chrono::Duration;
+        let mut p = base_policy("a");
+        p.ratified_by = Some("alice".into());
+        p.active_from = Utc::now() - Duration::hours(1);
+        assert!(p.is_currently_active(Utc::now()));
+    }
+
+    #[test]
+    fn is_currently_active_false_when_future_active_from() {
+        use chrono::Duration;
+        let mut p = base_policy("a");
+        p.ratified_by = Some("alice".into());
+        p.active_from = Utc::now() + Duration::hours(1);
+        assert!(!p.is_currently_active(Utc::now()));
+    }
+
+    #[test]
+    fn is_currently_active_false_when_expired() {
+        use chrono::Duration;
+        let mut p = base_policy("a");
+        p.ratified_by = Some("alice".into());
+        p.active_from = Utc::now() - Duration::hours(2);
+        p.expires_at = Some(Utc::now() - Duration::hours(1)); // expired one hour ago
+        assert!(!p.is_currently_active(Utc::now()));
+    }
+
+    #[test]
+    fn is_currently_active_false_when_expires_at_equals_now() {
+        // expires_at is exclusive upper bound
+        let now = Utc::now();
+        let mut p = base_policy("a");
+        p.ratified_by = Some("alice".into());
+        p.active_from = now;
+        p.expires_at = Some(now);
+        assert!(!p.is_currently_active(now));
+    }
+
+    #[test]
+    fn is_currently_active_true_just_before_expiry() {
+        use chrono::Duration;
+        let now = Utc::now();
+        let mut p = base_policy("a");
+        p.ratified_by = Some("alice".into());
+        p.active_from = now - Duration::hours(1);
+        p.expires_at = Some(now + Duration::seconds(1));
+        assert!(p.is_currently_active(now));
+    }
+
+    #[test]
+    fn policy_handle_format() {
+        let mut p = base_policy("infra/k8s/pod-failing");
+        p.version = 3;
+        assert_eq!(p.handle(), "infra/k8s/pod-failing@3");
+    }
+
+    // --- ExternalEvaluatorRef + EvaluatorSource ---
+
+    #[test]
+    fn external_evaluator_ref_all_variants_roundtrip() {
+        use std::path::PathBuf;
+        let sources = vec![
+            EvaluatorSource::Inline { body: "package p\ndefault allow = false".into() },
+            EvaluatorSource::FilePath { path: PathBuf::from("/policies/deny.rego") },
+            EvaluatorSource::CommitRef { path: "/_policy/rego/main".into() },
+        ];
+        for src in sources {
+            let refs = vec![
+                ExternalEvaluatorRef::Rego { source: src.clone() },
+                ExternalEvaluatorRef::Cedar { source: src.clone() },
+                ExternalEvaluatorRef::Wasm { source: src.clone() },
+            ];
+            for r in refs {
+                let j = serde_json::to_value(&r).unwrap();
+                assert!(j.get("kind").is_some());
+                let back: ExternalEvaluatorRef = serde_json::from_value(j).unwrap();
+                assert_eq!(r, back);
+            }
+        }
+    }
+
+    #[test]
+    fn policy_signature_roundtrip() {
+        let sig = PolicySignature::Ed25519 {
+            signer_key_id: "key-001".into(),
+            signature_hex: "a".repeat(128),
+        };
+        let j = serde_json::to_value(&sig).unwrap();
+        assert_eq!(j["algorithm"], "ed25519");
+        let back: PolicySignature = serde_json::from_value(j).unwrap();
+        assert_eq!(sig, back);
+    }
+
+    #[test]
+    fn approval_rule_timeout_roundtrips_as_millis() {
+        let rule = ApprovalRule {
+            action: "deploy".into(),
+            approvers: vec!["ops".into()],
+            timeout: Some(Duration::from_secs(7200)),
+            fallback: FallbackAction::Block,
+        };
+        let j = serde_json::to_value(&rule).unwrap();
+        assert_eq!(j["timeout"], 7_200_000u64);
+        let back: ApprovalRule = serde_json::from_value(j).unwrap();
+        assert_eq!(back.timeout, Some(Duration::from_secs(7200)));
+    }
+
+    #[test]
+    fn approval_rule_no_timeout_omitted_from_json() {
+        let rule = ApprovalRule {
+            action: "deploy".into(),
+            approvers: vec![],
+            timeout: None,
+            fallback: FallbackAction::Block,
+        };
+        let j = serde_json::to_string(&rule).unwrap();
+        assert!(!j.contains("timeout"), "None timeout should be omitted: {j}");
+    }
+
+    #[test]
+    fn authorized_action_optional_condition_omitted_when_none() {
+        let a = AuthorizedAction {
+            action: "restart".into(),
+            condition: None,
+            preconditions: vec![],
+        };
+        let j = serde_json::to_string(&a).unwrap();
+        assert!(!j.contains("\"condition\""), "None condition should be omitted: {j}");
+    }
+
+    #[test]
+    fn severity_default_is_low() {
+        assert_eq!(Severity::default(), Severity::Low);
+    }
+
+    #[test]
+    fn change_proposal_defaults() {
+        let p = ChangeProposal::new("act", "agent", "intent", "preferred");
+        assert!(p.tokens.is_empty());
+        assert!(p.attached_fields.is_empty());
+        assert!(p.alternatives.is_empty());
+    }
 }
