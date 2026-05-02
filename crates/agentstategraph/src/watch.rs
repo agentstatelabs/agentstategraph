@@ -74,7 +74,10 @@ impl WatchManager {
     /// Subscribe to state changes matching a pattern.
     pub fn subscribe(&self, pattern: PathPattern) -> SubscriptionId {
         let id = SubscriptionId(NEXT_SUB_ID.fetch_add(1, Ordering::Relaxed));
-        self.watchers.write().unwrap().insert(
+        self.watchers
+            .write()
+            .expect("WatchManager lock poisoned by earlier panic")
+            .insert(
             id,
             Watcher {
                 pattern,
@@ -86,7 +89,11 @@ impl WatchManager {
 
     /// Unsubscribe.
     pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
-        self.watchers.write().unwrap().remove(&id).is_some()
+        self.watchers
+            .write()
+            .expect("WatchManager lock poisoned by earlier panic")
+            .remove(&id)
+            .is_some()
     }
 
     /// Notify all matching watchers of a state change.
@@ -98,7 +105,10 @@ impl WatchManager {
         agent_id: &str,
         intent: &Intent,
     ) {
-        let mut watchers = self.watchers.write().unwrap();
+        let mut watchers = self
+            .watchers
+            .write()
+            .expect("WatchManager lock poisoned by earlier panic");
         for watcher in watchers.values_mut() {
             for path in changed_paths {
                 if watcher.pattern.matches(path) {
@@ -117,7 +127,10 @@ impl WatchManager {
 
     /// Drain events for a subscription (returns and clears pending events).
     pub fn drain_events(&self, id: SubscriptionId) -> Vec<WatchEvent> {
-        let mut watchers = self.watchers.write().unwrap();
+        let mut watchers = self
+            .watchers
+            .write()
+            .expect("WatchManager lock poisoned by earlier panic");
         if let Some(watcher) = watchers.get_mut(&id) {
             std::mem::take(&mut watcher.events)
         } else {
@@ -129,7 +142,7 @@ impl WatchManager {
     pub fn pending_count(&self, id: SubscriptionId) -> usize {
         self.watchers
             .read()
-            .unwrap()
+            .expect("WatchManager lock poisoned by earlier panic")
             .get(&id)
             .map(|w| w.events.len())
             .unwrap_or(0)

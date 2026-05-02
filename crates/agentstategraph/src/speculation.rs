@@ -126,7 +126,10 @@ impl SpeculationManager {
         base_root: ObjectId,
         label: Option<String>,
     ) -> Result<SpecHandle, SpecError> {
-        let mut specs = self.specs.write().unwrap();
+        let mut specs = self
+            .specs
+            .write()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         if specs.len() >= MAX_LIVE_SPECULATIONS {
             return Err(SpecError::TooMany {
                 live: specs.len(),
@@ -152,7 +155,10 @@ impl SpeculationManager {
         store: &dyn ObjectStore,
         path: &str,
     ) -> Result<Object, SpecError> {
-        let specs = self.specs.read().unwrap();
+        let specs = self
+            .specs
+            .read()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         let spec = specs.get(&handle).ok_or(SpecError::NotFound(handle))?;
         let resolver = OverlayResolver {
             overlay: &spec.overlay,
@@ -179,7 +185,10 @@ impl SpeculationManager {
         path: &str,
         value: &Object,
     ) -> Result<(), SpecError> {
-        let mut specs = self.specs.write().unwrap();
+        let mut specs = self
+            .specs
+            .write()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         let spec = specs.get_mut(&handle).ok_or(SpecError::NotFound(handle))?;
 
         let state_path = agentstategraph_core::StatePath::parse(path)
@@ -202,7 +211,10 @@ impl SpeculationManager {
         store: &dyn ObjectStore,
         path: &str,
     ) -> Result<(), SpecError> {
-        let mut specs = self.specs.write().unwrap();
+        let mut specs = self
+            .specs
+            .write()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         let spec = specs.get_mut(&handle).ok_or(SpecError::NotFound(handle))?;
 
         let state_path = agentstategraph_core::StatePath::parse(path)
@@ -220,7 +232,10 @@ impl SpeculationManager {
         handles: &[SpecHandle],
         store: &dyn ObjectStore,
     ) -> Result<SpecComparison, SpecError> {
-        let specs = self.specs.read().unwrap();
+        let specs = self
+            .specs
+            .read()
+            .expect("SpeculationManager lock poisoned by earlier panic");
 
         let mut entries = Vec::new();
         let mut base_ref = String::new();
@@ -247,7 +262,10 @@ impl SpeculationManager {
     /// Commit a speculation — returns the final state root ObjectId.
     /// The speculation is consumed (removed from the manager).
     pub fn commit(&self, handle: SpecHandle) -> Result<(ObjectId, String), SpecError> {
-        let mut specs = self.specs.write().unwrap();
+        let mut specs = self
+            .specs
+            .write()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         let spec = specs.remove(&handle).ok_or(SpecError::NotFound(handle))?;
         Ok((spec.current_root, spec.base_ref))
     }
@@ -255,21 +273,30 @@ impl SpeculationManager {
     /// Discard a speculation — all changes are lost.
     /// Since we use structural sharing, this is essentially free.
     pub fn discard(&self, handle: SpecHandle) -> Result<(), SpecError> {
-        let mut specs = self.specs.write().unwrap();
+        let mut specs = self
+            .specs
+            .write()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         specs.remove(&handle).ok_or(SpecError::NotFound(handle))?;
         Ok(())
     }
 
     /// Get the current state root of a speculation (for external use).
     pub fn current_root(&self, handle: SpecHandle) -> Result<ObjectId, SpecError> {
-        let specs = self.specs.read().unwrap();
+        let specs = self
+            .specs
+            .read()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         let spec = specs.get(&handle).ok_or(SpecError::NotFound(handle))?;
         Ok(spec.current_root)
     }
 
     /// List all active speculations.
     pub fn list(&self) -> Vec<(SpecHandle, Option<String>)> {
-        let specs = self.specs.read().unwrap();
+        let specs = self
+            .specs
+            .read()
+            .expect("SpeculationManager lock poisoned by earlier panic");
         specs
             .iter()
             .map(|(&handle, spec)| (handle, spec.label.clone()))
@@ -278,7 +305,10 @@ impl SpeculationManager {
 
     /// How many active speculations.
     pub fn count(&self) -> usize {
-        self.specs.read().unwrap().len()
+        self.specs
+            .read()
+            .expect("SpeculationManager lock poisoned by earlier panic")
+            .len()
     }
 }
 

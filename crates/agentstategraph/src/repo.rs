@@ -238,7 +238,14 @@ pub enum RepoError {
     /// is the storage id of the taint that caused the rejection — use
     /// `agentstategraph_policy` / MCP `check_taint` to surface the
     /// full context.
-    #[error("taint hook: {source}")]
+    ///
+    /// `taint_id` is `Some` for all blocking rejections (NotAuthorized,
+    /// Blocked, InsufficientConfidence) and `None` only for lookup
+    /// failures (NotFound) where no taint id exists to report.
+    #[error("taint hook rejected write{}: {source}", match .taint_id {
+        Some(id) => format!(" (taint: {id})"),
+        None => String::new(),
+    })]
     Taint {
         #[source]
         source: agentstategraph_taint::TaintError,
@@ -247,6 +254,9 @@ pub enum RepoError {
 }
 
 impl From<agentstategraph_taint::TaintError> for RepoError {
+    /// Converts a bare TaintError with no associated taint id.
+    /// Used only for lookup-not-found errors; blocking rejections always
+    /// go through `taint_err_with_id` in taint.rs which sets `Some(id)`.
     fn from(source: agentstategraph_taint::TaintError) -> Self {
         RepoError::Taint {
             source,
