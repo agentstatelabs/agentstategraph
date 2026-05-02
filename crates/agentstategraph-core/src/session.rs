@@ -88,3 +88,141 @@ pub struct Session {
 fn default_status() -> SessionStatus {
     SessionStatus::Active
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- SessionStatus::as_str ---
+
+    #[test]
+    fn as_str_active() {
+        assert_eq!(SessionStatus::Active.as_str(), "Active");
+    }
+
+    #[test]
+    fn as_str_completed() {
+        assert_eq!(SessionStatus::Completed.as_str(), "Completed");
+    }
+
+    #[test]
+    fn as_str_abandoned() {
+        assert_eq!(SessionStatus::Abandoned.as_str(), "Abandoned");
+    }
+
+    // --- SessionStatus::from_wire ---
+
+    #[test]
+    fn from_wire_known_values() {
+        assert_eq!(SessionStatus::from_wire("Active"), SessionStatus::Active);
+        assert_eq!(
+            SessionStatus::from_wire("Completed"),
+            SessionStatus::Completed
+        );
+        assert_eq!(
+            SessionStatus::from_wire("Abandoned"),
+            SessionStatus::Abandoned
+        );
+    }
+
+    #[test]
+    fn from_wire_unknown_maps_to_abandoned() {
+        assert_eq!(
+            SessionStatus::from_wire("unknown-future-status"),
+            SessionStatus::Abandoned
+        );
+        assert_eq!(SessionStatus::from_wire(""), SessionStatus::Abandoned);
+        assert_eq!(
+            SessionStatus::from_wire("active"), // wrong case
+            SessionStatus::Abandoned
+        );
+    }
+
+    // --- as_str → from_wire round-trip ---
+
+    #[test]
+    fn as_str_from_wire_roundtrip() {
+        for s in [
+            SessionStatus::Active,
+            SessionStatus::Completed,
+            SessionStatus::Abandoned,
+        ] {
+            assert_eq!(SessionStatus::from_wire(s.as_str()), s);
+        }
+    }
+
+    // --- SessionStatus serialization ---
+
+    #[test]
+    fn session_status_serializes_and_deserializes() {
+        for s in [
+            SessionStatus::Active,
+            SessionStatus::Completed,
+            SessionStatus::Abandoned,
+        ] {
+            let j = serde_json::to_string(&s).unwrap();
+            let back: SessionStatus = serde_json::from_str(&j).unwrap();
+            assert_eq!(back, s);
+        }
+    }
+
+    // --- Session optional fields ---
+
+    #[test]
+    fn session_optional_fields_skip_when_none() {
+        let s = Session {
+            id: "s1".into(),
+            agent_id: "agent/test".into(),
+            working_branch: "main".into(),
+            head: ObjectId::hash(b"head"),
+            parent_session: None,
+            delegated_intent: None,
+            report_to: None,
+            path_scope: None,
+            scope_tenant: None,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            ended_at: None,
+        };
+
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            !json.contains("scope_tenant"),
+            "scope_tenant should be omitted when None (has skip_serializing_if)"
+        );
+        // ended_at uses #[serde(default)] without skip_serializing_if, so it serializes as null
+        assert!(
+            json.contains("ended_at"),
+            "ended_at is always present in JSON (serializes as null when None)"
+        );
+    }
+
+    #[test]
+    fn session_round_trip_with_all_fields() {
+        let s = Session {
+            id: "sess-42".into(),
+            agent_id: "agent/planner".into(),
+            working_branch: "feature/planning".into(),
+            head: ObjectId::hash(b"some-commit"),
+            parent_session: Some("sess-1".into()),
+            delegated_intent: Some("intent-7".into()),
+            report_to: Some("lead/coordinator".into()),
+            path_scope: Some("/cluster/nodes".into()),
+            scope_tenant: Some("tenant-A".into()),
+            status: SessionStatus::Completed,
+            created_at: Utc::now(),
+            ended_at: Some(Utc::now()),
+        };
+
+        let json = serde_json::to_string(&s).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.id, s.id);
+        assert_eq!(restored.agent_id, s.agent_id);
+        assert_eq!(restored.working_branch, s.working_branch);
+        assert_eq!(restored.status, SessionStatus::Completed);
+        assert_eq!(restored.parent_session, s.parent_session);
+        assert_eq!(restored.scope_tenant.as_deref(), Some("tenant-A"));
+        assert!(restored.ended_at.is_some());
+    }
+}

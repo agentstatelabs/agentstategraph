@@ -586,4 +586,436 @@ mod tests {
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().agent_id, "agent/test");
     }
+
+    // --- Object edge cases ---
+
+    #[test]
+    fn test_get_nonexistent_object_returns_none() {
+        let store = MemoryStorage::new();
+        let missing = ObjectId::hash(b"does-not-exist");
+        assert_eq!(store.get_object(&missing).unwrap(), None);
+    }
+
+    #[test]
+    fn test_has_object() {
+        let store = MemoryStorage::new();
+        let obj = Object::int(99);
+        let id = store.put_object(&obj).unwrap();
+        assert!(store.has_object(&id).unwrap());
+        assert!(!store.has_object(&ObjectId::hash(b"missing")).unwrap());
+    }
+
+    // --- Commit edge cases ---
+
+    #[test]
+    fn test_get_nonexistent_commit_returns_none() {
+        let store = MemoryStorage::new();
+        let missing = ObjectId::hash(b"no-commit");
+        assert_eq!(store.get_commit(&missing).unwrap(), None);
+    }
+
+    #[test]
+    fn test_has_commit() {
+        let store = MemoryStorage::new();
+        let commit = CommitBuilder::new(
+            ObjectId::hash(b"s"),
+            "a",
+            Authority::simple("a"),
+            Intent::new(IntentCategory::Refine, "x"),
+        )
+        .build();
+        store.put_commit(&commit).unwrap();
+        assert!(store.has_commit(&commit.id).unwrap());
+        assert!(!store.has_commit(&ObjectId::hash(b"missing")).unwrap());
+    }
+
+    #[test]
+    fn test_list_commits_follows_parent_chain() {
+        let store = MemoryStorage::new();
+
+        let c1 = CommitBuilder::new(
+            ObjectId::hash(b"s1"),
+            "a",
+            Authority::simple("a"),
+            Intent::new(IntentCategory::Checkpoint, "first"),
+        )
+        .build();
+        store.put_commit(&c1).unwrap();
+
+        let c2 = CommitBuilder::new(
+            ObjectId::hash(b"s2"),
+            "a",
+            Authority::simple("a"),
+            Intent::new(IntentCategory::Refine, "second"),
+        )
+        .parent(c1.id)
+        .build();
+        store.put_commit(&c2).unwrap();
+
+        let c3 = CommitBuilder::new(
+            ObjectId::hash(b"s3"),
+            "a",
+            Authority::simple("a"),
+            Intent::new(IntentCategory::Refine, "third"),
+        )
+        .parent(c2.id)
+        .build();
+        store.put_commit(&c3).unwrap();
+
+        let log = store.list_commits(&c3.id, 10).unwrap();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0].id, c3.id);
+        assert_eq!(log[1].id, c2.id);
+        assert_eq!(log[2].id, c1.id);
+    }
+
+    #[test]
+    fn test_list_commits_respects_limit() {
+        let store = MemoryStorage::new();
+
+        let c1 = CommitBuilder::new(
+            ObjectId::hash(b"l1"),
+            "a",
+            Authority::simple("a"),
+            Intent::new(IntentCategory::Checkpoint, "1"),
+        )
+        .build();
+        store.put_commit(&c1).unwrap();
+
+        let c2 = CommitBuilder::new(
+            ObjectId::hash(b"l2"),
+            "a",
+            Authority::simple("a"),
+            Intent::new(IntentCategory::Refine, "2"),
+        )
+        .parent(c1.id)
+        .build();
+        store.put_commit(&c2).unwrap();
+
+        let log = store.list_commits(&c2.id, 1).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].id, c2.id);
+    }
+
+    // --- EpochStore ---
+
+    fn test_epoch(id: &str) -> Epoch {
+        Epoch {
+            id: id.to_string(),
+            description: "test epoch".into(),
+            root_intents: Vec::new(),
+            status: EpochStatus::Active,
+            created_at: Utc::now(),
+            sealed_at: None,
+            seal_summary: None,
+            seal_hash: None,
+            commits: Vec::new(),
+            agents: Vec::new(),
+            branches: Vec::new(),
+            tags: Vec::new(),
+            sealed_commits: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_epoch_create_get_list() {
+        let store = MemoryStorage::new();
+        let e = test_epoch("epoch-1");
+        store.create_epoch(&e).unwrap();
+
+        let got = store.get_epoch("epoch-1").unwrap();
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().id, "epoch-1");
+
+        let list = store.list_epochs().unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn test_epoch_duplicate_is_error() {
+        let store = MemoryStorage::new();
+        let e = test_epoch("e1");
+        store.create_epoch(&e).unwrap();
+        assert!(store.create_epoch(&e).is_err());
+    }
+
+    #[test]
+    fn test_epoch_seal() {
+        let store = MemoryStorage::new();
+        store.create_epoch(&test_epoch("e1")).unwrap();
+        let cid = ObjectId::hash(b"c1");
+        store
+            .seal_epoch("e1", "sealed for testing", Utc::now(), &[cid])
+            .unwrap();
+
+        let epoch = store.get_epoch("e1").unwrap().unwrap();
+        assert_eq!(epoch.status, EpochStatus::Sealed);
+        assert!(epoch.seal_summary.as_deref() == Some("sealed for testing"));
+        assert_eq!(epoch.sealed_commits, vec![cid]);
+    }
+
+    #[test]
+    fn test_epoch_seal_twice_is_error() {
+        let store = MemoryStorage::new();
+        store.create_epoch(&test_epoch("e1")).unwrap();
+        store
+            .seal_epoch("e1", "first seal", Utc::now(), &[])
+            .unwrap();
+        assert!(
+            store.seal_epoch("e1", "second seal", Utc::now(), &[]).is_err(),
+            "sealing an already-sealed epoch must fail"
+        );
+    }
+
+    #[test]
+    fn test_set_commit_epoch_rejects_sealed() {
+        let store = MemoryStorage::new();
+        store.create_epoch(&test_epoch("e1")).unwrap();
+        store.seal_epoch("e1", "done", Utc::now(), &[]).unwrap();
+
+        let cid = ObjectId::hash(b"late-commit");
+        assert!(
+            store.set_commit_epoch(&cid, "e1").is_err(),
+            "assigning a commit to a sealed epoch must fail"
+        );
+    }
+
+    // --- SessionStore ---
+
+    fn test_session(id: &str, agent: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            agent_id: agent.to_string(),
+            working_branch: "main".into(),
+            head: ObjectId::hash(id.as_bytes()),
+            parent_session: None,
+            delegated_intent: None,
+            report_to: None,
+            path_scope: None,
+            scope_tenant: None,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            ended_at: None,
+        }
+    }
+
+    #[test]
+    fn test_session_create_get() {
+        let store = MemoryStorage::new();
+        store.create_session(&test_session("s1", "agent/a")).unwrap();
+
+        let got = store.get_session("s1").unwrap();
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().agent_id, "agent/a");
+    }
+
+    #[test]
+    fn test_session_get_nonexistent() {
+        let store = MemoryStorage::new();
+        assert!(store.get_session("no-such-session").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_session_end() {
+        let store = MemoryStorage::new();
+        store.create_session(&test_session("s1", "agent/a")).unwrap();
+
+        store
+            .end_session("s1", SessionStatus::Completed, Utc::now())
+            .unwrap();
+
+        let got = store.get_session("s1").unwrap().unwrap();
+        assert_eq!(got.status, SessionStatus::Completed);
+        assert!(got.ended_at.is_some());
+    }
+
+    #[test]
+    fn test_session_end_twice_is_error() {
+        let store = MemoryStorage::new();
+        store.create_session(&test_session("s1", "a")).unwrap();
+        store
+            .end_session("s1", SessionStatus::Completed, Utc::now())
+            .unwrap();
+        assert!(
+            store
+                .end_session("s1", SessionStatus::Abandoned, Utc::now())
+                .is_err(),
+            "ending an already-ended session must fail"
+        );
+    }
+
+    #[test]
+    fn test_session_list_with_agent_filter() {
+        let store = MemoryStorage::new();
+        store.create_session(&test_session("s1", "agent/alpha")).unwrap();
+        store.create_session(&test_session("s2", "agent/beta")).unwrap();
+        store.create_session(&test_session("s3", "agent/alpha")).unwrap();
+
+        let alpha = store.list_sessions(Some("agent/alpha")).unwrap();
+        assert_eq!(alpha.len(), 2);
+
+        let all = store.list_sessions(None).unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_set_commit_session_rejects_ended_session() {
+        let store = MemoryStorage::new();
+        store.create_session(&test_session("s1", "a")).unwrap();
+        store
+            .end_session("s1", SessionStatus::Completed, Utc::now())
+            .unwrap();
+
+        let cid = ObjectId::hash(b"late");
+        assert!(
+            store.set_commit_session(&cid, "s1").is_err(),
+            "associating a commit with an ended session must fail"
+        );
+    }
+
+    // --- TaintStore ---
+
+    fn test_taint(id: &str, path: &str) -> Taint {
+        use agentstategraph_taint::{TaintEffect, TaintMetadata, TaintSeverity};
+        Taint {
+            id: id.to_string(),
+            path: path.to_string(),
+            name: "test-taint".into(),
+            kind: TaintKind::Taint,
+            effect: TaintEffect::Warn,
+            severity: TaintSeverity::Medium,
+            reason: "test".into(),
+            agent_id: "agent/test".into(),
+            commit_id: String::new(),
+            created_at: Utc::now(),
+            expires_at: None,
+            resolved_at: None,
+            resolved_by: None,
+            resolved_reason: None,
+            resolved_proof: None,
+            propagate: true,
+            metadata: TaintMetadata::new(),
+        }
+    }
+
+    #[test]
+    fn test_taint_create_get() {
+        let store = MemoryStorage::new();
+        store.create_taint(&test_taint("t1", "/nodes/pico1")).unwrap();
+
+        let got = store.get_taint("t1").unwrap();
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().path, "/nodes/pico1");
+    }
+
+    #[test]
+    fn test_taint_get_nonexistent() {
+        let store = MemoryStorage::new();
+        assert_eq!(store.get_taint("no-taint").unwrap(), None);
+    }
+
+    #[test]
+    fn test_taint_duplicate_active_is_error() {
+        let store = MemoryStorage::new();
+        store.create_taint(&test_taint("t1", "/x")).unwrap();
+        // Same path+name+kind → error
+        let mut t2 = test_taint("t2", "/x");
+        t2.name = "test-taint".into(); // same name
+        assert!(store.create_taint(&t2).is_err());
+    }
+
+    #[test]
+    fn test_taint_resolve() {
+        let store = MemoryStorage::new();
+        store.create_taint(&test_taint("t1", "/x")).unwrap();
+        store
+            .resolve_taint("t1", "agent/ops", "fixed", Some("commit-abc"), Utc::now())
+            .unwrap();
+
+        let got = store.get_taint("t1").unwrap().unwrap();
+        assert!(got.resolved_at.is_some());
+        assert_eq!(got.resolved_by.as_deref(), Some("agent/ops"));
+        assert_eq!(got.resolved_reason.as_deref(), Some("fixed"));
+        assert_eq!(got.resolved_proof.as_deref(), Some("commit-abc"));
+    }
+
+    #[test]
+    fn test_taint_resolve_twice_is_error() {
+        let store = MemoryStorage::new();
+        store.create_taint(&test_taint("t1", "/x")).unwrap();
+        store
+            .resolve_taint("t1", "a", "r", None, Utc::now())
+            .unwrap();
+        assert!(store.resolve_taint("t1", "a", "r2", None, Utc::now()).is_err());
+    }
+
+    #[test]
+    fn test_taint_list_excludes_resolved_by_default() {
+        let store = MemoryStorage::new();
+        store.create_taint(&test_taint("t1", "/x")).unwrap();
+        store.create_taint(&test_taint("t2", "/y")).unwrap();
+        store
+            .resolve_taint("t2", "a", "done", None, Utc::now())
+            .unwrap();
+
+        let active = store.list_taints(None, None, false).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "t1");
+
+        let all = store.list_taints(None, None, true).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_taint_list_path_prefix_filter() {
+        let store = MemoryStorage::new();
+        store
+            .create_taint(&test_taint("t1", "/nodes/pico1"))
+            .unwrap();
+        store
+            .create_taint(&test_taint("t2", "/nodes/pico2"))
+            .unwrap();
+        store.create_taint(&test_taint("t3", "/config")).unwrap();
+
+        let nodes = store.list_taints(Some("/nodes"), None, false).unwrap();
+        assert_eq!(nodes.len(), 2);
+
+        let pico1 = store
+            .list_taints(Some("/nodes/pico1"), None, false)
+            .unwrap();
+        assert_eq!(pico1.len(), 1);
+    }
+
+    #[test]
+    fn test_taint_check_propagation() {
+        let store = MemoryStorage::new();
+        // propagate=true — should match child paths
+        store
+            .create_taint(&test_taint("t1", "/nodes"))
+            .unwrap();
+        // propagate=false — should only match exact path
+        let mut t2 = test_taint("t2", "/config");
+        t2.name = "no-propagate".to_string();
+        t2.propagate = false;
+        store.create_taint(&t2).unwrap();
+
+        let child_hits = store.check_taint("/nodes/pico1").unwrap();
+        assert_eq!(child_hits.len(), 1, "propagating taint should match child");
+
+        let exact_hit = store.check_taint("/config").unwrap();
+        assert_eq!(exact_hit.len(), 1, "exact match always fires");
+
+        let child_no_prop = store.check_taint("/config/network").unwrap();
+        assert!(child_no_prop.is_empty(), "non-propagating should not match child");
+    }
+
+    #[test]
+    fn test_taint_set_commit_id() {
+        let store = MemoryStorage::new();
+        store.create_taint(&test_taint("t1", "/x")).unwrap();
+        store.set_taint_commit_id("t1", "commit-777").unwrap();
+
+        let got = store.get_taint("t1").unwrap().unwrap();
+        assert_eq!(got.commit_id, "commit-777");
+    }
 }
