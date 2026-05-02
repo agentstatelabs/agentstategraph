@@ -40,7 +40,7 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 27 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 59 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
@@ -99,7 +99,7 @@ OPTIONS:
   -h, --help            Print help with full endpoint list
 ```
 
-## Available Tools (26)
+## Available Tools (59)
 
 ### State Operations
 

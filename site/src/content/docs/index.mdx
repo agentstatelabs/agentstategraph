@@ -51,6 +51,12 @@ AgentStateGraph is a **state primitive** — the layer on which a next-generatio
 	<Card title="Plans & Tasks" icon="list-format">
 		Shared `agentstategraph-tasks` primitive — plans, state machine (pending / in_progress / done), proofs, blockers, and agent assignment. Native `IntentCategory::Plan` for log and blame filtering.
 	</Card>
+	<Card title="Policy" icon="approve-check-circle">
+		`agentstategraph-policy` — authorization + cost-of-change gating with fallback actions (soft enforcement + audit trail). Ed25519-signed ratification via `agentstategraph-policy-sign`. Evaluate any proposed change before it commits.
+	</Card>
+	<Card title="Taint & Quarantine" icon="warning">
+		`agentstategraph-taint` — mark-and-sweep for taint, quarantine, and watch. Gate changes through policy evaluation. Full audit trail with who tainted what and when.
+	</Card>
 	<Card title="Schema Migrations" icon="rocket">
 		`/_meta/schema_version` lives in-band so upgrade history shows up in `log` and `blame`. `agentstategraph-migrate` provides the registry and runner; `agentstategraph-mcp migrate` is a one-shot CLI with dry-run and sysexits-style codes.
 	</Card>
@@ -58,7 +64,7 @@ AgentStateGraph is a **state primitive** — the layer on which a next-generatio
 
 ## Use It From Anywhere
 
-- **MCP Server** — 27 tools, any MCP-compatible agent
+- **MCP Server** — 59 tools, any MCP-compatible agent
 - **Rust** — native library, 220+ tests across 8 crates
 - **Python** — PyO3 bindings
 - **TypeScript/Node** — napi-rs bindings

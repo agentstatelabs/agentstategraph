@@ -3,7 +3,19 @@ title: Quick Start
 description: Get AgentStateGraph running in under 5 minutes.
 ---
 
-## Option 1: MCP Server (connect to Claude, GPT, any agent)
+## Option 0: One-line install (Mac / Linux)
+
+```bash
+curl -sSL https://agentstategraph.dev/install.sh | sh
+```
+
+Detects your platform, downloads the prebuilt binary, installs to `~/.local/bin`. Then:
+
+```bash
+agentstategraph-mcp
+```
+
+## Option 1: Build from source (MCP Server)
 
 ```bash
 git clone https://github.com/agentstatelabs/AgentStateGraph.git
@@ -55,7 +67,7 @@ curl "http://localhost:3001/api/state/main/search?query=project"
 curl http://localhost:3001/api/stats/main
 ```
 
-19 endpoints with CORS enabled — see the [MCP Server guide](/guides/mcp-server/#http-rest-api) for the full list.
+22 endpoints with CORS enabled — see the [MCP Server guide](/guides/mcp-server/#http-rest-api) for the full list.
 
 ## Option 3: Rust Library (embed in your own app)
 

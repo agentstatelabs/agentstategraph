@@ -18,7 +18,13 @@ AgentStateGraph/
 │   ├── agentstategraph-core/       # Types, diff, merge, schema — zero I/O
 │   ├── agentstategraph-storage/    # Pluggable backends (memory, SQLite, IndexedDB)
 │   ├── agentstategraph/            # High-level Repository API
-│   ├── agentstategraph-mcp/        # MCP server (20 tools)
+│   ├── agentstategraph-mcp/        # MCP server (59 tools) + HTTP + migrate CLI
+│   ├── agentstategraph-tasks/      # Shared Plan/Task store — state machine, proofs, assignment
+│   ├── agentstategraph-policy/     # Authorization + cost-of-change gating with fallback actions
+│   ├── agentstategraph-policy-sign/ # Ed25519 signing for policy ratification
+│   ├── agentstategraph-policy-wasm/ # WASM host runner for policy evaluation (stub)
+│   ├── agentstategraph-taint/      # Taint/quarantine/watch mark-and-sweep primitive
+│   ├── agentstategraph-migrate/    # Schema-evolution framework + migration registry
 │   ├── agentstategraph-ffi/        # C ABI for language bindings
 │   └── agentstategraph-wasm/       # Browser/Deno WASM build
 ├── bindings/

@@ -29,6 +29,18 @@ A **Commit** links a state tree to its history and provenance. Beyond git's tree
 | `Checkpoint` | Saving a known-good state |
 | `Merge` | Combining work from branches |
 | `Migrate` | Schema or structural change |
+| `Plan` | Plan/task lifecycle commits |
+| `Taint` | Marking a path as tainted |
+| `Untaint` | Removing a taint mark |
+| `Quarantine` | Isolating tainted state |
+| `Unquarantine` | Lifting quarantine from a path |
+| `Watch` | Placing a watch on a path |
+| `Unwatch` | Removing a watch from a path |
+| `PolicyPropose` | Proposing a new policy |
+| `PolicyRatify` | Ratifying a proposed policy |
+| `PolicySupersede` | Superseding an existing policy |
+| `PolicySign` | Signing a policy with Ed25519 |
+| `Custom(<value>)` | Application-defined category |
 
 ## Branches
 

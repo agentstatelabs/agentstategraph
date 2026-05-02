@@ -118,7 +118,7 @@ asg.blame("/name")  # who changed it and why
 
 ## Features
 
-- **27 MCP tools** — any agent can connect immediately
+- **59 MCP tools** — any agent can connect immediately
 - **22 HTTP REST endpoints** — `--http` mode with CORS for browsers and scripts
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **6 language bindings** — Rust, Python, TypeScript, Go, WASM, C FFI
@@ -126,7 +126,7 @@ asg.blame("/name")  # who changed it and why
 - **220+ tests** across 8 crates
 - **Content-addressed Merkle DAG** — immutable, deduplicated history
 - **Structured intent metadata** — category, description, tags, reasoning, confidence
-- **8 intent categories** — Explore, Refine, Fix, Rollback, Checkpoint, Merge, Migrate, Plan
+- **19 intent categories** — Explore, Refine, Fix, Rollback, Checkpoint, Merge, Migrate, Plan, Taint, Untaint, Quarantine, Unquarantine, Watch, Unwatch, PolicyPropose, PolicyRatify, PolicySupersede, PolicySign, plus Custom
 - **Authority & delegation chains** — who authorized what, with full chain
 - **Schema-aware merge** — CRDT-inspired conflict resolution (sum, max, union-by-id)
 - **Speculative execution** — O(1) branching, instant discard
@@ -174,8 +174,12 @@ AgentStateGraph/
 │   ├── agentstategraph-core/     # Types, diff, merge, schema — zero I/O
 │   ├── agentstategraph-storage/  # Pluggable backends (memory, SQLite, IndexedDB)
 │   ├── agentstategraph/          # High-level Repository API
-│   ├── agentstategraph-mcp/      # MCP server (27 tools over stdio) + HTTP + migrate CLI
+│   ├── agentstategraph-mcp/      # MCP server (59 tools over stdio) + HTTP + migrate CLI
 │   ├── agentstategraph-tasks/    # Shared Plan/Task store — state machine, proofs, assignment
+│   ├── agentstategraph-policy/   # Authorization + cost-of-change gating with fallback actions
+│   ├── agentstategraph-policy-sign/ # Ed25519 signing for policy ratification
+│   ├── agentstategraph-policy-wasm/ # WASM host runner for policy evaluation (stub)
+│   ├── agentstategraph-taint/    # Taint/quarantine/watch mark-and-sweep primitive
 │   ├── agentstategraph-migrate/  # Schema-evolution framework + migration registry
 │   ├── agentstategraph-ffi/      # C ABI for language bindings
 │   └── agentstategraph-wasm/     # Browser/Deno WASM build
