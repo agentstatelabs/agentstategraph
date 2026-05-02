@@ -387,4 +387,233 @@ mod tests {
             vec!["agent/security".to_string(), "human/sre-lead".to_string()]
         );
     }
+
+    fn base_taint() -> Taint {
+        Taint {
+            id: "t1".into(),
+            path: "/x".into(),
+            name: "n".into(),
+            kind: TaintKind::Taint,
+            effect: TaintEffect::Warn,
+            severity: TaintSeverity::Low,
+            reason: "r".into(),
+            agent_id: "a".into(),
+            commit_id: String::new(),
+            created_at: Utc::now(),
+            expires_at: None,
+            resolved_at: None,
+            resolved_by: None,
+            resolved_reason: None,
+            resolved_proof: None,
+            propagate: true,
+            metadata: TaintMetadata::new(),
+        }
+    }
+
+    // --- is_active edge cases ---
+
+    #[test]
+    fn is_active_future_expiry_still_active() {
+        let mut t = base_taint();
+        t.expires_at = Some(Utc::now() + chrono::Duration::hours(1));
+        assert!(t.is_active(Utc::now()));
+    }
+
+    #[test]
+    fn is_active_resolved_overrides_non_expired() {
+        let mut t = base_taint();
+        t.expires_at = Some(Utc::now() + chrono::Duration::hours(1)); // not expired
+        t.resolved_at = Some(Utc::now() - chrono::Duration::seconds(1)); // but resolved
+        assert!(!t.is_active(Utc::now()));
+    }
+
+    #[test]
+    fn is_active_no_expiry_no_resolution_always_active() {
+        let t = base_taint();
+        assert!(t.is_active(Utc::now()));
+    }
+
+    // --- authorized_agents edge cases ---
+
+    #[test]
+    fn authorized_agents_empty_when_key_absent() {
+        let t = base_taint();
+        assert!(t.authorized_agents().is_empty());
+    }
+
+    #[test]
+    fn authorized_agents_empty_when_value_not_array() {
+        let mut t = base_taint();
+        t.metadata.insert("authorized_agents", "not-an-array");
+        assert!(t.authorized_agents().is_empty());
+    }
+
+    #[test]
+    fn authorized_agents_filters_non_string_entries() {
+        let mut t = base_taint();
+        // Mixed array: string + number; only strings should survive
+        t.metadata.insert(
+            "authorized_agents",
+            serde_json::json!(["agent/ok", 42, "human/ok"]),
+        );
+        let agents = t.authorized_agents();
+        assert_eq!(agents, vec!["agent/ok", "human/ok"]);
+    }
+
+    // --- TaintMetadata ---
+
+    #[test]
+    fn taint_metadata_insert_get_roundtrip() {
+        let mut m = TaintMetadata::new();
+        m.insert("key1", serde_json::json!("value1"));
+        m.insert("key2", serde_json::json!(42));
+        assert_eq!(m.get("key1"), Some(&serde_json::json!("value1")));
+        assert_eq!(m.get("key2"), Some(&serde_json::json!(42)));
+        assert_eq!(m.get("missing"), None);
+    }
+
+    #[test]
+    fn taint_metadata_insert_returns_self_for_chaining() {
+        let mut m = TaintMetadata::new();
+        m.insert("a", "1").insert("b", "2");
+        assert!(m.get("a").is_some());
+        assert!(m.get("b").is_some());
+    }
+
+    #[test]
+    fn taint_metadata_default_is_empty() {
+        let m = TaintMetadata::default();
+        assert!(m.0.is_empty());
+    }
+
+    // --- Default values ---
+
+    #[test]
+    fn taint_severity_default_is_medium() {
+        assert_eq!(TaintSeverity::default(), TaintSeverity::Medium);
+    }
+
+    #[test]
+    fn watch_direction_default_is_above() {
+        assert_eq!(WatchDirection::default(), WatchDirection::Above);
+    }
+
+    // --- TaintCheck::clear ---
+
+    #[test]
+    fn taint_check_clear_is_all_clear() {
+        let c = TaintCheck::clear();
+        assert!(!c.tainted);
+        assert!(!c.quarantined);
+        assert!(!c.watched);
+        assert!(c.taints.is_empty());
+        assert!(c.quarantines.is_empty());
+        assert!(c.watches.is_empty());
+        assert!(c.can_write);
+        assert_eq!(c.required_confidence, 0.0);
+        assert!(c.authorized_agents.is_empty());
+        assert!(!c.isolated);
+    }
+
+    // --- Serialization round-trips ---
+
+    #[test]
+    fn taint_severity_round_trips_all_variants() {
+        for s in [
+            TaintSeverity::Low,
+            TaintSeverity::Medium,
+            TaintSeverity::High,
+            TaintSeverity::Critical,
+        ] {
+            let j = serde_json::to_value(s).unwrap();
+            let back: TaintSeverity = serde_json::from_value(j).unwrap();
+            assert_eq!(s, back);
+        }
+    }
+
+    #[test]
+    fn taint_kind_deserializes_snake_case() {
+        assert_eq!(
+            serde_json::from_str::<TaintKind>("\"quarantine\"").unwrap(),
+            TaintKind::Quarantine
+        );
+        assert_eq!(
+            serde_json::from_str::<TaintKind>("\"watch\"").unwrap(),
+            TaintKind::Watch
+        );
+    }
+
+    #[test]
+    fn taint_full_round_trip_serialization() {
+        let t = Taint {
+            id: "uuid-123".into(),
+            path: "/nodes/pico1".into(),
+            name: "disk-pressure".into(),
+            kind: TaintKind::Quarantine,
+            effect: TaintEffect::Block,
+            severity: TaintSeverity::Critical,
+            reason: "disk full".into(),
+            agent_id: "monitor/disk".into(),
+            commit_id: "abc123".into(),
+            created_at: Utc::now(),
+            expires_at: Some(Utc::now() + chrono::Duration::hours(24)),
+            resolved_at: None,
+            resolved_by: None,
+            resolved_reason: None,
+            resolved_proof: None,
+            propagate: false,
+            metadata: {
+                let mut m = TaintMetadata::new();
+                m.insert("authorized_agents", serde_json::json!(["agent/ops"]));
+                m
+            },
+        };
+
+        let json = serde_json::to_string(&t).unwrap();
+        let restored: Taint = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.id, t.id);
+        assert_eq!(restored.kind, TaintKind::Quarantine);
+        assert_eq!(restored.effect, TaintEffect::Block);
+        assert_eq!(restored.severity, TaintSeverity::Critical);
+        assert!(!restored.propagate);
+        assert_eq!(restored.authorized_agents(), vec!["agent/ops"]);
+    }
+
+    #[test]
+    fn taint_resolved_fields_round_trip() {
+        let mut t = base_taint();
+        t.resolved_at = Some(Utc::now());
+        t.resolved_by = Some("human/sre".into());
+        t.resolved_reason = Some("disk replaced".into());
+        t.resolved_proof = Some("commit-xyz".into());
+
+        let json = serde_json::to_string(&t).unwrap();
+        let restored: Taint = serde_json::from_str(&json).unwrap();
+
+        assert!(restored.resolved_at.is_some());
+        assert_eq!(restored.resolved_by.as_deref(), Some("human/sre"));
+        assert_eq!(restored.resolved_reason.as_deref(), Some("disk replaced"));
+        assert_eq!(restored.resolved_proof.as_deref(), Some("commit-xyz"));
+        assert!(!restored.is_active(Utc::now()));
+    }
+
+    #[test]
+    fn taint_optional_fields_omitted_from_serialization() {
+        let t = base_taint();
+        let json = serde_json::to_string(&t).unwrap();
+        // Fields with skip_serializing_if should be absent
+        assert!(!json.contains("expires_at"));
+        assert!(!json.contains("resolved_at"));
+        assert!(!json.contains("resolved_by"));
+    }
+
+    #[test]
+    fn watch_direction_round_trips() {
+        for d in [WatchDirection::Above, WatchDirection::Below] {
+            let j = serde_json::to_value(d).unwrap();
+            let back: WatchDirection = serde_json::from_value(j).unwrap();
+            assert_eq!(d, back);
+        }
+    }
 }
