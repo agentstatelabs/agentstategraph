@@ -7,7 +7,10 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
-use agentstategraph_reminders::ReminderStore;
+use agentstategraph_reminders::{
+    Reminder, ReminderError, ReminderFilter, ReminderStore,
+    types::{Priority, ReminderStatus},
+};
 use agentstategraph_taint::{Taint, TaintEffect, TaintKind, TaintMetadata, TaintSeverity};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -117,6 +120,24 @@ impl SqliteStorage {
                 metadata        TEXT NOT NULL DEFAULT '{}'
             );
 
+            CREATE TABLE IF NOT EXISTS reminders (
+                id              TEXT PRIMARY KEY,
+                title           TEXT NOT NULL,
+                instructions    TEXT NOT NULL,
+                commands        TEXT NOT NULL DEFAULT '[]',
+                refs            TEXT NOT NULL DEFAULT '[]',
+                priority        INTEGER NOT NULL DEFAULT 3,
+                due_at          TEXT NOT NULL,
+                schedule        TEXT,
+                autonomous      INTEGER NOT NULL DEFAULT 1,
+                created_by      TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                snoozed_until   TEXT,
+                executions      TEXT NOT NULL DEFAULT '[]',
+                tags            TEXT NOT NULL DEFAULT '[]'
+            );
+
             CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_epochs_status ON epochs(status);
             CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
@@ -124,6 +145,10 @@ impl SqliteStorage {
             CREATE INDEX IF NOT EXISTS idx_taints_kind    ON taints(kind);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_taints_unique_active
                 ON taints(path, name, kind) WHERE resolved_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_reminders_status     ON reminders(status);
+            CREATE INDEX IF NOT EXISTS idx_reminders_due_at     ON reminders(due_at);
+            CREATE INDEX IF NOT EXISTS idx_reminders_priority   ON reminders(priority);
+            CREATE INDEX IF NOT EXISTS idx_reminders_created_by ON reminders(created_by);
             ",
         )
         .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
@@ -1244,10 +1269,311 @@ impl TaintStore for SqliteStorage {
     }
 }
 
-/// SQLite does not yet implement durable reminder storage.
-/// Consumers that need persistence should use the PostgreSQL backend
-/// or wrap a `MemoryReminderStore` separately.
-impl ReminderStore for SqliteStorage {}
+// ---------------------------------------------------------------------------
+// ReminderStore — durable SQLite reminder storage
+// ---------------------------------------------------------------------------
+
+fn reminder_status_to_str(s: ReminderStatus) -> &'static str {
+    match s {
+        ReminderStatus::Pending => "pending",
+        ReminderStatus::Due => "due",
+        ReminderStatus::AwaitingPermission => "awaiting_permission",
+        ReminderStatus::InProgress => "in_progress",
+        ReminderStatus::Completed => "completed",
+        ReminderStatus::Snoozed => "snoozed",
+        ReminderStatus::Cancelled => "cancelled",
+    }
+}
+
+fn reminder_status_from_str(s: &str) -> Result<ReminderStatus, ReminderError> {
+    match s {
+        "pending" => Ok(ReminderStatus::Pending),
+        "due" => Ok(ReminderStatus::Due),
+        "awaiting_permission" => Ok(ReminderStatus::AwaitingPermission),
+        "in_progress" => Ok(ReminderStatus::InProgress),
+        "completed" => Ok(ReminderStatus::Completed),
+        "snoozed" => Ok(ReminderStatus::Snoozed),
+        "cancelled" => Ok(ReminderStatus::Cancelled),
+        other => Err(ReminderError::Store(format!("unknown reminder status: {other}"))),
+    }
+}
+
+fn priority_to_i64(p: Priority) -> i64 {
+    p.as_u8() as i64
+}
+
+fn priority_from_i64(n: i64) -> Result<Priority, ReminderError> {
+    match n {
+        1 => Ok(Priority::Critical),
+        2 => Ok(Priority::High),
+        3 => Ok(Priority::Medium),
+        4 => Ok(Priority::Low),
+        5 => Ok(Priority::Minimal),
+        other => Err(ReminderError::Store(format!("unknown priority value: {other}"))),
+    }
+}
+
+fn row_to_reminder(row: &Row<'_>) -> rusqlite::Result<Reminder> {
+    use rusqlite::types::{FromSqlError, Type};
+
+    fn decode_err<E: std::fmt::Display>(e: E) -> rusqlite::Error {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            Type::Text,
+            Box::new(FromSqlError::Other(format!("{e}").into())),
+        )
+    }
+
+    let status_s: String = row.get("status")?;
+    let priority_n: i64 = row.get("priority")?;
+    let due_at_s: String = row.get("due_at")?;
+    let created_at_s: String = row.get("created_at")?;
+    let snoozed_until_s: Option<String> = row.get("snoozed_until")?;
+    let commands_s: String = row.get("commands")?;
+    let refs_s: String = row.get("refs")?;
+    let schedule_s: Option<String> = row.get("schedule")?;
+    let executions_s: String = row.get("executions")?;
+    let tags_s: String = row.get("tags")?;
+    let autonomous: i64 = row.get("autonomous")?;
+
+    let status = reminder_status_from_str(&status_s).map_err(|e| decode_err(e))?;
+    let priority = priority_from_i64(priority_n).map_err(|e| decode_err(e))?;
+    let due_at = DateTime::parse_from_rfc3339(&due_at_s)
+        .map_err(|e| decode_err(format!("due_at: {e}")))?
+        .with_timezone(&Utc);
+    let created_at = DateTime::parse_from_rfc3339(&created_at_s)
+        .map_err(|e| decode_err(format!("created_at: {e}")))?
+        .with_timezone(&Utc);
+    let snoozed_until = match snoozed_until_s {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| decode_err(format!("snoozed_until: {e}")))?
+                .with_timezone(&Utc),
+        ),
+        None => None,
+    };
+    let commands: Vec<String> =
+        serde_json::from_str(&commands_s).map_err(|e| decode_err(format!("commands: {e}")))?;
+    let refs = serde_json::from_str(&refs_s).map_err(|e| decode_err(format!("refs: {e}")))?;
+    let schedule = match schedule_s {
+        Some(s) => Some(
+            serde_json::from_str(&s).map_err(|e| decode_err(format!("schedule: {e}")))?,
+        ),
+        None => None,
+    };
+    let executions: Vec<agentstategraph_reminders::types::ExecutionRecord> =
+        serde_json::from_str(&executions_s)
+            .map_err(|e| decode_err(format!("executions: {e}")))?;
+    let tags: Vec<String> =
+        serde_json::from_str(&tags_s).map_err(|e| decode_err(format!("tags: {e}")))?;
+
+    Ok(Reminder {
+        id: row.get("id")?,
+        title: row.get("title")?,
+        instructions: row.get("instructions")?,
+        commands,
+        refs,
+        priority,
+        due_at,
+        schedule,
+        autonomous: autonomous != 0,
+        created_by: row.get("created_by")?,
+        created_at,
+        status,
+        snoozed_until,
+        executions,
+        tags,
+    })
+}
+
+impl ReminderStore for SqliteStorage {
+    fn save(&self, reminder: &Reminder) -> Result<(), ReminderError> {
+        let conn = self
+            .lock_conn()
+            .map_err(|e| ReminderError::Store(e.to_string()))?;
+        let commands_json = serde_json::to_string(&reminder.commands)
+            .map_err(|e| ReminderError::Store(format!("commands: {e}")))?;
+        let refs_json = serde_json::to_string(&reminder.refs)
+            .map_err(|e| ReminderError::Store(format!("refs: {e}")))?;
+        let schedule_json = reminder
+            .schedule
+            .as_ref()
+            .map(|s| serde_json::to_string(s))
+            .transpose()
+            .map_err(|e| ReminderError::Store(format!("schedule: {e}")))?;
+        let executions_json = serde_json::to_string(&reminder.executions)
+            .map_err(|e| ReminderError::Store(format!("executions: {e}")))?;
+        let tags_json = serde_json::to_string(&reminder.tags)
+            .map_err(|e| ReminderError::Store(format!("tags: {e}")))?;
+        conn.execute(
+            "INSERT INTO reminders (
+                id, title, instructions, commands, refs, priority, due_at,
+                schedule, autonomous, created_by, created_at, status,
+                snoozed_until, executions, tags
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+            )",
+            params![
+                reminder.id,
+                reminder.title,
+                reminder.instructions,
+                commands_json,
+                refs_json,
+                priority_to_i64(reminder.priority),
+                reminder.due_at.to_rfc3339(),
+                schedule_json,
+                if reminder.autonomous { 1_i64 } else { 0_i64 },
+                reminder.created_by,
+                reminder.created_at.to_rfc3339(),
+                reminder_status_to_str(reminder.status),
+                reminder.snoozed_until.map(|t| t.to_rfc3339()),
+                executions_json,
+                tags_json,
+            ],
+        )
+        .map_err(|e| ReminderError::Store(format!("insert reminder: {e}")))?;
+        Ok(())
+    }
+
+    fn get(&self, id: &str) -> Result<Option<Reminder>, ReminderError> {
+        let conn = self
+            .lock_conn()
+            .map_err(|e| ReminderError::Store(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT * FROM reminders WHERE id = ?1")
+            .map_err(|e| ReminderError::Store(format!("get reminder prep: {e}")))?;
+        let result = stmt
+            .query_row(params![id], row_to_reminder)
+            .optional()
+            .map_err(|e| ReminderError::Store(format!("get reminder: {e}")))?;
+        Ok(result)
+    }
+
+    fn update(&self, reminder: &Reminder) -> Result<(), ReminderError> {
+        let conn = self
+            .lock_conn()
+            .map_err(|e| ReminderError::Store(e.to_string()))?;
+        let commands_json = serde_json::to_string(&reminder.commands)
+            .map_err(|e| ReminderError::Store(format!("commands: {e}")))?;
+        let refs_json = serde_json::to_string(&reminder.refs)
+            .map_err(|e| ReminderError::Store(format!("refs: {e}")))?;
+        let schedule_json = reminder
+            .schedule
+            .as_ref()
+            .map(|s| serde_json::to_string(s))
+            .transpose()
+            .map_err(|e| ReminderError::Store(format!("schedule: {e}")))?;
+        let executions_json = serde_json::to_string(&reminder.executions)
+            .map_err(|e| ReminderError::Store(format!("executions: {e}")))?;
+        let tags_json = serde_json::to_string(&reminder.tags)
+            .map_err(|e| ReminderError::Store(format!("tags: {e}")))?;
+        let n = conn
+            .execute(
+                "UPDATE reminders SET
+                    title = ?2, instructions = ?3, commands = ?4, refs = ?5,
+                    priority = ?6, due_at = ?7, schedule = ?8, autonomous = ?9,
+                    created_by = ?10, created_at = ?11, status = ?12,
+                    snoozed_until = ?13, executions = ?14, tags = ?15
+                 WHERE id = ?1",
+                params![
+                    reminder.id,
+                    reminder.title,
+                    reminder.instructions,
+                    commands_json,
+                    refs_json,
+                    priority_to_i64(reminder.priority),
+                    reminder.due_at.to_rfc3339(),
+                    schedule_json,
+                    if reminder.autonomous { 1_i64 } else { 0_i64 },
+                    reminder.created_by,
+                    reminder.created_at.to_rfc3339(),
+                    reminder_status_to_str(reminder.status),
+                    reminder.snoozed_until.map(|t| t.to_rfc3339()),
+                    executions_json,
+                    tags_json,
+                ],
+            )
+            .map_err(|e| ReminderError::Store(format!("update reminder: {e}")))?;
+        if n == 0 {
+            return Err(ReminderError::NotFound(reminder.id.clone()));
+        }
+        Ok(())
+    }
+
+    fn delete(&self, id: &str) -> Result<bool, ReminderError> {
+        let conn = self
+            .lock_conn()
+            .map_err(|e| ReminderError::Store(e.to_string()))?;
+        let n = conn
+            .execute("DELETE FROM reminders WHERE id = ?1", params![id])
+            .map_err(|e| ReminderError::Store(format!("delete reminder: {e}")))?;
+        Ok(n > 0)
+    }
+
+    fn list(&self, filter: &ReminderFilter) -> Result<Vec<Reminder>, ReminderError> {
+        let conn = self
+            .lock_conn()
+            .map_err(|e| ReminderError::Store(e.to_string()))?;
+
+        // Build SQL for the parts expressible at the DB layer.
+        let mut sql = String::from("SELECT * FROM reminders WHERE 1=1");
+        if filter.status.is_some() {
+            sql.push_str(" AND status = :status");
+        }
+        if filter.priority_at_most.is_some() {
+            sql.push_str(" AND priority <= :priority");
+        }
+        if filter.created_by.is_some() {
+            sql.push_str(" AND created_by = :created_by");
+        }
+        if filter.due_before.is_some() {
+            sql.push_str(" AND due_at <= :due_before");
+        }
+        sql.push_str(" ORDER BY priority ASC, due_at ASC");
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| ReminderError::Store(format!("list reminders prep: {e}")))?;
+
+        let mut named: Vec<(&str, Box<dyn rusqlite::ToSql>)> = Vec::new();
+        if let Some(s) = filter.status {
+            named.push((":status", Box::new(reminder_status_to_str(s).to_string())));
+        }
+        if let Some(p) = filter.priority_at_most {
+            named.push((":priority", Box::new(priority_to_i64(p))));
+        }
+        if let Some(ref cb) = filter.created_by {
+            named.push((":created_by", Box::new(cb.clone())));
+        }
+        if let Some(due) = filter.due_before {
+            named.push((":due_before", Box::new(due.to_rfc3339())));
+        }
+
+        let refs_kv: Vec<(&str, &dyn rusqlite::ToSql)> =
+            named.iter().map(|(n, v)| (*n, v.as_ref())).collect();
+
+        let rows = stmt
+            .query_map(refs_kv.as_slice(), row_to_reminder)
+            .map_err(|e| ReminderError::Store(format!("list reminders query: {e}")))?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            let reminder =
+                r.map_err(|e| ReminderError::Store(format!("list reminders row: {e}")))?;
+            // Post-filter for ref_id and tags (JSON columns).
+            if let Some(ref rid) = filter.ref_id {
+                if !reminder.refs.iter().any(|rf| &rf.id == rid) {
+                    continue;
+                }
+            }
+            if filter.tags.iter().any(|tag| !reminder.tags.contains(tag)) {
+                continue;
+            }
+            out.push(reminder);
+        }
+        Ok(out)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1418,5 +1744,309 @@ mod tests {
 
         let retrieved_obj = store.get_object(&id1).unwrap().unwrap();
         assert_eq!(retrieved_obj, obj1);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReminderStore tests
+    // -----------------------------------------------------------------------
+
+    use agentstategraph_reminders::{
+        Reminder, ReminderFilter, ReminderStore,
+        types::{CreateReminder, Priority, ReminderRef, ReminderStatus, Schedule},
+    };
+    use chrono::Duration;
+
+    fn future(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() + Duration::seconds(secs)
+    }
+
+    fn past_ts(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now() - Duration::seconds(secs)
+    }
+
+    fn make_reminder(title: &str, secs_from_now: i64) -> Reminder {
+        CreateReminder::new(title, "do something", future(secs_from_now), "agent/test")
+            .into_reminder()
+    }
+
+    #[test]
+    fn reminder_save_and_get_roundtrip() {
+        let store = test_store();
+        let r = make_reminder("check server", 600);
+        store.save(&r).unwrap();
+        let got = store.get(&r.id).unwrap().unwrap();
+        assert_eq!(got.id, r.id);
+        assert_eq!(got.title, "check server");
+        assert_eq!(got.status, ReminderStatus::Pending);
+        assert!(got.autonomous);
+    }
+
+    #[test]
+    fn reminder_get_missing_returns_none() {
+        let store = test_store();
+        let result = store.get("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn reminder_save_duplicate_id_fails() {
+        let store = test_store();
+        let r = make_reminder("dup", 60);
+        store.save(&r).unwrap();
+        let err = store.save(&r).unwrap_err();
+        assert!(err.to_string().contains("insert reminder"));
+    }
+
+    #[test]
+    fn reminder_update_roundtrip() {
+        let store = test_store();
+        let mut r = make_reminder("update me", 300);
+        store.save(&r).unwrap();
+        r.status = ReminderStatus::Due;
+        r.title = "updated title".to_string();
+        store.update(&r).unwrap();
+        let got = store.get(&r.id).unwrap().unwrap();
+        assert_eq!(got.status, ReminderStatus::Due);
+        assert_eq!(got.title, "updated title");
+    }
+
+    #[test]
+    fn reminder_update_missing_returns_not_found() {
+        let store = test_store();
+        let r = make_reminder("ghost", 60);
+        let err = store.update(&r).unwrap_err();
+        assert!(matches!(err, agentstategraph_reminders::ReminderError::NotFound(_)));
+    }
+
+    #[test]
+    fn reminder_delete_existing_returns_true() {
+        let store = test_store();
+        let r = make_reminder("delete me", 60);
+        store.save(&r).unwrap();
+        assert!(store.delete(&r.id).unwrap());
+        assert!(store.get(&r.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn reminder_delete_missing_returns_false() {
+        let store = test_store();
+        assert!(!store.delete("ghost").unwrap());
+    }
+
+    #[test]
+    fn reminder_list_empty_filter_returns_all() {
+        let store = test_store();
+        let r1 = make_reminder("a", 100);
+        let r2 = make_reminder("b", 200);
+        store.save(&r1).unwrap();
+        store.save(&r2).unwrap();
+        let all = store.list(&ReminderFilter::default()).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn reminder_list_filter_by_status() {
+        let store = test_store();
+        let r1 = make_reminder("pending", 100);
+        let mut r2 = make_reminder("due", 50);
+        r2.status = ReminderStatus::Due;
+        store.save(&r1).unwrap();
+        store.save(&r2).unwrap();
+
+        let filter = ReminderFilter { status: Some(ReminderStatus::Due), ..Default::default() };
+        let results = store.list(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "due");
+    }
+
+    #[test]
+    fn reminder_list_filter_by_priority_at_most() {
+        let store = test_store();
+        let critical = CreateReminder::new("c", "i", future(100), "a")
+            .with_priority(Priority::Critical)
+            .into_reminder();
+        let low = CreateReminder::new("l", "i", future(200), "a")
+            .with_priority(Priority::Low)
+            .into_reminder();
+        store.save(&critical).unwrap();
+        store.save(&low).unwrap();
+
+        let filter = ReminderFilter {
+            priority_at_most: Some(Priority::High),
+            ..Default::default()
+        };
+        let results = store.list(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "c");
+    }
+
+    #[test]
+    fn reminder_list_filter_by_created_by() {
+        let store = test_store();
+        let r1 = CreateReminder::new("r1", "i", future(60), "agent/alice").into_reminder();
+        let r2 = CreateReminder::new("r2", "i", future(60), "agent/bob").into_reminder();
+        store.save(&r1).unwrap();
+        store.save(&r2).unwrap();
+
+        let filter = ReminderFilter {
+            created_by: Some("agent/alice".into()),
+            ..Default::default()
+        };
+        let results = store.list(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "r1");
+    }
+
+    #[test]
+    fn reminder_list_filter_by_due_before() {
+        let store = test_store();
+        let soon = CreateReminder::new("soon", "i", future(60), "a").into_reminder();
+        let later = CreateReminder::new("later", "i", future(7200), "a").into_reminder();
+        store.save(&soon).unwrap();
+        store.save(&later).unwrap();
+
+        let filter = ReminderFilter {
+            due_before: Some(future(600)),
+            ..Default::default()
+        };
+        let results = store.list(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "soon");
+    }
+
+    #[test]
+    fn reminder_list_filter_by_ref_id() {
+        let store = test_store();
+        let mut with_ref = make_reminder("with-ref", 60);
+        with_ref.refs = vec![ReminderRef::branch("main", "main branch")];
+        let without = make_reminder("without-ref", 60);
+        store.save(&with_ref).unwrap();
+        store.save(&without).unwrap();
+
+        let filter = ReminderFilter {
+            ref_id: Some("main".into()),
+            ..Default::default()
+        };
+        let results = store.list(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "with-ref");
+    }
+
+    #[test]
+    fn reminder_list_filter_by_tags() {
+        let store = test_store();
+        let mut tagged = make_reminder("tagged", 60);
+        tagged.tags = vec!["cleanup".into(), "server".into()];
+        let untagged = make_reminder("untagged", 60);
+        store.save(&tagged).unwrap();
+        store.save(&untagged).unwrap();
+
+        let filter = ReminderFilter {
+            tags: vec!["cleanup".into()],
+            ..Default::default()
+        };
+        let results = store.list(&filter).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "tagged");
+    }
+
+    #[test]
+    fn reminder_list_ordered_by_priority_then_due() {
+        let store = test_store();
+        let medium_late = CreateReminder::new("medium-late", "i", future(200), "a")
+            .with_priority(Priority::Medium)
+            .into_reminder();
+        let high_early = CreateReminder::new("high-early", "i", future(100), "a")
+            .with_priority(Priority::High)
+            .into_reminder();
+        let high_later = CreateReminder::new("high-later", "i", future(300), "a")
+            .with_priority(Priority::High)
+            .into_reminder();
+        store.save(&medium_late).unwrap();
+        store.save(&high_early).unwrap();
+        store.save(&high_later).unwrap();
+
+        let all = store.list(&ReminderFilter::default()).unwrap();
+        assert_eq!(all[0].title, "high-early");
+        assert_eq!(all[1].title, "high-later");
+        assert_eq!(all[2].title, "medium-late");
+    }
+
+    #[test]
+    fn reminder_persists_schedule_and_refs() {
+        let store = test_store();
+        let mut r = CreateReminder::new("scheduled", "i", future(60), "a")
+            .with_schedule(Schedule::Interval { every_seconds: 3600 })
+            .with_refs(vec![ReminderRef::plan("plan-123", "My plan")])
+            .into_reminder();
+        r.autonomous = false;
+        store.save(&r).unwrap();
+
+        let got = store.get(&r.id).unwrap().unwrap();
+        assert!(!got.autonomous);
+        assert!(matches!(
+            got.schedule,
+            Some(Schedule::Interval { every_seconds: 3600 })
+        ));
+        assert_eq!(got.refs.len(), 1);
+        assert_eq!(got.refs[0].id, "plan-123");
+        assert_eq!(got.refs[0].label.as_deref(), Some("My plan"));
+    }
+
+    #[test]
+    fn reminder_persists_snoozed_until() {
+        let store = test_store();
+        let mut r = make_reminder("snooze me", 60);
+        let snooze_time = future(3600);
+        r.status = ReminderStatus::Snoozed;
+        r.snoozed_until = Some(snooze_time);
+        store.save(&r).unwrap();
+
+        let got = store.get(&r.id).unwrap().unwrap();
+        assert_eq!(got.status, ReminderStatus::Snoozed);
+        assert!(got.snoozed_until.is_some());
+        let diff = (got.snoozed_until.unwrap() - snooze_time).num_seconds().abs();
+        assert!(diff < 2, "snoozed_until timestamp drifted by {diff}s");
+    }
+
+    #[test]
+    fn reminder_all_statuses_roundtrip() {
+        let store = test_store();
+        let statuses = [
+            ReminderStatus::Pending,
+            ReminderStatus::Due,
+            ReminderStatus::AwaitingPermission,
+            ReminderStatus::InProgress,
+            ReminderStatus::Completed,
+            ReminderStatus::Snoozed,
+            ReminderStatus::Cancelled,
+        ];
+        for status in statuses {
+            let mut r = make_reminder(&format!("{status:?}"), 60);
+            r.status = status;
+            store.save(&r).unwrap();
+            let got = store.get(&r.id).unwrap().unwrap();
+            assert_eq!(got.status, status, "status roundtrip failed for {status:?}");
+        }
+    }
+
+    #[test]
+    fn reminder_all_priorities_roundtrip() {
+        let store = test_store();
+        let priorities = [
+            Priority::Critical,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low,
+            Priority::Minimal,
+        ];
+        for p in priorities {
+            let r = CreateReminder::new(&format!("{p:?}"), "i", future(60), "a")
+                .with_priority(p)
+                .into_reminder();
+            store.save(&r).unwrap();
+            let got = store.get(&r.id).unwrap().unwrap();
+            assert_eq!(got.priority, p, "priority roundtrip failed for {p:?}");
+        }
     }
 }
