@@ -21,7 +21,7 @@ use std::sync::Arc;
 // Session + SessionStatus moved to agentstategraph-core in 0.6.5;
 // import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
-use agentstategraph::taint_types::{
+use agentstategraph_taint::{
     QuarantineParams, TaintKind, TaintParams, UntaintParams, UnwatchParams, WatchParams,
 };
 use agentstategraph::{CommitOptions, Repository};

@@ -172,35 +172,46 @@ pub trait SessionStore: Send + Sync {
 }
 
 /// Durable storage of taints, quarantines, and watches (0.7.75 §3).
-/// Backends must implement CRUD + ancestor-aware lookup.
+///
+/// All six methods have default no-op implementations that return
+/// `StorageError::Backend("taint storage not supported")`. Custom backends
+/// that do not need taint support can rely on the defaults and satisfy the
+/// `Storage` supertrait without additional boilerplate. Backends that do
+/// support taints should override every method.
 pub trait TaintStore: Send + Sync {
     /// Insert a freshly-created taint record. Storage must enforce
     /// the `(path, name, kind)` uniqueness invariant among unresolved
     /// rows — re-creating a resolved taint with the same triple is
     /// allowed (the old one stays as an audit row).
-    fn create_taint(&self, taint: &agentstategraph_taint::Taint) -> Result<(), StorageError>;
+    fn create_taint(&self, _taint: &agentstategraph_taint::Taint) -> Result<(), StorageError> {
+        Err(StorageError::Backend("taint storage not supported".into()))
+    }
 
     /// Mark the taint with id `id` as resolved. Returns
     /// `StorageError::Backend` (wrapping `AlreadyResolved`) if the
     /// record is already resolved.
     fn resolve_taint(
         &self,
-        id: &str,
-        resolved_by: &str,
-        reason: &str,
-        proof: Option<&str>,
-        resolved_at: DateTime<Utc>,
-    ) -> Result<(), StorageError>;
+        _id: &str,
+        _resolved_by: &str,
+        _reason: &str,
+        _proof: Option<&str>,
+        _resolved_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Backend("taint storage not supported".into()))
+    }
 
     /// List taints, optionally filtered by path prefix + kind +
     /// include-resolved flag. Results are most-recently-created
     /// first.
     fn list_taints(
         &self,
-        path_prefix: Option<&str>,
-        kind: Option<agentstategraph_taint::TaintKind>,
-        include_resolved: bool,
-    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError>;
+        _path_prefix: Option<&str>,
+        _kind: Option<agentstategraph_taint::TaintKind>,
+        _include_resolved: bool,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
+        Err(StorageError::Backend("taint storage not supported".into()))
+    }
 
     /// Return every active taint (unresolved + not expired) whose
     /// `path` matches `request_path` exactly OR whose `path` is a
@@ -208,16 +219,22 @@ pub trait TaintStore: Send + Sync {
     /// result into `agentstategraph_taint::evaluate_access`.
     fn check_taint(
         &self,
-        request_path: &str,
-    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError>;
+        _request_path: &str,
+    ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
+        Err(StorageError::Backend("taint storage not supported".into()))
+    }
 
     /// Fetch a taint by its id. Returns `None` if missing.
-    fn get_taint(&self, id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError>;
+    fn get_taint(&self, _id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
+        Err(StorageError::Backend("taint storage not supported".into()))
+    }
 
     /// Back-patch the `commit_id` onto a freshly-inserted taint
     /// after the repository has written the intent commit. A no-op
     /// if the taint is already resolved.
-    fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError>;
+    fn set_taint_commit_id(&self, _id: &str, _commit_id: &str) -> Result<(), StorageError> {
+        Err(StorageError::Backend("taint storage not supported".into()))
+    }
 }
 
 /// Combined storage trait for convenience.

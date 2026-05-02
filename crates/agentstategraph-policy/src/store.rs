@@ -1,9 +1,9 @@
 //! `PolicyStore` — handle bound to a `Repository` + path prefix.
 //!
 //! All policy operations go through this type. Writes commit with
-//! `IntentCategory::Custom("policy-propose" | "policy-ratify" |
-//! "policy-supersede")` so policy activity is natively filterable in
-//! the log and blame queries.
+//! `IntentCategory::PolicyPropose` / `PolicyRatify` / `PolicySupersede` /
+//! `PolicySign` so policy activity is natively filterable in log and blame
+//! queries.
 
 use std::sync::Arc;
 
@@ -137,7 +137,7 @@ impl PolicyStore {
             &path,
             &value,
             self.commit_opts(
-                "policy-propose",
+                IntentCategory::PolicyPropose,
                 format!("Propose policy {}", policy.handle()),
             ),
         )?;
@@ -177,7 +177,7 @@ impl PolicyStore {
             &active_path,
             &value,
             self.commit_opts(
-                "policy-ratify",
+                IntentCategory::PolicyRatify,
                 format!("Ratify policy {} by {}", policy.handle(), ratifier),
             ),
         )?;
@@ -224,7 +224,7 @@ impl PolicyStore {
         self.repo.commit_speculation(
             handle,
             self.commit_opts(
-                "policy-supersede",
+                IntentCategory::PolicySupersede,
                 format!("Supersede {} → {}", old.handle(), new_policy.handle()),
             ),
         )?;
@@ -237,8 +237,7 @@ impl PolicyStore {
     /// the registered `PolicySigner` has produced the signature bytes
     /// over the canonical form. The existing active policy is loaded,
     /// `policy.signature` is overwritten, and the result is written back
-    /// under `IntentCategory::Custom("policy-sign")` so the commit log
-    /// stays filterable.
+    /// under `IntentCategory::PolicySign` so the commit log stays filterable.
     ///
     /// This is the only writer that may mutate `Policy::signature`
     /// post-ratification without bumping version — signatures are
@@ -259,7 +258,10 @@ impl PolicyStore {
             ref_name,
             &active_path,
             &value,
-            self.commit_opts("policy-sign", format!("Sign policy {}", policy.handle())),
+            self.commit_opts(
+                IntentCategory::PolicySign,
+                format!("Sign policy {}", policy.handle()),
+            ),
         )?;
         Ok(())
     }
@@ -671,12 +673,8 @@ impl PolicyStore {
         Ok(serde_json::from_value(value)?)
     }
 
-    fn commit_opts(&self, category: &str, description: impl Into<String>) -> CommitOptions {
-        CommitOptions::new(
-            &self.agent_id,
-            IntentCategory::Custom(category.to_string()),
-            description,
-        )
+    fn commit_opts(&self, category: IntentCategory, description: impl Into<String>) -> CommitOptions {
+        CommitOptions::new(&self.agent_id, category, description)
     }
 }
 

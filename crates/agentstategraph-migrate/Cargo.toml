@@ -9,7 +9,6 @@ description = "Schema migration registry for AgentStateGraph databases"
 [dependencies]
 agentstategraph = { path = "../agentstategraph", default-features = false }
 agentstategraph-core = { path = "../agentstategraph-core" }
-agentstategraph-tasks = { path = "../agentstategraph-tasks" }
 semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -17,3 +16,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false }
+agentstategraph-tasks = { path = "../agentstategraph-tasks" }

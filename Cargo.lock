@@ -114,6 +114,7 @@ dependencies = [
  "agentstategraph-policy",
  "agentstategraph-policy-sign",
  "agentstategraph-storage",
+ "agentstategraph-taint",
  "agentstategraph-tasks",
  "ed25519-dalek",
  "hex",

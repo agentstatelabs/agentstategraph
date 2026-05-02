@@ -1,6 +1,7 @@
 [package]
 name = "agentstategraph-wasm"
 version.workspace = true
+# wasm-bindgen proc-macros are not compatible with edition 2024; keep at 2021.
 edition = "2021"
 authors.workspace = true
 license.workspace = true

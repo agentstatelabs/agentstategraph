@@ -77,6 +77,16 @@ pub enum IntentCategory {
     Watch,
     /// Removing an advisory watch.
     Unwatch,
+    /// A new policy has been proposed and is awaiting ratification.
+    /// Used by the `agentstategraph-policy` crate so policy lifecycle
+    /// is natively filterable in log/blame queries.
+    PolicyPropose,
+    /// A proposed policy has been ratified and is now live.
+    PolicyRatify,
+    /// An existing policy has been superseded by a newer version.
+    PolicySupersede,
+    /// A policy has been signed with an Ed25519 key.
+    PolicySign,
     /// Application-defined category.
     Custom(String),
 }
@@ -391,10 +401,49 @@ mod tests {
             IntentCategory::Unquarantine,
             IntentCategory::Watch,
             IntentCategory::Unwatch,
+            IntentCategory::PolicyPropose,
+            IntentCategory::PolicyRatify,
+            IntentCategory::PolicySupersede,
+            IntentCategory::PolicySign,
         ] {
             let json = serde_json::to_string(&c).unwrap();
             let back: IntentCategory = serde_json::from_str(&json).unwrap();
             assert_eq!(c, back, "round-trip failed for {:?}", c);
+        }
+    }
+
+    #[test]
+    fn policy_variants_serialize_as_native() {
+        assert_eq!(
+            serde_json::to_string(&IntentCategory::PolicyPropose).unwrap(),
+            "\"PolicyPropose\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IntentCategory::PolicyRatify).unwrap(),
+            "\"PolicyRatify\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IntentCategory::PolicySupersede).unwrap(),
+            "\"PolicySupersede\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IntentCategory::PolicySign).unwrap(),
+            "\"PolicySign\""
+        );
+    }
+
+    /// Pre-existing data written as `Custom("PolicyPropose")` etc. must
+    /// remain distinct from the new native variants, matching the same
+    /// backward-compatibility guarantee given to `Plan` and the taint
+    /// variants.
+    #[test]
+    fn custom_policy_strings_still_round_trip_as_custom() {
+        for name in ["PolicyPropose", "PolicyRatify", "PolicySupersede", "PolicySign"] {
+            let c = IntentCategory::Custom(name.to_string());
+            let json = serde_json::to_string(&c).unwrap();
+            assert_eq!(json, format!("{{\"Custom\":\"{}\"}}", name));
+            let back: IntentCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, IntentCategory::Custom(name.to_string()));
         }
     }
 

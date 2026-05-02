@@ -1,5 +1,9 @@
 //! AgentStateGraph MCP Server — exposes AgentStateGraph operations as MCP tools.
 
+mod policy;
+mod taint;
+mod tasks;
+
 use std::sync::Arc;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -12,11 +16,11 @@ use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{DiffOp, IntentCategory, Object, QueryFilters};
 use agentstategraph_policy::{
-    ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry, Policy,
-    PolicySignature, PolicyStore, SignatureVerifier, Situation,
+    ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry,
+    PolicyStore, SignatureVerifier,
 };
-use agentstategraph_policy_sign::{PolicySigner, canonicalize};
-use agentstategraph_tasks::{Priority, Proof, TaskId, TaskStore};
+use agentstategraph_policy_sign::PolicySigner;
+use agentstategraph_tasks::TaskStore;
 
 /// Threshold above which a change is tagged `large` in token inference.
 pub const LARGE_CHANGE_THRESHOLD: usize = 50;
@@ -1465,179 +1469,40 @@ impl AgentStateGraphServer {
         description = "Create a new plan — a named container for tasks with a state machine. Plans track structured work: drift reconciliation, upgrades, incident response."
     )]
     async fn agentstategraph_create_plan(&self, params: Parameters<CreatePlanParams>) -> String {
-        let p = params.0;
-        match self.tasks.create_plan(&p.r#ref, &p.name, p.description) {
-            Ok(plan) => serde_json::to_string_pretty(&serde_json::json!({
-                "name": plan.name,
-                "status": format!("{:?}", plan.status),
-                "created_at": plan.created_at.to_rfc3339(),
-                "created_by": plan.created_by,
-            }))
-            .unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_create_plan(params.0)
     }
 
     #[tool(
         description = "List all plans, optionally filtered by status (Active, Completed, Archived)."
     )]
     async fn agentstategraph_list_plans(&self, params: Parameters<ListPlansParams>) -> String {
-        let p = params.0;
-        let status = p.status.map(|s| match s.to_lowercase().as_str() {
-            "active" => agentstategraph_tasks::PlanStatus::Active,
-            "completed" => agentstategraph_tasks::PlanStatus::Completed,
-            "archived" => agentstategraph_tasks::PlanStatus::Archived,
-            _ => agentstategraph_tasks::PlanStatus::Active,
-        });
-        match self.tasks.list_plans_by_status(&p.r#ref, status) {
-            Ok(plans) => {
-                let json: Vec<serde_json::Value> = plans
-                    .iter()
-                    .map(|p| {
-                        serde_json::json!({
-                            "name": p.name,
-                            "description": p.description,
-                            "status": format!("{:?}", p.status),
-                            "created_at": p.created_at.to_rfc3339(),
-                        })
-                    })
-                    .collect();
-                format!(
-                    "{} plans:\n{}",
-                    json.len(),
-                    serde_json::to_string_pretty(&json).unwrap_or_default()
-                )
-            }
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_list_plans(params.0)
     }
 
     #[tool(description = "Get a plan's details including status and task summary.")]
     async fn agentstategraph_get_plan(&self, params: Parameters<GetPlanParams>) -> String {
-        let p = params.0;
-        match self.tasks.get_plan(&p.r#ref, &p.name) {
-            Ok(plan) => {
-                let tasks = self.tasks.list_tasks(&p.r#ref, &p.name).unwrap_or_default();
-                let pending = tasks
-                    .iter()
-                    .filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Pending))
-                    .count();
-                let in_progress = tasks
-                    .iter()
-                    .filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::InProgress))
-                    .count();
-                let done = tasks
-                    .iter()
-                    .filter(|t| matches!(t.status, agentstategraph_tasks::TaskStatus::Done))
-                    .count();
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "name": plan.name,
-                    "description": plan.description,
-                    "status": format!("{:?}", plan.status),
-                    "created_at": plan.created_at.to_rfc3339(),
-                    "task_count": tasks.len(),
-                    "pending": pending,
-                    "in_progress": in_progress,
-                    "done": done,
-                }))
-                .unwrap_or_default()
-            }
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_get_plan(params.0)
     }
 
     #[tool(
         description = "Add a task to a plan. Tasks have a strict state machine: pending → in_progress → done. Supports priority, blockers, parent tasks, and agent assignment."
     )]
     async fn agentstategraph_add_task(&self, params: Parameters<AddTaskParams>) -> String {
-        let p = params.0;
-        let priority = match p
-            .priority
-            .as_deref()
-            .unwrap_or("Medium")
-            .to_lowercase()
-            .as_str()
-        {
-            "low" => Priority::Low,
-            "high" => Priority::High,
-            "critical" => Priority::Critical,
-            _ => Priority::Medium,
-        };
-        let parent_id = p.parent_id.map(TaskId);
-        let blocked_by = p
-            .blocked_by
-            .unwrap_or_default()
-            .into_iter()
-            .map(TaskId)
-            .collect();
-        match self.tasks.add_task(
-            &p.r#ref,
-            &p.plan,
-            &p.title,
-            priority,
-            parent_id,
-            blocked_by,
-            p.assigned_to,
-        ) {
-            Ok(task) => serde_json::to_string_pretty(&serde_json::json!({
-                "id": task.id.as_str(),
-                "title": task.title,
-                "status": format!("{:?}", task.status),
-                "priority": format!("{:?}", task.priority),
-                "assigned_to": task.assigned_to,
-            }))
-            .unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_add_task(params.0)
     }
 
     #[tool(
         description = "List all tasks in a plan with their status, priority, assignment, and proof."
     )]
     async fn agentstategraph_list_tasks(&self, params: Parameters<ListTasksParams>) -> String {
-        let p = params.0;
-        match self.tasks.list_tasks(&p.r#ref, &p.plan) {
-            Ok(tasks) => {
-                let json: Vec<serde_json::Value> = tasks.iter().map(|t| {
-                    let mut v = serde_json::json!({
-                        "id": t.id.as_str(),
-                        "title": t.title,
-                        "status": format!("{:?}", t.status),
-                        "priority": format!("{:?}", t.priority),
-                        "assigned_to": t.assigned_to,
-                        "blocked_by": t.blocked_by.iter().map(|b| b.as_str().to_string()).collect::<Vec<_>>(),
-                    });
-                    if let Some(ref proof) = t.proof {
-                        v["proof"] = serde_json::json!({
-                            "kind": format!("{:?}", proof.kind),
-                            "value": proof.value,
-                            "note": proof.note,
-                        });
-                    }
-                    v
-                }).collect();
-                format!(
-                    "{} tasks:\n{}",
-                    json.len(),
-                    serde_json::to_string_pretty(&json).unwrap_or_default()
-                )
-            }
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_list_tasks(params.0)
     }
 
     #[tool(
         description = "Start a task — transition from pending to in_progress. Validates that all blockers are resolved."
     )]
     async fn agentstategraph_start_task(&self, params: Parameters<TaskActionParams>) -> String {
-        let p = params.0;
-        match self.tasks.start_task(&p.r#ref, &p.plan, &TaskId(p.task_id)) {
-            Ok(task) => format!(
-                "Task {} started (was: Pending → now: InProgress)",
-                task.id.as_str()
-            ),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_start_task(params.0)
     }
 
     #[tool(
@@ -1647,76 +1512,26 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<CompleteTaskParams>,
     ) -> String {
-        let p = params.0;
-        let proof = match p.proof_kind.to_lowercase().as_str() {
-            "commit" => Proof::commit(p.proof_value),
-            "file" => Proof::file(p.proof_value),
-            "test" => Proof::test(p.proof_value),
-            _ => Proof::text(p.proof_value),
-        };
-        let proof = if let Some(note) = p.proof_note {
-            proof.with_note(note)
-        } else {
-            proof
-        };
-        match self
-            .tasks
-            .complete_task(&p.r#ref, &p.plan, &TaskId(p.task_id), proof)
-        {
-            Ok(task) => format!("Task {} completed (InProgress → Done)", task.id.as_str()),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_complete_task(params.0)
     }
 
     #[tool(description = "Abandon a task with a reason. Terminal state — cannot be restarted.")]
     async fn agentstategraph_abandon_task(&self, params: Parameters<AbandonTaskParams>) -> String {
-        let p = params.0;
-        match self
-            .tasks
-            .abandon_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.reason)
-        {
-            Ok(task) => format!("Task {} abandoned: {}", task.id.as_str(), p.reason),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_abandon_task(params.0)
     }
 
     #[tool(
         description = "Assign a task to an agent. The agent can then query for their next task."
     )]
     async fn agentstategraph_assign_task(&self, params: Parameters<AssignTaskParams>) -> String {
-        let p = params.0;
-        match self
-            .tasks
-            .assign_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.agent)
-        {
-            Ok(task) => format!("Task {} assigned to {}", task.id.as_str(), p.agent),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_assign_task(params.0)
     }
 
     #[tool(
         description = "Get the next pending task in a plan, optionally filtered by assigned agent. Returns the highest-priority unblocked task."
     )]
     async fn agentstategraph_next_task(&self, params: Parameters<NextTaskParams>) -> String {
-        let p = params.0;
-        let result = if let Some(agent) = p.agent {
-            self.tasks
-                .next_task_for(&p.r#ref, &p.plan, Some(&agent), true)
-        } else {
-            self.tasks.next_task(&p.r#ref, &p.plan)
-        };
-        match result {
-            Ok(Some(task)) => serde_json::to_string_pretty(&serde_json::json!({
-                "id": task.id.as_str(),
-                "title": task.title,
-                "status": format!("{:?}", task.status),
-                "priority": format!("{:?}", task.priority),
-                "assigned_to": task.assigned_to,
-                "blocked_by": task.blocked_by.iter().map(|b| b.as_str().to_string()).collect::<Vec<_>>(),
-            })).unwrap_or_default(),
-            Ok(None) => "No pending tasks".to_string(),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_next_task(params.0)
     }
 
     // -- Policy tools (POLICY_V1.md §6 + §22.5) --
@@ -1728,15 +1543,7 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyProposeParams>,
     ) -> String {
-        let p = params.0;
-        let policy: Policy = match serde_json::from_value(p.policy) {
-            Ok(p) => p,
-            Err(e) => return format!("Error: invalid Policy JSON: {}", e),
-        };
-        match self.policies.propose(&p.r#ref, policy) {
-            Ok(handle) => format!("Proposed {}", handle),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_propose(params.0)
     }
 
     #[tool(
@@ -1746,14 +1553,7 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyRatifyParams>,
     ) -> String {
-        let p = params.0;
-        match self
-            .policies
-            .ratify(&p.r#ref, &p.path, &p.ratifier, &p.reasoning)
-        {
-            Ok(()) => format!("Ratified {} by {}", p.path, p.ratifier),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_ratify(params.0)
     }
 
     #[tool(
@@ -1763,51 +1563,21 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicySupersedeParams>,
     ) -> String {
-        let p = params.0;
-        let new_policy: Policy = match serde_json::from_value(p.new_policy) {
-            Ok(p) => p,
-            Err(e) => return format!("Error: invalid Policy JSON: {}", e),
-        };
-        match self.policies.supersede(&p.r#ref, &p.old_path, new_policy) {
-            Ok(handle) => format!("Superseded → {}", handle),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_supersede(params.0)
     }
 
     #[tool(
         description = "List policies. Filter by path prefix and status (\"active\", \"proposed\", or \"all\" — default \"active\"). Optional `tenant_filter` (0.7.5 §3b): when set, only policies with tenant_id matching or tenant_id=None (globals) are returned; when omitted, all policies are visible."
     )]
     async fn agentstategraph_policy_list(&self, params: Parameters<PolicyListParams>) -> String {
-        let p = params.0;
-        let status = p.status.as_deref().unwrap_or("active").to_lowercase();
-        let tenant = p.tenant_filter.as_deref();
-        let result = match status.as_str() {
-            "proposed" => self
-                .policies
-                .list_scoped(&p.r#ref, p.prefix.as_deref(), tenant)
-                .map(|ps| ps.into_iter().filter(|p| !p.is_ratified()).collect()),
-            "all" => self
-                .policies
-                .list_scoped(&p.r#ref, p.prefix.as_deref(), tenant),
-            _ => self
-                .policies
-                .active_scoped(&p.r#ref, p.prefix.as_deref(), tenant),
-        };
-        match result {
-            Ok(policies) => serde_json::to_string_pretty(&policies).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_list(params.0)
     }
 
     #[tool(
         description = "Read a policy. Returns the active version by default; pass `version` to pin a historical read."
     )]
     async fn agentstategraph_policy_show(&self, params: Parameters<PolicyShowParams>) -> String {
-        let p = params.0;
-        match self.policies.get(&p.r#ref, &p.path, p.version) {
-            Ok(policy) => serde_json::to_string_pretty(&policy).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_show(params.0)
     }
 
     #[tool(
@@ -1817,11 +1587,7 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyHistoryParams>,
     ) -> String {
-        let p = params.0;
-        match self.policies.history(&p.r#ref, &p.path) {
-            Ok(chain) => serde_json::to_string_pretty(&chain).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_history(params.0)
     }
 
     #[tool(
@@ -1831,18 +1597,7 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyEvaluateParams>,
     ) -> String {
-        let p = params.0;
-        let situation = Situation(p.situation);
-        match self.policies.evaluate_scoped(
-            &p.r#ref,
-            &situation,
-            &p.action,
-            &p.agent_id,
-            p.tenant_filter.as_deref(),
-        ) {
-            Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_evaluate(params.0)
     }
 
     #[tool(
@@ -1852,18 +1607,7 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyEvaluateChangeParams>,
     ) -> String {
-        let p = params.0;
-        let proposal: ChangeProposal = match serde_json::from_value(p.proposal) {
-            Ok(p) => p,
-            Err(e) => return format!("Error: invalid ChangeProposal JSON: {}", e),
-        };
-        match self
-            .policies
-            .evaluate_change_scoped(&p.r#ref, &proposal, p.tenant_filter.as_deref())
-        {
-            Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_evaluate_change(params.0)
     }
 
     #[tool(
@@ -1873,79 +1617,14 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyCheckTokensParams>,
     ) -> String {
-        let p = params.0;
-        match self.policies.active(&p.r#ref, None) {
-            Ok(policies) => {
-                let token_set: std::collections::HashSet<&str> =
-                    p.tokens.iter().map(String::as_str).collect();
-                let matches: Vec<serde_json::Value> = policies
-                    .iter()
-                    .filter(|policy| {
-                        policy
-                            .triggers
-                            .iter()
-                            .any(|t| token_set.contains(t.as_str()))
-                    })
-                    .map(|policy| {
-                        let hit: Vec<&String> = policy
-                            .triggers
-                            .iter()
-                            .filter(|t| token_set.contains(t.as_str()))
-                            .collect();
-                        serde_json::json!({
-                            "policy": policy.handle(),
-                            "matched_triggers": hit,
-                            "severity": policy.severity,
-                            "required_fields": policy.required_fields,
-                        })
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&matches).unwrap_or_default()
-            }
-            Err(e) => format!("Error: {}", e),
-        }
+        self.impl_policy_check_tokens(params.0)
     }
 
     #[tool(
         description = "Sign the active policy at `path` using the server's registered PolicySigner. Canonicalizes the policy (excluding the `signature` field), signs the canonical bytes, and writes the policy back with the signature attached. Returns {\"ok\": true, \"signature\": {...}} on success or {\"error\": \"...\"} when no signer is registered or the policy doesn't exist."
     )]
     async fn agentstategraph_policy_sign(&self, params: Parameters<PolicySignParams>) -> String {
-        let p = params.0;
-        let Some(signer) = self.signer.as_ref() else {
-            return serde_json::json!({ "error": "no signer registered" }).to_string();
-        };
-        let policy = match self.policies.get(&p.r#ref, &p.path, None) {
-            Ok(pol) => pol,
-            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
-        };
-        let canonical = match canonicalize(&policy) {
-            Ok(c) => c,
-            Err(e) => {
-                return serde_json::json!({ "error": format!("canonicalize: {}", e) }).to_string();
-            }
-        };
-        let (key_id, sig_bytes) = match signer.sign(&canonical) {
-            Ok(pair) => pair,
-            Err(e) => return serde_json::json!({ "error": format!("sign: {}", e) }).to_string(),
-        };
-        // `signer_key_id` param is advisory — `Ed25519Signer` returns its
-        // configured key_id. We surface the one the signer actually used.
-        let _requested = p.signer_key_id;
-        let signature = PolicySignature::Ed25519 {
-            signer_key_id: key_id,
-            signature_hex: hex::encode(&sig_bytes),
-        };
-        if let Err(e) = self
-            .policies
-            .set_signature(&p.r#ref, &p.path, signature.clone())
-        {
-            return serde_json::json!({ "error": e.to_string() }).to_string();
-        }
-        serde_json::json!({
-            "ok": true,
-            "signature": signature,
-        })
-        .to_string()
+        self.impl_policy_sign(params.0)
     }
 
     #[tool(
@@ -1955,26 +1634,7 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyVerifyParams>,
     ) -> String {
-        let p = params.0;
-        let Some(verifier) = self.verifier.as_ref() else {
-            return serde_json::json!({
-                "valid": serde_json::Value::Null,
-                "reason": "no verifier registered",
-            })
-            .to_string();
-        };
-        let policy = match self.policies.get(&p.r#ref, &p.path, None) {
-            Ok(pol) => pol,
-            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
-        };
-        match verifier.verify_policy(&policy) {
-            Ok(()) => serde_json::json!({ "valid": true }).to_string(),
-            Err(e) => serde_json::json!({
-                "valid": false,
-                "reason": e.to_string(),
-            })
-            .to_string(),
-        }
+        self.impl_policy_verify(params.0)
     }
 
     // -- Taint / Quarantine / Watch tools (0.7.75 §6) --
@@ -1983,44 +1643,14 @@ impl AgentStateGraphServer {
         description = "Apply a taint to `path` with an effect that changes how agents interact with it. Effects: 'warn' (advisory), 'block' (rejects writes), 'review' (requires confidence >= 0.9), 'isolate' (excludes from query/search)."
     )]
     async fn agentstategraph_taint(&self, params: Parameters<TaintApplyParams>) -> String {
-        let p = params.0;
-        let effect = match parse_taint_effect(&p.effect) {
-            Some(e) => e,
-            None => {
-                return serde_json::json!({ "error": format!("unknown effect: {}", p.effect) })
-                    .to_string();
-            }
-        };
-        let params = agentstategraph_taint::TaintParams {
-            name: p.name,
-            effect,
-            reason: p.reason,
-            severity: parse_taint_severity(p.severity.as_deref()),
-            expires_at: parse_optional_rfc3339(p.expires.as_deref()),
-            propagate: p.propagate.unwrap_or(true),
-            metadata: agentstategraph_taint::TaintMetadata::new(),
-            agent_id: p.agent_id,
-        };
-        match self.repo.taint(&p.r#ref, &p.path, params) {
-            Ok(id) => serde_json::json!({ "ok": true, "id": id }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_taint(params.0)
     }
 
     #[tool(
         description = "Remove a taint by name from `path`. Requires a reason; optional proof (commit id) for audit."
     )]
     async fn agentstategraph_untaint(&self, params: Parameters<TaintRemoveParams>) -> String {
-        let p = params.0;
-        let params = agentstategraph_taint::UntaintParams {
-            reason: p.reason,
-            proof: p.proof,
-            agent_id: p.agent_id,
-        };
-        match self.repo.untaint(&p.r#ref, &p.path, &p.name, params) {
-            Ok(()) => serde_json::json!({ "ok": true }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_untaint(params.0)
     }
 
     #[tool(
@@ -2030,118 +1660,38 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<QuarantineApplyParams>,
     ) -> String {
-        let p = params.0;
-        let params = agentstategraph_taint::QuarantineParams {
-            name: p.name,
-            reason: p.reason,
-            severity: parse_taint_severity(p.severity.as_deref()),
-            authorized_agents: p.authorized_agents,
-            expires_at: parse_optional_rfc3339(p.expires.as_deref()),
-            propagate: p.propagate.unwrap_or(true),
-            agent_id: p.agent_id,
-        };
-        match self.repo.quarantine(&p.r#ref, &p.path, params) {
-            Ok(id) => serde_json::json!({ "ok": true, "id": id }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_quarantine(params.0)
     }
 
-    #[tool(
-        description = "Release a quarantine. Caller should supply evidence the issue is resolved via the `proof` field."
-    )]
+    #[tool(description = "Release a quarantine. Caller should supply evidence the issue is resolved via the `proof` field.")]
     async fn agentstategraph_unquarantine(&self, params: Parameters<TaintRemoveParams>) -> String {
-        let p = params.0;
-        let params = agentstategraph_taint::UntaintParams {
-            reason: p.reason,
-            proof: p.proof,
-            agent_id: p.agent_id,
-        };
-        match self.repo.unquarantine(&p.r#ref, &p.path, &p.name, params) {
-            Ok(()) => serde_json::json!({ "ok": true }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_unquarantine(params.0)
     }
 
     #[tool(
         description = "Apply an advisory watch to `path`. Lighter than taint — purely advisory, does not restrict access. Watches with a numeric `threshold` auto-escalate to a Warn-effect taint when a subsequent set_json crosses the threshold."
     )]
     async fn agentstategraph_watch(&self, params: Parameters<WatchApplyParams>) -> String {
-        let p = params.0;
-        let direction = match p.direction.as_deref().unwrap_or("above") {
-            "below" => agentstategraph_taint::WatchDirection::Below,
-            _ => agentstategraph_taint::WatchDirection::Above,
-        };
-        let params = agentstategraph_taint::WatchParams {
-            name: p.name,
-            reason: p.reason,
-            metric: p.metric,
-            threshold: p.threshold,
-            direction,
-            check_interval_secs: p.check_interval_secs,
-            expires_at: parse_optional_rfc3339(p.expires.as_deref()),
-            severity: parse_taint_severity(p.severity.as_deref()),
-            propagate: p.propagate.unwrap_or(true),
-            agent_id: p.agent_id,
-        };
-        match self.repo.watch_path(&p.r#ref, &p.path, params) {
-            Ok(id) => serde_json::json!({ "ok": true, "id": id }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_watch(params.0)
     }
 
     #[tool(description = "Remove a watch by name.")]
     async fn agentstategraph_unwatch(&self, params: Parameters<WatchRemoveParams>) -> String {
-        let p = params.0;
-        let params = agentstategraph_taint::UnwatchParams {
-            reason: p.reason,
-            agent_id: p.agent_id,
-        };
-        match self.repo.unwatch(&p.r#ref, &p.path, &p.name, params) {
-            Ok(()) => serde_json::json!({ "ok": true }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_unwatch(params.0)
     }
 
     #[tool(
         description = "List active taints / quarantines / watches. Optional filters: `path` prefix, `kind` (taint|quarantine|watch), `effect`, `include_expired`."
     )]
     async fn agentstategraph_list_taints(&self, params: Parameters<ListTaintsParams>) -> String {
-        let p = params.0;
-        let kind = match p.kind.as_deref() {
-            Some("taint") => Some(agentstategraph_taint::TaintKind::Taint),
-            Some("quarantine") => Some(agentstategraph_taint::TaintKind::Quarantine),
-            Some("watch") => Some(agentstategraph_taint::TaintKind::Watch),
-            Some(other) => {
-                return serde_json::json!({ "error": format!("unknown kind: {}", other) })
-                    .to_string();
-            }
-            None => None,
-        };
-        match self
-            .repo
-            .list_taints(p.path.as_deref(), kind, p.include_expired.unwrap_or(false))
-        {
-            Ok(mut list) => {
-                if let Some(effect) = p.effect.as_deref().and_then(parse_taint_effect) {
-                    list.retain(|t| t.effect == effect);
-                }
-                serde_json::json!({ "ok": true, "taints": list }).to_string()
-            }
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_list_taints(params.0)
     }
 
     #[tool(
         description = "Check the full taint status for `path`, including ancestor taints. Returns whether a write is allowed for the given agent at the given confidence, plus aggregated taint / quarantine / watch lists."
     )]
     async fn agentstategraph_check_taint(&self, params: Parameters<CheckTaintParams>) -> String {
-        let p = params.0;
-        let agent_id = p.agent_id.as_deref().unwrap_or("");
-        let confidence = p.confidence.unwrap_or(1.0);
-        match self.repo.check_taint(&p.path, agent_id, confidence) {
-            Ok(c) => serde_json::json!({ "ok": true, "check": c }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.impl_check_taint(params.0)
     }
 
     #[tool(
@@ -2151,52 +1701,7 @@ impl AgentStateGraphServer {
         &self,
         params: Parameters<PolicyEvaluateChangeWithTaintsParams>,
     ) -> String {
-        let p = params.0;
-        let proposal: ChangeProposal = match serde_json::from_value(p.proposal.clone()) {
-            Ok(p) => p,
-            Err(e) => {
-                return serde_json::json!({ "error": format!("invalid ChangeProposal: {e}") })
-                    .to_string();
-            }
-        };
-        let decision = match self.policies.evaluate_change_scoped(
-            &p.r#ref,
-            &proposal,
-            p.tenant_filter.as_deref(),
-        ) {
-            Ok(d) => d,
-            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
-        };
-        let agent_id = p
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| proposal.agent_id.clone());
-        let confidence = p.confidence.unwrap_or(1.0);
-        let mut taint_status = Vec::new();
-        let mut can_proceed = !matches!(decision, agentstategraph_policy::Decision::Deny { .. });
-        for path in &p.affected_paths {
-            match self.repo.check_taint(path, &agent_id, confidence) {
-                Ok(c) => {
-                    if !c.can_write {
-                        can_proceed = false;
-                    }
-                    taint_status.push(serde_json::json!({
-                        "path": path,
-                        "check": c,
-                    }));
-                }
-                Err(e) => {
-                    return serde_json::json!({ "error": e.to_string() }).to_string();
-                }
-            }
-        }
-        serde_json::json!({
-            "ok": true,
-            "decision": decision,
-            "taint_status": taint_status,
-            "can_proceed": can_proceed,
-        })
-        .to_string()
+        self.impl_policy_evaluate_change_with_taints(params.0)
     }
 }
 

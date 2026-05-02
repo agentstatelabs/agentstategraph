@@ -22,10 +22,6 @@ pub mod taint;
 pub mod tree;
 pub mod watch;
 
-// Re-export taint types so consumers don't need the sibling crate
-// on their Cargo.toml for the common path.
-pub use agentstategraph_taint as taint_types;
-
 // Re-export core and storage for convenience
 pub use agentstategraph_core as core;
 pub use agentstategraph_storage as storage;
