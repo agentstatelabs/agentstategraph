@@ -264,6 +264,18 @@ pub struct SealEpochParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ArchiveEpochParams {
+    /// ID of the sealed epoch to archive.
+    pub id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ExportEpochParams {
+    /// ID of the sealed or archived epoch to export.
+    pub id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SessionListParams {
     /// Optional agent filter.
     pub agent_id: Option<String>,
@@ -1331,6 +1343,34 @@ impl AgentStateGraphServer {
         let p = params.0;
         match self.repo.seal_epoch(&p.id, &p.summary) {
             Ok(()) => format!("Epoch '{}' sealed", p.id),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Archive a sealed epoch, transitioning it from Sealed to Archived. An archived epoch is considered in cold storage: it remains queryable but signals that its state is finalized and no longer actively referenced. Only Sealed epochs can be archived."
+    )]
+    async fn agentstategraph_archive_epoch(
+        &self,
+        params: Parameters<ArchiveEpochParams>,
+    ) -> String {
+        let p = params.0;
+        match self.repo.archive_epoch(&p.id) {
+            Ok(()) => format!("Epoch '{}' archived", p.id),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Export a sealed or archived epoch as a self-contained JSON audit bundle. The bundle contains the epoch metadata and the full Commit records for every commit associated with the epoch, making it independently verifiable without access to the live store."
+    )]
+    async fn agentstategraph_export_epoch(
+        &self,
+        params: Parameters<ExportEpochParams>,
+    ) -> String {
+        let p = params.0;
+        match self.repo.export_epoch(&p.id) {
+            Ok(bundle) => bundle.to_string(),
             Err(e) => format!("Error: {}", e),
         }
     }

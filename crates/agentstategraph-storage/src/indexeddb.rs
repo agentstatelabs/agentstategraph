@@ -389,6 +389,12 @@ impl EpochStore for IndexedDbStorage {
         self.queue_epoch_snapshot(epoch_id)?;
         Ok(())
     }
+
+    fn archive_epoch(&self, id: &str) -> Result<(), StorageError> {
+        self.memory.archive_epoch(id)?;
+        self.queue_epoch_snapshot(id)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------

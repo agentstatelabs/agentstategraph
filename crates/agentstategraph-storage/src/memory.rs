@@ -252,7 +252,39 @@ impl EpochStore for MemoryStorage {
             .epochs
             .read()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
-        Ok(epochs.iter().find(|e| e.id == id).cloned())
+        let Some(mut epoch) = epochs.iter().find(|e| e.id == id).cloned() else {
+            return Ok(None);
+        };
+        // Rehydrate commits from the association map.
+        let assoc = self
+            .commit_epoch
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        epoch.commits = assoc
+            .iter()
+            .filter(|(_, eid)| eid == id)
+            .map(|(cid, _)| *cid)
+            .collect();
+        Ok(Some(epoch))
+    }
+
+    fn archive_epoch(&self, id: &str) -> Result<(), StorageError> {
+        let mut epochs = self
+            .epochs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let epoch = epochs
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| StorageError::Backend(format!("epoch not found: {}", id)))?;
+        if epoch.status != EpochStatus::Sealed {
+            return Err(StorageError::Backend(format!(
+                "epoch '{}' is not sealed",
+                id
+            )));
+        }
+        epoch.status = EpochStatus::Archived;
+        Ok(())
     }
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {

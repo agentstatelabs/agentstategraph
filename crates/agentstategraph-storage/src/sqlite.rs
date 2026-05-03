@@ -677,11 +677,51 @@ impl EpochStore for SqliteStorage {
         match row {
             None => Ok(None),
             Some((id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc)) => {
-                Ok(Some(row_to_epoch(
+                let mut epoch = row_to_epoch(
                     id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc,
-                )?))
+                )?;
+                // Rehydrate commits list from the commits table.
+                let mut stmt = conn
+                    .prepare("SELECT id FROM commits WHERE epoch_id = ?1 ORDER BY rowid")
+                    .map_err(|e| StorageError::Backend(format!("prepare epoch commits: {}", e)))?;
+                let commit_ids: Vec<ObjectId> = stmt
+                    .query_map(params![epoch.id], |row| {
+                        let bytes: Vec<u8> = row.get(0)?;
+                        Ok(bytes)
+                    })
+                    .map_err(|e| StorageError::Backend(format!("query epoch commits: {}", e)))?
+                    .filter_map(|r| r.ok())
+                    .filter_map(|b| {
+                        if b.len() == 32 {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&b);
+                            Some(ObjectId::from_bytes(arr))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                epoch.commits = commit_ids;
+                Ok(Some(epoch))
             }
         }
+    }
+
+    fn archive_epoch(&self, id: &str) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        let rows = conn
+            .execute(
+                "UPDATE epochs SET status = 'Archived' WHERE id = ?1 AND status = 'Sealed'",
+                params![id],
+            )
+            .map_err(|e| StorageError::Backend(format!("archive epoch: {}", e)))?;
+        if rows == 0 {
+            return Err(StorageError::Backend(format!(
+                "epoch '{}' not found or not sealed",
+                id
+            )));
+        }
+        Ok(())
     }
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {

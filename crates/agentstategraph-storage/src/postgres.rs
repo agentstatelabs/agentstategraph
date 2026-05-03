@@ -837,19 +837,72 @@ impl EpochStore for PostgresStorage {
 
             match row {
                 None => Ok(None),
-                Some(row) => Ok(Some(row_to_epoch(
-                    row.get("id"),
-                    row.get("description"),
-                    row.get("status"),
-                    row.get("created_at"),
-                    row.get("sealed_at"),
-                    row.get("summary"),
-                    row.get("root_intents"),
-                    row.get("agents"),
-                    row.get("tags"),
-                    row.get("sealed_commits"),
-                )?)),
+                Some(row) => {
+                    let mut epoch = row_to_epoch(
+                        row.get("id"),
+                        row.get("description"),
+                        row.get("status"),
+                        row.get("created_at"),
+                        row.get("sealed_at"),
+                        row.get("summary"),
+                        row.get("root_intents"),
+                        row.get("agents"),
+                        row.get("tags"),
+                        row.get("sealed_commits"),
+                    )?;
+                    // Rehydrate commits list.
+                    let rows = client
+                        .query(
+                            "SELECT id FROM commits
+                              WHERE tenant_id = $1 AND epoch_id = $2
+                              ORDER BY created_at",
+                            &[&self.tenant_id, &epoch.id],
+                        )
+                        .await
+                        .map_err(|e| {
+                            StorageError::Backend(format!("epoch commits: {}", e))
+                        })?;
+                    epoch.commits = rows
+                        .iter()
+                        .filter_map(|r| {
+                            let b: Vec<u8> = r.get("id");
+                            if b.len() == 32 {
+                                let mut arr = [0u8; 32];
+                                arr.copy_from_slice(&b);
+                                Some(ObjectId::from_bytes(arr))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    Ok(Some(epoch))
+                }
             }
+        })
+    }
+
+    fn archive_epoch(&self, id: &str) -> Result<(), StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let n = client
+                .execute(
+                    "UPDATE epochs SET status = 'Archived'
+                      WHERE tenant_id = $1 AND id = $2 AND status = 'Sealed'",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("archive epoch: {}", e)))?;
+            if n == 0 {
+                return Err(StorageError::Backend(format!(
+                    "epoch '{}' not found or not sealed",
+                    id
+                )));
+            }
+            Ok(())
         })
     }
 

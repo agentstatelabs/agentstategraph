@@ -242,6 +242,9 @@ pub enum RepoError {
     /// `taint_id` is `Some` for all blocking rejections (NotAuthorized,
     /// Blocked, InsufficientConfidence) and `None` only for lookup
     /// failures (NotFound) where no taint id exists to report.
+    #[error("invalid operation: {0}")]
+    InvalidOperation(String),
+
     #[error("taint hook rejected write{}: {source}", match .taint_id {
         Some(id) => format!(" (taint: {id})"),
         None => String::new(),
@@ -1036,6 +1039,42 @@ impl Repository {
         self.storage
             .get_epoch(id)?
             .ok_or_else(|| RepoError::RefNotFound(format!("epoch not found: {}", id)))
+    }
+
+    /// Transition a sealed epoch to Archived.
+    pub fn archive_epoch(&self, id: &str) -> Result<(), RepoError> {
+        self.storage.archive_epoch(id).map_err(RepoError::Storage)
+    }
+
+    /// Export a sealed or archived epoch as a self-contained JSON audit bundle.
+    ///
+    /// The bundle includes the epoch metadata and the full Commit records for
+    /// every commit associated with the epoch, making it independently
+    /// verifiable without access to the live store.
+    pub fn export_epoch(&self, id: &str) -> Result<serde_json::Value, RepoError> {
+        let epoch = self.get_epoch(id)?;
+        if epoch.status == agentstategraph_core::EpochStatus::Active {
+            return Err(RepoError::InvalidOperation(
+                "cannot export an active epoch; seal it first".to_string(),
+            ));
+        }
+        let mut commits = Vec::new();
+        for cid in &epoch.commits {
+            if let Some(commit) = self.storage.get_commit(cid)? {
+                commits.push(serde_json::to_value(&commit).map_err(|e| {
+                    RepoError::InvalidOperation(format!("serialize commit: {}", e))
+                })?);
+            }
+        }
+        let bundle = serde_json::json!({
+            "agentstategraph_export_version": 1,
+            "epoch": serde_json::to_value(&epoch).map_err(|e| {
+                RepoError::InvalidOperation(format!("serialize epoch: {}", e))
+            })?,
+            "commits": commits,
+            "exported_at": chrono::Utc::now().to_rfc3339(),
+        });
+        Ok(bundle)
     }
 
     // -----------------------------------------------------------------------
@@ -2373,5 +2412,76 @@ mod tests {
             Err(RepoError::EpochSealViolated { .. }) => {}
             other => panic!("expected EpochSealViolated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_get_epoch_rehydrates_commits() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.create_epoch("e1", "first epoch", vec![]).unwrap();
+        repo.set_active_epoch(Some("e1".to_string())).unwrap();
+
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a")).unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b")).unwrap();
+
+        repo.set_active_epoch(None).unwrap();
+        repo.seal_epoch("e1", "done").unwrap();
+
+        let epoch = repo.get_epoch("e1").unwrap();
+        assert_eq!(epoch.commits.len(), 2, "get_epoch must rehydrate 2 commits");
+    }
+
+    #[test]
+    fn test_archive_epoch() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.create_epoch("e1", "epoch", vec![]).unwrap();
+        repo.seal_epoch("e1", "done").unwrap();
+
+        repo.archive_epoch("e1").unwrap();
+
+        let epoch = repo.get_epoch("e1").unwrap();
+        assert_eq!(epoch.status, agentstategraph_core::EpochStatus::Archived);
+    }
+
+    #[test]
+    fn test_archive_epoch_requires_sealed() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.create_epoch("e1", "epoch", vec![]).unwrap();
+
+        // Cannot archive an active epoch.
+        assert!(repo.archive_epoch("e1").is_err());
+    }
+
+    #[test]
+    fn test_export_epoch() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.create_epoch("e1", "export test", vec![]).unwrap();
+        repo.set_active_epoch(Some("e1".to_string())).unwrap();
+
+        repo.set("main", "/x", &Object::string("hello"), quick_opts("x")).unwrap();
+
+        repo.set_active_epoch(None).unwrap();
+        repo.seal_epoch("e1", "done").unwrap();
+
+        let bundle = repo.export_epoch("e1").unwrap();
+        assert_eq!(bundle["agentstategraph_export_version"], 1);
+        assert_eq!(bundle["epoch"]["id"], "e1");
+        assert!(bundle["commits"].is_array());
+        assert_eq!(bundle["commits"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_export_epoch_rejects_active() {
+        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        repo.init().unwrap();
+        repo.create_epoch("e1", "active", vec![]).unwrap();
+
+        assert!(matches!(
+            repo.export_epoch("e1"),
+            Err(RepoError::InvalidOperation(_))
+        ));
     }
 }

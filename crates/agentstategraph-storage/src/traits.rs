@@ -141,6 +141,10 @@ pub trait EpochStore: Send + Sync {
     /// Associate a commit with the given epoch. Must reject if the epoch
     /// is already sealed.
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError>;
+
+    /// Transition a sealed epoch to Archived. Fails if the epoch is not
+    /// found or is not in the Sealed state.
+    fn archive_epoch(&self, id: &str) -> Result<(), StorageError>;
 }
 
 /// Durable storage of agent sessions and their association with commits.

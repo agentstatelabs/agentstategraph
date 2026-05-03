@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-ffi"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-mcp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-cedar"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-policy",
  "serde_json",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-rego"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-policy",
  "serde_json",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-sign"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-policy",
  "chrono",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-wasm"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-policy",
  "serde_json",
@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-reminders"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-taint"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-wasm"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
