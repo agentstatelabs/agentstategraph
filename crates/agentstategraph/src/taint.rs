@@ -236,6 +236,11 @@ impl Repository {
     // Query helpers
     // -----------------------------------------------------------------------
 
+    /// Fetch a taint / quarantine / watch record by its storage id.
+    pub fn get_taint(&self, id: &str) -> Result<Option<Taint>, RepoError> {
+        Ok(self.taint_storage().get_taint(id)?)
+    }
+
     /// List taints / quarantines / watches, optionally filtered.
     pub fn list_taints(
         &self,

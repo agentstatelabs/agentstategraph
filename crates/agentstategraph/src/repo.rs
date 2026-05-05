@@ -1581,6 +1581,42 @@ impl Repository {
     }
 }
 
+impl agentstategraph_reminders::ReminderStore for Repository {
+    fn save(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
+        self.storage.save(reminder)
+    }
+
+    fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
+        self.storage.get(id)
+    }
+
+    fn update(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
+        self.storage.update(reminder)
+    }
+
+    fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        self.storage.delete(id)
+    }
+
+    fn list(
+        &self,
+        filter: &agentstategraph_reminders::ReminderFilter,
+    ) -> Result<Vec<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
+        self.storage.list(filter)
+    }
+}
+
 /// Bridge between storage backends and the diff engine's ObjectResolver trait.
 struct StorageResolver<'a> {
     storage: &'a dyn Storage,
