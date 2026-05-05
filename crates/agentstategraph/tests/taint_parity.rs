@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentstategraph::Repository;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{
     QuarantineParams, TaintEffect, TaintMetadata, TaintParams, TaintSeverity,
 };
@@ -45,7 +45,7 @@ fn parse_severity(s: Option<&str>) -> TaintSeverity {
 }
 
 fn fresh() -> Arc<Repository> {
-    let r = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let r = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     r.init().unwrap();
     r
 }

@@ -25,7 +25,7 @@ use agentstategraph::{CommitOptions, Repository, SCHEMA_VERSION};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore, Situation};
-use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{
     QuarantineParams, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
     UntaintParams, UnwatchParams, WatchDirection, WatchParams,
@@ -52,7 +52,11 @@ pub struct SgPolicyStore {
 /// Create a new in-memory AgentStateGraph repository.
 #[no_mangle]
 pub extern "C" fn agentstategraph_new_memory() -> *mut SgRepo {
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    let storage = match SqliteStorage::in_memory() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+    let repo = Repository::new(Box::new(storage));
     if repo.init().is_err() {
         return ptr::null_mut();
     }
@@ -115,7 +119,7 @@ pub extern "C" fn agentstategraph_new_postgres(
     // PostgresStorage::connect_tenant is async. We need a runtime
     // to drive it, and we need the runtime to persist so later
     // block_on calls inside the Storage impls can dispatch on it.
-    // The pattern used by SqliteStorage + MemoryStorage is
+    // The pattern used by SqliteStorage is
     // fully-sync, so for Postgres we run an owned multi-thread
     // runtime and enter() its handle on construction so the repo
     // inherits it.

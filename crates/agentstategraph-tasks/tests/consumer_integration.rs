@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use agentstategraph::{PathPattern, Repository};
 use agentstategraph_core::IntentCategory;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskStore, Verifier, VerifyResult};
 
 /// A stand-in for CTXone's `GitFileTestVerifier`. Backed by in-memory
@@ -71,7 +71,7 @@ impl Verifier for StubGitFileVerifier {
 
 #[test]
 fn full_consumer_workflow() {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().unwrap();
 
     let store = TaskStore::new(repo.clone(), "/plans", "claude-code");

@@ -2,12 +2,12 @@
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{TaintKind, TaintSeverity, WatchDirection, WatchParams};
 use serde_json::json;
 
 fn repo() -> Repository {
-    let r = Repository::new(Box::new(MemoryStorage::new()));
+    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     r.init().unwrap();
     r
 }

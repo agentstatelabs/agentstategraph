@@ -9,7 +9,7 @@
 
 use agentstategraph_core::{Epoch, ObjectId};
 use agentstategraph_storage::{
-    CommitStore, EpochStore, MemoryStorage, ObjectStore, RefStore, SqliteStorage, StorageError,
+    CommitStore, EpochStore, ObjectStore, RefStore, SqliteStorage, StorageError,
 };
 use chrono::Utc;
 
@@ -48,17 +48,12 @@ fn round_trip<S: EpochStore>(store: &S) {
 }
 
 #[test]
-fn round_trip_memory() {
-    round_trip(&MemoryStorage::new());
-}
-
-#[test]
 fn round_trip_sqlite() {
     round_trip(&SqliteStorage::in_memory().unwrap());
 }
 
 // ---------------------------------------------------------------------------
-// Restart survival (SQLite only — MemoryStorage cannot persist by design).
+// Restart survival (SQLite only — in-memory connections cannot persist by design).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -114,11 +109,6 @@ fn seal_enforcement<S: EpochStore + CommitStore + ObjectStore>(store: &S) {
         .seal_epoch("locked", "again", Utc::now(), &[])
         .unwrap_err();
     assert!(matches!(err, StorageError::EpochAlreadySealed { .. }));
-}
-
-#[test]
-fn seal_enforcement_memory() {
-    seal_enforcement(&MemoryStorage::new());
 }
 
 #[test]

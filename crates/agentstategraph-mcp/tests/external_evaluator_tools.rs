@@ -22,11 +22,11 @@ use agentstategraph_policy::{
     AuthorizedAction, Decision, EvaluatorSource, ExternalError, ExternalEvaluator,
     ExternalEvaluatorRef, Policy, Selector, Severity, Situation,
 };
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use chrono::Utc;
 
 fn fresh_repo() -> Arc<Repository> {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().expect("init");
     repo
 }

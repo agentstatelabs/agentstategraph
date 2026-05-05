@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Python `test_policy.py` scenario set end-to-end through
 //! the `WasmPolicyStore` wrapper. Runs under `wasm-bindgen-test` on a
-//! `MemoryStorage`-backed repository so the browser runtime (IndexedDB)
+//! a SqliteStorage-backed repository so the browser runtime (IndexedDB)
 //! is not required. Also audits the 0.6.5 Session + 0.6.0 Task
 //! extension-field round-trip paths per §6 of the 0.7.0-beta.1 plan.
 
@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use agentstategraph::Repository;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_tasks::TaskStore;
 use agentstategraph_wasm::WasmPolicyStore;
 
@@ -25,7 +25,7 @@ extern crate hex;
 // wasm_bindgen_test_configure!(run_in_browser); // drop to allow --node tests
 
 fn new_repo() -> Arc<Repository> {
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     repo.init().expect("init");
     // Seed an initial commit so `main` is resolvable and session
     // creation can pick up a head.

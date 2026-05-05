@@ -146,10 +146,10 @@ pub fn _sanity_agent_id() -> AgentId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
 
-    fn mgr_store() -> MemoryStorage {
-        MemoryStorage::new()
+    fn mgr_store() -> SqliteStorage {
+        SqliteStorage::in_memory().expect("in-memory sqlite")
     }
 
     #[test]

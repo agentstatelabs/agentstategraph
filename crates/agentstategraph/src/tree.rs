@@ -660,10 +660,10 @@ pub enum TreeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
 
-    fn setup() -> (MemoryStorage, ObjectId) {
-        let store = MemoryStorage::new();
+    fn setup() -> (SqliteStorage, ObjectId) {
+        let store = SqliteStorage::in_memory().expect("in-memory sqlite");
 
         // Build a test state tree:
         // {
@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn test_list_paths_truncates_at_max_results() {
-        let store = MemoryStorage::new();
+        let store = SqliteStorage::in_memory().expect("in-memory sqlite");
         // Build a wide tree: a single map with > LIST_PATHS_MAX_RESULTS keys.
         let mut obj = serde_json::Map::new();
         let wide = LIST_PATHS_MAX_RESULTS + 500;

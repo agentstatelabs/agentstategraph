@@ -1,19 +1,19 @@
 //! Integration tests for agentstategraph::Repository.
 //!
-//! Covers the entire public API surface of repo.rs using MemoryStorage so
-//! every test is in-process with no I/O.  Tests are grouped by domain and
+//! Covers the entire public API surface of repo.rs using SqliteStorage::in_memory()
+//! so every test is in-process with no I/O.  Tests are grouped by domain and
 //! ordered from simplest to most complex within each group.
 
 use agentstategraph::{CommitOptions, RepoError, Repository, META_PATH_PREFIX, SCHEMA_VERSION};
 use agentstategraph_core::{IntentCategory, Object, QueryFilters};
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 fn repo() -> Repository {
-    let r = Repository::new(Box::new(MemoryStorage::new()));
+    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     r.init().unwrap();
     r
 }
@@ -32,7 +32,7 @@ fn opts_agent(agent: &str, category: IntentCategory, desc: &str) -> CommitOption
 
 #[test]
 fn init_creates_main() {
-    let r = Repository::new(Box::new(MemoryStorage::new()));
+    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     r.init().unwrap();
     // Should be able to get the schema version stamp
     let ver = r
@@ -43,7 +43,7 @@ fn init_creates_main() {
 
 #[test]
 fn init_is_idempotent() {
-    let r = Repository::new(Box::new(MemoryStorage::new()));
+    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     let id1 = r.init().unwrap();
     let id2 = r.init().unwrap();
     assert_eq!(id1, id2, "second init must return same commit id");

@@ -9,10 +9,10 @@
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 
 fn main() {
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     repo.init().unwrap();
 
     println!("=== Multi-Agent Orchestration Demo ===\n");

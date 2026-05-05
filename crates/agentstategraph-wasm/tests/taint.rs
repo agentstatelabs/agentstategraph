@@ -3,7 +3,7 @@
 //! Mirrors the §9 pattern used by `tests/policy.rs`: every scenario
 //! routes through the `WasmAgentStateGraph` wrappers and asserts the
 //! JSON payload JS sees on the wire. `IndexedDbStorage` is
-//! `MemoryStorage`-backed under `wasm-pack test --node`, so the
+//! backed by an in-memory store under `wasm-pack test --node`, so the
 //! browser runtime isn't needed.
 
 #![cfg(target_arch = "wasm32")]

@@ -194,7 +194,8 @@ async fn health_with_mgr(State(mgr): State<Arc<TenantManager>>) -> Json<serde_js
         // If auth is enabled, health still works — just report status
         mgr.get_repo(None).unwrap_or_else(|_| {
             Arc::new(Repository::new(Box::new(
-                agentstategraph_storage::MemoryStorage::new(),
+                agentstategraph_storage::SqliteStorage::in_memory()
+                    .expect("in-memory sqlite"),
             )))
         })
     });

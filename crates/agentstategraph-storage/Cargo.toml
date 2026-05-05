@@ -8,9 +8,10 @@ description = "Pluggable storage backends for AgentStateGraph"
 
 [features]
 default = ["sqlite"]
+memory = []
 sqlite = ["dep:rusqlite"]
 postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio"]
-indexeddb = []
+indexeddb = ["memory"]
 
 [dependencies]
 agentstategraph-core = { path = "../agentstategraph-core" }

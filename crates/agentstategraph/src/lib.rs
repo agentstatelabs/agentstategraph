@@ -8,10 +8,10 @@
 //!
 //! ```rust,ignore
 //! use agentstategraph::Repository;
-//! use agentstategraph_storage::MemoryStorage;
+//! use agentstategraph_storage::SqliteStorage;
 //! use agentstategraph_core::{IntentCategory, Intent};
 //!
-//! let storage = MemoryStorage::new();
+//! let storage = SqliteStorage::in_memory().expect("in-memory sqlite");
 //! let mut repo = Repository::new(Box::new(storage));
 //! ```
 

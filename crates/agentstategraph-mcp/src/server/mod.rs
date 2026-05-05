@@ -2124,7 +2124,7 @@ fn json_value_to_object(value: &serde_json::Value) -> Object {
 mod tests {
     use super::*;
     use agentstategraph::{CommitOptions, RepoError, Repository};
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
 
     #[test]
     fn parse_category_migrate_is_custom_not_migrate() {
@@ -2144,7 +2144,7 @@ mod tests {
         // A caller passing intent_category="migrate" must not be able to
         // write under /_meta/* — the substrate should reject it with
         // ReservedPath.
-        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
         repo.init().expect("init repo");
         let opts = CommitOptions::new(
             "test-agent",
@@ -2172,7 +2172,7 @@ mod tests {
         // IntentCategory::Migrate directly (not via parse_category) — that
         // path MUST continue to work, otherwise we've broken legitimate
         // migrations.
-        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
         repo.init().expect("init repo");
         let opts = CommitOptions::new("migrator", IntentCategory::Migrate, "legitimate migration");
         repo.set_json(

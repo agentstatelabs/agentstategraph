@@ -1,16 +1,16 @@
 //! 0.7.75 §4 — Repository-level taint methods + pre-commit hook
-//! integration tests. Runs against `MemoryStorage` for speed.
+//! integration tests. Runs against `SqliteStorage::in_memory()` for speed.
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{
     QuarantineParams, TaintEffect, TaintError, TaintKind, TaintMetadata, TaintParams,
     TaintSeverity, UntaintParams, UnwatchParams, WatchDirection, WatchParams,
 };
 
 fn repo() -> Repository {
-    let r = Repository::new(Box::new(MemoryStorage::new()));
+    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     r.init().unwrap();
     r
 }

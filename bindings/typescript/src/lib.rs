@@ -33,7 +33,7 @@ use agentstategraph_policy::{
 use agentstategraph_policy_sign::{
     Ed25519Signer, Ed25519Verifier, InMemoryKeyRegistry, PolicySigner, PolicyVerifier, canonicalize,
 };
-use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_tasks::{
     NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
     TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyReport, VerifyResult,
@@ -112,7 +112,7 @@ impl AgentStateGraph {
                 let storage = SqliteStorage::open(&p).map_err(err)?;
                 Repository::new(Box::new(storage))
             }
-            None => Repository::new(Box::new(MemoryStorage::new())),
+            None => Repository::new(Box::new(SqliteStorage::in_memory().map_err(err)?)),
         };
         repo.init().map_err(err)?;
         Ok(Self {

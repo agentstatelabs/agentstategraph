@@ -3,7 +3,7 @@ mod common;
 use std::sync::Arc;
 
 use agentstategraph::Repository;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_tasks::{Priority, TaskStore};
 
 /// Two TaskStores with different prefixes sharing one Repository must
@@ -12,7 +12,7 @@ use agentstategraph_tasks::{Priority, TaskStore};
 /// same repo by picking non-overlapping prefixes.
 #[test]
 fn two_stores_with_different_prefixes_do_not_interfere() {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().unwrap();
 
     let plans = TaskStore::new(repo.clone(), "/plans", "ctxone-agent");
@@ -64,7 +64,7 @@ fn two_stores_with_different_prefixes_do_not_interfere() {
 
 #[test]
 fn trailing_slash_in_prefix_is_stripped() {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().unwrap();
     let store = TaskStore::new(repo, "/plans/", "agent");
     assert_eq!(store.prefix(), "/plans");

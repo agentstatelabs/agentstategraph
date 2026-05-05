@@ -1,8 +1,7 @@
-//! Shared TaintStore conformance tests — run against both
-//! MemoryStorage and SqliteStorage so the two backends stay in
-//! lock-step. 0.7.75 §3.
+//! Shared TaintStore conformance tests — run against SqliteStorage.
+//! 0.7.75 §3.
 
-use agentstategraph_storage::{MemoryStorage, SqliteStorage, TaintStore};
+use agentstategraph_storage::{SqliteStorage, TaintStore};
 use agentstategraph_taint::{Taint, TaintEffect, TaintKind, TaintMetadata, TaintSeverity};
 use chrono::{Duration, Utc};
 
@@ -110,11 +109,6 @@ fn run_conformance<S: TaintStore>(store: &S) {
     store.create_taint(&expired).unwrap();
     let ex_match = store.check_taint("/exp").unwrap();
     assert!(ex_match.iter().all(|t| t.id != expired.id));
-}
-
-#[test]
-fn memory_storage_taint_conformance() {
-    run_conformance(&MemoryStorage::new());
 }
 
 #[test]

@@ -4,11 +4,11 @@ use agentstategraph_migrate::{
     CheckResult, MigrateError, Migration, MigrationOutcome, Registry, RunMode, StepStatus,
     binary_version, check, migrate_commit_options, version_object,
 };
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use semver::{Version, VersionReq};
 
 fn fresh_repo() -> Repository {
-    let r = Repository::new(Box::new(MemoryStorage::new()));
+    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     r.init().unwrap();
     r
 }
@@ -29,7 +29,7 @@ fn set_version(repo: &Repository, v: &str) {
 
 #[test]
 fn check_errors_for_repo_without_init() {
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     // No init → no branch → get() returns RepoError::Branch → MigrateError::Repo
     let target = binary_version();
     let r = check(&repo, "main", &target, &Registry::empty());

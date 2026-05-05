@@ -31,7 +31,7 @@ use agentstategraph_core::IntentCategory;
 use agentstategraph_policy::{
     ApprovalRule, ChangeProposal, Decision, FallbackAction, Policy, PolicyStore, Selector, Severity,
 };
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use chrono::Utc;
 
 fn main() {
@@ -40,7 +40,7 @@ fn main() {
     println!("──────────────────────────────────────────────────\n");
 
     // ─── Repo + PolicyStore ──────────────────────────────────
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().expect("init repo");
     let store = PolicyStore::new(repo.clone(), "/policies", "agent/demo");
 

@@ -7,12 +7,12 @@
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 
 fn main() {
     // ─── 1. Create a repository ───────────────────────────────────
-    // MemoryStorage for quick start. Use SqliteStorage("path.db") for persistence.
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    // In-memory SQLite for quick start. Use SqliteStorage::open("path.db") for persistence.
+    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     repo.init().unwrap();
     println!("✓ Repository initialized\n");
 

@@ -6,7 +6,7 @@
 
 use agentstategraph_core::{ObjectId, Session, SessionStatus};
 use agentstategraph_storage::{
-    CommitStore, MemoryStorage, ObjectStore, SessionStore, SqliteStorage, StorageError,
+    CommitStore, ObjectStore, SessionStore, SqliteStorage, StorageError,
 };
 use chrono::Utc;
 
@@ -50,11 +50,6 @@ fn round_trip<S: SessionStore>(store: &S) {
     let s1 = store.get_session("s1").unwrap().unwrap();
     assert_eq!(s1.status, SessionStatus::Completed);
     assert!(s1.ended_at.is_some());
-}
-
-#[test]
-fn round_trip_memory() {
-    round_trip(&MemoryStorage::new());
 }
 
 #[test]
@@ -110,11 +105,6 @@ fn end_enforcement<S: SessionStore + CommitStore + ObjectStore>(store: &S) {
         .end_session("s", SessionStatus::Abandoned, Utc::now())
         .unwrap_err();
     assert!(matches!(err, StorageError::SessionEnded { .. }));
-}
-
-#[test]
-fn end_enforcement_memory() {
-    end_enforcement(&MemoryStorage::new());
 }
 
 #[test]

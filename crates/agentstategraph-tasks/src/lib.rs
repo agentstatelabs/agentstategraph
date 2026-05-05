@@ -10,11 +10,11 @@
 //!
 //! ```rust,no_run
 //! use agentstategraph::Repository;
-//! use agentstategraph_storage::MemoryStorage;
+//! use agentstategraph_storage::SqliteStorage;
 //! use agentstategraph_tasks::{Priority, Proof, TaskStore};
 //! use std::sync::Arc;
 //!
-//! let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+//! let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
 //! repo.init().unwrap();
 //!
 //! let store = TaskStore::new(repo, "/plans", "claude-code");

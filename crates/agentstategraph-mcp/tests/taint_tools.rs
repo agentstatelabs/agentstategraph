@@ -8,11 +8,11 @@ use agentstategraph::Repository;
 use agentstategraph_mcp::server::{
     AgentStateGraphServer, parse_optional_rfc3339, parse_taint_effect, parse_taint_severity,
 };
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity};
 
 fn server() -> AgentStateGraphServer {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().unwrap();
     AgentStateGraphServer::new(repo)
 }

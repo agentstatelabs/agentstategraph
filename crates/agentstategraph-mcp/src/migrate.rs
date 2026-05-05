@@ -9,7 +9,7 @@ use agentstategraph::Repository;
 use agentstategraph_migrate::{
     CheckResult, Registry, RunMode, binary_version, check, exit as exit_codes,
 };
-use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_storage::SqliteStorage;
 use semver::Version;
 
 pub fn run(args: &[String]) -> i32 {
@@ -76,7 +76,9 @@ pub fn run(args: &[String]) -> i32 {
     };
 
     let repo: Arc<Repository> = match storage_type {
-        "memory" => Arc::new(Repository::new(Box::new(MemoryStorage::new()))),
+        "memory" => Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ))),
         _ => match SqliteStorage::open(&db_path) {
             Ok(s) => Arc::new(Repository::new(Box::new(s))),
             Err(e) => {

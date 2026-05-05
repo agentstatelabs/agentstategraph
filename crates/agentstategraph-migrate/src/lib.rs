@@ -410,10 +410,10 @@ pub use agentstategraph::META_PATH_PREFIX;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
 
     fn fresh_repo() -> Repository {
-        let repo = Repository::new(Box::new(MemoryStorage::new()));
+        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
         repo.init().unwrap();
         repo
     }

@@ -16,12 +16,12 @@ use std::sync::Arc;
 use agentstategraph::Repository;
 use agentstategraph_mcp::auth::{ApiKey, TenantManager};
 use agentstategraph_mcp::http;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 
 /// Boot an ASG HTTP server with auth enabled and a single seeded API
 /// key, on an ephemeral port. Returns (base_url, api_key).
 async fn boot_with_key(api_key: ApiKey) -> String {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().expect("init repo");
 
     let tenant_mgr = TenantManager::multi_tenant(repo.clone(), None);

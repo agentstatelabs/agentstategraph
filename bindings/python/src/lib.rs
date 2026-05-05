@@ -31,7 +31,7 @@ use agentstategraph_core::{Session, SessionStatus};
 use agentstategraph_policy::{
     ChangeProposal, Decision, Policy, PolicySignature, PolicyStore as PolicyBackend, Situation,
 };
-use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{
     QuarantineParams, Taint, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
     UntaintParams, UnwatchParams, WatchDirection, WatchParams,
@@ -124,7 +124,10 @@ impl AgentStateGraph {
                     .map_err(|e| PyRuntimeError::new_err(format!("storage error: {}", e)))?;
                 Repository::new(Box::new(storage))
             }
-            None => Repository::new(Box::new(MemoryStorage::new())),
+            None => Repository::new(Box::new(
+                SqliteStorage::in_memory()
+                    .map_err(|e| PyRuntimeError::new_err(format!("storage error: {}", e)))?,
+            )),
         };
         repo.init()
             .map_err(|e| PyRuntimeError::new_err(format!("init error: {}", e)))?;

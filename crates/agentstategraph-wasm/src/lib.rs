@@ -1062,7 +1062,7 @@ pub struct WasmPolicyStore {
 impl WasmPolicyStore {
     /// Construct directly from a `Repository` handle. Used by the
     /// integration tests that run under wasm-bindgen-test and need a
-    /// MemoryStorage-backed store rather than the IndexedDB-backed
+    /// SqliteStorage-backed store rather than the IndexedDB-backed
     /// `WasmAgentStateGraph`. Not exported to JS (plain Rust `impl`).
     #[doc(hidden)]
     pub fn from_repo(repo: Arc<Repository>, prefix: &str, agent_id: &str) -> Self {

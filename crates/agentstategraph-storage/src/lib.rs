@@ -10,6 +10,7 @@
 
 #[cfg(feature = "indexeddb")]
 pub mod indexeddb;
+#[cfg(feature = "memory")]
 pub mod memory;
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -20,6 +21,7 @@ pub mod traits;
 // Re-export primary types
 #[cfg(feature = "indexeddb")]
 pub use indexeddb::IndexedDbStorage;
+#[cfg(feature = "memory")]
 pub use memory::MemoryStorage;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStorage;

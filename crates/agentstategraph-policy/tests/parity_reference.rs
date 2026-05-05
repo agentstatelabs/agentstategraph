@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use agentstategraph::Repository;
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore};
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use serde_json::Value;
 
 fn load_fixture() -> Value {
@@ -39,7 +39,7 @@ fn parity_fixture_matches_rust_reference() {
     let agent_id = fixture["agent_id"].as_str().unwrap_or("parity-runner");
     let ref_name = fixture["ref"].as_str().unwrap_or("main");
 
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().expect("init repo");
     let store = PolicyStore::new(repo.clone(), prefix, agent_id);
 

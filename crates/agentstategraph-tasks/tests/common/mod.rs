@@ -2,11 +2,11 @@
 use std::sync::Arc;
 
 use agentstategraph::Repository;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_tasks::TaskStore;
 
 pub fn make_repo() -> Arc<Repository> {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().unwrap();
     repo
 }

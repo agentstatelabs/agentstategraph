@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use agentstategraph::Repository;
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_wasm::WasmPolicyStore;
 use serde_json::Value;
 use wasm_bindgen_test::*;
@@ -21,7 +21,7 @@ use wasm_bindgen_test::*;
 const FIXTURE: &str = include_str!("../../../spec/policy_parity_fixture.json");
 
 fn new_store(prefix: &str, agent_id: &str) -> WasmPolicyStore {
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     repo.init().expect("init");
     repo.set_json(
         "main",

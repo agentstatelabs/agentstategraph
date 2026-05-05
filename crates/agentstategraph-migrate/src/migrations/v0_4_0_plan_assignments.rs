@@ -213,7 +213,7 @@ mod tests {
     use crate::{CheckResult, Registry, RunMode, check};
     use agentstategraph::{CommitOptions, META_SCHEMA_VERSION_PATH, Repository};
     use agentstategraph_core::IntentCategory;
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
     use agentstategraph_tasks::{Priority, TaskId, TaskStore};
     use std::sync::Arc;
 
@@ -221,7 +221,7 @@ mod tests {
     /// sentinel to pretend 0.3.0, seed some tasks via TaskStore, and
     /// install a `/plan_assignments` sidecar.
     fn seed_pre_0_4_repo() -> (Arc<Repository>, Vec<(String, TaskId, String)>) {
-        let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+        let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
         repo.init().unwrap();
 
         // Downgrade the stamp using a Migrate commit so the guard allows it.

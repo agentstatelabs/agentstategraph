@@ -27,11 +27,11 @@
 //!
 //! ```rust,no_run
 //! use agentstategraph::Repository;
-//! use agentstategraph_storage::MemoryStorage;
+//! use agentstategraph_storage::SqliteStorage;
 //! use agentstategraph_policy::{PolicyStore, Situation, Selector};
 //! use std::sync::Arc;
 //!
-//! let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+//! let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
 //! repo.init().unwrap();
 //! let store = PolicyStore::new(repo, "/policies", "claude-code");
 //! // propose, ratify, evaluate ...

@@ -8,7 +8,7 @@
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::schema::{EnforcementMode, Schema};
 use agentstategraph_core::{IntentCategory, Object};
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 
 fn main() {
     println!("=== Schema & Merge Demo ===\n");
@@ -98,7 +98,7 @@ fn main() {
     // ─── 3. Demonstrate merge with non-conflicting changes ────────
     println!("\n--- Merge with different keys (auto-resolves) ---\n");
 
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     repo.init().unwrap();
 
     // Set initial state
@@ -163,7 +163,7 @@ fn main() {
     println!("\n--- Merge with same key (conflict) ---\n");
 
     // Fresh repo for clean conflict demo
-    let repo2 = Repository::new(Box::new(MemoryStorage::new()));
+    let repo2 = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     repo2.init().unwrap();
 
     repo2

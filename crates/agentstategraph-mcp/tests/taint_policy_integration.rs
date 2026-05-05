@@ -7,12 +7,12 @@ use agentstategraph_mcp::server::AgentStateGraphServer;
 use agentstategraph_policy::{
     ApprovalRule, AuthorizedAction, ChangeProposal, FallbackAction, Policy, Selector, Severity,
 };
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{TaintEffect, TaintMetadata, TaintParams, TaintSeverity};
 use chrono::Utc;
 
 fn server() -> AgentStateGraphServer {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
     repo.init().unwrap();
     AgentStateGraphServer::new(repo)
 }

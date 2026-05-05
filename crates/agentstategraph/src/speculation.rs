@@ -360,10 +360,10 @@ impl<'a> ObjectStore for OverlayObjectStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
 
-    fn setup() -> (MemoryStorage, ObjectId) {
-        let store = MemoryStorage::new();
+    fn setup() -> (SqliteStorage, ObjectId) {
+        let store = SqliteStorage::in_memory().expect("in-memory sqlite");
         let root_id = tree::json_to_tree(
             &store,
             &serde_json::json!({

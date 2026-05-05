@@ -8,13 +8,13 @@
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
-use agentstategraph_storage::MemoryStorage;
+use agentstategraph_storage::SqliteStorage;
 
 fn main() {
     println!("=== AgentStateGraph Agent Workflow Demo ===\n");
 
     // 1. Create a repository
-    let repo = Repository::new(Box::new(MemoryStorage::new()));
+    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
     repo.init().unwrap();
 
     // 2. Set initial cluster state
