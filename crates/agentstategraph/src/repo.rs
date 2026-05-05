@@ -234,6 +234,9 @@ pub enum RepoError {
         unreachable_commits: Vec<ObjectId>,
     },
 
+    #[error("write conflict: ref moved before CAS could land")]
+    WriteConflict,
+
     /// Pre-commit taint hook (0.7.75 §4) rejected a write. `taint_id`
     /// is the storage id of the taint that caused the rejection — use
     /// `agentstategraph_policy` / MCP `check_taint` to surface the
@@ -472,6 +475,73 @@ impl Repository {
             let _ = self.auto_escalate_watches(ref_name, path, value)?;
         }
         Ok(commit_id)
+    }
+
+    /// Return the current commit ID for `ref_name`. Needed for CAS-retry
+    /// callers that must snapshot the head before a read-modify-write cycle.
+    pub fn head(&self, ref_name: &str) -> Result<ObjectId, RepoError> {
+        self.resolve_ref(ref_name)
+    }
+
+    /// Like `set_json` but uses a compare-and-swap on the ref rather than an
+    /// unconditional `set_ref`. Builds the new commit on top of
+    /// `expected_head` (not the current ref head), then calls `cas_ref`.
+    ///
+    /// Returns `Ok(new_commit_id)` on success, `Err(WriteConflict)` when the
+    /// ref has moved since `expected_head` was snapshotted (allowing the
+    /// caller to retry), or another error on hard failures.
+    pub fn set_json_cas(
+        &self,
+        ref_name: &str,
+        expected_head: ObjectId,
+        path: &str,
+        value: &serde_json::Value,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        check_meta_guard(path, &options.intent)?;
+        let is_lifecycle = is_taint_lifecycle_intent(&options.intent.category);
+        if !is_lifecycle {
+            self.pre_commit_taint_check(&[path], &options)?;
+        }
+
+        // Build the new tree from *expected_head*, not the live ref.
+        let base_commit = self
+            .storage
+            .get_commit(&expected_head)?
+            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+
+        let root_id = tree::json_to_tree(self.storage.as_ref(), value)?;
+        let obj = self
+            .storage
+            .get_object(&root_id)?
+            .ok_or_else(|| RepoError::RefNotFound("value".to_string()))?;
+
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let new_root = tree::tree_set(
+            self.storage.as_ref(),
+            &base_commit.state_root,
+            &state_path,
+            &obj,
+        )?;
+
+        let new_commit = self.create_commit(new_root, vec![expected_head], options)?;
+
+        // Epoch-seal check (same guard that guarded_set_ref runs).
+        self.enforce_epoch_seals(ref_name, &new_commit.id)?;
+
+        match self
+            .storage
+            .cas_ref(ref_name, expected_head, new_commit.id)?
+        {
+            false => Err(RepoError::WriteConflict),
+            true => {
+                if !is_lifecycle {
+                    let _ = self.auto_escalate_watches(ref_name, path, value)?;
+                }
+                Ok(new_commit.id)
+            }
+        }
     }
 
     /// Delete a value from state, creating a new commit.

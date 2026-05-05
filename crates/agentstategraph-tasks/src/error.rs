@@ -42,6 +42,9 @@ pub enum TaskStoreError {
     #[error("invalid blocker id {0:?}: blocker ids must match ^t-\\d{{1,9}}$ (e.g. \"t-007\")")]
     InvalidBlockerId(String),
 
+    #[error("write conflict: too many concurrent writers for this plan")]
+    WriteConflict,
+
     #[error("repository error: {0}")]
     Repo(String),
 

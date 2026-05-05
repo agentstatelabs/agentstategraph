@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, RepoError, Repository};
 use agentstategraph_core::IntentCategory;
 use chrono::Utc;
 use once_cell::sync::Lazy;
@@ -77,36 +77,55 @@ impl TaskStore {
     // Plan operations
     // -----------------------------------------------------------------------
 
+    /// Maximum number of CAS retries for concurrent write operations.
+    const MAX_CAS_RETRIES: u32 = 32;
+
     /// Create a new plan. Fails if a plan with the same name already exists.
+    ///
+    /// Uses a CAS retry loop so concurrent writers across processes are safe:
+    /// if the ref moves between the existence check and the commit, the loop
+    /// retries up to `MAX_CAS_RETRIES` times before returning
+    /// `TaskStoreError::WriteConflict`.
     pub fn create_plan(
         &self,
         ref_name: &str,
         name: &str,
         description: Option<String>,
     ) -> Result<Plan, TaskStoreError> {
-        if self.plan_exists(ref_name, name)? {
-            return Err(TaskStoreError::PlanAlreadyExists(name.to_string()));
+        for _ in 0..Self::MAX_CAS_RETRIES {
+            // Snapshot BEFORE the existence check so the CAS can detect any
+            // interleaved write.
+            let head = self.repo.head(ref_name)?;
+
+            if self.plan_exists(ref_name, name)? {
+                return Err(TaskStoreError::PlanAlreadyExists(name.to_string()));
+            }
+
+            let plan = Plan {
+                name: name.to_string(),
+                description: description.clone(),
+                status: PlanStatus::Active,
+                created_at: Utc::now(),
+                created_by: self.agent_id.clone(),
+                archived_at: None,
+            };
+
+            let meta_path = paths::plan_meta(&self.prefix, name);
+            let value = serde_json::to_value(&plan)?;
+
+            match self.repo.set_json_cas(
+                ref_name,
+                head,
+                &meta_path,
+                &value,
+                self.commit_opts(format!("Create plan {}", name)),
+            ) {
+                Ok(_) => return Ok(plan),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
         }
-
-        let plan = Plan {
-            name: name.to_string(),
-            description,
-            status: PlanStatus::Active,
-            created_at: Utc::now(),
-            created_by: self.agent_id.clone(),
-            archived_at: None,
-        };
-
-        let meta_path = paths::plan_meta(&self.prefix, name);
-        let value = serde_json::to_value(&plan)?;
-        self.repo.set_json(
-            ref_name,
-            &meta_path,
-            &value,
-            self.commit_opts(format!("Create plan {}", name)),
-        )?;
-
-        Ok(plan)
+        Err(TaskStoreError::WriteConflict)
     }
 
     /// List every plan under the store's prefix. Returns plans in the
@@ -215,6 +234,11 @@ impl TaskStore {
     ///   when created from a deferred `ChangeProposal`.
     /// - `on_complete`: hook the consumer dispatches when the task
     ///   transitions to `Done`. The `-tasks` crate does not execute it.
+    ///
+    /// Uses a CAS retry loop so concurrent writers across processes are safe.
+    /// On each retry, `next_task_number` re-scans the current tree, naturally
+    /// picking the next available id even if a concurrent writer added a task
+    /// in the meantime.
     #[allow(clippy::too_many_arguments)]
     pub fn add_task_with_extensions(
         &self,
@@ -245,41 +269,52 @@ impl TaskStore {
             self.get_task(ref_name, plan, blocker)?;
         }
 
-        let next_num = self.next_task_number(ref_name, plan)?;
-        let id = TaskId::new(next_num);
+        for _ in 0..Self::MAX_CAS_RETRIES {
+            // Snapshot BEFORE the next_task_number read so the CAS can detect
+            // any interleaved write that might have claimed the same id.
+            let head = self.repo.head(ref_name)?;
 
-        let task = Task {
-            id: id.clone(),
-            title: title.to_string(),
-            status: TaskStatus::Pending,
-            priority,
-            parent_id,
-            blocked_by,
-            created_at: Utc::now(),
-            created_by: self.agent_id.clone(),
-            started_at: None,
-            started_by: None,
-            completed_at: None,
-            completed_by: None,
-            proof: None,
-            abandoned_at: None,
-            abandoned_reason: None,
-            assigned_to,
-            payload,
-            parent_change,
-            on_complete,
-        };
+            let next_num = self.next_task_number(ref_name, plan)?;
+            let id = TaskId::new(next_num);
 
-        let task_path = paths::task(&self.prefix, plan, &id);
-        let value = serde_json::to_value(&task)?;
-        self.repo.set_json(
-            ref_name,
-            &task_path,
-            &value,
-            self.commit_opts(format!("Add task {}/{}", plan, id)),
-        )?;
+            let task = Task {
+                id: id.clone(),
+                title: title.to_string(),
+                status: TaskStatus::Pending,
+                priority,
+                parent_id: parent_id.clone(),
+                blocked_by: blocked_by.clone(),
+                created_at: Utc::now(),
+                created_by: self.agent_id.clone(),
+                started_at: None,
+                started_by: None,
+                completed_at: None,
+                completed_by: None,
+                proof: None,
+                abandoned_at: None,
+                abandoned_reason: None,
+                assigned_to: assigned_to.clone(),
+                payload: payload.clone(),
+                parent_change: parent_change.clone(),
+                on_complete: on_complete.clone(),
+            };
 
-        Ok(task)
+            let task_path = paths::task(&self.prefix, plan, &id);
+            let value = serde_json::to_value(&task)?;
+
+            match self.repo.set_json_cas(
+                ref_name,
+                head,
+                &task_path,
+                &value,
+                self.commit_opts(format!("Add task {}/{}", plan, id)),
+            ) {
+                Ok(_) => return Ok(task),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(TaskStoreError::WriteConflict)
     }
 
     /// List every task id in a plan, cheaply — this walks tree paths
