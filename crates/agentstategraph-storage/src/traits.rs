@@ -250,7 +250,8 @@ pub trait Storage:
 }
 
 /// Blanket implementation: anything implementing all seven traits is a Storage.
-impl<T: ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore + ReminderStore>
-    Storage for T
+impl<
+    T: ObjectStore + CommitStore + RefStore + EpochStore + SessionStore + TaintStore + ReminderStore,
+> Storage for T
 {
 }

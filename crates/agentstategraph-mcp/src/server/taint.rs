@@ -5,8 +5,8 @@ use agentstategraph_policy::{ChangeProposal, Decision};
 use super::{
     AgentStateGraphServer, CheckTaintParams, ListTaintsParams,
     PolicyEvaluateChangeWithTaintsParams, QuarantineApplyParams, TaintApplyParams,
-    TaintRemoveParams, WatchApplyParams, WatchRemoveParams,
-    parse_optional_rfc3339, parse_taint_effect, parse_taint_severity,
+    TaintRemoveParams, WatchApplyParams, WatchRemoveParams, parse_optional_rfc3339,
+    parse_taint_effect, parse_taint_severity,
 };
 
 impl AgentStateGraphServer {

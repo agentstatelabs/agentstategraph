@@ -21,9 +21,6 @@ use std::sync::Arc;
 // Session + SessionStatus moved to agentstategraph-core in 0.6.5;
 // import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
-use agentstategraph_taint::{
-    QuarantineParams, TaintKind, TaintParams, UntaintParams, UnwatchParams, WatchParams,
-};
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_core::{Session, SessionStatus};
@@ -34,6 +31,9 @@ use agentstategraph_policy_sign::{
     Ed25519Signer, Ed25519Verifier, InMemoryKeyRegistry, PolicySigner, PolicyVerifier, canonicalize,
 };
 use agentstategraph_storage::SqliteStorage;
+use agentstategraph_taint::{
+    QuarantineParams, TaintKind, TaintParams, UntaintParams, UnwatchParams, WatchParams,
+};
 use agentstategraph_tasks::{
     NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
     TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyReport, VerifyResult,

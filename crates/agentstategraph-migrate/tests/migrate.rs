@@ -8,7 +8,9 @@ use agentstategraph_storage::SqliteStorage;
 use semver::{Version, VersionReq};
 
 fn fresh_repo() -> Repository {
-    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let r = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     r.init().unwrap();
     r
 }
@@ -29,7 +31,9 @@ fn set_version(repo: &Repository, v: &str) {
 
 #[test]
 fn check_errors_for_repo_without_init() {
-    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     // No init → no branch → get() returns RepoError::Branch → MigrateError::Repo
     let target = binary_version();
     let r = check(&repo, "main", &target, &Registry::empty());
@@ -60,13 +64,21 @@ fn check_upgrade_available_with_stub_migration() {
     let target = Version::parse("0.4.0").unwrap();
     let registry = {
         let mut r = Registry::empty();
-        r.register(Box::new(StubMigration::new("step-a", ">=0.3, <0.4", "0.4.0")));
+        r.register(Box::new(StubMigration::new(
+            "step-a",
+            ">=0.3, <0.4",
+            "0.4.0",
+        )));
         r
     };
 
     let r = check(&repo, "main", &target, &registry).unwrap();
     match r {
-        CheckResult::UpgradeAvailable { from, to, migrations } => {
+        CheckResult::UpgradeAvailable {
+            from,
+            to,
+            migrations,
+        } => {
             assert_eq!(from, Version::parse("0.3.0").unwrap());
             assert_eq!(to, target);
             assert_eq!(migrations, vec!["step-a"]);
@@ -82,7 +94,11 @@ fn check_up_to_date_after_migration() {
 
     let target = Version::parse("0.4.0").unwrap();
     let mut registry = Registry::empty();
-    registry.register(Box::new(StubMigration::new("step-a", ">=0.3, <0.4", "0.4.0")));
+    registry.register(Box::new(StubMigration::new(
+        "step-a",
+        ">=0.3, <0.4",
+        "0.4.0",
+    )));
 
     registry
         .run(&repo, "main", &target, RunMode::Apply)
@@ -104,8 +120,16 @@ fn plan_stops_at_version_gap() {
     // Registry has A→B and C→D but nothing for B→C.
     // Plan from A to D should only produce [A→B] then stop.
     let mut registry = Registry::empty();
-    registry.register(Box::new(StubMigration::new("a-to-b", ">=0.1, <0.2", "0.2.0")));
-    registry.register(Box::new(StubMigration::new("c-to-d", ">=0.3, <0.4", "0.4.0")));
+    registry.register(Box::new(StubMigration::new(
+        "a-to-b",
+        ">=0.1, <0.2",
+        "0.2.0",
+    )));
+    registry.register(Box::new(StubMigration::new(
+        "c-to-d",
+        ">=0.3, <0.4",
+        "0.4.0",
+    )));
 
     let plan = registry.plan(
         &Version::parse("0.1.0").unwrap(),
@@ -153,8 +177,16 @@ fn multi_step_run_executes_in_version_order() {
 
     let mut registry = Registry::empty();
     // Register out-of-order to verify sorting.
-    registry.register(Box::new(StubMigration::new("a-to-b", ">=0.3, <0.4", "0.4.0")));
-    registry.register(Box::new(StubMigration::new("b-to-c", ">=0.4, <0.5", "0.5.0")));
+    registry.register(Box::new(StubMigration::new(
+        "a-to-b",
+        ">=0.3, <0.4",
+        "0.4.0",
+    )));
+    registry.register(Box::new(StubMigration::new(
+        "b-to-c",
+        ">=0.4, <0.5",
+        "0.5.0",
+    )));
 
     let target = Version::parse("0.5.0").unwrap();
     let report = registry
@@ -183,8 +215,16 @@ fn multi_step_dry_run_does_not_mutate() {
     set_version(&repo, "0.3.0");
 
     let mut registry = Registry::empty();
-    registry.register(Box::new(StubMigration::new("a-to-b", ">=0.3, <0.4", "0.4.0")));
-    registry.register(Box::new(StubMigration::new("b-to-c", ">=0.4, <0.5", "0.5.0")));
+    registry.register(Box::new(StubMigration::new(
+        "a-to-b",
+        ">=0.3, <0.4",
+        "0.4.0",
+    )));
+    registry.register(Box::new(StubMigration::new(
+        "b-to-c",
+        ">=0.4, <0.5",
+        "0.5.0",
+    )));
 
     let log_before = repo.log("main", 100).unwrap().len();
     let report = registry
@@ -199,10 +239,12 @@ fn multi_step_dry_run_does_not_mutate() {
 
     assert_eq!(log_before, log_after, "DryRun must not write commits");
     assert_eq!(report.steps.len(), 2);
-    assert!(report
-        .steps
-        .iter()
-        .all(|s| s.status == StepStatus::WouldApply));
+    assert!(
+        report
+            .steps
+            .iter()
+            .all(|s| s.status == StepStatus::WouldApply)
+    );
     // DryRun still advances final_version in the report.
     assert_eq!(report.final_version, Version::parse("0.5.0").unwrap());
 }
@@ -433,7 +475,11 @@ impl Migration for StubMigration {
             return Ok(MigrationOutcome {
                 name: self.name.to_string(),
                 commit_id: None,
-                from: self.from.to_string().parse().unwrap_or(Version::new(0, 0, 0)),
+                from: self
+                    .from
+                    .to_string()
+                    .parse()
+                    .unwrap_or(Version::new(0, 0, 0)),
                 to: self.to.clone(),
                 notes: vec!["skipped".into()],
             });
@@ -453,7 +499,11 @@ impl Migration for StubMigration {
         Ok(MigrationOutcome {
             name: self.name.to_string(),
             commit_id: Some(commit_id),
-            from: self.from.to_string().parse().unwrap_or(Version::new(0, 0, 0)),
+            from: self
+                .from
+                .to_string()
+                .parse()
+                .unwrap_or(Version::new(0, 0, 0)),
             to: self.to.clone(),
             notes: Vec::new(),
         })

@@ -44,7 +44,10 @@ fn concurrent_add_task_produces_unique_ids() {
 
     let mut ids = Vec::new();
     for handle in handles {
-        let task = handle.join().expect("thread panicked").expect("add_task failed");
+        let task = handle
+            .join()
+            .expect("thread panicked")
+            .expect("add_task failed");
         ids.push(task.id);
     }
 
@@ -88,7 +91,11 @@ fn concurrent_create_plan_exactly_one_winner() {
     }
 
     assert_eq!(successes, 1, "exactly one thread should win");
-    assert_eq!(already_exists, THREAD_COUNT - 1, "all others should see AlreadyExists");
+    assert_eq!(
+        already_exists,
+        THREAD_COUNT - 1,
+        "all others should see AlreadyExists"
+    );
 }
 
 /// A write-conflict (MAX_CAS_RETRIES exhausted) must not panic — it should
@@ -103,4 +110,3 @@ fn write_conflict_variant_is_matchable() {
     let msg = err.to_string().to_lowercase();
     assert!(msg.contains("write conflict"), "message was: {}", msg);
 }
-

@@ -9,7 +9,9 @@ use std::sync::RwLock;
 use chrono::{DateTime, Utc};
 
 use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
-use agentstategraph_reminders::{MemoryReminderStore, Reminder, ReminderError, ReminderFilter, ReminderStore};
+use agentstategraph_reminders::{
+    MemoryReminderStore, Reminder, ReminderError, ReminderFilter, ReminderStore,
+};
 use agentstategraph_taint::{Taint, TaintKind};
 
 use crate::traits::{
@@ -816,7 +818,9 @@ mod tests {
             .seal_epoch("e1", "first seal", Utc::now(), &[])
             .unwrap();
         assert!(
-            store.seal_epoch("e1", "second seal", Utc::now(), &[]).is_err(),
+            store
+                .seal_epoch("e1", "second seal", Utc::now(), &[])
+                .is_err(),
             "sealing an already-sealed epoch must fail"
         );
     }
@@ -856,7 +860,9 @@ mod tests {
     #[test]
     fn test_session_create_get() {
         let store = MemoryStorage::new();
-        store.create_session(&test_session("s1", "agent/a")).unwrap();
+        store
+            .create_session(&test_session("s1", "agent/a"))
+            .unwrap();
 
         let got = store.get_session("s1").unwrap();
         assert!(got.is_some());
@@ -872,7 +878,9 @@ mod tests {
     #[test]
     fn test_session_end() {
         let store = MemoryStorage::new();
-        store.create_session(&test_session("s1", "agent/a")).unwrap();
+        store
+            .create_session(&test_session("s1", "agent/a"))
+            .unwrap();
 
         store
             .end_session("s1", SessionStatus::Completed, Utc::now())
@@ -901,9 +909,15 @@ mod tests {
     #[test]
     fn test_session_list_with_agent_filter() {
         let store = MemoryStorage::new();
-        store.create_session(&test_session("s1", "agent/alpha")).unwrap();
-        store.create_session(&test_session("s2", "agent/beta")).unwrap();
-        store.create_session(&test_session("s3", "agent/alpha")).unwrap();
+        store
+            .create_session(&test_session("s1", "agent/alpha"))
+            .unwrap();
+        store
+            .create_session(&test_session("s2", "agent/beta"))
+            .unwrap();
+        store
+            .create_session(&test_session("s3", "agent/alpha"))
+            .unwrap();
 
         let alpha = store.list_sessions(Some("agent/alpha")).unwrap();
         assert_eq!(alpha.len(), 2);
@@ -955,7 +969,9 @@ mod tests {
     #[test]
     fn test_taint_create_get() {
         let store = MemoryStorage::new();
-        store.create_taint(&test_taint("t1", "/nodes/pico1")).unwrap();
+        store
+            .create_taint(&test_taint("t1", "/nodes/pico1"))
+            .unwrap();
 
         let got = store.get_taint("t1").unwrap();
         assert!(got.is_some());
@@ -1000,7 +1016,11 @@ mod tests {
         store
             .resolve_taint("t1", "a", "r", None, Utc::now())
             .unwrap();
-        assert!(store.resolve_taint("t1", "a", "r2", None, Utc::now()).is_err());
+        assert!(
+            store
+                .resolve_taint("t1", "a", "r2", None, Utc::now())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1044,9 +1064,7 @@ mod tests {
     fn test_taint_check_propagation() {
         let store = MemoryStorage::new();
         // propagate=true — should match child paths
-        store
-            .create_taint(&test_taint("t1", "/nodes"))
-            .unwrap();
+        store.create_taint(&test_taint("t1", "/nodes")).unwrap();
         // propagate=false — should only match exact path
         let mut t2 = test_taint("t2", "/config");
         t2.name = "no-propagate".to_string();
@@ -1060,7 +1078,10 @@ mod tests {
         assert_eq!(exact_hit.len(), 1, "exact match always fires");
 
         let child_no_prop = store.check_taint("/config/network").unwrap();
-        assert!(child_no_prop.is_empty(), "non-propagating should not match child");
+        assert!(
+            child_no_prop.is_empty(),
+            "non-propagating should not match child"
+        );
     }
 
     #[test]

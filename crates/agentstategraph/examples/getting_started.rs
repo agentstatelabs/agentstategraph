@@ -12,7 +12,9 @@ use agentstategraph_storage::SqliteStorage;
 fn main() {
     // ─── 1. Create a repository ───────────────────────────────────
     // In-memory SQLite for quick start. Use SqliteStorage::open("path.db") for persistence.
-    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     repo.init().unwrap();
     println!("✓ Repository initialized\n");
 

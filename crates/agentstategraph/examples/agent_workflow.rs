@@ -14,7 +14,9 @@ fn main() {
     println!("=== AgentStateGraph Agent Workflow Demo ===\n");
 
     // 1. Create a repository
-    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     repo.init().unwrap();
 
     // 2. Set initial cluster state

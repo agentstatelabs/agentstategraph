@@ -217,14 +217,16 @@ fn large_change_threshold_boundary() {
 #[test]
 fn tokens_are_deduplicated() {
     // Multiple remove-key ops should still yield only one "destructive" token
-    let diff = vec![
-        remove_key("/a"),
-        remove_key("/b"),
-        remove_key("/c"),
-    ];
+    let diff = vec![remove_key("/a"), remove_key("/b"), remove_key("/c")];
     let tokens = infer_tokens_from_diff(&diff);
-    let destructive_count = tokens.iter().filter(|t| t.as_str() == "destructive").count();
-    assert_eq!(destructive_count, 1, "'destructive' must appear at most once");
+    let destructive_count = tokens
+        .iter()
+        .filter(|t| t.as_str() == "destructive")
+        .count();
+    assert_eq!(
+        destructive_count, 1,
+        "'destructive' must appear at most once"
+    );
 }
 
 #[test]

@@ -25,7 +25,9 @@ extern crate hex;
 // wasm_bindgen_test_configure!(run_in_browser); // drop to allow --node tests
 
 fn new_repo() -> Arc<Repository> {
-    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     repo.init().expect("init");
     // Seed an initial commit so `main` is resolvable and session
     // creation can pick up a head.

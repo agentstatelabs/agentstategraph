@@ -364,8 +364,8 @@ mod tests {
             condition: None,
             preconditions: vec![],
         }];
-        let proposal = change("migrate", &["schema-change"])
-            .with_field("justification", "upgrade for v2");
+        let proposal =
+            change("migrate", &["schema-change"]).with_field("justification", "upgrade for v2");
         let d = evaluate_change(&[&p], &proposal);
         assert!(matches!(d, Decision::Allow { .. }));
     }

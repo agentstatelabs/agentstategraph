@@ -413,7 +413,9 @@ mod tests {
     use agentstategraph_storage::SqliteStorage;
 
     fn fresh_repo() -> Repository {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo
     }
@@ -438,14 +440,26 @@ mod tests {
     }
 
     impl Migration for StubMigration {
-        fn from_version(&self) -> &semver::VersionReq { &self.from }
-        fn to_version(&self) -> &Version { &self.to }
-        fn name(&self) -> &str { self.name }
-        fn describe(&self) -> &str { "stub migration" }
+        fn from_version(&self) -> &semver::VersionReq {
+            &self.from
+        }
+        fn to_version(&self) -> &Version {
+            &self.to
+        }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn describe(&self) -> &str {
+            "stub migration"
+        }
         fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> {
             Ok(self.applies)
         }
-        fn migrate(&self, repo: &Repository, ref_name: &str) -> Result<MigrationOutcome, MigrateError> {
+        fn migrate(
+            &self,
+            repo: &Repository,
+            ref_name: &str,
+        ) -> Result<MigrationOutcome, MigrateError> {
             let commit_id = repo
                 .set(
                     ref_name,
@@ -475,11 +489,21 @@ mod tests {
         to: Version,
     }
     impl Migration for FailingMigration {
-        fn from_version(&self) -> &semver::VersionReq { &self.from }
-        fn to_version(&self) -> &Version { &self.to }
-        fn name(&self) -> &str { self.name }
-        fn describe(&self) -> &str { "failing stub" }
-        fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> { Ok(true) }
+        fn from_version(&self) -> &semver::VersionReq {
+            &self.from
+        }
+        fn to_version(&self) -> &Version {
+            &self.to
+        }
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn describe(&self) -> &str {
+            "failing stub"
+        }
+        fn applies_to(&self, _: &Repository, _: &str) -> Result<bool, MigrateError> {
+            Ok(true)
+        }
         fn migrate(&self, _: &Repository, _: &str) -> Result<MigrationOutcome, MigrateError> {
             Err(MigrateError::MigrationFailed {
                 name: self.name.to_string(),
@@ -534,7 +558,10 @@ mod tests {
             &Version::parse("0.3.0").unwrap(),
             &Version::parse("0.5.0").unwrap(),
         );
-        assert_eq!(plan.iter().map(|m| m.name()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            plan.iter().map(|m| m.name()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
 
         let plan = r.plan(
             &Version::parse("0.4.0").unwrap(),
@@ -716,7 +743,12 @@ mod tests {
         }));
 
         let r = check(&repo, "main", &target, &registry).unwrap();
-        if let CheckResult::UpgradeAvailable { from, to, migrations } = r {
+        if let CheckResult::UpgradeAvailable {
+            from,
+            to,
+            migrations,
+        } = r
+        {
             assert_eq!(from, Version::parse("0.3.0").unwrap());
             assert_eq!(to, target);
             assert_eq!(migrations, vec!["upgrade-to-0.4"]);

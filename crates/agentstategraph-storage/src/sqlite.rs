@@ -1334,7 +1334,9 @@ fn reminder_status_from_str(s: &str) -> Result<ReminderStatus, ReminderError> {
         "completed" => Ok(ReminderStatus::Completed),
         "snoozed" => Ok(ReminderStatus::Snoozed),
         "cancelled" => Ok(ReminderStatus::Cancelled),
-        other => Err(ReminderError::Store(format!("unknown reminder status: {other}"))),
+        other => Err(ReminderError::Store(format!(
+            "unknown reminder status: {other}"
+        ))),
     }
 }
 
@@ -1349,7 +1351,9 @@ fn priority_from_i64(n: i64) -> Result<Priority, ReminderError> {
         3 => Ok(Priority::Medium),
         4 => Ok(Priority::Low),
         5 => Ok(Priority::Minimal),
-        other => Err(ReminderError::Store(format!("unknown priority value: {other}"))),
+        other => Err(ReminderError::Store(format!(
+            "unknown priority value: {other}"
+        ))),
     }
 }
 
@@ -1396,14 +1400,13 @@ fn row_to_reminder(row: &Row<'_>) -> rusqlite::Result<Reminder> {
         serde_json::from_str(&commands_s).map_err(|e| decode_err(format!("commands: {e}")))?;
     let refs = serde_json::from_str(&refs_s).map_err(|e| decode_err(format!("refs: {e}")))?;
     let schedule = match schedule_s {
-        Some(s) => Some(
-            serde_json::from_str(&s).map_err(|e| decode_err(format!("schedule: {e}")))?,
-        ),
+        Some(s) => {
+            Some(serde_json::from_str(&s).map_err(|e| decode_err(format!("schedule: {e}")))?)
+        }
         None => None,
     };
     let executions: Vec<agentstategraph_reminders::types::ExecutionRecord> =
-        serde_json::from_str(&executions_s)
-            .map_err(|e| decode_err(format!("executions: {e}")))?;
+        serde_json::from_str(&executions_s).map_err(|e| decode_err(format!("executions: {e}")))?;
     let tags: Vec<String> =
         serde_json::from_str(&tags_s).map_err(|e| decode_err(format!("tags: {e}")))?;
 
@@ -1855,7 +1858,10 @@ mod tests {
         let store = test_store();
         let r = make_reminder("ghost", 60);
         let err = store.update(&r).unwrap_err();
-        assert!(matches!(err, agentstategraph_reminders::ReminderError::NotFound(_)));
+        assert!(matches!(
+            err,
+            agentstategraph_reminders::ReminderError::NotFound(_)
+        ));
     }
 
     #[test]
@@ -1893,7 +1899,10 @@ mod tests {
         store.save(&r1).unwrap();
         store.save(&r2).unwrap();
 
-        let filter = ReminderFilter { status: Some(ReminderStatus::Due), ..Default::default() };
+        let filter = ReminderFilter {
+            status: Some(ReminderStatus::Due),
+            ..Default::default()
+        };
         let results = store.list(&filter).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "due");
@@ -2016,7 +2025,9 @@ mod tests {
     fn reminder_persists_schedule_and_refs() {
         let store = test_store();
         let mut r = CreateReminder::new("scheduled", "i", future(60), "a")
-            .with_schedule(Schedule::Interval { every_seconds: 3600 })
+            .with_schedule(Schedule::Interval {
+                every_seconds: 3600,
+            })
             .with_refs(vec![ReminderRef::plan("plan-123", "My plan")])
             .into_reminder();
         r.autonomous = false;
@@ -2026,7 +2037,9 @@ mod tests {
         assert!(!got.autonomous);
         assert!(matches!(
             got.schedule,
-            Some(Schedule::Interval { every_seconds: 3600 })
+            Some(Schedule::Interval {
+                every_seconds: 3600
+            })
         ));
         assert_eq!(got.refs.len(), 1);
         assert_eq!(got.refs[0].id, "plan-123");
@@ -2045,7 +2058,9 @@ mod tests {
         let got = store.get(&r.id).unwrap().unwrap();
         assert_eq!(got.status, ReminderStatus::Snoozed);
         assert!(got.snoozed_until.is_some());
-        let diff = (got.snoozed_until.unwrap() - snooze_time).num_seconds().abs();
+        let diff = (got.snoozed_until.unwrap() - snooze_time)
+            .num_seconds()
+            .abs();
         assert!(diff < 2, "snoozed_until timestamp drifted by {diff}s");
     }
 

@@ -219,57 +219,135 @@ mod tests {
     #[test]
     fn ne_false_when_key_missing() {
         let s = Situation::new();
-        assert!(!Selector::Ne { key: "missing".into(), value: "x".into() }.matches(&s));
+        assert!(
+            !Selector::Ne {
+                key: "missing".into(),
+                value: "x".into()
+            }
+            .matches(&s)
+        );
     }
 
     #[test]
     fn ne_true_when_value_differs() {
         let s = sit(&[("env", "staging")]);
-        assert!(Selector::Ne { key: "env".into(), value: "prod".into() }.matches(&s));
+        assert!(
+            Selector::Ne {
+                key: "env".into(),
+                value: "prod".into()
+            }
+            .matches(&s)
+        );
     }
 
     #[test]
     fn ne_false_when_value_matches() {
         let s = sit(&[("env", "prod")]);
-        assert!(!Selector::Ne { key: "env".into(), value: "prod".into() }.matches(&s));
+        assert!(
+            !Selector::Ne {
+                key: "env".into(),
+                value: "prod".into()
+            }
+            .matches(&s)
+        );
     }
 
     #[test]
     fn numeric_missing_key_is_false_for_all_comparisons() {
         let s = Situation::new();
-        assert!(!Selector::Gt { key: "n".into(), value: 0 }.matches(&s));
-        assert!(!Selector::Gte { key: "n".into(), value: 0 }.matches(&s));
-        assert!(!Selector::Lt { key: "n".into(), value: 0 }.matches(&s));
-        assert!(!Selector::Lte { key: "n".into(), value: 0 }.matches(&s));
+        assert!(
+            !Selector::Gt {
+                key: "n".into(),
+                value: 0
+            }
+            .matches(&s)
+        );
+        assert!(
+            !Selector::Gte {
+                key: "n".into(),
+                value: 0
+            }
+            .matches(&s)
+        );
+        assert!(
+            !Selector::Lt {
+                key: "n".into(),
+                value: 0
+            }
+            .matches(&s)
+        );
+        assert!(
+            !Selector::Lte {
+                key: "n".into(),
+                value: 0
+            }
+            .matches(&s)
+        );
     }
 
     #[test]
     fn numeric_non_parseable_is_false() {
         let s = sit(&[("count", "not-a-number")]);
-        assert!(!Selector::Gt { key: "count".into(), value: 0 }.matches(&s));
+        assert!(
+            !Selector::Gt {
+                key: "count".into(),
+                value: 0
+            }
+            .matches(&s)
+        );
     }
 
     #[test]
     fn gte_and_lte_are_inclusive_at_boundary() {
         let s = sit(&[("n", "10")]);
-        assert!(Selector::Gte { key: "n".into(), value: 10 }.matches(&s));
-        assert!(Selector::Lte { key: "n".into(), value: 10 }.matches(&s));
+        assert!(
+            Selector::Gte {
+                key: "n".into(),
+                value: 10
+            }
+            .matches(&s)
+        );
+        assert!(
+            Selector::Lte {
+                key: "n".into(),
+                value: 10
+            }
+            .matches(&s)
+        );
         // exclusive counterparts at the boundary
-        assert!(!Selector::Gt { key: "n".into(), value: 10 }.matches(&s));
-        assert!(!Selector::Lt { key: "n".into(), value: 10 }.matches(&s));
+        assert!(
+            !Selector::Gt {
+                key: "n".into(),
+                value: 10
+            }
+            .matches(&s)
+        );
+        assert!(
+            !Selector::Lt {
+                key: "n".into(),
+                value: 10
+            }
+            .matches(&s)
+        );
     }
 
     #[test]
     fn regex_invalid_pattern_returns_false_not_panic() {
         let s = sit(&[("value", "anything")]);
-        let sel = Selector::Matches { key: "value".into(), pattern: "[invalid".into() };
+        let sel = Selector::Matches {
+            key: "value".into(),
+            pattern: "[invalid".into(),
+        };
         assert!(!sel.matches(&s));
     }
 
     #[test]
     fn regex_missing_key_returns_false() {
         let s = Situation::new();
-        let sel = Selector::Matches { key: "absent".into(), pattern: ".*".into() };
+        let sel = Selector::Matches {
+            key: "absent".into(),
+            pattern: ".*".into(),
+        };
         assert!(!sel.matches(&s));
     }
 
@@ -289,11 +367,19 @@ mod tests {
         assert!(sel.matches(&s1));
 
         // matches: prod + state=Failed
-        let s2 = sit(&[("namespace", "prod"), ("state", "Failed"), ("healthy", "true")]);
+        let s2 = sit(&[
+            ("namespace", "prod"),
+            ("state", "Failed"),
+            ("healthy", "true"),
+        ]);
         assert!(sel.matches(&s2));
 
         // doesn't match: prod + state=Running + healthy present
-        let s3 = sit(&[("namespace", "prod"), ("state", "Running"), ("healthy", "true")]);
+        let s3 = sit(&[
+            ("namespace", "prod"),
+            ("state", "Running"),
+            ("healthy", "true"),
+        ]);
         assert!(!sel.matches(&s3));
 
         // doesn't match: wrong namespace
@@ -303,9 +389,7 @@ mod tests {
 
     #[test]
     fn situation_with_builder_chain() {
-        let s = Situation::new()
-            .with("a", "1")
-            .with("b", "2");
+        let s = Situation::new().with("a", "1").with("b", "2");
         assert_eq!(s.get("a").unwrap(), "1");
         assert_eq!(s.get("b").unwrap(), "2");
         assert!(s.get("c").is_none());
@@ -325,17 +409,44 @@ mod tests {
         let selectors = vec![
             Selector::Always,
             Selector::Never,
-            Selector::Eq { key: "k".into(), value: "v".into() },
-            Selector::Ne { key: "k".into(), value: "v".into() },
-            Selector::Matches { key: "k".into(), pattern: ".*".into() },
+            Selector::Eq {
+                key: "k".into(),
+                value: "v".into(),
+            },
+            Selector::Ne {
+                key: "k".into(),
+                value: "v".into(),
+            },
+            Selector::Matches {
+                key: "k".into(),
+                pattern: ".*".into(),
+            },
             Selector::Exists { key: "k".into() },
-            Selector::Gt { key: "k".into(), value: 5 },
-            Selector::Gte { key: "k".into(), value: 5 },
-            Selector::Lt { key: "k".into(), value: 5 },
-            Selector::Lte { key: "k".into(), value: 5 },
-            Selector::Not { child: Box::new(Selector::Always) },
-            Selector::All { children: vec![Selector::Always] },
-            Selector::Any { children: vec![Selector::Never] },
+            Selector::Gt {
+                key: "k".into(),
+                value: 5,
+            },
+            Selector::Gte {
+                key: "k".into(),
+                value: 5,
+            },
+            Selector::Lt {
+                key: "k".into(),
+                value: 5,
+            },
+            Selector::Lte {
+                key: "k".into(),
+                value: 5,
+            },
+            Selector::Not {
+                child: Box::new(Selector::Always),
+            },
+            Selector::All {
+                children: vec![Selector::Always],
+            },
+            Selector::Any {
+                children: vec![Selector::Never],
+            },
         ];
         for sel in selectors {
             let j = serde_json::to_value(&sel).unwrap();

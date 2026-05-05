@@ -438,7 +438,12 @@ mod tests {
     /// variants.
     #[test]
     fn custom_policy_strings_still_round_trip_as_custom() {
-        for name in ["PolicyPropose", "PolicyRatify", "PolicySupersede", "PolicySign"] {
+        for name in [
+            "PolicyPropose",
+            "PolicyRatify",
+            "PolicySupersede",
+            "PolicySign",
+        ] {
             let c = IntentCategory::Custom(name.to_string());
             let json = serde_json::to_string(&c).unwrap();
             assert_eq!(json, format!("{{\"Custom\":\"{}\"}}", name));

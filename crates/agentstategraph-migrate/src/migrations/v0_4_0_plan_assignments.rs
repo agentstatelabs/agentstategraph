@@ -221,7 +221,9 @@ mod tests {
     /// sentinel to pretend 0.3.0, seed some tasks via TaskStore, and
     /// install a `/plan_assignments` sidecar.
     fn seed_pre_0_4_repo() -> (Arc<Repository>, Vec<(String, TaskId, String)>) {
-        let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
         repo.init().unwrap();
 
         // Downgrade the stamp using a Migrate commit so the guard allows it.

@@ -10,7 +10,9 @@ use agentstategraph_taint::{
 };
 
 fn repo() -> Repository {
-    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let r = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     r.init().unwrap();
     r
 }

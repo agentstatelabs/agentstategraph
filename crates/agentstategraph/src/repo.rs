@@ -217,6 +217,9 @@ pub enum RepoError {
     #[error("merge conflicts: {0:?}")]
     MergeConflicts(Vec<Conflict>),
 
+    #[error("write conflict: ref moved before CAS could land")]
+    WriteConflict,
+
     #[error("speculation error: {0}")]
     Speculation(#[from] SpecError),
 
@@ -472,6 +475,73 @@ impl Repository {
             let _ = self.auto_escalate_watches(ref_name, path, value)?;
         }
         Ok(commit_id)
+    }
+
+    /// Return the current commit ID for `ref_name`. Needed for CAS-retry
+    /// callers that must snapshot the head before a read-modify-write cycle.
+    pub fn head(&self, ref_name: &str) -> Result<ObjectId, RepoError> {
+        self.resolve_ref(ref_name)
+    }
+
+    /// Like `set_json` but uses a compare-and-swap on the ref rather than an
+    /// unconditional `set_ref`. Builds the new commit on top of
+    /// `expected_head` (not the current ref head), then calls `cas_ref`.
+    ///
+    /// Returns `Ok(new_commit_id)` on success, `Err(WriteConflict)` when the
+    /// ref has moved since `expected_head` was snapshotted (allowing the
+    /// caller to retry), or another error on hard failures.
+    pub fn set_json_cas(
+        &self,
+        ref_name: &str,
+        expected_head: ObjectId,
+        path: &str,
+        value: &serde_json::Value,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        check_meta_guard(path, &options.intent)?;
+        let is_lifecycle = is_taint_lifecycle_intent(&options.intent.category);
+        if !is_lifecycle {
+            self.pre_commit_taint_check(&[path], &options)?;
+        }
+
+        // Build the new tree from *expected_head*, not the live ref.
+        let base_commit = self
+            .storage
+            .get_commit(&expected_head)?
+            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+
+        let root_id = tree::json_to_tree(self.storage.as_ref(), value)?;
+        let obj = self
+            .storage
+            .get_object(&root_id)?
+            .ok_or_else(|| RepoError::RefNotFound("value".to_string()))?;
+
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        let new_root = tree::tree_set(
+            self.storage.as_ref(),
+            &base_commit.state_root,
+            &state_path,
+            &obj,
+        )?;
+
+        let new_commit = self.create_commit(new_root, vec![expected_head], options)?;
+
+        // Epoch-seal check (same guard that guarded_set_ref runs).
+        self.enforce_epoch_seals(ref_name, &new_commit.id)?;
+
+        match self
+            .storage
+            .cas_ref(ref_name, expected_head, new_commit.id)?
+        {
+            false => Err(RepoError::WriteConflict),
+            true => {
+                if !is_lifecycle {
+                    let _ = self.auto_escalate_watches(ref_name, path, value)?;
+                }
+                Ok(new_commit.id)
+            }
+        }
     }
 
     /// Delete a value from state, creating a new commit.
@@ -2322,7 +2392,9 @@ mod tests {
     #[test]
     fn test_detect_timestamp_anomalies_flat_history() {
         // A normal history: every commit is strictly after its parent.
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.set("main", "/a", &Object::string("1"), quick_opts("first"))
             .unwrap();
@@ -2337,7 +2409,9 @@ mod tests {
 
     #[test]
     fn test_blame_entry_timestamp_anomaly_is_false_by_default() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.set("main", "/a", &Object::string("v"), quick_opts("write"))
             .unwrap();
@@ -2349,7 +2423,9 @@ mod tests {
 
     #[test]
     fn test_seal_epoch_captures_reachable_commits() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
             .unwrap();
@@ -2370,7 +2446,9 @@ mod tests {
     fn test_epoch_seal_violation_in_warn_mode_is_logged_not_rejected() {
         // Warn mode is the default — a rewind past a sealed commit logs
         // but still succeeds.
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         let _ = repo
             .set("main", "/a", &Object::string("1"), quick_opts("a"))
@@ -2392,7 +2470,10 @@ mod tests {
 
     #[test]
     fn test_epoch_seal_violation_in_strict_mode_is_rejected() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))).with_epoch_seal_strict(true);
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ))
+        .with_epoch_seal_strict(true);
         repo.init().unwrap();
         let _ = repo
             .set("main", "/a", &Object::string("1"), quick_opts("a"))
@@ -2416,13 +2497,17 @@ mod tests {
 
     #[test]
     fn test_get_epoch_rehydrates_commits() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.create_epoch("e1", "first epoch", vec![]).unwrap();
         repo.set_active_epoch(Some("e1".to_string())).unwrap();
 
-        repo.set("main", "/a", &Object::string("1"), quick_opts("a")).unwrap();
-        repo.set("main", "/b", &Object::string("2"), quick_opts("b")).unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
 
         repo.set_active_epoch(None).unwrap();
         repo.seal_epoch("e1", "done").unwrap();
@@ -2433,7 +2518,9 @@ mod tests {
 
     #[test]
     fn test_archive_epoch() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.create_epoch("e1", "epoch", vec![]).unwrap();
         repo.seal_epoch("e1", "done").unwrap();
@@ -2446,7 +2533,9 @@ mod tests {
 
     #[test]
     fn test_archive_epoch_requires_sealed() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.create_epoch("e1", "epoch", vec![]).unwrap();
 
@@ -2456,12 +2545,15 @@ mod tests {
 
     #[test]
     fn test_export_epoch() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.create_epoch("e1", "export test", vec![]).unwrap();
         repo.set_active_epoch(Some("e1".to_string())).unwrap();
 
-        repo.set("main", "/x", &Object::string("hello"), quick_opts("x")).unwrap();
+        repo.set("main", "/x", &Object::string("hello"), quick_opts("x"))
+            .unwrap();
 
         repo.set_active_epoch(None).unwrap();
         repo.seal_epoch("e1", "done").unwrap();
@@ -2475,7 +2567,9 @@ mod tests {
 
     #[test]
     fn test_export_epoch_rejects_active() {
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().unwrap();
         repo.create_epoch("e1", "active", vec![]).unwrap();
 

@@ -19,7 +19,9 @@ use chrono::Utc;
 const REF: &str = "main";
 
 fn make_store(prefix: &str) -> (Arc<Repository>, PolicyStore) {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let store = PolicyStore::new(repo.clone(), prefix, "test-agent");
     (repo, store)
@@ -940,7 +942,9 @@ mod signature_hook {
     where
         F: Fn(&Policy) -> Result<(), SignatureVerificationError> + Send + Sync + 'static,
     {
-        let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
         repo.init().unwrap();
         let store = PolicyStore::new(repo.clone(), prefix, "test-agent")
             .with_verifier(MockVerifier::new(verifier_fn))
@@ -949,7 +953,9 @@ mod signature_hook {
     }
 
     fn build_store_no_verifier(prefix: &str) -> (Arc<Repository>, PolicyStore) {
-        let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
         repo.init().unwrap();
         let store = PolicyStore::new(repo.clone(), prefix, "test-agent");
         (repo, store)
@@ -1358,7 +1364,9 @@ fn test_external_evaluator_registry_register_and_get() {
 fn test_policy_without_external_evaluator_uses_local_path() {
     // A policy with no external_evaluator field must be evaluated by
     // the local evaluator even when a registry is attached.
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mut reg = ExternalEvaluatorRegistry::new();
     reg.register(Arc::new(MockEvaluator::new("wasm", |_, _, _, _| {
@@ -1385,7 +1393,9 @@ fn test_policy_without_external_evaluator_uses_local_path() {
 
 #[test]
 fn test_policy_with_external_evaluator_dispatches_to_registered_runner() {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mut reg = ExternalEvaluatorRegistry::new();
     reg.register(Arc::new(MockEvaluator::new(
@@ -1428,7 +1438,9 @@ fn test_policy_with_unregistered_external_kind_is_skipped() {
     // Registry has only wasm, but the policy references rego → the
     // policy is skipped (treated as not-matching). If it's the only
     // matching policy, result is NoPolicyMatch.
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mut reg = ExternalEvaluatorRegistry::new();
     reg.register(Arc::new(MockEvaluator::new("wasm", |_, _, _, _| {
@@ -1463,7 +1475,9 @@ fn test_policy_with_unregistered_external_kind_is_skipped() {
 fn test_external_evaluator_precedence_deny_wins() {
     // Two matched policies: the external one returns Allow, the local
     // one returns Deny. Deny must still win.
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mut reg = ExternalEvaluatorRegistry::new();
     reg.register(Arc::new(MockEvaluator::new("wasm", |_, _, _, _| {
@@ -1511,7 +1525,9 @@ fn test_external_evaluator_precedence_deny_wins() {
             reason: "external says no".to_string(),
         })
     })));
-    let repo2 = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo2 = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo2.init().unwrap();
     let store2 =
         PolicyStore::new(repo2, "/policies", "agent").with_external_evaluators(Arc::new(reg2));

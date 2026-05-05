@@ -21,7 +21,9 @@ use wasm_bindgen_test::*;
 const FIXTURE: &str = include_str!("../../../spec/policy_parity_fixture.json");
 
 fn new_store(prefix: &str, agent_id: &str) -> WasmPolicyStore {
-    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     repo.init().expect("init");
     repo.set_json(
         "main",

@@ -44,7 +44,9 @@ fn admin_key(key: &str) -> ApiKey {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_key_is_rejected() {
     // A key whose expires_at is in the past must be treated as revoked.
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin_expiry"));
@@ -84,7 +86,9 @@ async fn expired_key_is_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_key_with_expires_in_days_applies_expiry() {
     // POST /api/admin/keys with expires_in_days sets expires_at on the new key.
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin_create_exp"));
@@ -122,7 +126,9 @@ async fn create_key_with_expires_in_days_applies_expiry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rotate_key_invalidates_old_and_mints_new() {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin_rotate"));
@@ -215,7 +221,9 @@ async fn rotate_key_invalidates_old_and_mints_new() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn created_key_entropy_matches_asg_hex64() {
     // Key strings minted by the admin endpoint match `^asg_[0-9a-f]{64}$`.
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin_entropy"));

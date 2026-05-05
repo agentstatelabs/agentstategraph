@@ -62,7 +62,10 @@ impl ReminderStatus {
 
     /// Returns `true` if the reminder is actionable right now.
     pub fn is_actionable(self) -> bool {
-        matches!(self, Self::Due | Self::AwaitingPermission | Self::InProgress)
+        matches!(
+            self,
+            Self::Due | Self::AwaitingPermission | Self::InProgress
+        )
     }
 }
 
@@ -98,10 +101,7 @@ impl Schedule {
                 Some(after + Duration::seconds(*every_seconds as i64))
             }
             Schedule::Daily { time } => {
-                let candidate = after
-                    .date_naive()
-                    .and_time(*time)
-                    .and_utc();
+                let candidate = after.date_naive().and_time(*time).and_utc();
                 Some(if candidate > after {
                     candidate
                 } else {
@@ -169,28 +169,55 @@ pub struct ReminderRef {
 
 impl ReminderRef {
     pub fn branch(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { kind: RefKind::Branch, id: id.into(), label: Some(label.into()), stale: false }
+        Self {
+            kind: RefKind::Branch,
+            id: id.into(),
+            label: Some(label.into()),
+            stale: false,
+        }
     }
 
     pub fn memory(id: impl Into<String>) -> Self {
-        Self { kind: RefKind::Memory, id: id.into(), label: None, stale: false }
+        Self {
+            kind: RefKind::Memory,
+            id: id.into(),
+            label: None,
+            stale: false,
+        }
     }
 
     pub fn plan(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { kind: RefKind::Plan, id: id.into(), label: Some(label.into()), stale: false }
+        Self {
+            kind: RefKind::Plan,
+            id: id.into(),
+            label: Some(label.into()),
+            stale: false,
+        }
     }
 
     pub fn task(id: impl Into<String>, label: impl Into<String>) -> Self {
-        Self { kind: RefKind::Task, id: id.into(), label: Some(label.into()), stale: false }
+        Self {
+            kind: RefKind::Task,
+            id: id.into(),
+            label: Some(label.into()),
+            stale: false,
+        }
     }
 
     pub fn state_path(path: impl Into<String>) -> Self {
-        Self { kind: RefKind::StatePath, id: path.into(), label: None, stale: false }
+        Self {
+            kind: RefKind::StatePath,
+            id: path.into(),
+            label: None,
+            stale: false,
+        }
     }
 
     pub fn external(url: impl Into<String>, scheme: impl Into<String>) -> Self {
         Self {
-            kind: RefKind::External { scheme: scheme.into() },
+            kind: RefKind::External {
+                scheme: scheme.into(),
+            },
             id: url.into(),
             label: None,
             stale: false,
@@ -300,7 +327,9 @@ pub struct CreateReminder {
     pub tags: Vec<String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 impl CreateReminder {
     pub fn new(
@@ -323,12 +352,30 @@ impl CreateReminder {
         }
     }
 
-    pub fn with_priority(mut self, p: Priority) -> Self { self.priority = p; self }
-    pub fn with_schedule(mut self, s: Schedule) -> Self { self.schedule = Some(s); self }
-    pub fn with_autonomous(mut self, a: bool) -> Self { self.autonomous = a; self }
-    pub fn with_commands(mut self, cmds: Vec<String>) -> Self { self.commands = cmds; self }
-    pub fn with_refs(mut self, refs: Vec<ReminderRef>) -> Self { self.refs = refs; self }
-    pub fn with_tags(mut self, tags: Vec<String>) -> Self { self.tags = tags; self }
+    pub fn with_priority(mut self, p: Priority) -> Self {
+        self.priority = p;
+        self
+    }
+    pub fn with_schedule(mut self, s: Schedule) -> Self {
+        self.schedule = Some(s);
+        self
+    }
+    pub fn with_autonomous(mut self, a: bool) -> Self {
+        self.autonomous = a;
+        self
+    }
+    pub fn with_commands(mut self, cmds: Vec<String>) -> Self {
+        self.commands = cmds;
+        self
+    }
+    pub fn with_refs(mut self, refs: Vec<ReminderRef>) -> Self {
+        self.refs = refs;
+        self
+    }
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
 
     /// Build a `Reminder` from this input, generating a new ID.
     pub fn into_reminder(self) -> Reminder {
@@ -374,15 +421,35 @@ pub struct ReminderFilter {
 
 impl ReminderFilter {
     pub fn matches(&self, r: &Reminder) -> bool {
-        if let Some(s) = self.status { if r.status != s { return false; } }
-        if let Some(p) = self.priority_at_most { if r.priority > p { return false; } }
-        if let Some(ref cb) = self.created_by { if &r.created_by != cb { return false; } }
-        if let Some(due) = self.due_before { if r.due_at > due { return false; } }
+        if let Some(s) = self.status {
+            if r.status != s {
+                return false;
+            }
+        }
+        if let Some(p) = self.priority_at_most {
+            if r.priority > p {
+                return false;
+            }
+        }
+        if let Some(ref cb) = self.created_by {
+            if &r.created_by != cb {
+                return false;
+            }
+        }
+        if let Some(due) = self.due_before {
+            if r.due_at > due {
+                return false;
+            }
+        }
         if let Some(ref rid) = self.ref_id {
-            if !r.refs.iter().any(|rf| &rf.id == rid) { return false; }
+            if !r.refs.iter().any(|rf| &rf.id == rid) {
+                return false;
+            }
         }
         for tag in &self.tags {
-            if !r.tags.contains(tag) { return false; }
+            if !r.tags.contains(tag) {
+                return false;
+            }
         }
         true
     }
@@ -422,7 +489,13 @@ mod tests {
 
     #[test]
     fn priority_roundtrips_json() {
-        for p in [Priority::Critical, Priority::High, Priority::Medium, Priority::Low, Priority::Minimal] {
+        for p in [
+            Priority::Critical,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low,
+            Priority::Minimal,
+        ] {
             let j = serde_json::to_value(p).unwrap();
             let back: Priority = serde_json::from_value(j).unwrap();
             assert_eq!(p, back);
@@ -459,7 +532,11 @@ mod tests {
     #[test]
     fn schedule_interval_advances_by_given_seconds() {
         let now = Utc::now();
-        let next = Schedule::Interval { every_seconds: 3600 }.next_due(now).unwrap();
+        let next = Schedule::Interval {
+            every_seconds: 3600,
+        }
+        .next_due(now)
+        .unwrap();
         let diff = (next - now).num_seconds();
         assert_eq!(diff, 3600);
     }
@@ -478,7 +555,12 @@ mod tests {
     fn schedule_weekly_lands_on_correct_day() {
         let time = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
         let now = Utc::now();
-        let next = Schedule::Weekly { day: Weekday::Mon, time }.next_due(now).unwrap();
+        let next = Schedule::Weekly {
+            day: Weekday::Mon,
+            time,
+        }
+        .next_due(now)
+        .unwrap();
         assert!(next > now);
         assert_eq!(next.weekday(), Weekday::Mon);
     }
@@ -546,7 +628,9 @@ mod tests {
             .with_priority(Priority::Critical)
             .with_autonomous(false)
             .with_tags(vec!["cleanup".into()])
-            .with_schedule(Schedule::Interval { every_seconds: 86400 })
+            .with_schedule(Schedule::Interval {
+                every_seconds: 86400,
+            })
             .with_refs(vec![ReminderRef::branch("feat/x", "Feature X")])
             .into_reminder();
 
@@ -559,7 +643,11 @@ mod tests {
 
     // --- ReminderFilter::matches ---
 
-    fn make_reminder(status: ReminderStatus, priority: Priority, due_at: DateTime<Utc>) -> Reminder {
+    fn make_reminder(
+        status: ReminderStatus,
+        priority: Priority,
+        due_at: DateTime<Utc>,
+    ) -> Reminder {
         let mut r = CreateReminder::new("t", "i", due_at, "agent/a")
             .with_priority(priority)
             .into_reminder();
@@ -570,42 +658,113 @@ mod tests {
     #[test]
     fn filter_by_status() {
         let r = make_reminder(ReminderStatus::Due, Priority::Medium, past(1));
-        assert!(ReminderFilter { status: Some(ReminderStatus::Due), ..Default::default() }.matches(&r));
-        assert!(!ReminderFilter { status: Some(ReminderStatus::Pending), ..Default::default() }.matches(&r));
+        assert!(
+            ReminderFilter {
+                status: Some(ReminderStatus::Due),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
+        assert!(
+            !ReminderFilter {
+                status: Some(ReminderStatus::Pending),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
     }
 
     #[test]
     fn filter_by_priority_at_most() {
         let r = make_reminder(ReminderStatus::Due, Priority::High, past(1));
         // High (2) <= Medium (3) → matches
-        assert!(ReminderFilter { priority_at_most: Some(Priority::Medium), ..Default::default() }.matches(&r));
+        assert!(
+            ReminderFilter {
+                priority_at_most: Some(Priority::Medium),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
         // High (2) > Critical (1) → no match
-        assert!(!ReminderFilter { priority_at_most: Some(Priority::Critical), ..Default::default() }.matches(&r));
+        assert!(
+            !ReminderFilter {
+                priority_at_most: Some(Priority::Critical),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
     }
 
     #[test]
     fn filter_by_due_before() {
         let now = Utc::now();
-        let r = make_reminder(ReminderStatus::Pending, Priority::Medium, now + Duration::hours(2));
-        assert!(!ReminderFilter { due_before: Some(now + Duration::hours(1)), ..Default::default() }.matches(&r));
-        assert!(ReminderFilter { due_before: Some(now + Duration::hours(3)), ..Default::default() }.matches(&r));
+        let r = make_reminder(
+            ReminderStatus::Pending,
+            Priority::Medium,
+            now + Duration::hours(2),
+        );
+        assert!(
+            !ReminderFilter {
+                due_before: Some(now + Duration::hours(1)),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
+        assert!(
+            ReminderFilter {
+                due_before: Some(now + Duration::hours(3)),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
     }
 
     #[test]
     fn filter_by_ref_id() {
         let mut r = make_reminder(ReminderStatus::Pending, Priority::Medium, due_in(100));
-        r.refs.push(ReminderRef::branch("feature/web-demo", "web demo"));
-        assert!(ReminderFilter { ref_id: Some("feature/web-demo".into()), ..Default::default() }.matches(&r));
-        assert!(!ReminderFilter { ref_id: Some("other-branch".into()), ..Default::default() }.matches(&r));
+        r.refs
+            .push(ReminderRef::branch("feature/web-demo", "web demo"));
+        assert!(
+            ReminderFilter {
+                ref_id: Some("feature/web-demo".into()),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
+        assert!(
+            !ReminderFilter {
+                ref_id: Some("other-branch".into()),
+                ..Default::default()
+            }
+            .matches(&r)
+        );
     }
 
     #[test]
     fn filter_by_tags_all_must_match() {
         let mut r = make_reminder(ReminderStatus::Pending, Priority::Medium, due_in(100));
         r.tags = vec!["cleanup".into(), "infra".into()];
-        assert!(ReminderFilter { tags: vec!["cleanup".into()], ..Default::default() }.matches(&r));
-        assert!(ReminderFilter { tags: vec!["cleanup".into(), "infra".into()], ..Default::default() }.matches(&r));
-        assert!(!ReminderFilter { tags: vec!["cleanup".into(), "missing".into()], ..Default::default() }.matches(&r));
+        assert!(
+            ReminderFilter {
+                tags: vec!["cleanup".into()],
+                ..Default::default()
+            }
+            .matches(&r)
+        );
+        assert!(
+            ReminderFilter {
+                tags: vec!["cleanup".into(), "infra".into()],
+                ..Default::default()
+            }
+            .matches(&r)
+        );
+        assert!(
+            !ReminderFilter {
+                tags: vec!["cleanup".into(), "missing".into()],
+                ..Default::default()
+            }
+            .matches(&r)
+        );
     }
 
     #[test]

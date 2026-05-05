@@ -124,10 +124,11 @@ impl AgentStateGraph {
                     .map_err(|e| PyRuntimeError::new_err(format!("storage error: {}", e)))?;
                 Repository::new(Box::new(storage))
             }
-            None => Repository::new(Box::new(
-                SqliteStorage::in_memory()
-                    .map_err(|e| PyRuntimeError::new_err(format!("storage error: {}", e)))?,
-            )),
+            None => {
+                Repository::new(Box::new(SqliteStorage::in_memory().map_err(|e| {
+                    PyRuntimeError::new_err(format!("storage error: {}", e))
+                })?))
+            }
         };
         repo.init()
             .map_err(|e| PyRuntimeError::new_err(format!("init error: {}", e)))?;

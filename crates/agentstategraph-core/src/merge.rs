@@ -623,7 +623,11 @@ mod tests {
         match three_way_merge(&r, &base, &ours, &theirs) {
             MergeResult::Success(merged) => {
                 if let Object::Node(Node::Set(items)) = merged {
-                    assert_eq!(items.len(), 3, "union of {{1,2}} and {{1,3}} should have 3 items");
+                    assert_eq!(
+                        items.len(),
+                        3,
+                        "union of {{1,2}} and {{1,3}} should have 3 items"
+                    );
                     assert!(items.contains(&a));
                     assert!(items.contains(&b));
                     assert!(items.contains(&c));
@@ -713,7 +717,10 @@ mod tests {
         match three_way_merge(&r, &base, &ours, &theirs) {
             MergeResult::Success(_) | MergeResult::FastForward(_) => {}
             MergeResult::Conflicts { conflicts, .. } => {
-                panic!("identical list changes should not conflict: {:?}", conflicts);
+                panic!(
+                    "identical list changes should not conflict: {:?}",
+                    conflicts
+                );
             }
         }
     }
@@ -905,11 +912,26 @@ mod tests {
 
     #[test]
     fn test_conflict_value_from_object_atoms() {
-        assert_eq!(ConflictValue::from_object(&Object::null()), ConflictValue::Null);
-        assert_eq!(ConflictValue::from_object(&Object::bool(true)), ConflictValue::Bool(true));
-        assert_eq!(ConflictValue::from_object(&Object::bool(false)), ConflictValue::Bool(false));
-        assert_eq!(ConflictValue::from_object(&Object::int(42)), ConflictValue::Int(42));
-        assert_eq!(ConflictValue::from_object(&Object::int(-1)), ConflictValue::Int(-1));
+        assert_eq!(
+            ConflictValue::from_object(&Object::null()),
+            ConflictValue::Null
+        );
+        assert_eq!(
+            ConflictValue::from_object(&Object::bool(true)),
+            ConflictValue::Bool(true)
+        );
+        assert_eq!(
+            ConflictValue::from_object(&Object::bool(false)),
+            ConflictValue::Bool(false)
+        );
+        assert_eq!(
+            ConflictValue::from_object(&Object::int(42)),
+            ConflictValue::Int(42)
+        );
+        assert_eq!(
+            ConflictValue::from_object(&Object::int(-1)),
+            ConflictValue::Int(-1)
+        );
         assert_eq!(
             ConflictValue::from_object(&Object::string("hello".to_string())),
             ConflictValue::String("hello".to_string())
@@ -934,7 +956,11 @@ mod tests {
         );
 
         // List
-        let list = Object::list(vec![Object::int(1).id(), Object::int(2).id(), Object::int(3).id()]);
+        let list = Object::list(vec![
+            Object::int(1).id(),
+            Object::int(2).id(),
+            Object::int(3).id(),
+        ]);
         assert_eq!(
             ConflictValue::from_object(&list),
             ConflictValue::Complex("[list: 3 items]".to_string())

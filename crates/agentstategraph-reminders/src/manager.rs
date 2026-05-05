@@ -103,7 +103,11 @@ impl ReminderManager {
 
     /// Snooze a reminder until `until`. Valid from `Due`, `AwaitingPermission`,
     /// or `InProgress` states.
-    pub fn snooze(&self, id: &str, until: chrono::DateTime<Utc>) -> Result<Reminder, ReminderError> {
+    pub fn snooze(
+        &self,
+        id: &str,
+        until: chrono::DateTime<Utc>,
+    ) -> Result<Reminder, ReminderError> {
         let mut r = self.get(id)?;
         if r.status.is_terminal() {
             return Err(ReminderError::AlreadyTerminal(id.to_string(), r.status));

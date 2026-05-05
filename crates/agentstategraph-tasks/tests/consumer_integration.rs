@@ -71,7 +71,9 @@ impl Verifier for StubGitFileVerifier {
 
 #[test]
 fn full_consumer_workflow() {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
 
     let store = TaskStore::new(repo.clone(), "/plans", "claude-code");

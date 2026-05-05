@@ -6,7 +6,9 @@ use agentstategraph_storage::SqliteStorage;
 use agentstategraph_tasks::TaskStore;
 
 pub fn make_repo() -> Arc<Repository> {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     repo
 }

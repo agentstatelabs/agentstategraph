@@ -45,7 +45,9 @@ fn parse_severity(s: Option<&str>) -> TaintSeverity {
 }
 
 fn fresh() -> Arc<Repository> {
-    let r = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let r = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     r.init().unwrap();
     r
 }

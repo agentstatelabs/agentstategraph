@@ -12,7 +12,9 @@ use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity};
 
 fn server() -> AgentStateGraphServer {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     AgentStateGraphServer::new(repo)
 }

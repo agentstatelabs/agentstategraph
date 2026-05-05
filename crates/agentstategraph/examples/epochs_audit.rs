@@ -10,7 +10,9 @@ use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_storage::SqliteStorage;
 
 fn main() {
-    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     repo.init().unwrap();
 
     println!("=== Epochs & Audit Trail Demo ===\n");

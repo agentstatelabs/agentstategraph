@@ -531,7 +531,11 @@ mod tests {
         let s = Schema::from_json_schema(schema, EnforcementMode::Enforce);
         let result = s.validate(&serde_json::json!({"a": 1}));
         assert!(!result.valid);
-        assert_eq!(result.errors.len(), 2, "b and c should both be reported missing");
+        assert_eq!(
+            result.errors.len(),
+            2,
+            "b and c should both be reported missing"
+        );
         let paths: Vec<_> = result.errors.iter().map(|e| e.path.as_str()).collect();
         assert!(paths.iter().any(|p| p.contains("b")));
         assert!(paths.iter().any(|p| p.contains("c")));

@@ -63,7 +63,9 @@ fn admin_key(key: &str) -> ApiKey {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_endpoint_requires_key_in_multi_tenant() {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin_bootstrap"));
@@ -84,7 +86,9 @@ async fn admin_endpoint_requires_key_in_multi_tenant() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_endpoint_rejects_non_admin_key() {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin"));
@@ -107,7 +111,9 @@ async fn admin_endpoint_rejects_non_admin_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_endpoint_accepts_admin_key() {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin_ok"));
@@ -151,7 +157,9 @@ async fn admin_endpoint_accepts_admin_key() {
 async fn single_tenant_mode_skips_admin_auth() {
     // Single-tenant == trusted local process. Admin endpoints are
     // accessible without any key, consistent with `can_migrate` behavior.
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::single_tenant(repo.clone());
     let base = boot(mgr, repo).await;
@@ -171,7 +179,9 @@ async fn single_tenant_mode_skips_admin_auth() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_remains_public() {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     let mgr = TenantManager::multi_tenant(repo.clone(), None);
     mgr.register_key(admin_key("asg_admin_health"));

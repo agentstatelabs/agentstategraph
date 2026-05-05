@@ -20,7 +20,9 @@ impl Default for MemoryReminderStore {
 
 impl MemoryReminderStore {
     pub fn new() -> Self {
-        Self { reminders: RwLock::new(HashMap::new()) }
+        Self {
+            reminders: RwLock::new(HashMap::new()),
+        }
     }
 }
 
@@ -34,7 +36,8 @@ impl ReminderStore for MemoryReminderStore {
     }
 
     fn get(&self, id: &str) -> Result<Option<Reminder>, ReminderError> {
-        Ok(self.reminders
+        Ok(self
+            .reminders
             .read()
             .expect("MemoryReminderStore lock poisoned")
             .get(id)
@@ -42,7 +45,8 @@ impl ReminderStore for MemoryReminderStore {
     }
 
     fn update(&self, reminder: &Reminder) -> Result<(), ReminderError> {
-        let mut map = self.reminders
+        let mut map = self
+            .reminders
             .write()
             .expect("MemoryReminderStore lock poisoned");
         if map.contains_key(&reminder.id) {
@@ -54,7 +58,8 @@ impl ReminderStore for MemoryReminderStore {
     }
 
     fn delete(&self, id: &str) -> Result<bool, ReminderError> {
-        Ok(self.reminders
+        Ok(self
+            .reminders
             .write()
             .expect("MemoryReminderStore lock poisoned")
             .remove(id)
@@ -62,7 +67,8 @@ impl ReminderStore for MemoryReminderStore {
     }
 
     fn list(&self, filter: &ReminderFilter) -> Result<Vec<Reminder>, ReminderError> {
-        let map = self.reminders
+        let map = self
+            .reminders
             .read()
             .expect("MemoryReminderStore lock poisoned");
         let mut results: Vec<Reminder> = map
@@ -71,9 +77,7 @@ impl ReminderStore for MemoryReminderStore {
             .cloned()
             .collect();
         // Sort by priority (ascending = most urgent first), then due_at ascending.
-        results.sort_by(|a, b| {
-            a.priority.cmp(&b.priority).then(a.due_at.cmp(&b.due_at))
-        });
+        results.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.due_at.cmp(&b.due_at)));
         Ok(results)
     }
 }
@@ -81,13 +85,18 @@ impl ReminderStore for MemoryReminderStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
     use crate::types::{CreateReminder, Priority, ReminderStatus};
+    use chrono::{Duration, Utc};
 
     fn make(title: &str, priority: Priority, due_secs: i64) -> Reminder {
-        CreateReminder::new(title, "instructions", Utc::now() + Duration::seconds(due_secs), "agent/test")
-            .with_priority(priority)
-            .into_reminder()
+        CreateReminder::new(
+            title,
+            "instructions",
+            Utc::now() + Duration::seconds(due_secs),
+            "agent/test",
+        )
+        .with_priority(priority)
+        .into_reminder()
     }
 
     #[test]
@@ -138,7 +147,9 @@ mod tests {
         let a = make("low-later", Priority::Low, 120);
         let b = make("high-later", Priority::High, 120);
         let c = make("high-sooner", Priority::High, 60);
-        for r in [&a, &b, &c] { store.save(r).unwrap(); }
+        for r in [&a, &b, &c] {
+            store.save(r).unwrap();
+        }
 
         let results = store.list(&ReminderFilter::default()).unwrap();
         assert_eq!(results[0].title, "high-sooner");
@@ -155,10 +166,12 @@ mod tests {
         store.save(&r1).unwrap();
         store.save(&r2).unwrap();
 
-        let results = store.list(&ReminderFilter {
-            status: Some(ReminderStatus::Due),
-            ..Default::default()
-        }).unwrap();
+        let results = store
+            .list(&ReminderFilter {
+                status: Some(ReminderStatus::Due),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "due");
     }

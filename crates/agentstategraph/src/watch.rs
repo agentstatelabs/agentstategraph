@@ -78,12 +78,12 @@ impl WatchManager {
             .write()
             .expect("WatchManager lock poisoned by earlier panic")
             .insert(
-            id,
-            Watcher {
-                pattern,
-                events: Vec::new(),
-            },
-        );
+                id,
+                Watcher {
+                    pattern,
+                    events: Vec::new(),
+                },
+            );
         id
     }
 
@@ -311,7 +311,12 @@ mod tests {
         let sub = mgr.subscribe(PathPattern::All);
         let commit = ObjectId::hash(b"c1");
 
-        mgr.notify(commit, &["/test/path".to_string()], "agent/watcher", &test_intent());
+        mgr.notify(
+            commit,
+            &["/test/path".to_string()],
+            "agent/watcher",
+            &test_intent(),
+        );
 
         let events = mgr.drain_events(sub);
         assert_eq!(events.len(), 1);

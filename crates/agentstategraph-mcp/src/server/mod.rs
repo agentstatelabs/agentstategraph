@@ -17,8 +17,8 @@ use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{DiffOp, IntentCategory, Object, QueryFilters};
 use agentstategraph_policy::{
-    ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry,
-    PolicyStore, SignatureVerifier,
+    ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry, PolicyStore,
+    SignatureVerifier,
 };
 use agentstategraph_policy_sign::PolicySigner;
 use agentstategraph_reminders::ReminderManager;
@@ -1364,10 +1364,7 @@ impl AgentStateGraphServer {
     #[tool(
         description = "Export a sealed or archived epoch as a self-contained JSON audit bundle. The bundle contains the epoch metadata and the full Commit records for every commit associated with the epoch, making it independently verifiable without access to the live store."
     )]
-    async fn agentstategraph_export_epoch(
-        &self,
-        params: Parameters<ExportEpochParams>,
-    ) -> String {
+    async fn agentstategraph_export_epoch(&self, params: Parameters<ExportEpochParams>) -> String {
         let p = params.0;
         match self.repo.export_epoch(&p.id) {
             Ok(bundle) => bundle.to_string(),
@@ -1796,7 +1793,9 @@ impl AgentStateGraphServer {
         self.impl_quarantine(params.0)
     }
 
-    #[tool(description = "Release a quarantine. Caller should supply evidence the issue is resolved via the `proof` field.")]
+    #[tool(
+        description = "Release a quarantine. Caller should supply evidence the issue is resolved via the `proof` field."
+    )]
     async fn agentstategraph_unquarantine(&self, params: Parameters<TaintRemoveParams>) -> String {
         self.impl_unquarantine(params.0)
     }
@@ -2144,7 +2143,9 @@ mod tests {
         // A caller passing intent_category="migrate" must not be able to
         // write under /_meta/* — the substrate should reject it with
         // ReservedPath.
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().expect("init repo");
         let opts = CommitOptions::new(
             "test-agent",
@@ -2172,7 +2173,9 @@ mod tests {
         // IntentCategory::Migrate directly (not via parse_category) — that
         // path MUST continue to work, otherwise we've broken legitimate
         // migrations.
-        let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
         repo.init().expect("init repo");
         let opts = CommitOptions::new("migrator", IntentCategory::Migrate, "legitimate migration");
         repo.set_json(

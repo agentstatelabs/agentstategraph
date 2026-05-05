@@ -493,19 +493,33 @@ impl TaintStore for IndexedDbStorage {
 
 /// IndexedDB delegates reminders to the in-memory store it already wraps.
 impl ReminderStore for IndexedDbStorage {
-    fn save(&self, reminder: &agentstategraph_reminders::Reminder) -> Result<(), agentstategraph_reminders::ReminderError> {
+    fn save(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
         self.memory.reminders.save(reminder)
     }
-    fn get(&self, id: &str) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError> {
+    fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
         self.memory.reminders.get(id)
     }
-    fn update(&self, reminder: &agentstategraph_reminders::Reminder) -> Result<(), agentstategraph_reminders::ReminderError> {
+    fn update(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
         self.memory.reminders.update(reminder)
     }
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
         self.memory.reminders.delete(id)
     }
-    fn list(&self, filter: &agentstategraph_reminders::ReminderFilter) -> Result<Vec<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError> {
+    fn list(
+        &self,
+        filter: &agentstategraph_reminders::ReminderFilter,
+    ) -> Result<Vec<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
         self.memory.reminders.list(filter)
     }
 }

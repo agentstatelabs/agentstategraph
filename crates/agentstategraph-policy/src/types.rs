@@ -505,15 +505,27 @@ mod tests {
     fn external_evaluator_ref_all_variants_roundtrip() {
         use std::path::PathBuf;
         let sources = vec![
-            EvaluatorSource::Inline { body: "package p\ndefault allow = false".into() },
-            EvaluatorSource::FilePath { path: PathBuf::from("/policies/deny.rego") },
-            EvaluatorSource::CommitRef { path: "/_policy/rego/main".into() },
+            EvaluatorSource::Inline {
+                body: "package p\ndefault allow = false".into(),
+            },
+            EvaluatorSource::FilePath {
+                path: PathBuf::from("/policies/deny.rego"),
+            },
+            EvaluatorSource::CommitRef {
+                path: "/_policy/rego/main".into(),
+            },
         ];
         for src in sources {
             let refs = vec![
-                ExternalEvaluatorRef::Rego { source: src.clone() },
-                ExternalEvaluatorRef::Cedar { source: src.clone() },
-                ExternalEvaluatorRef::Wasm { source: src.clone() },
+                ExternalEvaluatorRef::Rego {
+                    source: src.clone(),
+                },
+                ExternalEvaluatorRef::Cedar {
+                    source: src.clone(),
+                },
+                ExternalEvaluatorRef::Wasm {
+                    source: src.clone(),
+                },
             ];
             for r in refs {
                 let j = serde_json::to_value(&r).unwrap();
@@ -559,7 +571,10 @@ mod tests {
             fallback: FallbackAction::Block,
         };
         let j = serde_json::to_string(&rule).unwrap();
-        assert!(!j.contains("timeout"), "None timeout should be omitted: {j}");
+        assert!(
+            !j.contains("timeout"),
+            "None timeout should be omitted: {j}"
+        );
     }
 
     #[test]
@@ -570,7 +585,10 @@ mod tests {
             preconditions: vec![],
         };
         let j = serde_json::to_string(&a).unwrap();
-        assert!(!j.contains("\"condition\""), "None condition should be omitted: {j}");
+        assert!(
+            !j.contains("\"condition\""),
+            "None condition should be omitted: {j}"
+        );
     }
 
     #[test]

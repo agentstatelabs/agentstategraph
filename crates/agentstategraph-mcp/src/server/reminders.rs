@@ -23,15 +23,23 @@ impl AgentStateGraphServer {
             Some(s) if s.starts_with("interval:") => {
                 let secs: u64 = match s.trim_start_matches("interval:").parse() {
                     Ok(n) => n,
-                    Err(_) => return "Error: interval schedule must be 'interval:<seconds>'".to_string(),
+                    Err(_) => {
+                        return "Error: interval schedule must be 'interval:<seconds>'".to_string();
+                    }
                 };
-                Some(Schedule::Interval { every_seconds: secs })
+                Some(Schedule::Interval {
+                    every_seconds: secs,
+                })
             }
             Some(s) if s.starts_with("daily:") => {
                 let time_str = s.trim_start_matches("daily:");
                 match NaiveTime::parse_from_str(time_str, "%H:%M") {
                     Ok(t) => Some(Schedule::Daily { time: t }),
-                    Err(_) => return format!("Error: daily schedule must be 'daily:HH:MM', got '{time_str}'"),
+                    Err(_) => {
+                        return format!(
+                            "Error: daily schedule must be 'daily:HH:MM', got '{time_str}'"
+                        );
+                    }
                 }
             }
             Some(s) if s.starts_with("weekly:") => {
@@ -55,7 +63,11 @@ impl AgentStateGraphServer {
                     Err(_) => return format!("Error: time must be HH:MM, got '{}'", parts[1]),
                 }
             }
-            Some(other) => return format!("Error: unknown schedule format '{other}'. Use 'once', 'interval:<secs>', 'daily:HH:MM', or 'weekly:Weekday:HH:MM'"),
+            Some(other) => {
+                return format!(
+                    "Error: unknown schedule format '{other}'. Use 'once', 'interval:<secs>', 'daily:HH:MM', or 'weekly:Weekday:HH:MM'"
+                );
+            }
         };
 
         let priority = match p.priority.as_deref().unwrap_or("medium") {
@@ -64,19 +76,26 @@ impl AgentStateGraphServer {
             "medium" | "3" => Priority::Medium,
             "low" | "4" => Priority::Low,
             "minimal" | "5" => Priority::Minimal,
-            other => return format!("Error: unknown priority '{other}'. Use critical/high/medium/low/minimal"),
+            other => {
+                return format!(
+                    "Error: unknown priority '{other}'. Use critical/high/medium/low/minimal"
+                );
+            }
         };
 
-        let refs: Vec<ReminderRef> = p.refs.unwrap_or_default().into_iter().map(|r| {
-            match r.kind.to_lowercase().as_str() {
+        let refs: Vec<ReminderRef> = p
+            .refs
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| match r.kind.to_lowercase().as_str() {
                 "branch" => ReminderRef::branch(&r.id, r.label.as_deref().unwrap_or(&r.id)),
                 "memory" => ReminderRef::memory(&r.id),
                 "plan" => ReminderRef::plan(&r.id, r.label.as_deref().unwrap_or(&r.id)),
                 "task" => ReminderRef::task(&r.id, r.label.as_deref().unwrap_or(&r.id)),
                 "state_path" | "statepath" => ReminderRef::state_path(&r.id),
                 _ => ReminderRef::external(&r.id, &r.kind),
-            }
-        }).collect();
+            })
+            .collect();
 
         let input = CreateReminder::new(&p.title, &p.instructions, due_at, &p.created_by)
             .with_priority(priority)
@@ -85,7 +104,11 @@ impl AgentStateGraphServer {
             .with_refs(refs)
             .with_tags(p.tags.unwrap_or_default());
 
-        let input = if let Some(s) = schedule { input.with_schedule(s) } else { input };
+        let input = if let Some(s) = schedule {
+            input.with_schedule(s)
+        } else {
+            input
+        };
 
         match self.reminders.create(input) {
             Ok(r) => serde_json::to_string_pretty(&serde_json::json!({
@@ -96,7 +119,8 @@ impl AgentStateGraphServer {
                 "priority": format!("{:?}", r.priority),
                 "autonomous": r.autonomous,
                 "refs": r.refs.len(),
-            })).unwrap_or_default(),
+            }))
+            .unwrap_or_default(),
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -105,7 +129,9 @@ impl AgentStateGraphServer {
         let status = p.status.and_then(|s| match s.to_lowercase().as_str() {
             "pending" => Some(ReminderStatus::Pending),
             "due" => Some(ReminderStatus::Due),
-            "awaiting_permission" | "awaiting-permission" => Some(ReminderStatus::AwaitingPermission),
+            "awaiting_permission" | "awaiting-permission" => {
+                Some(ReminderStatus::AwaitingPermission)
+            }
             "in_progress" | "inprogress" => Some(ReminderStatus::InProgress),
             "completed" => Some(ReminderStatus::Completed),
             "snoozed" => Some(ReminderStatus::Snoozed),
@@ -123,24 +149,32 @@ impl AgentStateGraphServer {
 
         match self.reminders.list(&filter) {
             Ok(reminders) => {
-                let json: Vec<serde_json::Value> = reminders.iter().map(|r| serde_json::json!({
-                    "id": r.id,
-                    "title": r.title,
-                    "status": format!("{:?}", r.status),
-                    "priority": format!("{:?}", r.priority),
-                    "due_at": r.due_at.to_rfc3339(),
-                    "autonomous": r.autonomous,
-                    "tags": r.tags,
-                    "refs": r.refs.iter().map(|rf| serde_json::json!({
-                        "kind": format!("{:?}", rf.kind),
-                        "id": rf.id,
-                        "label": rf.label,
-                        "stale": rf.stale,
-                    })).collect::<Vec<_>>(),
-                    "executions": r.executions.len(),
-                })).collect();
-                format!("{} reminders:\n{}", json.len(),
-                    serde_json::to_string_pretty(&json).unwrap_or_default())
+                let json: Vec<serde_json::Value> = reminders
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "id": r.id,
+                            "title": r.title,
+                            "status": format!("{:?}", r.status),
+                            "priority": format!("{:?}", r.priority),
+                            "due_at": r.due_at.to_rfc3339(),
+                            "autonomous": r.autonomous,
+                            "tags": r.tags,
+                            "refs": r.refs.iter().map(|rf| serde_json::json!({
+                                "kind": format!("{:?}", rf.kind),
+                                "id": rf.id,
+                                "label": rf.label,
+                                "stale": rf.stale,
+                            })).collect::<Vec<_>>(),
+                            "executions": r.executions.len(),
+                        })
+                    })
+                    .collect();
+                format!(
+                    "{} reminders:\n{}",
+                    json.len(),
+                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                )
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -150,26 +184,33 @@ impl AgentStateGraphServer {
         match self.reminders.remind_me() {
             Ok(reminders) if reminders.is_empty() => "No reminders due.".to_string(),
             Ok(reminders) => {
-                let json: Vec<serde_json::Value> = reminders.iter().map(|r| serde_json::json!({
-                    "id": r.id,
-                    "title": r.title,
-                    "priority": format!("{:?}", r.priority),
-                    "due_at": r.due_at.to_rfc3339(),
-                    "instructions": r.instructions,
-                    "commands": r.commands,
-                    "autonomous": r.autonomous,
-                    "status": format!("{:?}", r.status),
-                    "refs": r.refs.iter().map(|rf| serde_json::json!({
-                        "kind": format!("{:?}", rf.kind),
-                        "id": rf.id,
-                        "label": rf.label,
-                        "stale": rf.stale,
-                    })).collect::<Vec<_>>(),
-                    "tags": r.tags,
-                })).collect();
-                format!("{} reminder(s) due:\n{}",
+                let json: Vec<serde_json::Value> = reminders
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "id": r.id,
+                            "title": r.title,
+                            "priority": format!("{:?}", r.priority),
+                            "due_at": r.due_at.to_rfc3339(),
+                            "instructions": r.instructions,
+                            "commands": r.commands,
+                            "autonomous": r.autonomous,
+                            "status": format!("{:?}", r.status),
+                            "refs": r.refs.iter().map(|rf| serde_json::json!({
+                                "kind": format!("{:?}", rf.kind),
+                                "id": rf.id,
+                                "label": rf.label,
+                                "stale": rf.stale,
+                            })).collect::<Vec<_>>(),
+                            "tags": r.tags,
+                        })
+                    })
+                    .collect();
+                format!(
+                    "{} reminder(s) due:\n{}",
                     reminders.len(),
-                    serde_json::to_string_pretty(&json).unwrap_or_default())
+                    serde_json::to_string_pretty(&json).unwrap_or_default()
+                )
             }
             Err(e) => format!("Error: {e}"),
         }
@@ -181,14 +222,21 @@ impl AgentStateGraphServer {
             Err(e) => return format!("Error: invalid until format (expected RFC3339): {e}"),
         };
         match self.reminders.snooze(&p.id, until) {
-            Ok(r) => format!("Reminder '{}' snoozed until {}", r.title, until.to_rfc3339()),
+            Ok(r) => format!(
+                "Reminder '{}' snoozed until {}",
+                r.title,
+                until.to_rfc3339()
+            ),
             Err(e) => format!("Error: {e}"),
         }
     }
 
     pub(super) fn impl_reminder_approve(&self, p: ReminderApproveParams) -> String {
         match self.reminders.approve(&p.id, &p.approved_by) {
-            Ok(r) => format!("Reminder '{}' approved by {} — status: {:?}", r.title, p.approved_by, r.status),
+            Ok(r) => format!(
+                "Reminder '{}' approved by {} — status: {:?}",
+                r.title, p.approved_by, r.status
+            ),
             Err(e) => format!("Error: {e}"),
         }
     }
@@ -207,7 +255,11 @@ impl AgentStateGraphServer {
             "deferred" => ExecutionResult::Deferred,
             "snoozed" => ExecutionResult::Snoozed,
             "cancelled" => ExecutionResult::Cancelled,
-            other => return format!("Error: unknown result '{other}'. Use success/failed/deferred/snoozed/cancelled"),
+            other => {
+                return format!(
+                    "Error: unknown result '{other}'. Use success/failed/deferred/snoozed/cancelled"
+                );
+            }
         };
 
         let record = ExecutionRecord {
@@ -227,7 +279,8 @@ impl AgentStateGraphServer {
                 "status": format!("{:?}", r.status),
                 "executions": r.executions.len(),
                 "next_due": r.due_at.to_rfc3339(),
-            })).unwrap_or_default(),
+            }))
+            .unwrap_or_default(),
             Err(e) => format!("Error: {e}"),
         }
     }

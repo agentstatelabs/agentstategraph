@@ -859,9 +859,7 @@ impl EpochStore for PostgresStorage {
                             &[&self.tenant_id, &epoch.id],
                         )
                         .await
-                        .map_err(|e| {
-                            StorageError::Backend(format!("epoch commits: {}", e))
-                        })?;
+                        .map_err(|e| StorageError::Backend(format!("epoch commits: {}", e)))?;
                     epoch.commits = rows
                         .iter()
                         .filter_map(|r| {
@@ -1615,9 +1613,7 @@ impl TaintStore for PostgresStorage {
 // ReminderStore — durable Postgres reminder storage
 // ---------------------------------------------------------------------------
 
-fn pg_reminder_status_to_str(
-    s: agentstategraph_reminders::types::ReminderStatus,
-) -> &'static str {
+fn pg_reminder_status_to_str(s: agentstategraph_reminders::types::ReminderStatus) -> &'static str {
     use agentstategraph_reminders::types::ReminderStatus;
     match s {
         ReminderStatus::Pending => "pending",
@@ -1742,8 +1738,9 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         &self,
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
-        let commands_json = serde_json::to_string(&reminder.commands)
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("commands: {e}")))?;
+        let commands_json = serde_json::to_string(&reminder.commands).map_err(|e| {
+            agentstategraph_reminders::ReminderError::Store(format!("commands: {e}"))
+        })?;
         let refs_json = serde_json::to_string(&reminder.refs)
             .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("refs: {e}")))?;
         let schedule_json = reminder
@@ -1751,9 +1748,12 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
             .as_ref()
             .map(|s| serde_json::to_string(s))
             .transpose()
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("schedule: {e}")))?;
-        let executions_json = serde_json::to_string(&reminder.executions)
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("executions: {e}")))?;
+            .map_err(|e| {
+                agentstategraph_reminders::ReminderError::Store(format!("schedule: {e}"))
+            })?;
+        let executions_json = serde_json::to_string(&reminder.executions).map_err(|e| {
+            agentstategraph_reminders::ReminderError::Store(format!("executions: {e}"))
+        })?;
         let tags_json = serde_json::to_string(&reminder.tags)
             .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("tags: {e}")))?;
         let priority = pg_priority_to_i32(reminder.priority);
@@ -1831,8 +1831,9 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         &self,
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
-        let commands_json = serde_json::to_string(&reminder.commands)
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("commands: {e}")))?;
+        let commands_json = serde_json::to_string(&reminder.commands).map_err(|e| {
+            agentstategraph_reminders::ReminderError::Store(format!("commands: {e}"))
+        })?;
         let refs_json = serde_json::to_string(&reminder.refs)
             .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("refs: {e}")))?;
         let schedule_json = reminder
@@ -1840,9 +1841,12 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
             .as_ref()
             .map(|s| serde_json::to_string(s))
             .transpose()
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("schedule: {e}")))?;
-        let executions_json = serde_json::to_string(&reminder.executions)
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("executions: {e}")))?;
+            .map_err(|e| {
+                agentstategraph_reminders::ReminderError::Store(format!("schedule: {e}"))
+            })?;
+        let executions_json = serde_json::to_string(&reminder.executions).map_err(|e| {
+            agentstategraph_reminders::ReminderError::Store(format!("executions: {e}"))
+        })?;
         let tags_json = serde_json::to_string(&reminder.tags)
             .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("tags: {e}")))?;
         let priority = pg_priority_to_i32(reminder.priority);
@@ -1901,10 +1905,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         })
     }
 
-    fn delete(
-        &self,
-        id: &str,
-    ) -> Result<bool, agentstategraph_reminders::ReminderError> {
+    fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
         self.block_on(async {
             let client = self
                 .pool
@@ -1945,8 +1946,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
 
-            let mut sql =
-                "SELECT * FROM reminders WHERE tenant_id = $1".to_string();
+            let mut sql = "SELECT * FROM reminders WHERE tenant_id = $1".to_string();
             let mut idx = 2usize;
             if status_str.is_some() {
                 sql.push_str(&format!(" AND status = ${idx}"));
@@ -1966,8 +1966,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
             }
             sql.push_str(" ORDER BY priority ASC, due_at ASC");
 
-            let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                vec![&self.tenant_id];
+            let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&self.tenant_id];
             if let Some(ref s) = status_str {
                 params.push(s);
             }
@@ -2099,7 +2098,13 @@ mod tests {
 
     #[test]
     fn pg_reminder_status_strings_are_snake_case() {
-        assert_eq!(pg_reminder_status_to_str(ReminderStatus::AwaitingPermission), "awaiting_permission");
-        assert_eq!(pg_reminder_status_to_str(ReminderStatus::InProgress), "in_progress");
+        assert_eq!(
+            pg_reminder_status_to_str(ReminderStatus::AwaitingPermission),
+            "awaiting_permission"
+        );
+        assert_eq!(
+            pg_reminder_status_to_str(ReminderStatus::InProgress),
+            "in_progress"
+        );
     }
 }

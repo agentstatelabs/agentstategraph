@@ -12,7 +12,9 @@ use agentstategraph_taint::{TaintEffect, TaintMetadata, TaintParams, TaintSeveri
 use chrono::Utc;
 
 fn server() -> AgentStateGraphServer {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().unwrap();
     AgentStateGraphServer::new(repo)
 }

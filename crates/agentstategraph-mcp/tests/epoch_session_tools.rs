@@ -14,7 +14,9 @@ use agentstategraph_core::{IntentCategory, Object, SessionStatus};
 use agentstategraph_storage::SqliteStorage;
 
 fn fresh_repo() -> Arc<Repository> {
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().expect("init repo");
     repo
 }

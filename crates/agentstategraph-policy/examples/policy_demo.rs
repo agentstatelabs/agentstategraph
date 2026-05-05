@@ -40,7 +40,9 @@ fn main() {
     println!("──────────────────────────────────────────────────\n");
 
     // ─── Repo + PolicyStore ──────────────────────────────────
-    let repo = Arc::new(Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite"))));
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
     repo.init().expect("init repo");
     let store = PolicyStore::new(repo.clone(), "/policies", "agent/demo");
 

@@ -7,7 +7,9 @@ use agentstategraph_taint::{TaintKind, TaintSeverity, WatchDirection, WatchParam
 use serde_json::json;
 
 fn repo() -> Repository {
-    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let r = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     r.init().unwrap();
     r
 }

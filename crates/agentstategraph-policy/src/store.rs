@@ -673,7 +673,11 @@ impl PolicyStore {
         Ok(serde_json::from_value(value)?)
     }
 
-    fn commit_opts(&self, category: IntentCategory, description: impl Into<String>) -> CommitOptions {
+    fn commit_opts(
+        &self,
+        category: IntentCategory,
+        description: impl Into<String>,
+    ) -> CommitOptions {
         CommitOptions::new(&self.agent_id, category, description)
     }
 }

@@ -98,7 +98,9 @@ fn main() {
     // ─── 3. Demonstrate merge with non-conflicting changes ────────
     println!("\n--- Merge with different keys (auto-resolves) ---\n");
 
-    let repo = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     repo.init().unwrap();
 
     // Set initial state
@@ -163,7 +165,9 @@ fn main() {
     println!("\n--- Merge with same key (conflict) ---\n");
 
     // Fresh repo for clean conflict demo
-    let repo2 = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let repo2 = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     repo2.init().unwrap();
 
     repo2

@@ -4,7 +4,7 @@
 //! so every test is in-process with no I/O.  Tests are grouped by domain and
 //! ordered from simplest to most complex within each group.
 
-use agentstategraph::{CommitOptions, RepoError, Repository, META_PATH_PREFIX, SCHEMA_VERSION};
+use agentstategraph::{CommitOptions, META_PATH_PREFIX, RepoError, Repository, SCHEMA_VERSION};
 use agentstategraph_core::{IntentCategory, Object, QueryFilters};
 use agentstategraph_storage::SqliteStorage;
 
@@ -13,7 +13,9 @@ use agentstategraph_storage::SqliteStorage;
 // ---------------------------------------------------------------------------
 
 fn repo() -> Repository {
-    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let r = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     r.init().unwrap();
     r
 }
@@ -32,7 +34,9 @@ fn opts_agent(agent: &str, category: IntentCategory, desc: &str) -> CommitOption
 
 #[test]
 fn init_creates_main() {
-    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let r = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     r.init().unwrap();
     // Should be able to get the schema version stamp
     let ver = r
@@ -43,7 +47,9 @@ fn init_creates_main() {
 
 #[test]
 fn init_is_idempotent() {
-    let r = Repository::new(Box::new(SqliteStorage::in_memory().expect("in-memory sqlite")));
+    let r = Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    ));
     let id1 = r.init().unwrap();
     let id2 = r.init().unwrap();
     assert_eq!(id1, id2, "second init must return same commit id");
@@ -343,7 +349,10 @@ fn diff_empty_branches_is_empty() {
     let r = repo();
     r.branch("copy", "main").unwrap();
     let diff = r.diff("main", "copy").unwrap();
-    assert!(diff.is_empty(), "identical branches must produce empty diff");
+    assert!(
+        diff.is_empty(),
+        "identical branches must produce empty diff"
+    );
 }
 
 #[test]
@@ -452,7 +461,11 @@ fn merge_conflict_returns_error() {
     .unwrap();
 
     let err = r
-        .merge("feature", "main", opts(IntentCategory::Merge, "conflict merge"))
+        .merge(
+            "feature",
+            "main",
+            opts(IntentCategory::Merge, "conflict merge"),
+        )
         .unwrap_err();
     assert!(
         matches!(err, RepoError::MergeConflicts(_)),
@@ -636,16 +649,14 @@ fn query_by_confidence_range() {
         "main",
         "/a",
         &Object::int(1),
-        opts(IntentCategory::Explore, "low confidence")
-            .with_confidence(0.4),
+        opts(IntentCategory::Explore, "low confidence").with_confidence(0.4),
     )
     .unwrap();
     r.set(
         "main",
         "/b",
         &Object::int(2),
-        opts(IntentCategory::Checkpoint, "high confidence")
-            .with_confidence(0.95),
+        opts(IntentCategory::Checkpoint, "high confidence").with_confidence(0.95),
     )
     .unwrap();
 
