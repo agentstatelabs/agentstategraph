@@ -15,5 +15,5 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false }
+agentstategraph-storage = { path = "../agentstategraph-storage", features = ["sqlite"] }
 agentstategraph-tasks = { path = "../agentstategraph-tasks" }
