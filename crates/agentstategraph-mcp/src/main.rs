@@ -34,6 +34,8 @@ pub struct ServeArgs {
     pub pg_pool_size: usize,
     pub initial_admin_key: Option<String>,
     pub external_evaluators: Vec<String>,
+    /// When set, proxy `GET /api/code/*` to ASD at this URL (`/api/v1/*`).
+    pub asd_url: Option<String>,
 }
 
 /// Parse the bind address from CLI args + env.
@@ -162,6 +164,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let initial_admin_key_env = std::env::var("ASG_INITIAL_ADMIN_KEY").ok();
     let mut initial_admin_key_cli: Option<String> = None;
     let mut external_evaluators: Vec<String> = Vec::new();
+    let mut asd_url: Option<String> = std::env::var("ASG_ASD_URL").ok().filter(|s| !s.is_empty());
 
     let mut i = 0;
     while i < args.len() {
@@ -246,6 +249,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     external_evaluators.push(args[i].clone());
                 }
             }
+            "--asd-url" => {
+                i += 1;
+                if i < args.len() {
+                    asd_url = Some(args[i].clone());
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -287,6 +296,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 );
                 eprintln!(
                     "      --external-evaluator <KIND>  Register stock external policy runner (wasm|rego|cedar); repeatable"
+                );
+                eprintln!(
+                    "      --asd-url <URL>  Proxy GET /api/code/* to ASD at URL/api/v1/* (env ASG_ASD_URL)"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -344,6 +356,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         pg_pool_size,
         initial_admin_key: initial_admin_key_cli.or(initial_admin_key_env),
         external_evaluators,
+        asd_url,
     }
 }
 
@@ -429,6 +442,10 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!("Try: curl http://localhost:{}/api/health", args.http_port);
 
+        #[cfg(feature = "providers")]
+        if let Some(ref url) = args.asd_url {
+            eprintln!("ASD proxy: /api/code/* → {}/api/v1/*", url);
+        }
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
@@ -458,6 +475,12 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     http::build_router_for_test(repo, tenant_mgr, args.rate_limit_rpm)
                 } else {
                     http::router_with_rate_limit(repo, args.rate_limit_rpm)
+                };
+                #[cfg(feature = "providers")]
+                let app = if let Some(asd_url) = args.asd_url {
+                    app.merge(http::asd_proxy_router(asd_url))
+                } else {
+                    app
                 };
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
