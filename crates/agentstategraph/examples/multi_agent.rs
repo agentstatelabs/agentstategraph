@@ -7,7 +7,7 @@
 //!
 //! Run: cargo run --example multi_agent -p stategraph
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, CreateSessionParams, Repository};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_storage::SqliteStorage;
 
@@ -50,10 +50,7 @@ fn main() {
             "agent/orchestrator",
             "main",
             repo.log("main", 1).unwrap()[0].id,
-            None,
-            Some("intent-001".to_string()),
-            None,
-            None,
+            CreateSessionParams { delegated_intent: Some("intent-001".to_string()), ..Default::default() },
         )
         .unwrap();
     println!("✓ Orchestrator session: {}\n", orchestrator_session.id);
@@ -65,10 +62,12 @@ fn main() {
             "agent/network",
             "agents/network/workspace",
             repo.log("main", 1).unwrap()[0].id,
-            Some(orchestrator_session.id.clone()),
-            Some("intent-002".to_string()),
-            Some("agent/orchestrator".to_string()),
-            Some("/cluster/network".to_string()),
+            CreateSessionParams {
+                parent_session: Some(orchestrator_session.id.clone()),
+                delegated_intent: Some("intent-002".to_string()),
+                report_to: Some("agent/orchestrator".to_string()),
+                path_scope: Some("/cluster/network".to_string()),
+            },
         )
         .unwrap();
     repo.branch("agents/network/workspace", "main").unwrap();
@@ -80,10 +79,12 @@ fn main() {
             "agent/storage",
             "agents/storage/workspace",
             repo.log("main", 1).unwrap()[0].id,
-            Some(orchestrator_session.id.clone()),
-            Some("intent-003".to_string()),
-            Some("agent/orchestrator".to_string()),
-            Some("/cluster/storage".to_string()),
+            CreateSessionParams {
+                parent_session: Some(orchestrator_session.id.clone()),
+                delegated_intent: Some("intent-003".to_string()),
+                report_to: Some("agent/orchestrator".to_string()),
+                path_scope: Some("/cluster/storage".to_string()),
+            },
         )
         .unwrap();
     repo.branch("agents/storage/workspace", "main").unwrap();
@@ -95,10 +96,12 @@ fn main() {
             "agent/gpu-scheduler",
             "agents/gpu-scheduler/workspace",
             repo.log("main", 1).unwrap()[0].id,
-            Some(orchestrator_session.id.clone()),
-            Some("intent-004".to_string()),
-            Some("agent/orchestrator".to_string()),
-            Some("/cluster/scheduling".to_string()),
+            CreateSessionParams {
+                parent_session: Some(orchestrator_session.id.clone()),
+                delegated_intent: Some("intent-004".to_string()),
+                report_to: Some("agent/orchestrator".to_string()),
+                path_scope: Some("/cluster/scheduling".to_string()),
+            },
         )
         .unwrap();
     repo.branch("agents/gpu-scheduler/workspace", "main")

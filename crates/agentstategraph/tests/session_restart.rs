@@ -2,7 +2,7 @@
 //! high-level `Repository`/`SessionManager` API survive a
 //! process-restart when backed by `SqliteStorage`.
 
-use agentstategraph::Repository;
+use agentstategraph::{CreateSessionParams, Repository};
 use agentstategraph_core::{ObjectId, SessionStatus};
 use agentstategraph_storage::SqliteStorage;
 
@@ -33,10 +33,11 @@ fn session_survives_restart_via_repository() {
                 "agent/planner",
                 "agents/planner/workspace",
                 ObjectId::hash(b"head"),
-                None,
-                Some("intent-001".to_string()),
-                None,
-                Some("/scope".to_string()),
+                CreateSessionParams {
+                    delegated_intent: Some("intent-001".to_string()),
+                    path_scope: Some("/scope".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap();
         s.id

@@ -24,6 +24,15 @@ pub enum SessionError {
     Storage(#[from] StorageError),
 }
 
+/// Optional fields for [`SessionManager::create`].
+#[derive(Default)]
+pub struct CreateSessionParams {
+    pub parent_session: Option<SessionId>,
+    pub delegated_intent: Option<IntentId>,
+    pub report_to: Option<String>,
+    pub path_scope: Option<String>,
+}
+
 /// Manages active sessions.
 ///
 /// Backed by a `SessionStore` so sessions survive process restart.
@@ -39,16 +48,12 @@ impl<'a> SessionManager<'a> {
     }
 
     /// Create a new session and persist it.
-    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         agent_id: &str,
         working_branch: &str,
         head: ObjectId,
-        parent_session: Option<SessionId>,
-        delegated_intent: Option<IntentId>,
-        report_to: Option<String>,
-        path_scope: Option<String>,
+        params: CreateSessionParams,
     ) -> Result<Session, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         let session = Session {
@@ -56,10 +61,10 @@ impl<'a> SessionManager<'a> {
             agent_id: agent_id.to_string(),
             working_branch: working_branch.to_string(),
             head,
-            parent_session,
-            delegated_intent,
-            report_to,
-            path_scope,
+            parent_session: params.parent_session,
+            delegated_intent: params.delegated_intent,
+            report_to: params.report_to,
+            path_scope: params.path_scope,
             scope_tenant: None,
             status: SessionStatus::Active,
             created_at: Utc::now(),
@@ -152,6 +157,25 @@ mod tests {
         SqliteStorage::in_memory().expect("in-memory sqlite")
     }
 
+    /// Build a minimal Session for tests. Optional/new fields default to None/Active.
+    /// Update this helper when Session gains fields so call sites stay stable.
+    pub fn make_session(id: &str, agent_id: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            agent_id: agent_id.to_string(),
+            working_branch: format!("agents/{}/workspace", agent_id),
+            head: agentstategraph_core::ObjectId::hash(id.as_bytes()),
+            parent_session: None,
+            delegated_intent: None,
+            report_to: None,
+            path_scope: None,
+            scope_tenant: None,
+            status: SessionStatus::Active,
+            created_at: Utc::now(),
+            ended_at: None,
+        }
+    }
+
     #[test]
     fn test_create_and_get_session() {
         let store = mgr_store();
@@ -161,10 +185,7 @@ mod tests {
                 "agent/planner",
                 "agents/planner/workspace",
                 ObjectId::hash(b"head"),
-                None,
-                None,
-                None,
-                None,
+                CreateSessionParams::default(),
             )
             .unwrap();
 
@@ -181,10 +202,10 @@ mod tests {
                 "agent/orchestrator",
                 "agents/orchestrator/workspace",
                 ObjectId::hash(b"head"),
-                None,
-                Some("intent-001".to_string()),
-                None,
-                None,
+                CreateSessionParams {
+                    delegated_intent: Some("intent-001".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -192,10 +213,12 @@ mod tests {
             "agent/storage",
             "agents/storage/workspace",
             ObjectId::hash(b"head"),
-            Some(parent.id.clone()),
-            Some("intent-002".to_string()),
-            Some("agent/orchestrator".to_string()),
-            Some("/config/storage".to_string()),
+            CreateSessionParams {
+                parent_session: Some(parent.id.clone()),
+                delegated_intent: Some("intent-002".to_string()),
+                report_to: Some("agent/orchestrator".to_string()),
+                path_scope: Some("/config/storage".to_string()),
+            },
         )
         .unwrap();
 
@@ -203,10 +226,12 @@ mod tests {
             "agent/network",
             "agents/network/workspace",
             ObjectId::hash(b"head"),
-            Some(parent.id.clone()),
-            Some("intent-003".to_string()),
-            Some("agent/orchestrator".to_string()),
-            Some("/config/network".to_string()),
+            CreateSessionParams {
+                parent_session: Some(parent.id.clone()),
+                delegated_intent: Some("intent-003".to_string()),
+                report_to: Some("agent/orchestrator".to_string()),
+                path_scope: Some("/config/network".to_string()),
+            },
         )
         .unwrap();
 
@@ -260,36 +285,12 @@ mod tests {
     fn test_list_by_agent() {
         let store = mgr_store();
         let mgr = SessionManager::new(&store);
-        mgr.create(
-            "agent/a",
-            "br/a",
-            ObjectId::hash(b"h"),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        mgr.create(
-            "agent/b",
-            "br/b",
-            ObjectId::hash(b"h"),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        mgr.create(
-            "agent/a",
-            "br/a2",
-            ObjectId::hash(b"h"),
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        mgr.create("agent/a", "br/a", ObjectId::hash(b"h"), CreateSessionParams::default())
+            .unwrap();
+        mgr.create("agent/b", "br/b", ObjectId::hash(b"h"), CreateSessionParams::default())
+            .unwrap();
+        mgr.create("agent/a", "br/a2", ObjectId::hash(b"h"), CreateSessionParams::default())
+            .unwrap();
 
         assert_eq!(mgr.list(Some("agent/a")).unwrap().len(), 2);
         assert_eq!(mgr.list(Some("agent/b")).unwrap().len(), 1);

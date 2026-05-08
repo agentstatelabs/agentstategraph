@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, CreateSessionParams, Repository};
 use agentstategraph_core::{IntentCategory, Object, SessionStatus};
 use agentstategraph_storage::SqliteStorage;
 
@@ -38,10 +38,7 @@ fn create_test_session(repo: &Repository, id_hint: &str) -> String {
             &format!("agent/{}", id_hint),
             "main",
             agentstategraph_core::ObjectId::hash(b"head"),
-            None,
-            None,
-            None,
-            None,
+            CreateSessionParams::default(),
         )
         .expect("create session");
     s.id

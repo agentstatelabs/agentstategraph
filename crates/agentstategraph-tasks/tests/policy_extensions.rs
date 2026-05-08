@@ -7,7 +7,7 @@
 
 mod common;
 
-use agentstategraph_tasks::{OnCompleteHook, Priority, Task, TaskId};
+use agentstategraph_tasks::{AddTaskOptions, OnCompleteHook, Priority, Task, TaskId};
 use serde_json::json;
 
 use common::make_store;
@@ -40,9 +40,7 @@ fn test_task_with_payload_roundtrips() {
             None,
             vec![],
             Some("oncall".into()),
-            Some(payload.clone()),
-            None,
-            None,
+            AddTaskOptions { payload: Some(payload.clone()), ..Default::default() },
         )
         .unwrap();
 
@@ -67,9 +65,7 @@ fn test_task_with_parent_change_roundtrips() {
             None,
             vec![],
             None,
-            None,
-            Some("spec-deadbeef".into()),
-            None,
+            AddTaskOptions { parent_change: Some("spec-deadbeef".into()), ..Default::default() },
         )
         .unwrap();
 
@@ -148,9 +144,11 @@ fn test_add_task_with_extensions_builder() {
             None,
             vec![],
             Some("agent-a".into()),
-            Some(payload.clone()),
-            Some("spec-xyz".into()),
-            Some(OnCompleteHook::PromoteChange),
+            AddTaskOptions {
+                payload: Some(payload.clone()),
+                parent_change: Some("spec-xyz".into()),
+                on_complete: Some(OnCompleteHook::PromoteChange),
+            },
         )
         .unwrap();
 

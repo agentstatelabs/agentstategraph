@@ -53,7 +53,7 @@ pub mod verifier;
 
 pub use error::TaskStoreError;
 pub use state::Transition;
-pub use store::TaskStore;
+pub use store::{AddTaskOptions, TaskStore};
 pub use types::{
     OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
 };

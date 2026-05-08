@@ -50,6 +50,11 @@ policy-wasm = ["dep:agentstategraph-policy-wasm"]
 policy-rego = ["dep:agentstategraph-policy-rego"]
 policy-cedar = ["dep:agentstategraph-policy-cedar"]
 all-external-evaluators = ["policy-wasm", "policy-rego", "policy-cedar"]
+# Guard rail: any future external-network provider crate (reqwest, rustls, AI
+# clients) MUST be gated behind this feature so `cargo build` stays lean.
+# Pattern: providers = ["dep:my-providers-crate"]
+# Validate with: cargo build --no-default-features && cargo tree --no-default-features | grep reqwest
+providers = []
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

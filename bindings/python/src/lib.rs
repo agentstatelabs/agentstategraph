@@ -25,7 +25,7 @@ use pyo3::prelude::*;
 // Session + SessionStatus moved to agentstategraph-core in 0.6.5;
 // import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, CreateSessionParams, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_core::{Session, SessionStatus};
 use agentstategraph_policy::{
@@ -37,9 +37,9 @@ use agentstategraph_taint::{
     UntaintParams, UnwatchParams, WatchDirection, WatchParams,
 };
 use agentstategraph_tasks::{
-    NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
-    TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyEntry, VerifyReport,
-    VerifyResult,
+    AddTaskOptions, NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind,
+    Task, TaskId, TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyEntry,
+    VerifyReport, VerifyResult,
 };
 use chrono::{DateTime, Utc};
 
@@ -1017,9 +1017,7 @@ impl TaskStore {
                 parent,
                 blockers,
                 assigned_to,
-                payload_val,
-                parent_change,
-                on_complete_val,
+                AddTaskOptions { payload: payload_val, parent_change, on_complete: on_complete_val },
             )
             .map_err(task_err)?;
         task_to_dict(py, &task)
@@ -1708,10 +1706,7 @@ impl AgentStateGraph {
                 agent_id,
                 working_branch,
                 head,
-                parent_session,
-                delegated_intent,
-                report_to,
-                path_scope,
+                CreateSessionParams { parent_session, delegated_intent, report_to, path_scope },
             )
             .map_err(session_err)?;
         session_to_dict(py, &s)

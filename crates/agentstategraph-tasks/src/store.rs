@@ -36,6 +36,21 @@ use crate::state::{Transition, check_transition};
 use crate::types::{OnCompleteHook, Plan, PlanStatus, Priority, Proof, Task, TaskId, TaskStatus};
 use crate::verifier::{Verifier, VerifyEntry, VerifyReport};
 
+/// Optional extension fields for [`TaskStore::add_task_with_extensions`].
+///
+/// - `payload`: opaque JSON the task carries for a downstream consumer.
+///   The `-tasks` crate does not interpret it.
+/// - `parent_change`: identifier of the change this task gates, when
+///   created from a deferred `ChangeProposal`.
+/// - `on_complete`: hook the consumer dispatches when the task transitions
+///   to `Done`. The `-tasks` crate does not execute it.
+#[derive(Default)]
+pub struct AddTaskOptions {
+    pub payload: Option<serde_json::Value>,
+    pub parent_change: Option<String>,
+    pub on_complete: Option<OnCompleteHook>,
+}
+
 /// A handle bound to a `Repository` and a path prefix. All operations on
 /// plans and tasks go through a `TaskStore`.
 pub struct TaskStore {
@@ -200,7 +215,6 @@ impl TaskStore {
     /// Add a new task to a plan. Task ids are assigned monotonically —
     /// the next available `t-NNN` is picked by scanning existing entries.
     /// `assigned_to` is optional — pass an agent id to record ownership.
-    #[allow(clippy::too_many_arguments)]
     pub fn add_task(
         &self,
         ref_name: &str,
@@ -219,27 +233,17 @@ impl TaskStore {
             parent_id,
             blocked_by,
             assigned_to,
-            None,
-            None,
-            None,
+            AddTaskOptions::default(),
         )
     }
 
     /// Like `add_task` but also accepts the policy-fallback extension
-    /// fields (POLICY_V1.md §22.4):
-    ///
-    /// - `payload`: opaque JSON the task carries for a downstream
-    ///   consumer. The `-tasks` crate does not interpret it.
-    /// - `parent_change`: identifier of the change this task gates,
-    ///   when created from a deferred `ChangeProposal`.
-    /// - `on_complete`: hook the consumer dispatches when the task
-    ///   transitions to `Done`. The `-tasks` crate does not execute it.
+    /// fields (POLICY_V1.md §22.4). See [`AddTaskOptions`] for field docs.
     ///
     /// Uses a CAS retry loop so concurrent writers across processes are safe.
     /// On each retry, `next_task_number` re-scans the current tree, naturally
     /// picking the next available id even if a concurrent writer added a task
     /// in the meantime.
-    #[allow(clippy::too_many_arguments)]
     pub fn add_task_with_extensions(
         &self,
         ref_name: &str,
@@ -249,10 +253,9 @@ impl TaskStore {
         parent_id: Option<TaskId>,
         blocked_by: Vec<TaskId>,
         assigned_to: Option<String>,
-        payload: Option<serde_json::Value>,
-        parent_change: Option<String>,
-        on_complete: Option<OnCompleteHook>,
+        opts: AddTaskOptions,
     ) -> Result<Task, TaskStoreError> {
+        let AddTaskOptions { payload, parent_change, on_complete } = opts;
         if !self.plan_exists(ref_name, plan)? {
             return Err(TaskStoreError::PlanNotFound(plan.to_string()));
         }

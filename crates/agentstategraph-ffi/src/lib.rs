@@ -30,7 +30,7 @@ use agentstategraph_taint::{
     QuarantineParams, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
     UntaintParams, UnwatchParams, WatchDirection, WatchParams,
 };
-use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskId, TaskStore};
+use agentstategraph_tasks::{AddTaskOptions, Priority, Proof, ProofKind, TaskId, TaskStore};
 use semver::Version;
 use serde::Serialize;
 
@@ -782,9 +782,7 @@ pub extern "C" fn agentstategraph_taskstore_add_task_ex(
         parent,
         blockers,
         assigned,
-        payload,
-        parent_change_opt,
-        on_complete_opt,
+        AddTaskOptions { payload, parent_change: parent_change_opt, on_complete: on_complete_opt },
     ) {
         Ok(t) => json_ok(&t),
         Err(e) => json_err(&e.to_string()),

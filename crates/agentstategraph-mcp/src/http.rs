@@ -28,7 +28,7 @@ use tracing::{info, warn};
 use agentstategraph::{CommitOptions, RepoError, Repository};
 use agentstategraph_core::IntentCategory;
 
-use crate::auth::{self, AuthContext, TenantManager};
+use crate::auth::{self, AuthContext, CreateKeyOptions, TenantManager};
 
 /// Compiled config for per-peer-IP governor.
 pub type PeerIpGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
@@ -242,10 +242,12 @@ async fn create_key(
         &req.tenant_id,
         &req.name,
         &plan,
-        req.commit_agent_id,
-        can_migrate,
-        is_admin,
-        expires_at,
+        CreateKeyOptions {
+            commit_agent_id: req.commit_agent_id,
+            can_migrate,
+            is_admin,
+            expires_at,
+        },
     );
     // Return the full key ONCE — it won't be shown again
     Json(serde_json::json!({

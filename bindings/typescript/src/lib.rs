@@ -21,7 +21,7 @@ use std::sync::Arc;
 // Session + SessionStatus moved to agentstategraph-core in 0.6.5;
 // import from the canonical location rather than the facade re-export.
 use agentstategraph::speculation::SpecHandle;
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, CreateSessionParams, Repository};
 use agentstategraph_core::{IntentCategory, Object};
 use agentstategraph_core::{Session, SessionStatus};
 use agentstategraph_policy::{
@@ -35,8 +35,9 @@ use agentstategraph_taint::{
     QuarantineParams, TaintKind, TaintParams, UntaintParams, UnwatchParams, WatchParams,
 };
 use agentstategraph_tasks::{
-    NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
-    TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyReport, VerifyResult,
+    AddTaskOptions, NoopVerifier, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind,
+    Task, TaskId, TaskStatus, TaskStore as TasksBackend, TaskStoreError, Verifier, VerifyReport,
+    VerifyResult,
 };
 
 fn parse_category(s: &str) -> IntentCategory {
@@ -494,10 +495,7 @@ impl AgentStateGraph {
                 &agent_id,
                 &branch,
                 head,
-                parent_session,
-                delegated_intent,
-                report_to,
-                path_scope,
+                CreateSessionParams { parent_session, delegated_intent, report_to, path_scope },
             )
             .map_err(err)?;
         Ok(session_to_json(&s))
@@ -1098,9 +1096,7 @@ impl TaskStore {
                 parent,
                 blockers,
                 assigned_to,
-                payload_val,
-                parent_change,
-                on_complete_val,
+                AddTaskOptions { payload: payload_val, parent_change, on_complete: on_complete_val },
             )
             .map_err(task_err)?;
         Ok(task_to_json(&task))

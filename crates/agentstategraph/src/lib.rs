@@ -31,6 +31,6 @@ pub use repo::{
     CommitOptions, META_PATH_PREFIX, META_SCHEMA_VERSION_PATH, RepoError, Repository,
     SCHEMA_VERSION,
 };
-pub use session::{Session, SessionError, SessionManager};
+pub use session::{CreateSessionParams, Session, SessionError, SessionManager};
 pub use speculation::{SpecComparison, SpecHandle, SpeculationManager};
 pub use watch::{PathPattern, SubscriptionId, WatchEvent, WatchManager};

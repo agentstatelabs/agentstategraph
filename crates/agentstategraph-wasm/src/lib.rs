@@ -28,7 +28,7 @@ use agentstategraph_taint::{
     QuarantineParams, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
     UntaintParams, UnwatchParams, WatchDirection, WatchParams,
 };
-use agentstategraph_tasks::{OnCompleteHook, Priority, Proof, ProofKind, TaskId, TaskStore};
+use agentstategraph_tasks::{AddTaskOptions, OnCompleteHook, Priority, Proof, ProofKind, TaskId, TaskStore};
 use semver::Version;
 
 fn parse_category(s: &str) -> IntentCategory {
@@ -551,9 +551,7 @@ impl WasmAgentStateGraph {
                 parent,
                 blockers,
                 assigned_to,
-                payload,
-                parent_change,
-                on_complete,
+                AddTaskOptions { payload, parent_change, on_complete },
             )
             .map_err(js_err)?;
         serde_json::to_string(&task).map_err(js_err)

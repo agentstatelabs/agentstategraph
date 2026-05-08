@@ -19,6 +19,23 @@ use agentstategraph::Repository;
 use agentstategraph_storage::SqliteStorage;
 use rmcp::ServiceExt;
 
+/// All resolved server configuration, parsed from CLI args + environment.
+pub struct ServeArgs {
+    pub storage_type: String,
+    pub db_path: String,
+    pub database_url: String,
+    pub tenant_id: String,
+    pub http_mode: bool,
+    pub http_port: u16,
+    pub bind_addr: String,
+    pub auth_enabled: bool,
+    pub keys_file: String,
+    pub rate_limit_rpm: u32,
+    pub pg_pool_size: usize,
+    pub initial_admin_key: Option<String>,
+    pub external_evaluators: Vec<String>,
+}
+
 /// Parse the bind address from CLI args + env.
 ///
 /// Precedence: `--bind <ADDR>` > `ASG_BIND` env > default `127.0.0.1`.
@@ -121,17 +138,10 @@ fn apply_external_evaluators(
     srv
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-
-    // Subcommand dispatch: `agentstategraph-mcp migrate ...` is a
-    // one-shot maintenance command, not a server mode.
-    if args.get(1).map(String::as_str) == Some("migrate") {
-        let rest: Vec<String> = args.iter().skip(2).cloned().collect();
-        std::process::exit(migrate::run(&rest));
-    }
-
-    let mut storage_type = "sqlite";
+/// Parse CLI args (everything after the program name) together with
+/// relevant environment variables into a fully resolved `ServeArgs`.
+pub fn parse_args(args: &[String]) -> ServeArgs {
+    let mut storage_type = "sqlite".to_string();
     let mut db_path = "./agentstategraph.db".to_string();
     let mut database_url = String::new();
     let mut tenant_id = "default".to_string();
@@ -139,34 +149,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut http_port: u16 = 3001;
     let mut auth_enabled = false;
     let mut keys_file = String::new();
-    // Rate limit (requests/minute, per peer IP). CLI wins over env.
-    // 0 disables rate limiting entirely.
     let mut rate_limit_rpm: u32 = std::env::var("ASG_RATE_LIMIT_RPM")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let mut rate_limit_rpm_cli: Option<u32> = None;
-    // v2-C2: default to loopback; require explicit --bind for LAN exposure.
-    let bind_addr = resolve_bind_addr(&args, std::env::var("ASG_BIND").ok());
-    // v2-M1: configurable Postgres pool cap.
+    let bind_addr = resolve_bind_addr(args, std::env::var("ASG_BIND").ok());
     let mut pg_pool_size: usize = std::env::var("ASG_PG_POOL_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(32);
-    // v2-C1: bootstrap admin key from CLI/env (chosen over auto-generate;
-    // explicit ops input is clearer than fishing a one-time log line out
-    // of journalctl).
-    let initial_admin_key = std::env::var("ASG_INITIAL_ADMIN_KEY").ok();
+    let initial_admin_key_env = std::env::var("ASG_INITIAL_ADMIN_KEY").ok();
     let mut initial_admin_key_cli: Option<String> = None;
-    // 0.7.5 §4c: repeatable `--external-evaluator <kind>` flag. Each
-    // value (`wasm` / `rego` / `cedar`) registers the stock runner from
-    // the corresponding sibling crate — but only if that crate was
-    // compiled in via its feature flag. Unknown kinds are rejected;
-    // kinds whose feature is disabled produce a startup warning and are
-    // skipped.
     let mut external_evaluators: Vec<String> = Vec::new();
 
-    let mut i = 1;
+    let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--storage" | "-s" => {
@@ -176,7 +173,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "memory" => "memory",
                         "postgres" | "pg" => "postgres",
                         _ => "sqlite",
-                    };
+                    }
+                    .to_string();
                 }
             }
             "--path" | "-p" => {
@@ -317,19 +315,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
+    // CLI flag wins over env for rate_limit_rpm and initial_admin_key.
+    if let Some(cli_rpm) = rate_limit_rpm_cli {
+        rate_limit_rpm = cli_rpm;
+    }
 
-    // Check for DATABASE_URL env var as fallback for postgres
+    // Check for DATABASE_URL env var as fallback for postgres.
     if database_url.is_empty()
         && let Ok(url) = std::env::var("DATABASE_URL")
     {
         database_url = url;
         if storage_type == "sqlite" {
-            storage_type = "postgres";
+            storage_type = "postgres".to_string();
         }
     }
 
-    let repo: Arc<Repository> = match storage_type {
+    ServeArgs {
+        storage_type,
+        db_path,
+        database_url,
+        tenant_id,
+        http_mode,
+        http_port,
+        bind_addr,
+        auth_enabled,
+        keys_file,
+        rate_limit_rpm,
+        pg_pool_size,
+        initial_admin_key: initial_admin_key_cli.or(initial_admin_key_env),
+        external_evaluators,
+    }
+}
+
+/// Build the repository and run either the HTTP or MCP server.
+pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
+
+    let repo: Arc<Repository> = match args.storage_type.as_str() {
         "memory" => {
             eprintln!("Storage: in-memory (ephemeral)");
             Arc::new(Repository::new(Box::new(
@@ -337,55 +359,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )))
         }
         "postgres" => {
-            if database_url.is_empty() {
+            if args.database_url.is_empty() {
                 eprintln!("Error: --database-url or DATABASE_URL required for postgres storage");
                 std::process::exit(1);
             }
             eprintln!(
                 "Storage: postgres (tenant: {}, pool: {})",
-                tenant_id, pg_pool_size
+                args.tenant_id, args.pg_pool_size
             );
             let rt = tokio::runtime::Runtime::new()?;
             let storage = rt.block_on(async {
                 agentstategraph_storage::PostgresStorage::connect_tenant_with_pool_size(
-                    &database_url,
-                    &tenant_id,
-                    pg_pool_size,
+                    &args.database_url,
+                    &args.tenant_id,
+                    args.pg_pool_size,
                 )
                 .await
             })?;
             Arc::new(Repository::new(Box::new(storage)))
         }
         _ => {
-            eprintln!("Storage: {}", db_path);
-            let storage = SqliteStorage::open(&db_path)?;
+            eprintln!("Storage: {}", args.db_path);
+            let storage = SqliteStorage::open(&args.db_path)?;
             Arc::new(Repository::new(Box::new(storage)))
         }
     };
 
     repo.init()?;
 
-    if let Some(cli_rpm) = rate_limit_rpm_cli {
-        rate_limit_rpm = cli_rpm;
-    }
-
-    if http_mode {
+    if args.http_mode {
         eprintln!(
             "Rate limit: {} requests/minute per peer IP{}",
-            rate_limit_rpm,
-            if rate_limit_rpm == 0 {
+            args.rate_limit_rpm,
+            if args.rate_limit_rpm == 0 {
                 " (DISABLED)"
             } else {
                 ""
             }
         );
-        if auth_enabled {
+        if args.auth_enabled {
             eprintln!(
                 "Auth: enabled (keys file: {})",
-                if keys_file.is_empty() {
+                if args.keys_file.is_empty() {
                     "none"
                 } else {
-                    &keys_file
+                    &args.keys_file
                 }
             );
         } else {
@@ -393,45 +411,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!(
             "HTTP API listening on http://{}:{} (bind: {})",
-            if bind_addr == "0.0.0.0" {
+            if args.bind_addr == "0.0.0.0" {
                 "0.0.0.0"
             } else {
-                bind_addr.as_str()
+                args.bind_addr.as_str()
             },
-            http_port,
-            bind_addr
+            args.http_port,
+            args.bind_addr
         );
-        if bind_addr == "127.0.0.1" || bind_addr == "localhost" {
+        if args.bind_addr == "127.0.0.1" || args.bind_addr == "localhost" {
             eprintln!(
                 "Note: default bind is loopback-only. Pass --bind 0.0.0.0 to expose on the LAN."
             );
         }
-        // v3-V7: warn once if we're exposed on a non-loopback address
-        // without TLS. ASG does not terminate TLS itself — operators
-        // need a reverse proxy (nginx/caddy/tailscale) in front.
-        if let Some(msg) = tls_advice(&bind_addr, /* has_tls = */ false) {
+        if let Some(msg) = tls_advice(&args.bind_addr, false) {
             eprintln!("WARNING: {}", msg);
         }
-        eprintln!("Try: curl http://localhost:{}/api/health", http_port);
+        eprintln!("Try: curl http://localhost:{}/api/health", args.http_port);
 
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
             .block_on(async {
-                let app = if auth_enabled {
-                    let kf = if keys_file.is_empty() {
+                let app = if args.auth_enabled {
+                    let kf = if args.keys_file.is_empty() {
                         None
                     } else {
-                        Some(keys_file.as_str())
+                        Some(args.keys_file.as_str())
                     };
                     let tenant_mgr = TenantManager::multi_tenant(repo.clone(), kf);
 
-                    // v2-C1: admin bootstrap — register the operator-provided
-                    // key, or refuse to start if none is available and no
-                    // admin key already exists in the keys file.
-                    let provided = initial_admin_key_cli
-                        .clone()
-                        .or_else(|| initial_admin_key.clone());
+                    let provided = args.initial_admin_key.clone();
                     if let Some(k) = provided {
                         if tenant_mgr.register_admin_key(k, "bootstrap-admin") {
                             eprintln!("Auth: registered bootstrap admin key");
@@ -445,15 +455,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(2);
                     }
 
-                    http::build_router_for_test(repo, tenant_mgr, rate_limit_rpm)
+                    http::build_router_for_test(repo, tenant_mgr, args.rate_limit_rpm)
                 } else {
-                    http::router_with_rate_limit(repo, rate_limit_rpm)
+                    http::router_with_rate_limit(repo, args.rate_limit_rpm)
                 };
-                let addr = format!("{}:{}", bind_addr, http_port);
+                let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
-                // `into_make_service_with_connect_info::<SocketAddr>()`
-                // exposes the peer IP to tower_governor so per-IP keying
-                // works. Without this, the governor layer panics.
                 axum::serve(
                     listener,
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -469,7 +476,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?
             .block_on(async {
                 let mut srv = server::AgentStateGraphServer::new(repo);
-                srv = apply_external_evaluators(srv, &external_evaluators);
+                srv = apply_external_evaluators(srv, &args.external_evaluators);
                 let service = srv
                     .serve(rmcp::transport::stdio())
                     .await
@@ -482,6 +489,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Server shut down.");
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.get(1).map(String::as_str) == Some("migrate") {
+        let rest: Vec<String> = args.iter().skip(2).cloned().collect();
+        std::process::exit(migrate::run(&rest));
+    }
+
+    cmd_serve(parse_args(&args[1..]))
 }
 
 #[cfg(test)]
@@ -515,7 +533,7 @@ mod tests {
 
     #[test]
     fn default_bind_is_loopback() {
-        let args: Vec<String> = vec!["agentstategraph-mcp".into(), "--http".into()];
+        let args: Vec<String> = vec!["--http".into()];
         assert_eq!(resolve_bind_addr(&args, None), "127.0.0.1");
     }
 
@@ -538,5 +556,31 @@ mod tests {
     fn empty_env_bind_falls_back_to_default() {
         let args: Vec<String> = vec![];
         assert_eq!(resolve_bind_addr(&args, Some(String::new())), "127.0.0.1");
+    }
+
+    #[test]
+    fn parse_args_defaults() {
+        let parsed = super::parse_args(&[]);
+        assert_eq!(parsed.storage_type, "sqlite");
+        assert_eq!(parsed.http_port, 3001);
+        assert!(!parsed.http_mode);
+        assert!(!parsed.auth_enabled);
+        assert_eq!(parsed.tenant_id, "default");
+    }
+
+    #[test]
+    fn parse_args_http_port() {
+        let args: Vec<String> = vec!["--http".into(), "--port".into(), "8080".into()];
+        let parsed = super::parse_args(&args);
+        assert!(parsed.http_mode);
+        assert_eq!(parsed.http_port, 8080);
+    }
+
+    #[test]
+    fn parse_args_external_evaluators() {
+        let args: Vec<String> =
+            vec!["--external-evaluator".into(), "wasm".into(), "--external-evaluator".into(), "cedar".into()];
+        let parsed = super::parse_args(&args);
+        assert_eq!(parsed.external_evaluators, vec!["wasm", "cedar"]);
     }
 }

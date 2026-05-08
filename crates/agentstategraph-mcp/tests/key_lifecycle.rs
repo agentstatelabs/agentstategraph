@@ -25,20 +25,26 @@ async fn boot(tenant_mgr: Arc<TenantManager>, repo: Arc<Repository>) -> String {
     base
 }
 
-fn admin_key(key: &str) -> ApiKey {
+/// Build a minimal ApiKey for tests. Optional/new fields default sensibly.
+/// Update this helper when ApiKey gains fields so call sites stay stable.
+fn make_api_key(key: &str, tenant_id: &str) -> ApiKey {
     ApiKey {
         key: key.to_string(),
-        tenant_id: "admin".into(),
-        name: "admin".into(),
-        plan: "admin".into(),
+        tenant_id: tenant_id.to_string(),
+        name: "test-key".into(),
+        plan: "free".into(),
         enabled: true,
         created_at: chrono::Utc::now().to_rfc3339(),
         commit_agent_id: None,
-        can_migrate: true,
-        is_admin: true,
+        can_migrate: false,
+        is_admin: false,
         expires_at: None,
         last_used_at: None,
     }
+}
+
+fn admin_key(key: &str) -> ApiKey {
+    ApiKey { is_admin: true, can_migrate: true, plan: "admin".into(), name: "admin".into(), tenant_id: "admin".into(), ..make_api_key(key, "admin") }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

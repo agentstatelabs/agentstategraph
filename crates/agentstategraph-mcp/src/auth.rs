@@ -22,6 +22,15 @@ use rand::{RngCore, TryRngCore};
 
 use agentstategraph::Repository;
 
+/// Optional capability/meta fields for [`TenantManager::create_key_with`].
+#[derive(Default)]
+pub struct CreateKeyOptions {
+    pub commit_agent_id: Option<String>,
+    pub can_migrate: bool,
+    pub is_admin: bool,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 /// A registered API key with its tenant and metadata.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ApiKey {
@@ -127,24 +136,20 @@ impl TenantManager {
         }
     }
 
-    /// Generate a new API key for a tenant.
+    /// Generate a new API key for a tenant with default options.
     #[allow(dead_code)]
     pub fn create_key(&self, tenant_id: &str, name: &str, plan: &str) -> ApiKey {
-        self.create_key_with(tenant_id, name, plan, None, false, false, None)
+        self.create_key_with(tenant_id, name, plan, CreateKeyOptions::default())
     }
 
-    /// Generate a new API key with optional commit_agent_id binding,
-    /// migrate capability, and optional expiry (v3-V5).
-    #[allow(clippy::too_many_arguments)]
+    /// Generate a new API key with optional capability/meta fields (v3-V5).
+    /// See [`CreateKeyOptions`] for field docs.
     pub fn create_key_with(
         &self,
         tenant_id: &str,
         name: &str,
         plan: &str,
-        commit_agent_id: Option<String>,
-        can_migrate: bool,
-        is_admin: bool,
-        expires_at: Option<DateTime<Utc>>,
+        opts: CreateKeyOptions,
     ) -> ApiKey {
         let key = generate_key();
         let api_key = ApiKey {
@@ -154,10 +159,10 @@ impl TenantManager {
             plan: plan.to_string(),
             enabled: true,
             created_at: Utc::now().to_rfc3339(),
-            commit_agent_id,
-            can_migrate,
-            is_admin,
-            expires_at,
+            commit_agent_id: opts.commit_agent_id,
+            can_migrate: opts.can_migrate,
+            is_admin: opts.is_admin,
+            expires_at: opts.expires_at,
             last_used_at: None,
         };
         self.register_key(api_key.clone());
@@ -190,10 +195,7 @@ impl TenantManager {
             &tenant_id,
             &name,
             &plan,
-            commit_agent_id,
-            can_migrate,
-            is_admin,
-            expires_at,
+            CreateKeyOptions { commit_agent_id, can_migrate, is_admin, expires_at },
         );
         // Disable the old key.
         self.revoke_key(key_prefix);

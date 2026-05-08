@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use agentstategraph::Repository;
 use agentstategraph_storage::SqliteStorage;
-use agentstategraph_tasks::TaskStore;
+use agentstategraph_tasks::{AddTaskOptions, TaskStore};
 use agentstategraph_wasm::WasmPolicyStore;
 
 use wasm_bindgen_test::*;
@@ -444,9 +444,11 @@ fn task_extension_fields_roundtrip() {
             None,
             Vec::new(),
             None,
-            payload.clone(),
-            Some("spec-7@42".to_string()),
-            on_complete,
+            AddTaskOptions {
+                payload,
+                parent_change: Some("spec-7@42".to_string()),
+                on_complete,
+            },
         )
         .unwrap();
 
@@ -469,11 +471,12 @@ fn task_extension_fields_roundtrip() {
             None,
             Vec::new(),
             None,
-            None,
-            None,
-            Some(agentstategraph_tasks::OnCompleteHook::Named {
-                name: "notify-slack".to_string(),
-            }),
+            AddTaskOptions {
+                on_complete: Some(agentstategraph_tasks::OnCompleteHook::Named {
+                    name: "notify-slack".to_string(),
+                }),
+                ..Default::default()
+            },
         )
         .unwrap();
     let enc2 = serde_json::to_string(&t2).unwrap();
