@@ -70,6 +70,10 @@ pub struct GetParams {
     pub r#ref: String,
     /// JSON path (e.g., "/nodes/0/status"). Use "/" for entire state.
     pub path: String,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -91,6 +95,10 @@ pub struct SetParams {
     pub confidence: Option<f64>,
     /// Optional queryable tags.
     pub tags: Option<Vec<String>>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -100,6 +108,10 @@ pub struct DeleteParams {
     pub path: String,
     pub intent_category: String,
     pub intent_description: String,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -109,12 +121,20 @@ pub struct BranchParams {
     /// Ref to branch from (default: "main").
     #[serde(default = "default_ref")]
     pub from: String,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ListBranchesParams {
     /// Optional namespace prefix filter.
     pub prefix: Option<String>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -128,6 +148,10 @@ pub struct MergeParams {
     pub intent_description: String,
     /// Optional reasoning.
     pub reasoning: Option<String>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -165,6 +189,10 @@ pub struct LogParams {
     /// Max commits to return (default: 10).
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -173,6 +201,10 @@ pub struct DiffParams {
     pub ref_a: String,
     /// Second ref to compare against.
     pub ref_b: String,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -182,6 +214,10 @@ pub struct SpeculateParams {
     pub from: String,
     /// Human-readable label.
     pub label: Option<String>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -263,6 +299,10 @@ pub struct QueryParams {
     pub has_deviations: Option<bool>,
     /// Max results (default: 20).
     pub limit: Option<usize>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -271,6 +311,10 @@ pub struct BlameParams {
     pub r#ref: Option<String>,
     /// Path to blame (e.g., "/nodes/2/status").
     pub path: String,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -352,6 +396,10 @@ pub struct ListPathsParams {
     pub prefix: String,
     /// Max tree depth to traverse (default: 50).
     pub max_depth: Option<usize>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -362,6 +410,10 @@ pub struct GetTreeParams {
     /// Path prefix to get subtree for (default: "/").
     #[serde(default = "default_root")]
     pub prefix: String,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -373,6 +425,10 @@ pub struct SearchValuesParams {
     pub query: String,
     /// Max results (default: 50).
     pub max_results: Option<usize>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -380,6 +436,10 @@ pub struct StatsParams {
     /// Branch or ref (default: "main").
     #[serde(default = "default_ref")]
     pub r#ref: String,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -390,6 +450,10 @@ pub struct CommitGraphParams {
     /// Max commits to include (default: 50).
     #[serde(default = "default_graph_depth")]
     pub depth: usize,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -399,6 +463,10 @@ pub struct IntentTreeParams {
     pub r#ref: String,
     /// Optional root commit ID to start from.
     pub root_commit_id: Option<String>,
+    /// Optional namespace override. When set, this operation runs against
+    /// the specified namespace instead of the server's configured default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 fn default_ref() -> String {
@@ -1005,12 +1073,32 @@ impl AgentStateGraphServer {
         &self.repo
     }
 
+    /// Resolve an optional namespace string into a forked Repository.
+    /// Returns `Ok(Some(forked))` when a namespace was given and is valid,
+    /// `Ok(None)` when no namespace was given (caller should use `&self.repo`),
+    /// or `Err(message)` when the namespace string is invalid.
+    fn ns_repo(&self, namespace: Option<&str>) -> Result<Option<Repository>, String> {
+        match namespace {
+            Some(ns_str) => {
+                let ns = Namespace::new(ns_str)
+                    .map_err(|e| format!("Invalid namespace '{}': {}", ns_str, e))?;
+                Ok(Some(self.repo.fork_namespace(ns)))
+            }
+            None => Ok(None),
+        }
+    }
+
     #[tool(
         description = "Read a value from state at any branch, tag, or commit. Use JSON-path addressing (e.g., '/nodes/0/hostname'). Use '/' for entire state."
     )]
     async fn agentstategraph_get(&self, params: Parameters<GetParams>) -> String {
         let p = params.0;
-        match self.repo.get_json(&p.r#ref, &p.path) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.get_json(&p.r#ref, &p.path) {
             Ok(value) => {
                 serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
             }
@@ -1023,6 +1111,11 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_set(&self, params: Parameters<SetParams>) -> String {
         let p = params.0;
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
         let category = parse_category(&p.intent_category);
         let mut opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
         if let Some(r) = p.reasoning {
@@ -1035,7 +1128,7 @@ impl AgentStateGraphServer {
             opts = opts.with_tags(t);
         }
 
-        match self.repo.set_json(&p.r#ref, &p.path, &p.value, opts) {
+        match repo.set_json(&p.r#ref, &p.path, &p.value, opts) {
             Ok(commit_id) => format!("Committed: {}", commit_id),
             Err(e) => format!("Error: {}", e),
         }
@@ -1044,9 +1137,14 @@ impl AgentStateGraphServer {
     #[tool(description = "Remove a value from state, creating a new commit.")]
     async fn agentstategraph_delete(&self, params: Parameters<DeleteParams>) -> String {
         let p = params.0;
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
         let category = parse_category(&p.intent_category);
         let opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
-        match self.repo.delete(&p.r#ref, &p.path, opts) {
+        match repo.delete(&p.r#ref, &p.path, opts) {
             Ok(commit_id) => format!("Deleted and committed: {}", commit_id),
             Err(e) => format!("Error: {}", e),
         }
@@ -1057,7 +1155,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_branch(&self, params: Parameters<BranchParams>) -> String {
         let p = params.0;
-        match self.repo.branch(&p.name, &p.from) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.branch(&p.name, &p.from) {
             Ok(id) => format!("Branch '{}' created at {}", p.name, id.short()),
             Err(e) => format!("Error: {}", e),
         }
@@ -1069,7 +1172,12 @@ impl AgentStateGraphServer {
         params: Parameters<ListBranchesParams>,
     ) -> String {
         let p = params.0;
-        match self.repo.list_branches(p.prefix.as_deref()) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.list_branches(p.prefix.as_deref()) {
             Ok(branches) => {
                 let lines: Vec<String> = branches
                     .iter()
@@ -1163,12 +1271,17 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_merge(&self, params: Parameters<MergeParams>) -> String {
         let p = params.0;
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
         let mut opts =
             CommitOptions::new("mcp-agent", IntentCategory::Merge, &p.intent_description);
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
         }
-        match self.repo.merge(&p.source, &p.target, opts) {
+        match repo.merge(&p.source, &p.target, opts) {
             Ok(commit_id) => format!("Merged '{}' into '{}': {}", p.source, p.target, commit_id),
             Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => {
                 format!(
@@ -1186,7 +1299,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_log(&self, params: Parameters<LogParams>) -> String {
         let p = params.0;
-        match self.repo.log(&p.r#ref, p.limit) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.log(&p.r#ref, p.limit) {
             Ok(commits) => {
                 let entries: Vec<serde_json::Value> = commits
                     .iter()
@@ -1217,7 +1335,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_diff(&self, params: Parameters<DiffParams>) -> String {
         let p = params.0;
-        match self.repo.diff(&p.ref_a, &p.ref_b) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.diff(&p.ref_a, &p.ref_b) {
             Ok(ops) if ops.is_empty() => "No differences.".to_string(),
             Ok(ops) => {
                 format!(
@@ -1235,7 +1358,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_speculate(&self, params: Parameters<SpeculateParams>) -> String {
         let p = params.0;
-        match self.repo.speculate(&p.from, p.label.clone()) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.speculate(&p.from, p.label.clone()) {
             Ok(handle) => format!(
                 "Speculation created: handle_id={} (from '{}', label: {:?})",
                 handle.id(),
@@ -1392,6 +1520,11 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_query(&self, params: Parameters<QueryParams>) -> String {
         let p = params.0;
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
         let filters = QueryFilters {
             agent_id: p.agent_id,
             intent_category: p.intent_category,
@@ -1405,7 +1538,7 @@ impl AgentStateGraphServer {
         let limit = p.limit.unwrap_or(20);
         let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
 
-        match self.repo.query_commits(&ref_name, &filters, limit) {
+        match repo.query_commits(&ref_name, &filters, limit) {
             Ok(commits) => {
                 let entries: Vec<serde_json::Value> = commits
                     .iter()
@@ -1435,8 +1568,13 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_blame(&self, params: Parameters<BlameParams>) -> String {
         let p = params.0;
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
         let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
-        match self.repo.blame(&ref_name, &p.path) {
+        match repo.blame(&ref_name, &p.path) {
             Ok(entry) => serde_json::to_string_pretty(&entry).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }
@@ -1692,7 +1830,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_list_paths(&self, params: Parameters<ListPathsParams>) -> String {
         let p = params.0;
-        match self.repo.list_paths(&p.r#ref, &p.prefix, p.max_depth) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.list_paths(&p.r#ref, &p.prefix, p.max_depth) {
             Ok(paths) => format!("{} paths:\n{}", paths.len(), paths.join("\n")),
             Err(e) => format!("Error: {}", e),
         }
@@ -1703,7 +1846,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_get_tree(&self, params: Parameters<GetTreeParams>) -> String {
         let p = params.0;
-        match self.repo.get_tree(&p.r#ref, &p.prefix) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.get_tree(&p.r#ref, &p.prefix) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }
@@ -1714,7 +1862,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_search(&self, params: Parameters<SearchValuesParams>) -> String {
         let p = params.0;
-        match self.repo.search_values(&p.r#ref, &p.query, p.max_results) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.search_values(&p.r#ref, &p.query, p.max_results) {
             Ok(results) if results.is_empty() => "No matches found.".to_string(),
             Ok(results) => {
                 let entries: Vec<serde_json::Value> = results
@@ -1732,7 +1885,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_stats(&self, params: Parameters<StatsParams>) -> String {
         let p = params.0;
-        match self.repo.stats(&p.r#ref) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.stats(&p.r#ref) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }
@@ -1743,7 +1901,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_commit_graph(&self, params: Parameters<CommitGraphParams>) -> String {
         let p = params.0;
-        match self.repo.commit_graph(&p.r#ref, p.depth) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.commit_graph(&p.r#ref, p.depth) {
             Ok(nodes) => serde_json::to_string_pretty(&nodes).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }
@@ -1754,7 +1917,12 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_intent_tree(&self, params: Parameters<IntentTreeParams>) -> String {
         let p = params.0;
-        match self.repo.intent_tree(&p.r#ref, p.root_commit_id.as_deref()) {
+        let forked = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let repo = forked.as_ref().unwrap_or(&self.repo);
+        match repo.intent_tree(&p.r#ref, p.root_commit_id.as_deref()) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }

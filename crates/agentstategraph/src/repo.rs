@@ -6,6 +6,8 @@
 //! Every write operation is an atomic commit with intent metadata.
 //! There is no staging area.
 
+use std::sync::Arc;
+
 use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Conflict, DiffOp, Intent, IntentCategory, MergeResult,
     Namespace, Object, ObjectId, ObjectResolver, StatePath,
@@ -127,7 +129,7 @@ pub struct EpochViolation {
 
 /// The primary API for interacting with an AgentStateGraph state store.
 pub struct Repository {
-    storage: Box<dyn Storage>,
+    storage: Arc<dyn Storage + Send + Sync>,
     specs: SpeculationManager,
     watch_mgr: crate::watch::WatchManager,
     /// Configured namespace for this repository instance. The active session's
@@ -292,12 +294,12 @@ impl Repository {
     /// variable `ASG_EPOCH_SEAL_STRICT=1` is set at construction time, the
     /// repository starts in strict mode. Use
     /// [`Repository::with_epoch_seal_strict`] to opt in programmatically.
-    pub fn new(storage: Box<dyn Storage>) -> Self {
+    pub fn new(storage: Box<dyn Storage + Send + Sync>) -> Self {
         let strict = std::env::var(EPOCH_SEAL_STRICT_ENV)
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         Self {
-            storage,
+            storage: Arc::from(storage),
             specs: SpeculationManager::new(),
             watch_mgr: crate::watch::WatchManager::new(),
             namespace: Namespace::default_ns(),
@@ -315,6 +317,30 @@ impl Repository {
     pub fn with_namespace(mut self, ns: Namespace) -> Self {
         self.namespace = ns;
         self
+    }
+
+    /// Create a new `Repository` that operates in a different namespace but
+    /// shares the same underlying storage.  Used for per-call namespace
+    /// overrides (MCP tool `namespace` param, WASM `namespace` argument)
+    /// without mutating the server-wide repository configuration.
+    ///
+    /// The forked repository inherits `epoch_seal_strict` and the active
+    /// epoch/session ids from the parent; speculation state and watch
+    /// subscriptions start fresh (they are in-memory and call-scoped).
+    pub fn fork_namespace(&self, ns: Namespace) -> Self {
+        let epoch = self.active_epoch.read().unwrap().clone();
+        let session = self.active_session.read().unwrap().clone();
+        let session_ns = self.active_session_namespace.read().unwrap().clone();
+        Self {
+            storage: Arc::clone(&self.storage),
+            specs: crate::speculation::SpeculationManager::new(),
+            watch_mgr: crate::watch::WatchManager::new(),
+            namespace: ns,
+            active_epoch: std::sync::RwLock::new(epoch),
+            active_session: std::sync::RwLock::new(session),
+            epoch_seal_strict: self.epoch_seal_strict,
+            active_session_namespace: std::sync::RwLock::new(session_ns),
+        }
     }
 
     /// The namespace this repository was configured with. The *effective*
