@@ -727,6 +727,38 @@ impl RefStore for PostgresStorage {
             Ok(rows > 0)
         })
     }
+
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<bool, StorageError> {
+        if namespace.as_str() == Namespace::DEFAULT {
+            return Err(StorageError::InvalidOperation(
+                "cannot delete the 'default' namespace".to_string(),
+            ));
+        }
+        let ns = namespace.as_str().to_string();
+        let tid = self.tenant_id.clone();
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            client
+                .execute(
+                    "DELETE FROM refs WHERE tenant_id = $1 AND namespace = $2",
+                    &[&tid, &ns],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let rows = client
+                .execute(
+                    "DELETE FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                    &[&tid, &ns],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            Ok(rows > 0)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -835,7 +867,9 @@ fn row_to_session(
         report_to: meta.report_to,
         path_scope: scope_path,
         scope_tenant: meta.scope_tenant,
-        scope_namespace,
+        scope_namespace: scope_namespace
+            .as_deref()
+            .and_then(|s| Namespace::new(s).ok()),
         status: SessionStatus::from_wire(&status),
         created_at: parse_rfc3339(&created_at)?,
         ended_at: ended_at.as_deref().map(parse_rfc3339).transpose()?,
@@ -1175,7 +1209,7 @@ impl SessionStore for PostgresStorage {
                         &session.parent_session,
                         &session.path_scope,
                         &session.working_branch,
-                        &session.scope_namespace,
+                        &session.scope_namespace.as_ref().map(|n| n.as_str().to_string()),
                         &session.status.as_str(),
                         &session.created_at.to_rfc3339(),
                         &session.ended_at.map(|t| t.to_rfc3339()),

@@ -495,7 +495,7 @@ impl AgentStateGraph {
                 &agent_id,
                 &branch,
                 head,
-                CreateSessionParams { parent_session, delegated_intent, report_to, path_scope },
+                CreateSessionParams { parent_session, delegated_intent, report_to, path_scope, ..Default::default() },
             )
             .map_err(err)?;
         Ok(session_to_json(&s))

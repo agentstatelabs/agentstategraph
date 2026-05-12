@@ -297,6 +297,27 @@ impl RefStore for MemoryStorage {
             .remove(&(namespace.as_str().to_string(), name.to_string()))
             .is_some())
     }
+
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<bool, StorageError> {
+        if namespace.as_str() == Namespace::DEFAULT {
+            return Err(StorageError::InvalidOperation(
+                "cannot delete the 'default' namespace".to_string(),
+            ));
+        }
+        let existed = self
+            .namespaces
+            .write()
+            .unwrap()
+            .remove(namespace.as_str());
+        if existed {
+            let ns_str = namespace.as_str().to_string();
+            self.refs
+                .write()
+                .unwrap()
+                .retain(|(ns, _), _| ns != &ns_str);
+        }
+        Ok(existed)
+    }
 }
 
 impl EpochStore for MemoryStorage {

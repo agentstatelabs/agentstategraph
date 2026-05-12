@@ -656,6 +656,21 @@ impl RefStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("delete ref: {}", e)))?;
         Ok(rows > 0)
     }
+
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<bool, StorageError> {
+        if namespace.as_str() == Namespace::DEFAULT {
+            return Err(StorageError::InvalidOperation(
+                "cannot delete the 'default' namespace".to_string(),
+            ));
+        }
+        let conn = self.lock_conn()?;
+        conn.execute("DELETE FROM refs WHERE namespace = ?1", [namespace.as_str()])
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let rows = conn
+            .execute("DELETE FROM namespaces WHERE name = ?1", [namespace.as_str()])
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(rows > 0)
+    }
 }
 
 fn epoch_status_str(s: &EpochStatus) -> &'static str {
@@ -999,7 +1014,9 @@ fn row_to_session(
         report_to: meta.report_to,
         path_scope: scope_path,
         scope_tenant: meta.scope_tenant,
-        scope_namespace,
+        scope_namespace: scope_namespace
+            .as_deref()
+            .and_then(|s| Namespace::new(s).ok()),
         status: SessionStatus::from_wire(&status),
         created_at: parse_rfc3339(&created_at)?,
         ended_at: ended_at.as_deref().map(parse_rfc3339).transpose()?,
@@ -1029,7 +1046,7 @@ impl SessionStore for SqliteStorage {
                 session.parent_session,
                 session.path_scope,
                 session.working_branch,
-                session.scope_namespace,
+                session.scope_namespace.as_ref().map(|n| n.as_str()),
                 session.status.as_str(),
                 session.created_at.to_rfc3339(),
                 session.ended_at.map(|t| t.to_rfc3339()),

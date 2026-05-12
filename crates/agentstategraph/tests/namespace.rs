@@ -1,6 +1,7 @@
 //! Integration tests for namespace isolation and Repository namespace API.
 
 use agentstategraph::{CommitOptions, Repository, RepoError};
+use agentstategraph::session::CreateSessionParams;
 use agentstategraph_core::{IntentCategory, Namespace, Object};
 use agentstategraph_storage::SqliteStorage;
 
@@ -204,8 +205,6 @@ fn cross_namespace_merge_across_namespaces_denied_without_policy() {
 
 #[test]
 fn session_scope_namespace_overrides_repo_namespace() {
-    use agentstategraph::session::CreateSessionParams;
-
     let storage = SqliteStorage::in_memory().expect("in-memory sqlite");
     let repo = Repository::new(Box::new(storage));
 
@@ -215,23 +214,87 @@ fn session_scope_namespace_overrides_repo_namespace() {
 
     repo.init().unwrap();
 
-    // create a session (scope_namespace is set after creation; this test
-    // verifies that list_namespaces works correctly from a repo that uses
-    // a non-default namespace, and that the repository's with_namespace API
-    // is exercised correctly)
+    // create a session with scope_namespace set
     let mgr = repo.sessions();
     let head = repo.head("main").unwrap();
-    let _session = mgr
+    let session = mgr
         .create(
             "agent/test",
             "main",
             head,
-            CreateSessionParams::default(),
+            CreateSessionParams {
+                scope_namespace: Some(Namespace::new("project-x").unwrap()),
+                ..Default::default()
+            },
         )
         .unwrap();
+
+    // The session's scope_namespace should be the Namespace type.
+    assert_eq!(
+        session.scope_namespace.as_ref().map(|n| n.as_str()),
+        Some("project-x")
+    );
 
     // Verify that list_namespaces surfaces both namespaces.
     let namespaces = repo.list_namespaces().unwrap();
     let names: Vec<&str> = namespaces.iter().map(|n| n.as_str()).collect();
     assert!(names.contains(&"project-x"), "project-x should be listed");
+}
+
+// ---------------------------------------------------------------------------
+// Repository::init() auto-creates its namespace
+// ---------------------------------------------------------------------------
+
+#[test]
+fn init_auto_creates_namespace() {
+    // Previously would fail with NamespaceNotFound for namespaces other than "default".
+    let storage = SqliteStorage::in_memory().expect("in-memory sqlite");
+    let ns = Namespace::new("fresh-ns").unwrap();
+    let repo = Repository::new(Box::new(storage)).with_namespace(ns);
+    // No explicit create_namespace call — init() should handle it.
+    repo.init().expect("init() should auto-create the namespace");
+}
+
+// ---------------------------------------------------------------------------
+// delete_namespace
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delete_namespace_removes_refs_and_namespace() {
+    let repo = default_repo();
+    repo.create_namespace("to-delete").unwrap();
+
+    // Create a ref in the namespace by using a repo scoped to it.
+    let storage2 = SqliteStorage::in_memory().expect("in-memory sqlite");
+    let ns = Namespace::new("to-delete").unwrap();
+    let repo2 = Repository::new(Box::new(storage2)).with_namespace(ns);
+    repo2.init().unwrap();
+
+    // Deleting a non-default namespace that exists should return true.
+    assert!(repo.delete_namespace("to-delete").unwrap());
+    // Deleting it again should return false.
+    assert!(!repo.delete_namespace("to-delete").unwrap());
+
+    // It should no longer appear in list_namespaces.
+    let names: Vec<String> = repo
+        .list_namespaces()
+        .unwrap()
+        .into_iter()
+        .map(|n| n.as_str().to_string())
+        .collect();
+    assert!(
+        !names.contains(&"to-delete".to_string()),
+        "deleted namespace must not appear in listing"
+    );
+}
+
+#[test]
+fn delete_default_namespace_is_rejected() {
+    let repo = default_repo();
+    let err = repo.delete_namespace("default").unwrap_err();
+    assert!(
+        matches!(err, RepoError::Storage(_)),
+        "expected Storage error wrapping InvalidOperation, got {:?}",
+        err
+    );
 }

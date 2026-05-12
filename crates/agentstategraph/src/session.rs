@@ -8,6 +8,7 @@
 use chrono::Utc;
 
 use agentstategraph_core::intent::{AgentId, IntentId, SessionId};
+use agentstategraph_core::namespace::Namespace;
 use agentstategraph_core::object::ObjectId;
 pub use agentstategraph_core::session::{Session, SessionStatus};
 #[allow(unused_imports)]
@@ -31,6 +32,7 @@ pub struct CreateSessionParams {
     pub delegated_intent: Option<IntentId>,
     pub report_to: Option<String>,
     pub path_scope: Option<String>,
+    pub scope_namespace: Option<Namespace>,
 }
 
 /// Manages active sessions.
@@ -66,7 +68,7 @@ impl<'a> SessionManager<'a> {
             report_to: params.report_to,
             path_scope: params.path_scope,
             scope_tenant: None,
-            scope_namespace: None,
+            scope_namespace: params.scope_namespace,
             status: SessionStatus::Active,
             created_at: Utc::now(),
             ended_at: None,
@@ -220,6 +222,7 @@ mod tests {
                 delegated_intent: Some("intent-002".to_string()),
                 report_to: Some("agent/orchestrator".to_string()),
                 path_scope: Some("/config/storage".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -233,6 +236,7 @@ mod tests {
                 delegated_intent: Some("intent-003".to_string()),
                 report_to: Some("agent/orchestrator".to_string()),
                 path_scope: Some("/config/network".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();

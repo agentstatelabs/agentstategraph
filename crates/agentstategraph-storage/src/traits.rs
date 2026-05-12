@@ -47,6 +47,9 @@ pub enum StorageError {
 
     #[error("session '{id}' has already ended")]
     SessionEnded { id: String },
+
+    #[error("invalid operation: {0}")]
+    InvalidOperation(String),
 }
 
 /// Content-addressed object storage.
@@ -148,6 +151,11 @@ pub trait RefStore: Send + Sync {
     /// Delete a ref. Returns `true` if the ref existed. Returns
     /// `NamespaceNotFound` if the namespace doesn't exist.
     fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError>;
+
+    /// Delete a namespace and all its refs. Returns `true` if the namespace
+    /// existed and was deleted, `false` if it was not found. The "default"
+    /// namespace cannot be deleted and returns `InvalidOperation`.
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<bool, StorageError>;
 }
 
 /// Durable storage of epochs and their association with commits.

@@ -354,6 +354,10 @@ impl RefStore for IndexedDbStorage {
         }
         Ok(result)
     }
+
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<bool, StorageError> {
+        self.memory.delete_namespace(namespace)
+    }
 }
 
 /// Convert hex string to bytes.

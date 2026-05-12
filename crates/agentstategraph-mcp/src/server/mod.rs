@@ -13,9 +13,10 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use agentstategraph::session::CreateSessionParams;
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::{DiffOp, IntentCategory, Object, QueryFilters};
+use agentstategraph_core::{DiffOp, IntentCategory, Namespace, Object, QueryFilters};
 use agentstategraph_policy::{
     ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry, PolicyStore,
     SignatureVerifier,
@@ -132,6 +133,12 @@ pub struct MergeParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct CreateNamespaceParams {
     /// Namespace name (alphanumeric, `-`, `_`, max 64 chars).
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DeleteNamespaceParams {
+    /// Namespace to delete. The "default" namespace cannot be deleted.
     pub name: String,
 }
 
@@ -300,6 +307,23 @@ pub struct ExportEpochParams {
 pub struct SessionListParams {
     /// Optional agent filter.
     pub agent_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateSessionMcpParams {
+    /// Agent identifier for the new session (e.g. "agent/planner").
+    pub agent_id: String,
+    /// Working branch for the session (e.g. "agents/planner/workspace").
+    pub working_branch: String,
+    /// Optional namespace to scope this session to. When set, the session's
+    /// Repository will use this namespace for all ref operations.
+    pub namespace_id: Option<String>,
+    /// Optional parent session id.
+    pub parent_session: Option<String>,
+    /// Optional delegated intent id.
+    pub delegated_intent: Option<String>,
+    /// Optional path scope restriction.
+    pub path_scope: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1086,6 +1110,20 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
+        description = "Delete a namespace and all its refs. Irreversible. The 'default' namespace cannot be deleted."
+    )]
+    async fn agentstategraph_delete_namespace(
+        &self,
+        params: Parameters<DeleteNamespaceParams>,
+    ) -> String {
+        match self.repo.delete_namespace(&params.0.name) {
+            Ok(true) => format!("Namespace '{}' deleted.", params.0.name),
+            Ok(false) => format!("Namespace '{}' not found.", params.0.name),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
         description = "Merge a branch from another namespace into a branch in the active namespace. Cross-namespace merges are policy-gated and audited. Currently requires PolicyStore integration."
     )]
     async fn agentstategraph_cross_namespace_merge(
@@ -1575,6 +1613,51 @@ impl AgentStateGraphServer {
     }
 
     // -- Session tools --
+
+    #[tool(
+        description = "Create a new agent session. Returns the session id. Pass namespace_id to scope the session to a specific namespace."
+    )]
+    async fn agentstategraph_create_session(
+        &self,
+        params: Parameters<CreateSessionMcpParams>,
+    ) -> String {
+        let p = params.0;
+        let scope_namespace = match p
+            .namespace_id
+            .as_deref()
+            .map(|s| Namespace::new(s))
+            .transpose()
+        {
+            Ok(ns) => ns,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let head = match self.repo.head(&p.working_branch) {
+            Ok(id) => id,
+            Err(e) => return format!("Error: {}", e),
+        };
+        let create_params = CreateSessionParams {
+            parent_session: p.parent_session,
+            delegated_intent: p.delegated_intent,
+            report_to: None,
+            path_scope: p.path_scope,
+            scope_namespace,
+        };
+        match self
+            .repo
+            .sessions()
+            .create(&p.agent_id, &p.working_branch, head, create_params)
+        {
+            Ok(session) => serde_json::json!({
+                "id": session.id,
+                "agent": session.agent_id,
+                "branch": session.working_branch,
+                "namespace": session.scope_namespace.as_ref().map(|n| n.as_str()),
+                "status": "Active",
+            })
+            .to_string(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
 
     #[tool(
         description = "List active agent sessions. Shows parent-child relationships and path scoping."

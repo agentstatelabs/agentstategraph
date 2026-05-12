@@ -1706,7 +1706,7 @@ impl AgentStateGraph {
                 agent_id,
                 working_branch,
                 head,
-                CreateSessionParams { parent_session, delegated_intent, report_to, path_scope },
+                CreateSessionParams { parent_session, delegated_intent, report_to, path_scope, ..Default::default() },
             )
             .map_err(session_err)?;
         session_to_dict(py, &s)

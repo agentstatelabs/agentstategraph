@@ -146,6 +146,10 @@ pub struct Repository {
     /// a warning and the update proceeds. Opt-in via `Repository::with_epoch_seal_strict`
     /// or `ASG_EPOCH_SEAL_STRICT=1`.
     epoch_seal_strict: bool,
+    /// Cached namespace override from the active session's scope_namespace.
+    /// Populated eagerly in `set_active_session`; cleared when session is None.
+    /// Avoids a storage round-trip on every ref operation.
+    active_session_namespace: std::sync::RwLock<Option<Namespace>>,
 }
 
 /// Options for creating a commit.
@@ -297,6 +301,7 @@ impl Repository {
             specs: SpeculationManager::new(),
             watch_mgr: crate::watch::WatchManager::new(),
             namespace: Namespace::default_ns(),
+            active_session_namespace: std::sync::RwLock::new(None),
             active_epoch: std::sync::RwLock::new(None),
             active_session: std::sync::RwLock::new(None),
             epoch_seal_strict: strict,
@@ -337,6 +342,9 @@ impl Repository {
     /// version. See `spec/UPGRADE-PATH.md`.
     pub fn init(&self) -> Result<ObjectId, RepoError> {
         let ns = self.active_namespace()?;
+        // Ensure the namespace row exists. init() is idempotent so creating here
+        // is safe; create_namespace absorbs NamespaceAlreadyExists.
+        self.create_namespace(ns.as_str())?;
         if let Some(id) = self.storage.get_ref(&ns, "main")? {
             return Ok(id);
         }
@@ -1069,11 +1077,24 @@ impl Repository {
     }
 
     /// Set (or clear) the active session id.
+    /// Eagerly caches the session's `scope_namespace` to avoid per-call storage lookups.
     pub fn set_active_session(&self, id: Option<String>) -> Result<(), RepoError> {
+        // Cache the session's scope_namespace to avoid per-call storage lookups.
+        let ns_override = if let Some(ref session_id) = id {
+            self.storage
+                .get_session(session_id)?
+                .and_then(|s| s.scope_namespace)
+        } else {
+            None
+        };
         *self
             .active_session
             .write()
             .map_err(|e| RepoError::RefNotFound(e.to_string()))? = id;
+        *self
+            .active_session_namespace
+            .write()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))? = ns_override;
         Ok(())
     }
 
@@ -1092,13 +1113,13 @@ impl Repository {
     /// `namespace`. Falls back to `Namespace::default_ns()` only when no
     /// session is active and no namespace was configured.
     fn active_namespace(&self) -> Result<Namespace, RepoError> {
-        if let Some(session_id) = self.active_session()? {
-            if let Some(session) = self.storage.get_session(&session_id)? {
-                if let Some(ns_str) = &session.scope_namespace {
-                    return Namespace::new(ns_str.clone())
-                        .map_err(|e| RepoError::InvalidOperation(e.to_string()));
-                }
-            }
+        if let Some(ns) = self
+            .active_session_namespace
+            .read()
+            .map_err(|e| RepoError::RefNotFound(e.to_string()))?
+            .clone()
+        {
+            return Ok(ns);
         }
         Ok(self.namespace.clone())
     }
@@ -1121,6 +1142,14 @@ impl Repository {
     /// List all namespaces.
     pub fn list_namespaces(&self) -> Result<Vec<Namespace>, RepoError> {
         Ok(self.storage.list_namespaces()?)
+    }
+
+    /// Delete a namespace and all its refs. The "default" namespace cannot be deleted.
+    /// Returns `true` if it existed and was removed.
+    pub fn delete_namespace(&self, name: &str) -> Result<bool, RepoError> {
+        let ns = Namespace::new(name)
+            .map_err(|e| RepoError::InvalidOperation(e.to_string()))?;
+        Ok(self.storage.delete_namespace(&ns)?)
     }
 
     /// Merge a branch from a different namespace into a branch in the active namespace.
