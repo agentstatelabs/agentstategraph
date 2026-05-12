@@ -5,6 +5,31 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.9.1] — 2026-05-12
+
+Theme: **per-call namespace override** on all ref-touching operations.
+
+### Added
+
+- **`Repository::fork_namespace(&self, ns: Namespace) -> Repository`** —
+  creates a lightweight sibling repository sharing the same `Arc` storage
+  but operating in a different namespace. Inherits epoch/session context
+  and `epoch_seal_strict`; starts with fresh in-memory speculation and
+  watch state. Enables per-request namespace isolation without holding a
+  separate storage connection per namespace.
+- **`Repository` storage changed to `Arc<dyn Storage + Send + Sync>`** —
+  enables shared-storage forks without data duplication.
+- **`namespace: Option<String>` on 17 MCP tools** — `get`, `set`,
+  `delete`, `branch`, `list_branches`, `merge`, `log`, `diff`,
+  `speculate`, `query`, `blame`, `list_paths`, `get_tree`, `search`,
+  `stats`, `commit_graph`, `intent_tree` all accept an optional
+  `namespace` field. When provided, the tool operates against that
+  namespace; when omitted, the server's configured namespace is used.
+- **`namespace: Option<String>` on 9 WASM methods** — `get`, `set`,
+  `delete`, `branch`, `merge`, `diff`, `log`, `blame`, `speculate`.
+  Same semantics as the MCP param: pass `null` / `undefined` to use the
+  repository's configured namespace.
+
 ## [0.9.0] — 2026-05-12
 
 Theme: **namespace primitive** — ref-layer isolation boundary for
