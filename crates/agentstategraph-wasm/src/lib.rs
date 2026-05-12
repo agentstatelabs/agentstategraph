@@ -868,6 +868,7 @@ impl WasmAgentStateGraph {
                     delegated_intent,
                     report_to,
                     path_scope,
+                    scope_namespace: None,
                 },
             )
             .map_err(js_err)?;
