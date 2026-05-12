@@ -3,12 +3,14 @@
 //! Fast, ephemeral storage suitable for testing, speculation,
 //! and workflows that don't need durability.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::RwLock;
 
 use chrono::{DateTime, Utc};
 
-use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_core::{
+    Commit, Epoch, EpochStatus, Namespace, Object, ObjectId, Session, SessionStatus,
+};
 use agentstategraph_reminders::{
     MemoryReminderStore, Reminder, ReminderError, ReminderFilter, ReminderStore,
 };
@@ -24,7 +26,10 @@ use crate::traits::{
 pub struct MemoryStorage {
     objects: RwLock<HashMap<ObjectId, Object>>,
     commits: RwLock<HashMap<ObjectId, Commit>>,
-    refs: RwLock<BTreeMap<String, ObjectId>>,
+    /// Refs keyed by (namespace, name). Namespace must exist in `namespaces`.
+    refs: RwLock<BTreeMap<(String, String), ObjectId>>,
+    /// Known namespaces. A ref cannot be created in an unknown namespace.
+    namespaces: RwLock<HashSet<String>>,
     epochs: RwLock<Vec<Epoch>>,
     sessions: RwLock<HashMap<String, Session>>,
     /// (commit_id, epoch_id) associations, in insertion order.
@@ -40,10 +45,13 @@ pub struct MemoryStorage {
 
 impl MemoryStorage {
     pub fn new() -> Self {
+        let mut namespaces = HashSet::new();
+        namespaces.insert(Namespace::DEFAULT.to_string());
         Self {
             objects: RwLock::new(HashMap::new()),
             commits: RwLock::new(HashMap::new()),
             refs: RwLock::new(BTreeMap::new()),
+            namespaces: RwLock::new(namespaces),
             epochs: RwLock::new(Vec::new()),
             sessions: RwLock::new(HashMap::new()),
             commit_epoch: RwLock::new(Vec::new()),
@@ -140,61 +148,154 @@ impl CommitStore for MemoryStorage {
 }
 
 impl RefStore for MemoryStorage {
-    fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError> {
-        let store = self
-            .refs
-            .read()
-            .map_err(|e| StorageError::Backend(e.to_string()))?;
-        Ok(store.get(name).copied())
-    }
-
-    fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError> {
-        let mut store = self
-            .refs
+    fn create_namespace(&self, namespace: &Namespace) -> Result<(), StorageError> {
+        let mut ns_store = self
+            .namespaces
             .write()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
-        store.insert(name.to_string(), target);
+        if !ns_store.insert(namespace.as_str().to_string()) {
+            return Err(StorageError::NamespaceAlreadyExists(
+                namespace.as_str().to_string(),
+            ));
+        }
         Ok(())
     }
 
-    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError> {
-        let mut store = self
-            .refs
-            .write()
+    fn list_namespaces(&self) -> Result<Vec<Namespace>, StorageError> {
+        let ns_store = self
+            .namespaces
+            .read()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
-        match store.get(name) {
-            Some(&current) if current == expected => {
-                store.insert(name.to_string(), new);
-                Ok(true)
-            }
-            Some(_) => Ok(false),
-            None => {
-                // Ref doesn't exist — only succeed if expected is also "empty"
-                // For now, fail the CAS if the ref doesn't exist
-                Ok(false)
-            }
-        }
+        let mut names: Vec<Namespace> = ns_store
+            .iter()
+            .map(|s| Namespace::new(s).expect("stored namespace is always valid"))
+            .collect();
+        names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(names)
     }
 
-    fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError> {
+    fn get_ref(&self, namespace: &Namespace, name: &str) -> Result<Option<ObjectId>, StorageError> {
+        let ns_store = self
+            .namespaces
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if !ns_store.contains(namespace.as_str()) {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+        drop(ns_store);
         let store = self
             .refs
             .read()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(store
+            .get(&(namespace.as_str().to_string(), name.to_string()))
+            .copied())
+    }
+
+    fn set_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<(), StorageError> {
+        let ns_store = self
+            .namespaces
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if !ns_store.contains(namespace.as_str()) {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+        drop(ns_store);
+        let mut store = self
+            .refs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        store.insert((namespace.as_str().to_string(), name.to_string()), target);
+        Ok(())
+    }
+
+    fn cas_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+        new: ObjectId,
+    ) -> Result<bool, StorageError> {
+        let ns_store = self
+            .namespaces
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if !ns_store.contains(namespace.as_str()) {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+        drop(ns_store);
+        let mut store = self
+            .refs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let key = (namespace.as_str().to_string(), name.to_string());
+        match store.get(&key) {
+            Some(&current) if current == expected => {
+                store.insert(key, new);
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+            None => Ok(false),
+        }
+    }
+
+    fn list_refs(
+        &self,
+        namespace: &Namespace,
+        prefix: &str,
+    ) -> Result<Vec<(String, ObjectId)>, StorageError> {
+        let ns_store = self
+            .namespaces
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if !ns_store.contains(namespace.as_str()) {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+        drop(ns_store);
+        let store = self
+            .refs
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let ns = namespace.as_str().to_string();
         let result = store
-            .range(prefix.to_string()..)
-            .take_while(|(k, _)| k.starts_with(prefix))
-            .map(|(k, v)| (k.clone(), *v))
+            .iter()
+            .filter(|((n, name), _)| n == &ns && name.starts_with(prefix))
+            .map(|((_, name), id)| (name.clone(), *id))
             .collect();
         Ok(result)
     }
 
-    fn delete_ref(&self, name: &str) -> Result<bool, StorageError> {
+    fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError> {
+        let ns_store = self
+            .namespaces
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if !ns_store.contains(namespace.as_str()) {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+        drop(ns_store);
         let mut store = self
             .refs
             .write()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
-        Ok(store.remove(name).is_some())
+        Ok(store
+            .remove(&(namespace.as_str().to_string(), name.to_string()))
+            .is_some())
     }
 }
 
@@ -577,52 +678,92 @@ mod tests {
     #[test]
     fn test_ref_operations() {
         let store = MemoryStorage::new();
+        let ns = Namespace::default_ns();
         let target = ObjectId::hash(b"test-commit");
 
         // Set
-        store.set_ref("main", target).unwrap();
-        assert_eq!(store.get_ref("main").unwrap(), Some(target));
+        store.set_ref(&ns, "main", target).unwrap();
+        assert_eq!(store.get_ref(&ns, "main").unwrap(), Some(target));
 
         // CAS success
         let new_target = ObjectId::hash(b"new-commit");
-        assert!(store.cas_ref("main", target, new_target).unwrap());
-        assert_eq!(store.get_ref("main").unwrap(), Some(new_target));
+        assert!(store.cas_ref(&ns, "main", target, new_target).unwrap());
+        assert_eq!(store.get_ref(&ns, "main").unwrap(), Some(new_target));
 
         // CAS failure (stale expected value)
         let stale = ObjectId::hash(b"stale");
         let another = ObjectId::hash(b"another");
-        assert!(!store.cas_ref("main", stale, another).unwrap());
-        assert_eq!(store.get_ref("main").unwrap(), Some(new_target)); // unchanged
+        assert!(!store.cas_ref(&ns, "main", stale, another).unwrap());
+        assert_eq!(store.get_ref(&ns, "main").unwrap(), Some(new_target)); // unchanged
     }
 
     #[test]
     fn test_list_refs_with_prefix() {
         let store = MemoryStorage::new();
+        let ns = Namespace::default_ns();
 
         store
-            .set_ref("agents/planner/workspace", ObjectId::hash(b"a"))
+            .set_ref(&ns, "agents/planner/workspace", ObjectId::hash(b"a"))
             .unwrap();
         store
-            .set_ref("agents/storage/workspace", ObjectId::hash(b"b"))
+            .set_ref(&ns, "agents/storage/workspace", ObjectId::hash(b"b"))
             .unwrap();
-        store.set_ref("main", ObjectId::hash(b"c")).unwrap();
+        store.set_ref(&ns, "main", ObjectId::hash(b"c")).unwrap();
 
-        let agent_refs = store.list_refs("agents/").unwrap();
+        let agent_refs = store.list_refs(&ns, "agents/").unwrap();
         assert_eq!(agent_refs.len(), 2);
 
-        let all_refs = store.list_refs("").unwrap();
+        let all_refs = store.list_refs(&ns, "").unwrap();
         assert_eq!(all_refs.len(), 3);
     }
 
     #[test]
     fn test_delete_ref() {
         let store = MemoryStorage::new();
+        let ns = Namespace::default_ns();
         let target = ObjectId::hash(b"test");
 
-        store.set_ref("temp", target).unwrap();
-        assert!(store.delete_ref("temp").unwrap());
-        assert_eq!(store.get_ref("temp").unwrap(), None);
-        assert!(!store.delete_ref("temp").unwrap()); // already deleted
+        store.set_ref(&ns, "temp", target).unwrap();
+        assert!(store.delete_ref(&ns, "temp").unwrap());
+        assert_eq!(store.get_ref(&ns, "temp").unwrap(), None);
+        assert!(!store.delete_ref(&ns, "temp").unwrap()); // already deleted
+    }
+
+    #[test]
+    fn test_namespace_isolation() {
+        let store = MemoryStorage::new();
+        let ns_a = Namespace::default_ns();
+        let ns_b = Namespace::new("project-b").unwrap();
+        store.create_namespace(&ns_b).unwrap();
+
+        let id_a = ObjectId::hash(b"a");
+        let id_b = ObjectId::hash(b"b");
+
+        store.set_ref(&ns_a, "main", id_a).unwrap();
+        store.set_ref(&ns_b, "main", id_b).unwrap();
+
+        assert_eq!(store.get_ref(&ns_a, "main").unwrap(), Some(id_a));
+        assert_eq!(store.get_ref(&ns_b, "main").unwrap(), Some(id_b));
+
+        let list_a = store.list_refs(&ns_a, "").unwrap();
+        let list_b = store.list_refs(&ns_b, "").unwrap();
+        assert_eq!(list_a.len(), 1);
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_a[0].0, "main");
+        assert_eq!(list_b[0].0, "main");
+    }
+
+    #[test]
+    fn test_namespace_not_found() {
+        let store = MemoryStorage::new();
+        let unknown = Namespace::new("unknown-ns").unwrap();
+        let target = ObjectId::hash(b"x");
+
+        let err = store.set_ref(&unknown, "main", target).unwrap_err();
+        assert!(
+            matches!(err, StorageError::NamespaceNotFound(_)),
+            "expected NamespaceNotFound, got {err:?}"
+        );
     }
 
     #[test]
@@ -851,6 +992,7 @@ mod tests {
             report_to: None,
             path_scope: None,
             scope_tenant: None,
+            scope_namespace: None,
             status: SessionStatus::Active,
             created_at: Utc::now(),
             ended_at: None,

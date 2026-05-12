@@ -4,7 +4,7 @@
 //! The in-memory and SQLite backends are provided; custom backends
 //! can be added by implementing these traits.
 
-use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_core::{Commit, Epoch, Namespace, Object, ObjectId, Session, SessionStatus};
 use agentstategraph_reminders::ReminderStore;
 use chrono::{DateTime, Utc};
 
@@ -19,6 +19,12 @@ pub enum StorageError {
 
     #[error("ref not found: {0}")]
     RefNotFound(String),
+
+    #[error("namespace not found: '{0}' (create it with create_namespace before writing refs)")]
+    NamespaceNotFound(String),
+
+    #[error("namespace already exists: '{0}'")]
+    NamespaceAlreadyExists(String),
 
     #[error("CAS conflict: ref '{name}' expected {expected}, found {actual}")]
     CasConflict {
@@ -87,25 +93,61 @@ pub trait CommitStore: Send + Sync {
 }
 
 /// Named ref management with atomic compare-and-swap.
-/// Refs are named pointers to commit IDs (branches, tags, heads).
+///
+/// All ref operations are scoped to a [`Namespace`]. The storage layer
+/// enforces that refs in different namespaces are completely independent:
+/// `get_ref(ns_a, "main")` and `get_ref(ns_b, "main")` are distinct rows.
+///
+/// Namespaces must be explicitly created with [`RefStore::create_namespace`]
+/// before any ref can be written into them. `set_ref` returns
+/// [`StorageError::NamespaceNotFound`] if the namespace does not exist.
 pub trait RefStore: Send + Sync {
-    /// Get the commit ID a ref points to. Returns None if the ref doesn't exist.
-    fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError>;
+    /// Create a namespace. Returns `NamespaceAlreadyExists` if it already
+    /// exists — callers that want idempotent creation should check first or
+    /// ignore that variant.
+    fn create_namespace(&self, namespace: &Namespace) -> Result<(), StorageError>;
 
-    /// Set a ref to point to a commit. Creates the ref if it doesn't exist.
-    fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError>;
+    /// List all known namespaces.
+    fn list_namespaces(&self) -> Result<Vec<Namespace>, StorageError>;
+
+    /// Get the commit ID a ref points to. Returns None if the ref doesn't
+    /// exist. Returns `NamespaceNotFound` if the namespace doesn't exist.
+    fn get_ref(&self, namespace: &Namespace, name: &str) -> Result<Option<ObjectId>, StorageError>;
+
+    /// Set a ref to point to a commit. Creates the ref if it doesn't exist
+    /// but the namespace must already exist. Returns `NamespaceNotFound` if
+    /// the namespace hasn't been created yet.
+    fn set_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<(), StorageError>;
 
     /// Atomic compare-and-swap on a ref.
     /// Updates the ref only if it currently points to `expected`.
-    /// Returns true if the swap succeeded, false if the ref's current value
-    /// didn't match `expected`.
-    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError>;
+    /// Returns `true` if the swap succeeded, `false` if the current value
+    /// didn't match `expected`. Returns `NamespaceNotFound` if the namespace
+    /// doesn't exist.
+    fn cas_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+        new: ObjectId,
+    ) -> Result<bool, StorageError>;
 
-    /// List all refs matching a prefix.
-    fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError>;
+    /// List all refs in `namespace` whose name starts with `prefix`.
+    /// Returns `NamespaceNotFound` if the namespace doesn't exist.
+    fn list_refs(
+        &self,
+        namespace: &Namespace,
+        prefix: &str,
+    ) -> Result<Vec<(String, ObjectId)>, StorageError>;
 
-    /// Delete a ref. Returns true if the ref existed.
-    fn delete_ref(&self, name: &str) -> Result<bool, StorageError>;
+    /// Delete a ref. Returns `true` if the ref existed. Returns
+    /// `NamespaceNotFound` if the namespace doesn't exist.
+    fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError>;
 }
 
 /// Durable storage of epochs and their association with commits.

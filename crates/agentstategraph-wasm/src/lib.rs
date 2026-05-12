@@ -863,10 +863,12 @@ impl WasmAgentStateGraph {
                 agent_id,
                 &branch,
                 head,
-                parent_session,
-                delegated_intent,
-                report_to,
-                path_scope,
+                agentstategraph::session::CreateSessionParams {
+                    parent_session,
+                    delegated_intent,
+                    report_to,
+                    path_scope,
+                },
             )
             .map_err(js_err)?;
         serde_json::to_string(&s).map_err(js_err)

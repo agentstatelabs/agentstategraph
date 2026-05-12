@@ -31,7 +31,7 @@ use crate::memory::MemoryStorage;
 use crate::traits::{
     CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
 };
-use agentstategraph_core::{Commit, Epoch, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_core::{Commit, Epoch, Namespace, Object, ObjectId, Session, SessionStatus};
 use agentstategraph_reminders::ReminderStore;
 use chrono::{DateTime, Utc};
 
@@ -99,8 +99,9 @@ impl IndexedDbStorage {
         Ok(())
     }
 
-    /// Load refs from key-value pairs.
+    /// Load refs from key-value pairs. All refs are loaded into the default namespace.
     pub fn load_refs(&self, pairs: &[(String, String)]) -> Result<(), StorageError> {
+        let ns = Namespace::default_ns();
         for (name, hex_id) in pairs {
             let bytes = hex_to_bytes(hex_id)
                 .ok_or_else(|| StorageError::Serialization("invalid hex id".to_string()))?;
@@ -112,7 +113,7 @@ impl IndexedDbStorage {
             }
             arr.copy_from_slice(&bytes);
             let id = ObjectId::from_bytes(arr);
-            self.memory.set_ref(name, id)?;
+            self.memory.set_ref(&ns, name, id)?;
         }
         Ok(())
     }
@@ -293,12 +294,25 @@ impl CommitStore for IndexedDbStorage {
 }
 
 impl RefStore for IndexedDbStorage {
-    fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError> {
-        self.memory.get_ref(name)
+    fn create_namespace(&self, namespace: &Namespace) -> Result<(), StorageError> {
+        self.memory.create_namespace(namespace)
     }
 
-    fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError> {
-        self.memory.set_ref(name, target)?;
+    fn list_namespaces(&self) -> Result<Vec<Namespace>, StorageError> {
+        self.memory.list_namespaces()
+    }
+
+    fn get_ref(&self, namespace: &Namespace, name: &str) -> Result<Option<ObjectId>, StorageError> {
+        self.memory.get_ref(namespace, name)
+    }
+
+    fn set_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.memory.set_ref(namespace, name, target)?;
         let hex_id = format!("{}", target);
         self.pending_refs
             .write()
@@ -307,8 +321,14 @@ impl RefStore for IndexedDbStorage {
         Ok(())
     }
 
-    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError> {
-        let result = self.memory.cas_ref(name, expected, new)?;
+    fn cas_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+        new: ObjectId,
+    ) -> Result<bool, StorageError> {
+        let result = self.memory.cas_ref(namespace, name, expected, new)?;
         if result {
             let hex_id = format!("{}", new);
             self.pending_refs
@@ -319,12 +339,16 @@ impl RefStore for IndexedDbStorage {
         Ok(result)
     }
 
-    fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError> {
-        self.memory.list_refs(prefix)
+    fn list_refs(
+        &self,
+        namespace: &Namespace,
+        prefix: &str,
+    ) -> Result<Vec<(String, ObjectId)>, StorageError> {
+        self.memory.list_refs(namespace, prefix)
     }
 
-    fn delete_ref(&self, name: &str) -> Result<bool, StorageError> {
-        let result = self.memory.delete_ref(name)?;
+    fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError> {
+        let result = self.memory.delete_ref(namespace, name)?;
         if result {
             self.deleted_refs.write().unwrap().push(name.to_string());
         }
@@ -560,7 +584,8 @@ mod tests {
         let store = IndexedDbStorage::new("test-db");
         let target = ObjectId::hash(b"commit");
 
-        store.set_ref("main", target).unwrap();
+        let ns = Namespace::default_ns();
+        store.set_ref(&ns, "main", target).unwrap();
 
         let pending = store.drain_pending_refs();
         assert_eq!(pending.len(), 1);
@@ -610,10 +635,11 @@ mod tests {
         let store = IndexedDbStorage::new("test-db");
         let target = ObjectId::hash(b"commit");
 
-        store.set_ref("temp", target).unwrap();
+        let ns = Namespace::default_ns();
+        store.set_ref(&ns, "temp", target).unwrap();
         store.drain_pending_refs(); // clear
 
-        store.delete_ref("temp").unwrap();
+        store.delete_ref(&ns, "temp").unwrap();
         let deleted = store.drain_deleted_refs();
         assert_eq!(deleted, vec!["temp"]);
     }
@@ -682,6 +708,7 @@ mod tests {
             report_to: None,
             path_scope: None,
             scope_tenant: None,
+            scope_namespace: None,
             status: SessionStatus::Active,
             created_at: Utc::now(),
             ended_at: None,
@@ -713,6 +740,7 @@ mod tests {
             report_to: None,
             path_scope: None,
             scope_tenant: None,
+            scope_namespace: None,
             status: SessionStatus::Active,
             created_at: Utc::now(),
             ended_at: None,

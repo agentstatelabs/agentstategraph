@@ -130,6 +130,27 @@ pub struct MergeParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct CreateNamespaceParams {
+    /// Namespace name (alphanumeric, `-`, `_`, max 64 chars).
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CrossNamespaceMergeParams {
+    /// Source namespace.
+    pub source_namespace: String,
+    /// Branch in the source namespace to merge from.
+    pub source_branch: String,
+    /// Branch in the active namespace to merge into (default: "main").
+    #[serde(default = "default_ref")]
+    pub target_branch: String,
+    /// Why this cross-namespace merge is being done.
+    pub intent_description: String,
+    /// Optional reasoning.
+    pub reasoning: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct LogParams {
     /// Branch or ref (default: "main").
     #[serde(default = "default_ref")]
@@ -1031,6 +1052,69 @@ impl AgentStateGraphServer {
                     .map(|(name, id)| format!("  {} -> {}", name, id.short()))
                     .collect();
                 format!("{} branches:\n{}", branches.len(), lines.join("\n"))
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Create a namespace. Namespaces are isolation boundaries for refs — each namespace has its own branch set. Returns success even if the namespace already exists."
+    )]
+    async fn agentstategraph_create_namespace(
+        &self,
+        params: Parameters<CreateNamespaceParams>,
+    ) -> String {
+        match self.repo.create_namespace(&params.0.name) {
+            Ok(()) => format!("Namespace '{}' ready.", params.0.name),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(description = "List all namespaces known to this repository.")]
+    async fn agentstategraph_list_namespaces(&self) -> String {
+        match self.repo.list_namespaces() {
+            Ok(namespaces) => {
+                if namespaces.is_empty() {
+                    "No namespaces found.".to_string()
+                } else {
+                    let names: Vec<&str> = namespaces.iter().map(|n| n.as_str()).collect();
+                    names.join("\n")
+                }
+            }
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Merge a branch from another namespace into a branch in the active namespace. Cross-namespace merges are policy-gated and audited. Currently requires PolicyStore integration."
+    )]
+    async fn agentstategraph_cross_namespace_merge(
+        &self,
+        params: Parameters<CrossNamespaceMergeParams>,
+    ) -> String {
+        let p = params.0;
+        let mut opts =
+            CommitOptions::new("mcp-agent", IntentCategory::Merge, &p.intent_description);
+        if let Some(r) = p.reasoning {
+            opts = opts.with_reasoning(r);
+        }
+        match self
+            .repo
+            .cross_namespace_merge(&p.source_namespace, &p.source_branch, &p.target_branch, opts)
+        {
+            Ok(commit_id) => format!(
+                "Merged '{}/{}' into '{}': {}",
+                p.source_namespace,
+                p.source_branch,
+                p.target_branch,
+                commit_id
+            ),
+            Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => {
+                format!(
+                    "CONFLICTS ({}):\n{}",
+                    conflicts.len(),
+                    serde_json::to_string_pretty(&conflicts).unwrap_or_default()
+                )
             }
             Err(e) => format!("Error: {}", e),
         }

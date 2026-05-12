@@ -6,7 +6,9 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_core::{
+    Commit, Epoch, EpochStatus, Namespace, Object, ObjectId, Session, SessionStatus,
+};
 use agentstategraph_reminders::{
     Reminder, ReminderError, ReminderFilter, ReminderStore,
     types::{Priority, ReminderStatus},
@@ -68,9 +70,16 @@ impl SqliteStorage {
                 timestamp TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS namespaces (
+                name       TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS refs (
-                name   TEXT PRIMARY KEY,
-                target BLOB NOT NULL
+                namespace TEXT NOT NULL,
+                name      TEXT NOT NULL,
+                target    BLOB NOT NULL,
+                PRIMARY KEY (namespace, name)
             );
 
             CREATE TABLE IF NOT EXISTS epochs (
@@ -93,6 +102,7 @@ impl SqliteStorage {
                 parent_id       TEXT REFERENCES sessions(id),
                 scope_path      TEXT,
                 scope_branch    TEXT,
+                scope_namespace TEXT,
                 status          TEXT NOT NULL DEFAULT 'Active',
                 created_at      TEXT NOT NULL,
                 ended_at        TEXT,
@@ -210,6 +220,66 @@ impl SqliteStorage {
             [],
         )
         .map_err(|e| StorageError::Backend(format!("idx session: {}", e)))?;
+
+        // Migration: refs table — add namespace column + composite PK.
+        // Check whether refs still has the old flat schema (single-column PK).
+        let refs_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(refs)")
+                .map_err(|e| StorageError::Backend(format!("pragma refs: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| StorageError::Backend(format!("pragma query: {}", e)))?;
+            let mut cols = Vec::new();
+            for r in rows {
+                cols.push(r.map_err(|e| StorageError::Backend(format!("pragma row: {}", e)))?);
+            }
+            cols
+        };
+        if !refs_cols.iter().any(|c| c == "namespace") {
+            // Old schema detected. Recreate with composite PK.
+            conn.execute_batch(
+                "
+                CREATE TABLE refs_new (
+                    namespace TEXT NOT NULL,
+                    name      TEXT NOT NULL,
+                    target    BLOB NOT NULL,
+                    PRIMARY KEY (namespace, name)
+                );
+                INSERT INTO refs_new (namespace, name, target)
+                    SELECT 'default', name, target FROM refs;
+                DROP TABLE refs;
+                ALTER TABLE refs_new RENAME TO refs;
+                ",
+            )
+            .map_err(|e| StorageError::Backend(format!("migrate refs: {}", e)))?;
+        }
+
+        // Migration: ensure namespaces table exists and 'default' is seeded.
+        conn.execute(
+            "INSERT OR IGNORE INTO namespaces (name, created_at) VALUES ('default', ?1)",
+            params![chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| StorageError::Backend(format!("seed default namespace: {}", e)))?;
+
+        // Migration: sessions — add scope_namespace column if missing.
+        let session_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(sessions)")
+                .map_err(|e| StorageError::Backend(format!("pragma sessions: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| StorageError::Backend(format!("pragma query: {}", e)))?;
+            let mut cols = Vec::new();
+            for r in rows {
+                cols.push(r.map_err(|e| StorageError::Backend(format!("pragma row: {}", e)))?);
+            }
+            cols
+        };
+        if !session_cols.iter().any(|c| c == "scope_namespace") {
+            conn.execute("ALTER TABLE sessions ADD COLUMN scope_namespace TEXT", [])
+                .map_err(|e| StorageError::Backend(format!("add scope_namespace: {}", e)))?;
+        }
 
         Ok(())
     }
@@ -384,12 +454,60 @@ impl CommitStore for SqliteStorage {
 }
 
 impl RefStore for SqliteStorage {
-    fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError> {
+    fn create_namespace(&self, namespace: &Namespace) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
+        let rows = conn
+            .execute(
+                "INSERT OR IGNORE INTO namespaces (name, created_at) VALUES (?1, ?2)",
+                params![namespace.as_str(), chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| StorageError::Backend(format!("create namespace: {}", e)))?;
+        if rows == 0 {
+            return Err(StorageError::NamespaceAlreadyExists(
+                namespace.as_str().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn list_namespaces(&self) -> Result<Vec<Namespace>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT name FROM namespaces ORDER BY name")
+            .map_err(|e| StorageError::Backend(format!("list namespaces: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| StorageError::Backend(format!("list namespaces query: {}", e)))?;
+        let mut result = Vec::new();
+        for row in rows {
+            let name =
+                row.map_err(|e| StorageError::Backend(format!("list namespaces row: {}", e)))?;
+            let ns = Namespace::new(name)
+                .map_err(|e| StorageError::Backend(format!("invalid namespace in db: {}", e)))?;
+            result.push(ns);
+        }
+        Ok(result)
+    }
+
+    fn get_ref(&self, namespace: &Namespace, name: &str) -> Result<Option<ObjectId>, StorageError> {
+        let conn = self.lock_conn()?;
+        let ns_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = ?1)",
+                params![namespace.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+        if !ns_exists {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+
         let result: Option<Vec<u8>> = conn
             .query_row(
-                "SELECT target FROM refs WHERE name = ?1",
-                params![name],
+                "SELECT target FROM refs WHERE namespace = ?1 AND name = ?2",
+                params![namespace.as_str(), name],
                 |row| row.get(0),
             )
             .optional()
@@ -405,43 +523,99 @@ impl RefStore for SqliteStorage {
         }
     }
 
-    fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError> {
+    fn set_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
+        let ns_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = ?1)",
+                params![namespace.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+        if !ns_exists {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+
         conn.execute(
-            "INSERT OR REPLACE INTO refs (name, target) VALUES (?1, ?2)",
-            params![name, target.as_bytes().as_slice()],
+            "INSERT OR REPLACE INTO refs (namespace, name, target) VALUES (?1, ?2, ?3)",
+            params![namespace.as_str(), name, target.as_bytes().as_slice()],
         )
         .map_err(|e| StorageError::Backend(format!("set ref: {}", e)))?;
         Ok(())
     }
 
-    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError> {
+    fn cas_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+        new: ObjectId,
+    ) -> Result<bool, StorageError> {
         let conn = self.lock_conn()?;
+        let ns_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = ?1)",
+                params![namespace.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+        if !ns_exists {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
 
-        // Use UPDATE with WHERE to make it atomic
         let rows = conn
             .execute(
-                "UPDATE refs SET target = ?1 WHERE name = ?2 AND target = ?3",
+                "UPDATE refs SET target = ?1 \
+                 WHERE namespace = ?2 AND name = ?3 AND target = ?4",
                 params![
                     new.as_bytes().as_slice(),
+                    namespace.as_str(),
                     name,
                     expected.as_bytes().as_slice()
                 ],
             )
             .map_err(|e| StorageError::Backend(format!("cas ref: {}", e)))?;
-
         Ok(rows > 0)
     }
 
-    fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError> {
+    fn list_refs(
+        &self,
+        namespace: &Namespace,
+        prefix: &str,
+    ) -> Result<Vec<(String, ObjectId)>, StorageError> {
         let conn = self.lock_conn()?;
+        let ns_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = ?1)",
+                params![namespace.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+        if !ns_exists {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+
         let mut stmt = conn
-            .prepare("SELECT name, target FROM refs WHERE name LIKE ?1 ORDER BY name")
+            .prepare(
+                "SELECT name, target FROM refs \
+                 WHERE namespace = ?1 AND name LIKE ?2 ORDER BY name",
+            )
             .map_err(|e| StorageError::Backend(format!("list refs: {}", e)))?;
 
         let pattern = format!("{}%", prefix);
         let rows = stmt
-            .query_map(params![pattern], |row| {
+            .query_map(params![namespace.as_str(), pattern], |row| {
                 let name: String = row.get(0)?;
                 let bytes: Vec<u8> = row.get(1)?;
                 Ok((name, bytes))
@@ -456,14 +630,29 @@ impl RefStore for SqliteStorage {
             arr.copy_from_slice(&bytes);
             result.push((name, ObjectId::from_bytes(arr)));
         }
-
         Ok(result)
     }
 
-    fn delete_ref(&self, name: &str) -> Result<bool, StorageError> {
+    fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError> {
         let conn = self.lock_conn()?;
+        let ns_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = ?1)",
+                params![namespace.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+        if !ns_exists {
+            return Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ));
+        }
+
         let rows = conn
-            .execute("DELETE FROM refs WHERE name = ?1", params![name])
+            .execute(
+                "DELETE FROM refs WHERE namespace = ?1 AND name = ?2",
+                params![namespace.as_str(), name],
+            )
             .map_err(|e| StorageError::Backend(format!("delete ref: {}", e)))?;
         Ok(rows > 0)
     }
@@ -772,6 +961,7 @@ fn row_to_session(
     parent_id: Option<String>,
     scope_path: Option<String>,
     scope_branch: Option<String>,
+    scope_namespace: Option<String>,
     status: String,
     created_at: String,
     ended_at: Option<String>,
@@ -791,6 +981,8 @@ fn row_to_session(
         report_to: Option<String>,
         #[serde(default)]
         working_branch: Option<String>,
+        #[serde(default)]
+        scope_tenant: Option<String>,
     }
     let meta: Meta = serde_json::from_str(&metadata).unwrap_or_default();
     let head = meta.head.unwrap_or_else(|| ObjectId::hash(b""));
@@ -806,7 +998,8 @@ fn row_to_session(
         delegated_intent: meta.delegated_intent,
         report_to: meta.report_to,
         path_scope: scope_path,
-        scope_tenant: None,
+        scope_tenant: meta.scope_tenant,
+        scope_namespace,
         status: SessionStatus::from_wire(&status),
         created_at: parse_rfc3339(&created_at)?,
         ended_at: ended_at.as_deref().map(parse_rfc3339).transpose()?,
@@ -821,13 +1014,14 @@ impl SessionStore for SqliteStorage {
             "delegated_intent": session.delegated_intent,
             "report_to": session.report_to,
             "working_branch": session.working_branch,
+            "scope_tenant": session.scope_tenant,
         })
         .to_string();
         conn.execute(
             "INSERT OR REPLACE INTO sessions
-             (id, agent_id, parent_id, scope_path, scope_branch, status,
-              created_at, ended_at, metadata, commit_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+             (id, agent_id, parent_id, scope_path, scope_branch, scope_namespace,
+              status, created_at, ended_at, metadata, commit_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                      COALESCE((SELECT commit_count FROM sessions WHERE id = ?1), 0))",
             params![
                 session.id,
@@ -835,6 +1029,7 @@ impl SessionStore for SqliteStorage {
                 session.parent_session,
                 session.path_scope,
                 session.working_branch,
+                session.scope_namespace,
                 session.status.as_str(),
                 session.created_at.to_rfc3339(),
                 session.ended_at.map(|t| t.to_rfc3339()),
@@ -881,8 +1076,8 @@ impl SessionStore for SqliteStorage {
         let conn = self.lock_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, agent_id, parent_id, scope_path, scope_branch, status,
-                        created_at, ended_at, metadata
+                "SELECT id, agent_id, parent_id, scope_path, scope_branch, scope_namespace,
+                        status, created_at, ended_at, metadata
                  FROM sessions
                  WHERE (?1 IS NULL OR agent_id = ?1)
                  ORDER BY created_at DESC",
@@ -896,18 +1091,19 @@ impl SessionStore for SqliteStorage {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             })
             .map_err(|e| StorageError::Backend(format!("list sessions query: {}", e)))?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, agent, parent, sp, sb, st, ca, ea, md) =
+            let (id, agent, parent, sp, sb, sns, st, ca, ea, md) =
                 r.map_err(|e| StorageError::Backend(format!("list sessions row: {}", e)))?;
-            out.push(row_to_session(id, agent, parent, sp, sb, st, ca, ea, md)?);
+            out.push(row_to_session(id, agent, parent, sp, sb, sns, st, ca, ea, md)?);
         }
         Ok(out)
     }
@@ -920,6 +1116,7 @@ impl SessionStore for SqliteStorage {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
             String,
             String,
             Option<String>,
@@ -927,8 +1124,8 @@ impl SessionStore for SqliteStorage {
         );
         let row: Option<SessionRow> = conn
             .query_row(
-                "SELECT id, agent_id, parent_id, scope_path, scope_branch, status,
-                        created_at, ended_at, metadata
+                "SELECT id, agent_id, parent_id, scope_path, scope_branch, scope_namespace,
+                        status, created_at, ended_at, metadata
                  FROM sessions WHERE id = ?1",
                 params![id],
                 |row| {
@@ -942,6 +1139,7 @@ impl SessionStore for SqliteStorage {
                         row.get(6)?,
                         row.get(7)?,
                         row.get(8)?,
+                        row.get(9)?,
                     ))
                 },
             )
@@ -949,8 +1147,8 @@ impl SessionStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("get session: {}", e)))?;
         match row {
             None => Ok(None),
-            Some((id, agent, parent, sp, sb, st, ca, ea, md)) => Ok(Some(row_to_session(
-                id, agent, parent, sp, sb, st, ca, ea, md,
+            Some((id, agent, parent, sp, sb, sns, st, ca, ea, md)) => Ok(Some(row_to_session(
+                id, agent, parent, sp, sb, sns, st, ca, ea, md,
             )?)),
         }
     }
@@ -1674,29 +1872,31 @@ mod tests {
         let target = ObjectId::hash(b"commit-1");
         let new_target = ObjectId::hash(b"commit-2");
 
-        store.set_ref("main", target).unwrap();
-        assert_eq!(store.get_ref("main").unwrap(), Some(target));
+        let ns = Namespace::default_ns();
+        store.set_ref(&ns, "main", target).unwrap();
+        assert_eq!(store.get_ref(&ns, "main").unwrap(), Some(target));
 
         // CAS success
-        assert!(store.cas_ref("main", target, new_target).unwrap());
-        assert_eq!(store.get_ref("main").unwrap(), Some(new_target));
+        assert!(store.cas_ref(&ns, "main", target, new_target).unwrap());
+        assert_eq!(store.get_ref(&ns, "main").unwrap(), Some(new_target));
 
         // CAS failure
         let stale = ObjectId::hash(b"stale");
-        assert!(!store.cas_ref("main", stale, target).unwrap());
+        assert!(!store.cas_ref(&ns, "main", stale, target).unwrap());
     }
 
     #[test]
     fn test_list_refs() {
         let store = test_store();
-        store.set_ref("agents/a", ObjectId::hash(b"a")).unwrap();
-        store.set_ref("agents/b", ObjectId::hash(b"b")).unwrap();
-        store.set_ref("main", ObjectId::hash(b"m")).unwrap();
+        let ns = Namespace::default_ns();
+        store.set_ref(&ns, "agents/a", ObjectId::hash(b"a")).unwrap();
+        store.set_ref(&ns, "agents/b", ObjectId::hash(b"b")).unwrap();
+        store.set_ref(&ns, "main", ObjectId::hash(b"m")).unwrap();
 
-        let agents = store.list_refs("agents/").unwrap();
+        let agents = store.list_refs(&ns, "agents/").unwrap();
         assert_eq!(agents.len(), 2);
 
-        let all = store.list_refs("").unwrap();
+        let all = store.list_refs(&ns, "").unwrap();
         assert_eq!(all.len(), 3);
     }
 
@@ -1776,10 +1976,11 @@ mod tests {
         store.put_commit(&commit).unwrap();
 
         // Set a ref
-        store.set_ref("main", commit.id).unwrap();
+        let ns = Namespace::default_ns();
+        store.set_ref(&ns, "main", commit.id).unwrap();
 
         // Read it all back
-        let ref_target = store.get_ref("main").unwrap().unwrap();
+        let ref_target = store.get_ref(&ns, "main").unwrap().unwrap();
         assert_eq!(ref_target, commit.id);
 
         let retrieved_commit = store.get_commit(&ref_target).unwrap().unwrap();

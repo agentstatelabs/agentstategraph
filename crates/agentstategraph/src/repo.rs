@@ -8,7 +8,7 @@
 
 use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Conflict, DiffOp, Intent, IntentCategory, MergeResult,
-    Object, ObjectId, ObjectResolver, StatePath,
+    Namespace, Object, ObjectId, ObjectResolver, StatePath,
 };
 use agentstategraph_storage::{Storage, StorageError};
 
@@ -130,6 +130,10 @@ pub struct Repository {
     storage: Box<dyn Storage>,
     specs: SpeculationManager,
     watch_mgr: crate::watch::WatchManager,
+    /// Configured namespace for this repository instance. The active session's
+    /// `scope_namespace` takes priority when resolving the effective namespace
+    /// (see `active_namespace()`). Defaults to `Namespace::default_ns()`.
+    namespace: Namespace,
     /// Active epoch id — if set, all new commits are associated with it
     /// via `storage.set_commit_epoch` on commit finalization. Set via
     /// `set_active_epoch` / cleared via `clear_active_epoch`. Not a
@@ -248,6 +252,12 @@ pub enum RepoError {
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
 
+    #[error("namespace not found: '{0}' — call create_namespace first")]
+    NamespaceNotFound(String),
+
+    #[error("cross-namespace merge denied: no PolicyStore configured")]
+    CrossNamespaceAccessDenied,
+
     #[error("taint hook rejected write{}: {source}", match .taint_id {
         Some(id) => format!(" (taint: {id})"),
         None => String::new(),
@@ -286,10 +296,27 @@ impl Repository {
             storage,
             specs: SpeculationManager::new(),
             watch_mgr: crate::watch::WatchManager::new(),
+            namespace: Namespace::default_ns(),
             active_epoch: std::sync::RwLock::new(None),
             active_session: std::sync::RwLock::new(None),
             epoch_seal_strict: strict,
         }
+    }
+
+    /// Return a Repository configured to use the given namespace for all ref
+    /// operations. The active session's `scope_namespace` overrides this value
+    /// when a session is active. Callers can chain this with other builders:
+    /// `Repository::new(storage).with_namespace(ns).with_epoch_seal_strict(true)`.
+    pub fn with_namespace(mut self, ns: Namespace) -> Self {
+        self.namespace = ns;
+        self
+    }
+
+    /// The namespace this repository was configured with. The *effective*
+    /// namespace for a ref operation may differ when a session with its own
+    /// `scope_namespace` is active — use `active_namespace()` for that.
+    pub fn namespace(&self) -> &Namespace {
+        &self.namespace
     }
 
     /// Return a Repository with epoch-seal enforcement set to the given mode.
@@ -309,7 +336,8 @@ impl Repository {
     /// The initial commit stamps `/_meta/schema_version` with the crate
     /// version. See `spec/UPGRADE-PATH.md`.
     pub fn init(&self) -> Result<ObjectId, RepoError> {
-        if let Some(id) = self.storage.get_ref("main")? {
+        let ns = self.active_namespace()?;
+        if let Some(id) = self.storage.get_ref(&ns, "main")? {
             return Ok(id);
         }
 
@@ -337,7 +365,7 @@ impl Repository {
         .build();
 
         self.storage.put_commit(&commit)?;
-        self.storage.set_ref("main", commit.id)?;
+        self.storage.set_ref(&ns, "main", commit.id)?;
 
         Ok(commit.id)
     }
@@ -530,9 +558,10 @@ impl Repository {
         // Epoch-seal check (same guard that guarded_set_ref runs).
         self.enforce_epoch_seals(ref_name, &new_commit.id)?;
 
+        let ns = self.active_namespace()?;
         match self
             .storage
-            .cas_ref(ref_name, expected_head, new_commit.id)?
+            .cas_ref(&ns, ref_name, expected_head, new_commit.id)?
         {
             false => Err(RepoError::WriteConflict),
             true => {
@@ -577,8 +606,9 @@ impl Repository {
 
     /// Create a new branch from the given ref.
     pub fn branch(&self, name: &str, from: &str) -> Result<ObjectId, RepoError> {
+        let ns = self.active_namespace()?;
         // Check if branch already exists
-        if self.storage.get_ref(name)?.is_some() {
+        if self.storage.get_ref(&ns, name)?.is_some() {
             return Err(RepoError::BranchAlreadyExists(name.to_string()));
         }
 
@@ -593,7 +623,8 @@ impl Repository {
     /// Delete a branch. Returns true if the branch existed.
     /// Does NOT delete any commits (they remain in the DAG).
     pub fn delete_branch(&self, name: &str) -> Result<bool, RepoError> {
-        Ok(self.storage.delete_ref(name)?)
+        let ns = self.active_namespace()?;
+        Ok(self.storage.delete_ref(&ns, name)?)
     }
 
     /// List all branches, optionally filtered by prefix.
@@ -601,7 +632,8 @@ impl Repository {
         &self,
         prefix: Option<&str>,
     ) -> Result<Vec<(String, ObjectId)>, RepoError> {
-        Ok(self.storage.list_refs(prefix.unwrap_or(""))?)
+        let ns = self.active_namespace()?;
+        Ok(self.storage.list_refs(&ns, prefix.unwrap_or(""))?)
     }
 
     /// Merge source branch into target branch.
@@ -1054,6 +1086,72 @@ impl Repository {
             .clone())
     }
 
+    /// Resolve the effective namespace for the current call.
+    ///
+    /// Priority: active session's `scope_namespace` > repository's configured
+    /// `namespace`. Falls back to `Namespace::default_ns()` only when no
+    /// session is active and no namespace was configured.
+    fn active_namespace(&self) -> Result<Namespace, RepoError> {
+        if let Some(session_id) = self.active_session()? {
+            if let Some(session) = self.storage.get_session(&session_id)? {
+                if let Some(ns_str) = &session.scope_namespace {
+                    return Namespace::new(ns_str.clone())
+                        .map_err(|e| RepoError::InvalidOperation(e.to_string()));
+                }
+            }
+        }
+        Ok(self.namespace.clone())
+    }
+
+    // -----------------------------------------------------------------------
+    // Namespace operations
+    // -----------------------------------------------------------------------
+
+    /// Create a namespace. Returns `Ok(())` if already exists.
+    pub fn create_namespace(&self, name: &str) -> Result<(), RepoError> {
+        let ns = Namespace::new(name)
+            .map_err(|e| RepoError::InvalidOperation(e.to_string()))?;
+        match self.storage.create_namespace(&ns) {
+            Ok(()) => Ok(()),
+            Err(StorageError::NamespaceAlreadyExists(_)) => Ok(()),
+            Err(e) => Err(RepoError::Storage(e)),
+        }
+    }
+
+    /// List all namespaces.
+    pub fn list_namespaces(&self) -> Result<Vec<Namespace>, RepoError> {
+        Ok(self.storage.list_namespaces()?)
+    }
+
+    /// Merge a branch from a different namespace into a branch in the active namespace.
+    ///
+    /// Cross-namespace merges are denied by default — they require a configured
+    /// PolicyStore (future work). Returns `Err(CrossNamespaceAccessDenied)` until
+    /// policy integration is complete.
+    ///
+    /// The merge is audited: the commit's intent tags include the source namespace
+    /// and branch so the history remains inspectable.
+    pub fn cross_namespace_merge(
+        &self,
+        source_namespace: &str,
+        source_branch: &str,
+        target_branch: &str,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        let source_ns = Namespace::new(source_namespace)
+            .map_err(|e| RepoError::InvalidOperation(e.to_string()))?;
+        let target_ns = self.active_namespace()?;
+
+        if source_ns == target_ns {
+            // Same namespace — just a normal merge.
+            return self.merge(source_branch, target_branch, options);
+        }
+
+        // Cross-namespace: deny until PolicyStore integration lands.
+        // When a PolicyStore is wired up this check will consult it.
+        Err(RepoError::CrossNamespaceAccessDenied)
+    }
+
     // -----------------------------------------------------------------------
     // Watch operations
     // -----------------------------------------------------------------------
@@ -1089,7 +1187,8 @@ impl Repository {
     pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), RepoError> {
         // Walk main first — cheap, and we want the sealed_commits set
         // computed against the current tip.
-        let sealed_commits = match self.storage.get_ref("main")? {
+        let ns = self.active_namespace()?;
+        let sealed_commits = match self.storage.get_ref(&ns, "main")? {
             Some(head) => self.reachable_commits_from(&head)?,
             None => Vec::new(),
         };
@@ -1490,8 +1589,9 @@ impl Repository {
     /// enforcement check. Every internal code path that moves a ref goes
     /// through this.
     fn guarded_set_ref(&self, ref_name: &str, new_target: ObjectId) -> Result<(), RepoError> {
+        let ns = self.active_namespace()?;
         self.enforce_epoch_seals(ref_name, &new_target)?;
-        self.storage.set_ref(ref_name, new_target)?;
+        self.storage.set_ref(&ns, ref_name, new_target)?;
         Ok(())
     }
 
@@ -1504,8 +1604,9 @@ impl Repository {
 
     /// Resolve a ref name to a commit ID.
     fn resolve_ref(&self, ref_name: &str) -> Result<ObjectId, RepoError> {
+        let ns = self.active_namespace()?;
         self.storage
-            .get_ref(ref_name)?
+            .get_ref(&ns, ref_name)?
             .ok_or_else(|| RepoError::BranchNotFound(ref_name.to_string()))
     }
 

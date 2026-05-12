@@ -16,6 +16,7 @@ use agentstategraph_mcp::server;
 use std::sync::Arc;
 
 use agentstategraph::Repository;
+use agentstategraph_core::Namespace;
 use agentstategraph_storage::SqliteStorage;
 use rmcp::ServiceExt;
 
@@ -25,6 +26,10 @@ pub struct ServeArgs {
     pub db_path: String,
     pub database_url: String,
     pub tenant_id: String,
+    /// Default namespace for ref operations. Can be overridden per-session
+    /// via `scope_namespace`. Maps to `Repository::with_namespace(...)`.
+    /// Env: `ASG_NAMESPACE`. CLI: `--namespace <ID>`. Default: `"default"`.
+    pub default_namespace: String,
     pub http_mode: bool,
     pub http_port: u16,
     pub bind_addr: String,
@@ -147,6 +152,10 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let mut db_path = "./agentstategraph.db".to_string();
     let mut database_url = String::new();
     let mut tenant_id = "default".to_string();
+    let mut default_namespace: String = std::env::var("ASG_NAMESPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".to_string());
     let mut http_mode = false;
     let mut http_port: u16 = 3001;
     let mut auth_enabled = false;
@@ -196,6 +205,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 i += 1;
                 if i < args.len() {
                     tenant_id = args[i].clone();
+                }
+            }
+            "--namespace" => {
+                i += 1;
+                if i < args.len() {
+                    default_namespace = args[i].clone();
                 }
             }
             "--http" => {
@@ -281,6 +296,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
                 );
+                eprintln!(
+                    "      --namespace <ID>  Default namespace for ref isolation (default: \"default\"; env ASG_NAMESPACE)"
+                );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!(
                     "      --bind <ADDR>     Bind address (default: 127.0.0.1; pass 0.0.0.0 for LAN; env ASG_BIND)"
@@ -347,6 +365,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         db_path,
         database_url,
         tenant_id,
+        default_namespace,
         http_mode,
         http_port,
         bind_addr,
@@ -364,12 +383,23 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
 pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
 
+    let repo_namespace = Namespace::new(&args.default_namespace).unwrap_or_else(|_| {
+        eprintln!(
+            "Warning: invalid namespace '{}', falling back to 'default'",
+            args.default_namespace
+        );
+        Namespace::default_ns()
+    });
+
     let repo: Arc<Repository> = match args.storage_type.as_str() {
         "memory" => {
             eprintln!("Storage: in-memory (ephemeral)");
-            Arc::new(Repository::new(Box::new(
-                SqliteStorage::in_memory().expect("in-memory sqlite"),
-            )))
+            Arc::new(
+                Repository::new(Box::new(
+                    SqliteStorage::in_memory().expect("in-memory sqlite"),
+                ))
+                .with_namespace(repo_namespace),
+            )
         }
         "postgres" => {
             if args.database_url.is_empty() {
@@ -389,12 +419,12 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await
             })?;
-            Arc::new(Repository::new(Box::new(storage)))
+            Arc::new(Repository::new(Box::new(storage)).with_namespace(repo_namespace))
         }
         _ => {
             eprintln!("Storage: {}", args.db_path);
             let storage = SqliteStorage::open(&args.db_path)?;
-            Arc::new(Repository::new(Box::new(storage)))
+            Arc::new(Repository::new(Box::new(storage)).with_namespace(repo_namespace))
         }
     };
 
@@ -589,6 +619,14 @@ mod tests {
         assert!(!parsed.http_mode);
         assert!(!parsed.auth_enabled);
         assert_eq!(parsed.tenant_id, "default");
+        assert_eq!(parsed.default_namespace, "default");
+    }
+
+    #[test]
+    fn parse_args_namespace_flag() {
+        let args: Vec<String> = vec!["--namespace".into(), "project-alpha".into()];
+        let parsed = super::parse_args(&args);
+        assert_eq!(parsed.default_namespace, "project-alpha");
     }
 
     #[test]
