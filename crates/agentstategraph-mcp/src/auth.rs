@@ -46,6 +46,11 @@ pub struct ApiKey {
     /// commit agent_id).
     #[serde(default)]
     pub commit_agent_id: Option<String>,
+    /// Optional namespace this key is scoped to. When set, the Repository
+    /// is operated in this namespace for requests authenticated with this key.
+    /// `None` means the server's configured default namespace applies.
+    #[serde(default)]
+    pub namespace_id: Option<String>,
     /// Whether this key is allowed to issue commits tagged
     /// `IntentCategory::Migrate` (§10 — key-scoped migrate capability).
     /// Defaults to false; only trusted keys should have it.
@@ -77,6 +82,8 @@ pub struct AuthContext {
     pub can_migrate: bool,
     /// Short prefix of the key (for logging), if any.
     pub key_prefix: Option<String>,
+    /// Namespace from the API key, if any.
+    pub namespace_id: Option<String>,
 }
 
 /// Manages tenants, API keys, and per-tenant Repository instances.
@@ -159,6 +166,7 @@ impl TenantManager {
             plan: plan.to_string(),
             enabled: true,
             created_at: Utc::now().to_rfc3339(),
+            namespace_id: None,
             commit_agent_id: opts.commit_agent_id,
             can_migrate: opts.can_migrate,
             is_admin: opts.is_admin,
@@ -176,7 +184,7 @@ impl TenantManager {
     /// forget it). Returns `None` if no key matches `key_prefix`.
     pub fn rotate_key(&self, key_prefix: &str) -> Option<ApiKey> {
         // Snapshot the old key's settings first.
-        let (tenant_id, name, plan, commit_agent_id, can_migrate, is_admin, expires_at) = {
+        let (tenant_id, name, plan, namespace_id, commit_agent_id, can_migrate, is_admin, expires_at) = {
             let keys = self.keys.read().ok()?;
             let full = keys.keys().find(|k| k.starts_with(key_prefix)).cloned()?;
             let old = keys.get(&full)?;
@@ -184,19 +192,21 @@ impl TenantManager {
                 old.tenant_id.clone(),
                 old.name.clone(),
                 old.plan.clone(),
+                old.namespace_id.clone(),
                 old.commit_agent_id.clone(),
                 old.can_migrate,
                 old.is_admin,
                 old.expires_at,
             )
         };
-        // Mint the replacement.
-        let new_key = self.create_key_with(
+        // Mint the replacement, preserving all capabilities from the old key.
+        let mut new_key = self.create_key_with(
             &tenant_id,
             &name,
             &plan,
             CreateKeyOptions { commit_agent_id, can_migrate, is_admin, expires_at },
         );
+        new_key.namespace_id = namespace_id;
         // Disable the old key.
         self.revoke_key(key_prefix);
         Some(new_key)
@@ -222,6 +232,7 @@ impl TenantManager {
                 plan: "admin".to_string(),
                 enabled: true,
                 created_at: Utc::now().to_rfc3339(),
+                namespace_id: None,
                 commit_agent_id: None,
                 can_migrate: true,
                 is_admin: true,
@@ -283,6 +294,16 @@ impl TenantManager {
         keys.get(api_key)
             .map(|k| is_key_live(k) && k.can_migrate)
             .unwrap_or(false)
+    }
+
+    /// The namespace_id bound to this API key, if any.
+    pub fn get_namespace_id(&self, api_key: &str) -> Option<String> {
+        let Ok(keys) = self.keys.read() else {
+            return None;
+        };
+        keys.get(api_key)
+            .filter(|k| is_key_live(k))
+            .and_then(|k| k.namespace_id.clone())
     }
 
     /// Whether auth is enabled on this manager.
@@ -431,6 +452,7 @@ pub async fn auth_middleware(
             .as_deref()
             .map(|k| tenant_mgr.can_migrate(k))
             .unwrap_or(false);
+        let namespace_id = api_key.as_deref().and_then(|k| tenant_mgr.get_namespace_id(k));
         let key_prefix = api_key.as_deref().map(|k| {
             if k.len() > 8 {
                 k[..8].to_string()
@@ -442,12 +464,14 @@ pub async fn auth_middleware(
             commit_agent_id,
             can_migrate,
             key_prefix,
+            namespace_id,
         }
     } else {
         AuthContext {
             commit_agent_id: None,
             can_migrate: true,
             key_prefix: None,
+            namespace_id: None,
         }
     };
 
@@ -582,6 +606,7 @@ mod tests {
             plan: "free".into(),
             enabled: true,
             created_at: Utc::now().to_rfc3339(),
+            namespace_id: None,
             commit_agent_id: None,
             can_migrate: false,
             is_admin: false,

@@ -43,6 +43,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 governor = "0.10"
 tracing = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 [features]
 default = []
@@ -54,7 +55,7 @@ all-external-evaluators = ["policy-wasm", "policy-rego", "policy-cedar"]
 # clients) MUST be gated behind this feature so `cargo build` stays lean.
 # Pattern: providers = ["dep:my-providers-crate"]
 # Validate with: cargo build --no-default-features && cargo tree --no-default-features | grep reqwest
-providers = []
+providers = ["dep:reqwest"]
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

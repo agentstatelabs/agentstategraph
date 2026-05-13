@@ -18,7 +18,9 @@ use tokio_postgres::NoTls;
 /// the binary's `--pg-pool-size` flag.
 pub const DEFAULT_POOL_SIZE: usize = 32;
 
-use agentstategraph_core::{Commit, Epoch, EpochStatus, Object, ObjectId, Session, SessionStatus};
+use agentstategraph_core::{
+    Commit, Epoch, EpochStatus, Namespace, Object, ObjectId, Session, SessionStatus,
+};
 use chrono::{DateTime, Utc};
 
 use crate::traits::{
@@ -103,11 +105,19 @@ impl PostgresStorage {
                     PRIMARY KEY (tenant_id, id)
                 );
 
+                CREATE TABLE IF NOT EXISTS namespaces (
+                    tenant_id  TEXT NOT NULL,
+                    name       TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, name)
+                );
+
                 CREATE TABLE IF NOT EXISTS refs (
                     tenant_id TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
                     name      TEXT NOT NULL,
                     target    BYTEA NOT NULL,
-                    PRIMARY KEY (tenant_id, name)
+                    PRIMARY KEY (tenant_id, namespace, name)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_ts
@@ -136,6 +146,7 @@ impl PostgresStorage {
                     parent_id       TEXT,
                     scope_path      TEXT,
                     scope_branch    TEXT,
+                    scope_namespace TEXT,
                     status          TEXT NOT NULL DEFAULT 'Active',
                     created_at      TEXT NOT NULL,
                     ended_at        TEXT,
@@ -207,6 +218,7 @@ impl PostgresStorage {
 
                 ALTER TABLE commits ADD COLUMN IF NOT EXISTS epoch_id TEXT;
                 ALTER TABLE commits ADD COLUMN IF NOT EXISTS session_id TEXT;
+                ALTER TABLE sessions ADD COLUMN IF NOT EXISTS scope_namespace TEXT;
 
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_epoch
                     ON commits(tenant_id, epoch_id);
@@ -216,6 +228,17 @@ impl PostgresStorage {
             )
             .await
             .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
+
+        // Seed the default namespace for this tenant.
+        client
+            .execute(
+                "INSERT INTO namespaces (tenant_id, name, created_at)
+                 VALUES ($1, 'default', NOW()::TEXT)
+                 ON CONFLICT DO NOTHING",
+                &[&self.tenant_id],
+            )
+            .await
+            .map_err(|e| StorageError::Backend(format!("seed default namespace: {}", e)))?;
 
         Ok(())
     }
@@ -431,7 +454,7 @@ impl CommitStore for PostgresStorage {
 // ─── RefStore ───────────────────────────────────────────────
 
 impl RefStore for PostgresStorage {
-    fn get_ref(&self, name: &str) -> Result<Option<ObjectId>, StorageError> {
+    fn create_namespace(&self, namespace: &Namespace) -> Result<(), StorageError> {
         self.block_on(async {
             let client = self
                 .pool
@@ -439,10 +462,78 @@ impl RefStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
+            let rows = client
+                .execute(
+                    "INSERT INTO namespaces (tenant_id, name, created_at)
+                     VALUES ($1, $2, NOW()::TEXT)
+                     ON CONFLICT DO NOTHING",
+                    &[&self.tenant_id, &namespace.as_str()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("create namespace: {}", e)))?;
+            if rows == 0 {
+                return Err(StorageError::NamespaceAlreadyExists(
+                    namespace.as_str().to_string(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    fn list_namespaces(&self) -> Result<Vec<Namespace>, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let rows = client
+                .query(
+                    "SELECT name FROM namespaces WHERE tenant_id = $1 ORDER BY name",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("list namespaces: {}", e)))?;
+
+            let mut result = Vec::new();
+            for row in rows {
+                let name: String = row.get("name");
+                let ns = Namespace::new(name).map_err(|e| {
+                    StorageError::Backend(format!("invalid namespace in db: {}", e))
+                })?;
+                result.push(ns);
+            }
+            Ok(result)
+        })
+    }
+
+    fn get_ref(&self, namespace: &Namespace, name: &str) -> Result<Option<ObjectId>, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+
+            let ns_row = client
+                .query_opt(
+                    "SELECT 1 FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                    &[&self.tenant_id, &namespace.as_str()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+            if ns_row.is_none() {
+                return Err(StorageError::NamespaceNotFound(
+                    namespace.as_str().to_string(),
+                ));
+            }
+
             let row = client
                 .query_opt(
-                    "SELECT target FROM refs WHERE tenant_id = $1 AND name = $2",
-                    &[&self.tenant_id, &name.to_string()],
+                    "SELECT target FROM refs
+                     WHERE tenant_id = $1 AND namespace = $2 AND name = $3",
+                    &[&self.tenant_id, &namespace.as_str(), &name],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("get ref: {}", e)))?;
@@ -461,7 +552,12 @@ impl RefStore for PostgresStorage {
         })
     }
 
-    fn set_ref(&self, name: &str, target: ObjectId) -> Result<(), StorageError> {
+    fn set_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<(), StorageError> {
         self.block_on(async {
             let client = self
                 .pool
@@ -469,13 +565,28 @@ impl RefStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
+            let ns_row = client
+                .query_opt(
+                    "SELECT 1 FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                    &[&self.tenant_id, &namespace.as_str()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+            if ns_row.is_none() {
+                return Err(StorageError::NamespaceNotFound(
+                    namespace.as_str().to_string(),
+                ));
+            }
+
             client
                 .execute(
-                    "INSERT INTO refs (tenant_id, name, target) VALUES ($1, $2, $3)
-                     ON CONFLICT (tenant_id, name) DO UPDATE SET target = $3",
+                    "INSERT INTO refs (tenant_id, namespace, name, target)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (tenant_id, namespace, name) DO UPDATE SET target = $4",
                     &[
                         &self.tenant_id,
-                        &name.to_string(),
+                        &namespace.as_str(),
+                        &name,
                         &target.as_bytes().as_slice(),
                     ],
                 )
@@ -486,7 +597,13 @@ impl RefStore for PostgresStorage {
         })
     }
 
-    fn cas_ref(&self, name: &str, expected: ObjectId, new: ObjectId) -> Result<bool, StorageError> {
+    fn cas_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+        new: ObjectId,
+    ) -> Result<bool, StorageError> {
         self.block_on(async {
             let client = self
                 .pool
@@ -494,14 +611,29 @@ impl RefStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
+            let ns_row = client
+                .query_opt(
+                    "SELECT 1 FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                    &[&self.tenant_id, &namespace.as_str()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+            if ns_row.is_none() {
+                return Err(StorageError::NamespaceNotFound(
+                    namespace.as_str().to_string(),
+                ));
+            }
+
             let rows = client
                 .execute(
                     "UPDATE refs SET target = $1
-                     WHERE tenant_id = $2 AND name = $3 AND target = $4",
+                     WHERE tenant_id = $2 AND namespace = $3
+                       AND name = $4 AND target = $5",
                     &[
                         &new.as_bytes().as_slice(),
                         &self.tenant_id,
-                        &name.to_string(),
+                        &namespace.as_str(),
+                        &name,
                         &expected.as_bytes().as_slice(),
                     ],
                 )
@@ -512,7 +644,11 @@ impl RefStore for PostgresStorage {
         })
     }
 
-    fn list_refs(&self, prefix: &str) -> Result<Vec<(String, ObjectId)>, StorageError> {
+    fn list_refs(
+        &self,
+        namespace: &Namespace,
+        prefix: &str,
+    ) -> Result<Vec<(String, ObjectId)>, StorageError> {
         self.block_on(async {
             let client = self
                 .pool
@@ -520,13 +656,26 @@ impl RefStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
+            let ns_row = client
+                .query_opt(
+                    "SELECT 1 FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                    &[&self.tenant_id, &namespace.as_str()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+            if ns_row.is_none() {
+                return Err(StorageError::NamespaceNotFound(
+                    namespace.as_str().to_string(),
+                ));
+            }
+
             let pattern = format!("{}%", prefix);
             let rows = client
                 .query(
                     "SELECT name, target FROM refs
-                     WHERE tenant_id = $1 AND name LIKE $2
+                     WHERE tenant_id = $1 AND namespace = $2 AND name LIKE $3
                      ORDER BY name",
-                    &[&self.tenant_id, &pattern],
+                    &[&self.tenant_id, &namespace.as_str(), &pattern],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("list refs: {}", e)))?;
@@ -546,7 +695,7 @@ impl RefStore for PostgresStorage {
         })
     }
 
-    fn delete_ref(&self, name: &str) -> Result<bool, StorageError> {
+    fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError> {
         self.block_on(async {
             let client = self
                 .pool
@@ -554,14 +703,59 @@ impl RefStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
+            let ns_row = client
+                .query_opt(
+                    "SELECT 1 FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                    &[&self.tenant_id, &namespace.as_str()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+            if ns_row.is_none() {
+                return Err(StorageError::NamespaceNotFound(
+                    namespace.as_str().to_string(),
+                ));
+            }
+
             let rows = client
                 .execute(
-                    "DELETE FROM refs WHERE tenant_id = $1 AND name = $2",
-                    &[&self.tenant_id, &name.to_string()],
+                    "DELETE FROM refs WHERE tenant_id = $1 AND namespace = $2 AND name = $3",
+                    &[&self.tenant_id, &namespace.as_str(), &name],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("delete ref: {}", e)))?;
 
+            Ok(rows > 0)
+        })
+    }
+
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<bool, StorageError> {
+        if namespace.as_str() == Namespace::DEFAULT {
+            return Err(StorageError::InvalidOperation(
+                "cannot delete the 'default' namespace".to_string(),
+            ));
+        }
+        let ns = namespace.as_str().to_string();
+        let tid = self.tenant_id.clone();
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            client
+                .execute(
+                    "DELETE FROM refs WHERE tenant_id = $1 AND namespace = $2",
+                    &[&tid, &ns],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            let rows = client
+                .execute(
+                    "DELETE FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                    &[&tid, &ns],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
             Ok(rows > 0)
         })
     }
@@ -639,6 +833,7 @@ fn row_to_session(
     parent_id: Option<String>,
     scope_path: Option<String>,
     scope_branch: Option<String>,
+    scope_namespace: Option<String>,
     status: String,
     created_at: String,
     ended_at: Option<String>,
@@ -654,6 +849,8 @@ fn row_to_session(
         report_to: Option<String>,
         #[serde(default)]
         working_branch: Option<String>,
+        #[serde(default)]
+        scope_tenant: Option<String>,
     }
     let meta: Meta = serde_json::from_str(&metadata).unwrap_or_default();
     let head = meta.head.unwrap_or_else(|| ObjectId::hash(b""));
@@ -669,7 +866,10 @@ fn row_to_session(
         delegated_intent: meta.delegated_intent,
         report_to: meta.report_to,
         path_scope: scope_path,
-        scope_tenant: None,
+        scope_tenant: meta.scope_tenant,
+        scope_namespace: scope_namespace
+            .as_deref()
+            .and_then(|s| Namespace::new(s).ok()),
         status: SessionStatus::from_wire(&status),
         created_at: parse_rfc3339(&created_at)?,
         ended_at: ended_at.as_deref().map(parse_rfc3339).transpose()?,
@@ -971,6 +1171,7 @@ impl SessionStore for PostgresStorage {
             "delegated_intent": session.delegated_intent,
             "report_to": session.report_to,
             "working_branch": session.working_branch,
+            "scope_tenant": session.scope_tenant,
         })
         .to_string();
 
@@ -985,8 +1186,8 @@ impl SessionStore for PostgresStorage {
                 .execute(
                     "INSERT INTO sessions
                      (tenant_id, id, agent_id, parent_id, scope_path, scope_branch,
-                      status, created_at, ended_at, metadata, commit_count)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                      scope_namespace, status, created_at, ended_at, metadata, commit_count)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                              COALESCE(
                                  (SELECT commit_count FROM sessions
                                   WHERE tenant_id = $1 AND id = $2),
@@ -996,6 +1197,7 @@ impl SessionStore for PostgresStorage {
                            parent_id = EXCLUDED.parent_id,
                            scope_path = EXCLUDED.scope_path,
                            scope_branch = EXCLUDED.scope_branch,
+                           scope_namespace = EXCLUDED.scope_namespace,
                            status = EXCLUDED.status,
                            created_at = EXCLUDED.created_at,
                            ended_at = EXCLUDED.ended_at,
@@ -1007,6 +1209,7 @@ impl SessionStore for PostgresStorage {
                         &session.parent_session,
                         &session.path_scope,
                         &session.working_branch,
+                        &session.scope_namespace.as_ref().map(|n| n.as_str().to_string()),
                         &session.status.as_str(),
                         &session.created_at.to_rfc3339(),
                         &session.ended_at.map(|t| t.to_rfc3339()),
@@ -1073,8 +1276,8 @@ impl SessionStore for PostgresStorage {
 
             let rows = client
                 .query(
-                    "SELECT id, agent_id, parent_id, scope_path, scope_branch, status,
-                            created_at, ended_at, metadata
+                    "SELECT id, agent_id, parent_id, scope_path, scope_branch, scope_namespace,
+                            status, created_at, ended_at, metadata
                      FROM sessions
                      WHERE tenant_id = $1 AND ($2::text IS NULL OR agent_id = $2)
                      ORDER BY created_at DESC",
@@ -1091,6 +1294,7 @@ impl SessionStore for PostgresStorage {
                     row.get("parent_id"),
                     row.get("scope_path"),
                     row.get("scope_branch"),
+                    row.get("scope_namespace"),
                     row.get("status"),
                     row.get("created_at"),
                     row.get("ended_at"),
@@ -1111,8 +1315,8 @@ impl SessionStore for PostgresStorage {
 
             let row = client
                 .query_opt(
-                    "SELECT id, agent_id, parent_id, scope_path, scope_branch, status,
-                            created_at, ended_at, metadata
+                    "SELECT id, agent_id, parent_id, scope_path, scope_branch, scope_namespace,
+                            status, created_at, ended_at, metadata
                      FROM sessions WHERE tenant_id = $1 AND id = $2",
                     &[&self.tenant_id, &id],
                 )
@@ -1127,6 +1331,7 @@ impl SessionStore for PostgresStorage {
                     row.get("parent_id"),
                     row.get("scope_path"),
                     row.get("scope_branch"),
+                    row.get("scope_namespace"),
                     row.get("status"),
                     row.get("created_at"),
                     row.get("ended_at"),

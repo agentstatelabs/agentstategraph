@@ -237,5 +237,7 @@ fn demo_commit_with_tag<S: CommitStore + ObjectStore>(
 // hook for follow-up tests.
 #[allow(dead_code)]
 fn _ref_store_used(s: &dyn RefStore, name: &str) -> Option<ObjectId> {
-    s.get_ref(name).ok().flatten()
+    s.get_ref(&agentstategraph_core::Namespace::default_ns(), name)
+        .ok()
+        .flatten()
 }

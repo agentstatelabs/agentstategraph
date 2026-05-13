@@ -67,6 +67,7 @@ fn main() {
                 delegated_intent: Some("intent-002".to_string()),
                 report_to: Some("agent/orchestrator".to_string()),
                 path_scope: Some("/cluster/network".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -84,6 +85,7 @@ fn main() {
                 delegated_intent: Some("intent-003".to_string()),
                 report_to: Some("agent/orchestrator".to_string()),
                 path_scope: Some("/cluster/storage".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -101,6 +103,7 @@ fn main() {
                 delegated_intent: Some("intent-004".to_string()),
                 report_to: Some("agent/orchestrator".to_string()),
                 path_scope: Some("/cluster/scheduling".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();

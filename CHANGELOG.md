@@ -5,6 +5,92 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.9.1] — 2026-05-12
+
+Theme: **per-call namespace override** on all ref-touching operations.
+
+### Added
+
+- **`Repository::fork_namespace(&self, ns: Namespace) -> Repository`** —
+  creates a lightweight sibling repository sharing the same `Arc` storage
+  but operating in a different namespace. Inherits epoch/session context
+  and `epoch_seal_strict`; starts with fresh in-memory speculation and
+  watch state. Enables per-request namespace isolation without holding a
+  separate storage connection per namespace.
+- **`Repository` storage changed to `Arc<dyn Storage + Send + Sync>`** —
+  enables shared-storage forks without data duplication.
+- **`namespace: Option<String>` on 17 MCP tools** — `get`, `set`,
+  `delete`, `branch`, `list_branches`, `merge`, `log`, `diff`,
+  `speculate`, `query`, `blame`, `list_paths`, `get_tree`, `search`,
+  `stats`, `commit_graph`, `intent_tree` all accept an optional
+  `namespace` field. When provided, the tool operates against that
+  namespace; when omitted, the server's configured namespace is used.
+- **`namespace: Option<String>` on 9 WASM methods** — `get`, `set`,
+  `delete`, `branch`, `merge`, `diff`, `log`, `blame`, `speculate`.
+  Same semantics as the MCP param: pass `null` / `undefined` to use the
+  repository's configured namespace.
+
+## [0.9.0] — 2026-05-12
+
+Theme: **namespace primitive** — ref-layer isolation boundary for
+multi-project and multi-tenant deployments.
+
+### Added
+
+- **`Namespace` newtype** (`agentstategraph-core`) — validated
+  alphanumeric + `-_` identifier (max 64 chars) with a `"default"`
+  constant. Enforced at the ref-store layer via a composite
+  `(namespace, name)` primary key on the refs table across all
+  four backends (SQLite, Postgres, in-memory, IndexedDB).
+- **`Repository::with_namespace(ns) -> Self`** — configures a
+  repository-level default namespace at construction time. The
+  `--namespace` / `ASG_NAMESPACE` flag on `agentstategraph-mcp`
+  threads this through to the server.
+- **`Repository::create_namespace` / `list_namespaces` /
+  `delete_namespace`** — full CRUD for namespace lifecycle.
+  `delete_namespace` cascades to all refs in that namespace and
+  protects `"default"` from deletion.
+- **`Repository::cross_namespace_merge`** — merges a branch from
+  a source namespace into a target branch in the current namespace.
+  Same-namespace merges are plain merges; cross-namespace merges
+  are denied by default (no `PolicyStore` attached) with a new
+  `RepoError::CrossNamespaceAccessDenied` variant.
+- **`Session::scope_namespace: Option<Namespace>`** — upgraded
+  from `Option<String>` to the typed `Namespace` newtype. Wire
+  format is unchanged; SQLite and Postgres `row_to_session` do the
+  conversion at read time. `CreateSessionParams::scope_namespace`
+  allows callers to set it at session-creation time.
+- **`active_session_namespace` cache on `Repository`** — the
+  session's namespace is eagerly cached in a `RwLock` when
+  `set_active_session()` is called, eliminating a `get_session()`
+  storage round-trip on every ref operation.
+- **MCP tools** — `agentstategraph_create_namespace`,
+  `agentstategraph_list_namespaces`, `agentstategraph_delete_namespace`,
+  `agentstategraph_cross_namespace_merge`; `create_session` gains
+  an optional `namespace_id` field.
+- **`StorageError::InvalidOperation(String)`** — new error variant
+  for operations rejected by the storage layer (e.g. deleting the
+  default namespace).
+- **13 integration tests** in `crates/agentstategraph/tests/namespace.rs`
+  covering namespace isolation, ref/branch visibility, CRUD, session
+  scope override, cross-namespace merge, and startup auto-creation.
+
+### Changed
+
+- **`Repository::init()` auto-creates its configured namespace** —
+  fixes startup failures when `--namespace` points to a namespace
+  that doesn't yet exist in the database.
+- **Auth `ApiKey` gains `namespace_id: Option<String>`** — keys
+  can be scoped to a specific namespace; the auth middleware
+  propagates this into `AuthContext`.
+
+### Verified locally
+
+- `cargo test --workspace` — all tests pass (13 new namespace
+  integration tests included).
+- Full build clean; the pre-existing PyO3 dyld failure on the
+  Python bindings is unchanged (unrelated to this release).
+
 ## [0.7.75-beta.3] — 2026-04-24
 
 Theme: **remaining stub closures** flagged in the 0.7.75-beta.2

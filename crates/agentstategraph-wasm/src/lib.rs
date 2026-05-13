@@ -157,10 +157,18 @@ impl WasmAgentStateGraph {
     }
 
     /// Get a JSON value at a path.
-    pub fn get(&self, path: &str, reference: Option<String>) -> Result<String, JsValue> {
+    pub fn get(&self, path: &str, reference: Option<String>, namespace: Option<String>) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
-        let val = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let val = repo
             .get_json(&ref_name, path)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(serde_json::to_string(&val).unwrap_or_default())
@@ -176,13 +184,22 @@ impl WasmAgentStateGraph {
         reference: Option<String>,
         reasoning: Option<String>,
         confidence: Option<f64>,
+        namespace: Option<String>,
     ) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let value: serde_json::Value = serde_json::from_str(json_value)
             .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
         let opts = make_opts(description, category, reasoning, confidence);
-        let id = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let id = repo
             .set_json(&ref_name, path, &value, opts)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
@@ -195,21 +212,38 @@ impl WasmAgentStateGraph {
         category: &str,
         description: &str,
         reference: Option<String>,
+        namespace: Option<String>,
     ) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let opts = make_opts(description, category, None, None);
-        let id = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let id = repo
             .delete(&ref_name, path, opts)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
     }
 
     /// Create a branch.
-    pub fn branch(&self, name: &str, from: Option<String>) -> Result<String, JsValue> {
+    pub fn branch(&self, name: &str, from: Option<String>, namespace: Option<String>) -> Result<String, JsValue> {
         let from_ref = from.unwrap_or_else(|| "main".to_string());
-        let id = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let id = repo
             .branch(name, &from_ref)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
@@ -221,32 +255,57 @@ impl WasmAgentStateGraph {
         source: &str,
         target: Option<String>,
         description: Option<String>,
+        namespace: Option<String>,
     ) -> Result<String, JsValue> {
         let target_ref = target.unwrap_or_else(|| "main".to_string());
         let desc = description.unwrap_or_else(|| "merge".to_string());
         let opts = make_opts(&desc, "Merge", None, None);
-        let id = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let id = repo
             .merge(source, &target_ref, opts)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(id.to_string())
     }
 
     /// Structured diff between two refs. Returns JSON.
-    pub fn diff(&self, ref_a: &str, ref_b: &str) -> Result<String, JsValue> {
-        let ops = self
-            .repo
+    pub fn diff(&self, ref_a: &str, ref_b: &str, namespace: Option<String>) -> Result<String, JsValue> {
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let ops = repo
             .diff(ref_a, ref_b)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(serde_json::to_string(&ops).unwrap_or_default())
     }
 
     /// Commit log. Returns JSON.
-    pub fn log(&self, reference: Option<String>, limit: Option<u32>) -> Result<String, JsValue> {
+    pub fn log(&self, reference: Option<String>, limit: Option<u32>, namespace: Option<String>) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let max = limit.unwrap_or(10) as usize;
-        let commits = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let commits = repo
             .log(&ref_name, max)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         let entries: Vec<serde_json::Value> = commits
@@ -270,20 +329,36 @@ impl WasmAgentStateGraph {
     }
 
     /// Blame — who modified a path and why.
-    pub fn blame(&self, path: &str, reference: Option<String>) -> Result<String, JsValue> {
+    pub fn blame(&self, path: &str, reference: Option<String>, namespace: Option<String>) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
-        let entry = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let entry = repo
             .blame(&ref_name, path)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(serde_json::to_string(&entry).unwrap_or_default())
     }
 
     /// Create a speculation. Returns handle ID.
-    pub fn speculate(&self, from: Option<String>, label: Option<String>) -> Result<u32, JsValue> {
+    pub fn speculate(&self, from: Option<String>, label: Option<String>, namespace: Option<String>) -> Result<u32, JsValue> {
         let from_ref = from.unwrap_or_else(|| "main".to_string());
-        let handle = self
-            .repo
+        let forked;
+        let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
+            let ns = agentstategraph_core::Namespace::new(&ns_str)
+                .map_err(|e| JsValue::from_str(&format!("Invalid namespace: {}", e)))?;
+            forked = self.repo.fork_namespace(ns);
+            &forked
+        } else {
+            &self.repo
+        };
+        let handle = repo
             .speculate(&from_ref, label)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
         Ok(handle.id() as u32)
@@ -863,10 +938,13 @@ impl WasmAgentStateGraph {
                 agent_id,
                 &branch,
                 head,
-                parent_session,
-                delegated_intent,
-                report_to,
-                path_scope,
+                agentstategraph::session::CreateSessionParams {
+                    parent_session,
+                    delegated_intent,
+                    report_to,
+                    path_scope,
+                    scope_namespace: None,
+                },
             )
             .map_err(js_err)?;
         serde_json::to_string(&s).map_err(js_err)

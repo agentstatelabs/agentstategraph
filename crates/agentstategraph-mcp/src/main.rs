@@ -16,6 +16,7 @@ use agentstategraph_mcp::server;
 use std::sync::Arc;
 
 use agentstategraph::Repository;
+use agentstategraph_core::Namespace;
 use agentstategraph_storage::SqliteStorage;
 use rmcp::ServiceExt;
 
@@ -25,6 +26,10 @@ pub struct ServeArgs {
     pub db_path: String,
     pub database_url: String,
     pub tenant_id: String,
+    /// Default namespace for ref operations. Can be overridden per-session
+    /// via `scope_namespace`. Maps to `Repository::with_namespace(...)`.
+    /// Env: `ASG_NAMESPACE`. CLI: `--namespace <ID>`. Default: `"default"`.
+    pub default_namespace: String,
     pub http_mode: bool,
     pub http_port: u16,
     pub bind_addr: String,
@@ -34,6 +39,8 @@ pub struct ServeArgs {
     pub pg_pool_size: usize,
     pub initial_admin_key: Option<String>,
     pub external_evaluators: Vec<String>,
+    /// When set, proxy `GET /api/code/*` to ASD at this URL (`/api/v1/*`).
+    pub asd_url: Option<String>,
 }
 
 /// Parse the bind address from CLI args + env.
@@ -145,6 +152,10 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let mut db_path = "./agentstategraph.db".to_string();
     let mut database_url = String::new();
     let mut tenant_id = "default".to_string();
+    let mut default_namespace: String = std::env::var("ASG_NAMESPACE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".to_string());
     let mut http_mode = false;
     let mut http_port: u16 = 3001;
     let mut auth_enabled = false;
@@ -162,6 +173,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let initial_admin_key_env = std::env::var("ASG_INITIAL_ADMIN_KEY").ok();
     let mut initial_admin_key_cli: Option<String> = None;
     let mut external_evaluators: Vec<String> = Vec::new();
+    let mut asd_url: Option<String> = std::env::var("ASG_ASD_URL").ok().filter(|s| !s.is_empty());
 
     let mut i = 0;
     while i < args.len() {
@@ -193,6 +205,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 i += 1;
                 if i < args.len() {
                     tenant_id = args[i].clone();
+                }
+            }
+            "--namespace" => {
+                i += 1;
+                if i < args.len() {
+                    default_namespace = args[i].clone();
                 }
             }
             "--http" => {
@@ -246,6 +264,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     external_evaluators.push(args[i].clone());
                 }
             }
+            "--asd-url" => {
+                i += 1;
+                if i < args.len() {
+                    asd_url = Some(args[i].clone());
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -272,6 +296,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
                 );
+                eprintln!(
+                    "      --namespace <ID>  Default namespace for ref isolation (default: \"default\"; env ASG_NAMESPACE)"
+                );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!(
                     "      --bind <ADDR>     Bind address (default: 127.0.0.1; pass 0.0.0.0 for LAN; env ASG_BIND)"
@@ -287,6 +314,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 );
                 eprintln!(
                     "      --external-evaluator <KIND>  Register stock external policy runner (wasm|rego|cedar); repeatable"
+                );
+                eprintln!(
+                    "      --asd-url <URL>  Proxy GET /api/code/* to ASD at URL/api/v1/* (env ASG_ASD_URL)"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -335,6 +365,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         db_path,
         database_url,
         tenant_id,
+        default_namespace,
         http_mode,
         http_port,
         bind_addr,
@@ -344,6 +375,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         pg_pool_size,
         initial_admin_key: initial_admin_key_cli.or(initial_admin_key_env),
         external_evaluators,
+        asd_url,
     }
 }
 
@@ -351,12 +383,23 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
 pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
 
+    let repo_namespace = Namespace::new(&args.default_namespace).unwrap_or_else(|_| {
+        eprintln!(
+            "Warning: invalid namespace '{}', falling back to 'default'",
+            args.default_namespace
+        );
+        Namespace::default_ns()
+    });
+
     let repo: Arc<Repository> = match args.storage_type.as_str() {
         "memory" => {
             eprintln!("Storage: in-memory (ephemeral)");
-            Arc::new(Repository::new(Box::new(
-                SqliteStorage::in_memory().expect("in-memory sqlite"),
-            )))
+            Arc::new(
+                Repository::new(Box::new(
+                    SqliteStorage::in_memory().expect("in-memory sqlite"),
+                ))
+                .with_namespace(repo_namespace),
+            )
         }
         "postgres" => {
             if args.database_url.is_empty() {
@@ -376,12 +419,12 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await
             })?;
-            Arc::new(Repository::new(Box::new(storage)))
+            Arc::new(Repository::new(Box::new(storage)).with_namespace(repo_namespace))
         }
         _ => {
             eprintln!("Storage: {}", args.db_path);
             let storage = SqliteStorage::open(&args.db_path)?;
-            Arc::new(Repository::new(Box::new(storage)))
+            Arc::new(Repository::new(Box::new(storage)).with_namespace(repo_namespace))
         }
     };
 
@@ -429,6 +472,10 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         eprintln!("Try: curl http://localhost:{}/api/health", args.http_port);
 
+        #[cfg(feature = "providers")]
+        if let Some(ref url) = args.asd_url {
+            eprintln!("ASD proxy: /api/code/* → {}/api/v1/*", url);
+        }
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
@@ -458,6 +505,12 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     http::build_router_for_test(repo, tenant_mgr, args.rate_limit_rpm)
                 } else {
                     http::router_with_rate_limit(repo, args.rate_limit_rpm)
+                };
+                #[cfg(feature = "providers")]
+                let app = if let Some(asd_url) = args.asd_url {
+                    app.merge(http::asd_proxy_router(asd_url))
+                } else {
+                    app
                 };
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -566,6 +619,14 @@ mod tests {
         assert!(!parsed.http_mode);
         assert!(!parsed.auth_enabled);
         assert_eq!(parsed.tenant_id, "default");
+        assert_eq!(parsed.default_namespace, "default");
+    }
+
+    #[test]
+    fn parse_args_namespace_flag() {
+        let args: Vec<String> = vec!["--namespace".into(), "project-alpha".into()];
+        let parsed = super::parse_args(&args);
+        assert_eq!(parsed.default_namespace, "project-alpha");
     }
 
     #[test]

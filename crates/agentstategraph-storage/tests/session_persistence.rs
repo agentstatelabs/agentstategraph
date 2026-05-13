@@ -21,6 +21,7 @@ fn sample_session(id: &str) -> Session {
         report_to: Some("agent/root".to_string()),
         path_scope: Some("/scope/test".to_string()),
         scope_tenant: None,
+        scope_namespace: None,
         status: SessionStatus::Active,
         created_at: Utc::now(),
         ended_at: None,

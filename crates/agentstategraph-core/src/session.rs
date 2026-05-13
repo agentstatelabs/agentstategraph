@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::intent::{AgentId, IntentId, SessionId};
+use crate::namespace::Namespace;
 use crate::object::ObjectId;
 
 /// Lifecycle state of a persisted session.
@@ -75,6 +76,12 @@ pub struct Session {
     /// scoping, same behaviour as pre-0.7.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_tenant: Option<String>,
+    /// Namespace scope. When set, this session's Repository will use this
+    /// namespace for all ref operations, overriding the Repository's
+    /// configured default namespace. `None` = use the Repository default.
+    /// Added alongside the namespace primitive (§namespace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_namespace: Option<Namespace>,
     /// Lifecycle status.
     #[serde(default = "default_status")]
     pub status: SessionStatus,
@@ -180,6 +187,7 @@ mod tests {
             report_to: None,
             path_scope: None,
             scope_tenant: None,
+            scope_namespace: None,
             status: SessionStatus::Active,
             created_at: Utc::now(),
             ended_at: None,
@@ -209,6 +217,7 @@ mod tests {
             report_to: Some("lead/coordinator".into()),
             path_scope: Some("/cluster/nodes".into()),
             scope_tenant: Some("tenant-A".into()),
+            scope_namespace: Some(Namespace::new("project-x").unwrap()),
             status: SessionStatus::Completed,
             created_at: Utc::now(),
             ended_at: Some(Utc::now()),
@@ -223,6 +232,10 @@ mod tests {
         assert_eq!(restored.status, SessionStatus::Completed);
         assert_eq!(restored.parent_session, s.parent_session);
         assert_eq!(restored.scope_tenant.as_deref(), Some("tenant-A"));
+        assert_eq!(
+            restored.scope_namespace.as_ref().map(|n| n.as_str()),
+            Some("project-x")
+        );
         assert!(restored.ended_at.is_some());
     }
 }

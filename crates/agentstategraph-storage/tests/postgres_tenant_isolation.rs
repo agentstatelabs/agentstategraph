@@ -10,7 +10,7 @@
 
 #![cfg(feature = "postgres")]
 
-use agentstategraph_core::{Atom, Object};
+use agentstategraph_core::{Atom, Namespace, Object};
 use agentstategraph_storage::{ObjectStore, PostgresStorage, RefStore};
 
 #[test]
@@ -50,16 +50,17 @@ fn postgres_tenants_cannot_see_each_others_refs() {
         let id_b =
             <PostgresStorage as ObjectStore>::put_object(&tenant_b, &obj_b).expect("put object B");
 
-        tenant_a.set_ref("main", id_a).expect("set ref A");
-        tenant_b.set_ref("main", id_b).expect("set ref B");
+        let ns = Namespace::default_ns();
+        tenant_a.set_ref(&ns, "main", id_a).expect("set ref A");
+        tenant_b.set_ref(&ns, "main", id_b).expect("set ref B");
 
         // Each tenant sees its own target.
         let a_sees = tenant_a
-            .get_ref("main")
+            .get_ref(&ns, "main")
             .expect("get A")
             .expect("A has main");
         let b_sees = tenant_b
-            .get_ref("main")
+            .get_ref(&ns, "main")
             .expect("get B")
             .expect("B has main");
         assert_eq!(a_sees, id_a, "tenant-a must see its own ref target");
@@ -75,13 +76,13 @@ fn postgres_tenants_cannot_see_each_others_refs() {
         assert!(cross_b.is_none(), "tenant-b must NOT see tenant-a's object");
 
         // list_refs must not leak the other tenant's refs.
-        let a_refs = tenant_a.list_refs("").expect("list A");
+        let a_refs = tenant_a.list_refs(&ns, "").expect("list A");
         assert!(
             a_refs.iter().all(|(_, tgt)| *tgt != id_b),
             "tenant-a list_refs leaked tenant-b's target: {:?}",
             a_refs
         );
-        let b_refs = tenant_b.list_refs("").expect("list B");
+        let b_refs = tenant_b.list_refs(&ns, "").expect("list B");
         assert!(
             b_refs.iter().all(|(_, tgt)| *tgt != id_a),
             "tenant-b list_refs leaked tenant-a's target: {:?}",
@@ -89,7 +90,7 @@ fn postgres_tenants_cannot_see_each_others_refs() {
         );
 
         // Cleanup — best effort, don't fail the test on teardown noise.
-        let _ = tenant_a.delete_ref("main");
-        let _ = tenant_b.delete_ref("main");
+        let _ = tenant_a.delete_ref(&ns, "main");
+        let _ = tenant_b.delete_ref(&ns, "main");
     });
 }

@@ -17,6 +17,8 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+#[cfg(feature = "providers")]
+use axum::extract::OriginalUri;
 use governor::middleware::NoOpMiddleware;
 use serde::Deserialize;
 use tower_governor::GovernorLayer;
@@ -764,5 +766,57 @@ fn parse_category(s: &str) -> IntentCategory {
         "migrate" => IntentCategory::Migrate,
         "plan" => IntentCategory::Plan,
         other => IntentCategory::Custom(other.to_string()),
+    }
+}
+
+// ─── ASD Code Proxy ──────────────────────────────────────────
+
+/// Build a router that proxies `GET /api/code/*` to ASD's `<base>/api/v1/*`.
+/// Merge this into the main router when `--asd-url` is configured so the
+/// embedded Lens can reach ASD without CORS issues when both are served from
+/// the same origin (e.g. `ctxone-hub --lens --asd-url http://localhost:8787`).
+#[cfg(feature = "providers")]
+pub fn asd_proxy_router(asd_base_url: String) -> Router {
+    Router::new()
+        .route("/api/code/{*path}", get(asd_proxy))
+        .with_state(std::sync::Arc::new(asd_base_url))
+}
+
+#[cfg(feature = "providers")]
+async fn asd_proxy(
+    State(base_url): State<std::sync::Arc<String>>,
+    OriginalUri(uri): OriginalUri,
+) -> impl IntoResponse {
+    let client = reqwest::Client::new();
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let stripped = path_and_query
+        .strip_prefix("/api/code")
+        .unwrap_or(path_and_query);
+    let target = format!(
+        "{}/api/v1{}",
+        base_url.trim_end_matches('/'),
+        stripped
+    );
+    match client.get(&target).send().await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
+            match resp.bytes().await {
+                Ok(body) => (
+                    status,
+                    [(axum::http::header::CONTENT_TYPE, ct)],
+                    body,
+                )
+                    .into_response(),
+                Err(_) => StatusCode::BAD_GATEWAY.into_response(),
+            }
+        }
+        Err(_) => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
