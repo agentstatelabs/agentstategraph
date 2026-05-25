@@ -104,6 +104,21 @@ Branch creation is O(1). Discard is instant. This enables agents to explore hund
 
 For enterprise adoption, work can be grouped into **epochs** -- bounded, sealable units with a Merkle root hash. A sealed epoch is cryptographically tamper-evident and exportable as a self-contained audit bundle. Compliance teams can independently verify the record.
 
+### Governance: From Provenance to Enforcement
+
+Recording *why* a change happened solves half the trust problem. The other half is *preventing* the changes that shouldn't happen at all -- and doing it by the data model, not by hoping the agent behaves.
+
+AgentStateGraph now enforces governance at commit time:
+
+- **Policy** -- authorization plus cost-of-change gating. A policy is proposed, ratified, and (optionally) Ed25519-signed, then any proposed change is evaluated against it before it lands. Decisions are `Allow` / `Deny` / `RequireApproval` (with a fallback action) / `NoPolicyMatch`. Bring your own evaluator -- Cedar, Rego (OPA), or a WASM module.
+- **Taint & quarantine** -- mark-and-sweep markers that a pre-commit hook turns into enforcement: warn, block, require high confidence, or isolate a suspect path. Every mark is itself a blameable commit.
+
+Policy says what's allowed; taint says what's gone wrong. Compose them in a single call and you get one go/no-go decision for a sensitive change. This is what it means to govern a fleet of agents mechanically rather than socially.
+
+### Namespaces: One Substrate, Many Tenants
+
+A single AgentStateGraph deployment can back many projects or tenants without giving each its own database. A **namespace** keys every branch on a composite `(namespace, name)` primary key across all four storage backends, so two tenants can hold same-named branches in complete isolation. Crossing a namespace boundary is deny-by-default and policy-gated -- tenant data never leaks unless an operator explicitly authorizes it.
+
 ## Try It Now
 
 AgentStateGraph is source-available under [BSL 1.1](https://github.com/agentstatelabs/AgentStateGraph/blob/main/LICENSE) (free for all production use; converts to Apache 2.0 after four years) and available today:
@@ -130,7 +145,7 @@ sg.set("/name", "prod", "init", category="Checkpoint")
 
 **From TypeScript, Go, or WASM** -- all supported.
 
-20 MCP tools. 137 tests. 6 reference implementations. Full RFC specification.
+73 MCP tools across 14 crates. Six language bindings. Four storage backends. Full RFC specification.
 
 **GitHub**: [github.com/agentstatelabs/AgentStateGraph](https://github.com/agentstatelabs/AgentStateGraph)
 
