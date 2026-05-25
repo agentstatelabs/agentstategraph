@@ -118,12 +118,15 @@ asg.blame("/name")  # who changed it and why
 
 ## Features
 
-- **59 MCP tools** — any agent can connect immediately
-- **22 HTTP REST endpoints** — `--http` mode with CORS for browsers and scripts
+- **73 MCP tools** — any agent can connect immediately
+- **HTTP REST API** — `--http` mode with CORS for browsers and scripts
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **6 language bindings** — Rust, Python, TypeScript, Go, WASM, C FFI
-- **3 storage backends** — Memory, SQLite, IndexedDB (browser)
-- **220+ tests** across 8 crates
+- **4 storage backends** — Memory, SQLite, Postgres (multi-tenant), IndexedDB (browser)
+- **14 crates** — modular core, storage, MCP, policy, taint, tasks, reminders, and bindings
+- **Namespaces** — ref-layer isolation for multi-project / multi-tenant deployments
+- **Reminders** — pull-based scheduling with priority, recurrence, and approval gating
+- **Taint & quarantine** — `agentstategraph-taint` mark-and-sweep enforced at commit time
 - **Content-addressed Merkle DAG** — immutable, deduplicated history
 - **Structured intent metadata** — category, description, tags, reasoning, confidence
 - **19 intent categories** — Explore, Refine, Fix, Rollback, Checkpoint, Merge, Migrate, Plan, Taint, Untaint, Quarantine, Unquarantine, Watch, Unwatch, PolicyPropose, PolicyRatify, PolicySupersede, PolicySign, plus Custom
@@ -174,7 +177,7 @@ AgentStateGraph/
 │   ├── agentstategraph-core/     # Types, diff, merge, schema — zero I/O
 │   ├── agentstategraph-storage/  # Pluggable backends (memory, SQLite, IndexedDB)
 │   ├── agentstategraph/          # High-level Repository API
-│   ├── agentstategraph-mcp/      # MCP server (59 tools over stdio) + HTTP + migrate CLI
+│   ├── agentstategraph-mcp/      # MCP server (73 tools over stdio) + HTTP + migrate CLI
 │   ├── agentstategraph-tasks/    # Shared Plan/Task store — state machine, proofs, assignment
 │   ├── agentstategraph-policy/   # Authorization + cost-of-change gating with fallback actions
 │   ├── agentstategraph-policy-sign/ # Ed25519 signing for policy ratification
@@ -191,7 +194,7 @@ AgentStateGraph/
 │   ├── AGENTSTATEGRAPH-RFC.md    # Full specification (~2300 lines)
 │   ├── UPGRADE-PATH.md           # Schema versioning + migration design
 │   └── SECURITY-THREAT-MODEL.md
-├── examples/                     # 9 reference implementations
+├── examples/                     # reference implementations + feature walkthroughs
 └── site/                         # agentstategraph.dev (Astro Starlight)
 ```
 
@@ -239,9 +242,16 @@ cargo run --example agent_workflow -p agentstategraph     # Speculate, compare, 
 cargo run --example multi_agent -p agentstategraph        # Orchestrator + sub-agents
 cargo run --example schema_merge -p agentstategraph       # Schema validation + merge
 cargo run --example epochs_audit -p agentstategraph       # Epochs, blame, query
+cargo run --example namespaces -p agentstategraph         # Multi-tenant namespace isolation
 python3 examples/python_agent.py                          # Python workflow
 node examples/typescript_agent.ts                         # TypeScript workflow
 ```
+
+MCP tool-call walkthroughs for the newer capabilities (work with any MCP-connected agent):
+
+- [`examples/namespaces-multitenant.md`](examples/namespaces-multitenant.md) — multi-tenant isolation + deny-by-default cross-namespace merge
+- [`examples/governance-policy-taint.md`](examples/governance-policy-taint.md) — policy + taint gating a sensitive change
+- [`examples/reminders-and-tasks.md`](examples/reminders-and-tasks.md) — pull-based reminders driving a task plan
 
 ## Specification
 

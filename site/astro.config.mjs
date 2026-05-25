@@ -20,6 +20,17 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Capabilities',
+					items: [
+						{ label: 'Policy', slug: 'guides/policy' },
+						{ label: 'Taint & Quarantine', slug: 'guides/taint' },
+						{ label: 'Namespaces', slug: 'guides/namespaces' },
+						{ label: 'Reminders', slug: 'guides/reminders' },
+						{ label: 'Plans & Tasks', slug: 'guides/plans-tasks' },
+						{ label: 'Epochs', slug: 'guides/epochs' },
+					],
+				},
+				{
 					label: 'Language Guides',
 					items: [
 						{ label: 'MCP Server', slug: 'guides/mcp-server' },
@@ -32,7 +43,7 @@ export default defineConfig({
 				{
 					label: 'Reference',
 					items: [
-						{ label: 'MCP Tools (20)', slug: 'reference/mcp-tools' },
+						{ label: 'MCP Tools (73)', slug: 'reference/mcp-tools' },
 						{ label: 'RFC Specification', slug: 'reference/rfc' },
 					],
 				},

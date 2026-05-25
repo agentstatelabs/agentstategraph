@@ -3,13 +3,15 @@ title: RFC Specification
 description: Overview of the AgentStateGraph RFC-0001 specification and what each section covers.
 ---
 
-The full specification lives at [`spec/STATEGRAPH-RFC.md`](https://github.com/agentstatelabs/AgentStateGraph/blob/main/spec/STATEGRAPH-RFC.md) in the repository.
+The full specification lives at [`spec/AGENTSTATEGRAPH-RFC.md`](https://github.com/agentstatelabs/AgentStateGraph/blob/main/spec/AGENTSTATEGRAPH-RFC.md) in the repository.
 
 **Status:** Stable
 **Authors:** Craig Brown
 **Created:** 2026-04-04
 **Updated:** 2026-05-02
-**Version:** 0.8.0
+**RFC Version:** 0.8.0 · **Current implementation:** 0.9.1
+
+> The tool, crate, and capability counts on this page reflect the current 0.9.1 implementation. The formal RFC text is at 0.8.0; capabilities added since — most notably [Namespaces](/guides/namespaces/) (0.9.x) — are documented in the [Capabilities guides](/guides/policy/) pending a normative RFC revision.
 
 ---
 
@@ -67,7 +69,7 @@ Optional schema annotations for validation and merge behavior.
 
 How AgentStateGraph exposes itself as an MCP server.
 
-- **7.1 Tools** -- All 66 tools across 7 groups: 29 core (state, branching, speculation, query/audit, epochs, sessions, explorer), 10 tasks, 11 policy, 9 taint, 7 reminders. Full parameter schemas, descriptions, and example inputs/outputs documented in the [MCP Tools Reference](/reference/mcp-tools).
+- **7.1 Tools** -- All 73 tools: 36 core (state, branching, speculation, query/audit, namespaces, epochs, sessions, explorer), 10 tasks, 11 policy, 9 taint, 7 reminders. Full parameter schemas, descriptions, and example inputs/outputs documented in the [MCP Tools Reference](/reference/mcp-tools).
 - **7.2 Resources** -- MCP resource endpoints for state at paths.
 - **7.3 Events** -- MCP event notifications for state changes.
 
@@ -87,7 +89,7 @@ Declarative, multi-engine access control with tamper-evident ratification.
 - **9.1 Policy Lifecycle** -- Propose → Ratify → Active (or Supersede). Every transition is an audit commit. Policies cannot be silently modified.
 - **9.2 Evaluation Engines** -- Pluggable evaluators: built-in rule engine, Rego (OPA), WASM (any language compiled to WASM), Cedar (Amazon). Engine kind is stored with the policy.
 - **9.3 Ed25519 Signing** -- Policies can be signed with Ed25519 keys. `policy_sign` canonicalizes the policy (sorted JSON, signature field excluded) before signing. `policy_verify` checks all signatures. Ratification requires valid signatures from all required signers.
-- **9.4 Cost-of-Change Gating** -- Policies can encode token-cost thresholds and fallback actions (Allow, Deny, Escalate, RequestApproval) for AI agents operating within budget constraints.
+- **9.4 Decisions and Cost-of-Change Gating** -- Evaluation yields a `Decision` (`Allow`, `Deny`, `RequireApproval`, `NoPolicyMatch`) with precedence `deny > require_approval > allow`. `RequireApproval` carries a fallback action (`Block`, `PickAlternative`, `LowestRiskAlternative`, `KeepCurrentState`, `DelegateTo`) so agents have a defined path while approval is pending. Policies can also encode token-cost thresholds for agents operating within budget constraints.
 - **9.5 MCP Tools** -- 11 tools: policy_propose, policy_ratify, policy_sign, policy_verify, policy_supersede, policy_show, policy_list, policy_history, policy_evaluate, policy_evaluate_change, policy_check_tokens.
 
 ### 10. Reminders
@@ -105,17 +107,19 @@ Pull-based scheduled work for agents and users.
 
 Implementation structure.
 
-- **11.1 Crate Structure** -- 12 Rust crates:
-  - `agentstategraph-core` — types, diff, merge, BLAKE3 content addressing
+- **11.1 Crate Structure** -- 14 Rust crates:
+  - `agentstategraph-core` — types, diff, merge, BLAKE3 content addressing, `Namespace`
   - `agentstategraph-storage` — pluggable storage backends (Memory, SQLite, Postgres, IndexedDB); 7-trait `Storage` supertrait
   - `agentstategraph` — high-level Repository API
-  - `agentstategraph-mcp` — MCP server (66 tools) + HTTP REST API + `migrate` CLI
-  - `agentstategraph-tasks` — shared Plan/Task state machine, proofs, assignment
+  - `agentstategraph-mcp` — MCP server (73 tools) + HTTP REST API + `migrate` CLI
+  - `agentstategraph-ffi` — C ABI / CGo bindings layer
+  - `agentstategraph-tasks` — shared Plan/Task state machine, proofs, assignment, CAS-safe writes
   - `agentstategraph-migrate` — schema-evolution framework and migration registry
   - `agentstategraph-policy` — authorization + cost-of-change gating with fallback actions
   - `agentstategraph-policy-sign` — Ed25519 signing for policy ratification
   - `agentstategraph-policy-wasm` — WASM host runner for policy evaluation
   - `agentstategraph-policy-cedar` — Cedar engine integration
+  - `agentstategraph-policy-rego` — Rego (OPA) engine integration
   - `agentstategraph-taint` — taint/quarantine/watch mark-and-sweep primitive
   - `agentstategraph-reminders` — pull-based reminders: priority, schedules, soft refs, autonomous flag
 - **11.2 Storage Traits** -- The `Storage` supertrait combines 7 sub-traits: `ObjectStore`, `CommitStore`, `RefStore`, `EpochStore`, `SessionStore`, `TaintStore`, `ReminderStore`. All four backends (Memory, SQLite, Postgres, IndexedDB) fully satisfy the supertrait. `TaintStore` and `ReminderStore` provide default no-op implementations so custom backends can opt in gradually.
@@ -137,7 +141,7 @@ How humans and agents share the same state store.
 Managing state growth over time.
 
 - **13.1 The Growth Problem** -- Unbounded history accumulation and how to manage it.
-- **13.2 Epochs** -- Bounded, sealable segments of work. Open/Sealed/Archived lifecycle. Merkle root hash for tamper evidence. Exportable as self-contained audit bundles.
+- **13.2 Epochs** -- Bounded, sealable segments of work. Active/Sealed/Archived lifecycle. Merkle root hash for tamper evidence. Exportable as self-contained audit bundles.
 - **13.3 The Registry** -- Metadata catalog for discovering and navigating state stores, epochs, and schemas.
 - **13.4 MCP Tools** -- Epoch and registry management tools.
 
@@ -147,9 +151,9 @@ Implementation details and test coverage.
 
 - **14.1 Principles** -- Correctness over performance, content-addressed everything, zero unsafe.
 - **14.2 Rust Reference Library** -- The `agentstategraph` crate with Repository API.
-- **14.3 MCP Server** -- The `agentstategraph-mcp` crate with all 66 tools plus the `migrate` subcommand.
+- **14.3 MCP Server** -- The `agentstategraph-mcp` crate with all 73 tools plus the `migrate` subcommand.
 - **14.4 Getting Started Example** -- End-to-end code walkthrough.
-- **14.5 Implementation Test Suite** -- 848+ tests across 12 crates covering all operations, storage backends, policy engines, taint propagation, and reminder lifecycle.
+- **14.5 Implementation Test Suite** -- A comprehensive test suite across 14 crates covering all operations, storage backends, namespace isolation, policy engines, taint propagation, and reminder lifecycle.
 
 ### 15. Open Questions
 

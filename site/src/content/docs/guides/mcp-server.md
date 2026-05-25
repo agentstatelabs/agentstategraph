@@ -40,11 +40,11 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 59 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 73 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
-The same binary also supports HTTP mode — 22 REST endpoints with CORS enabled:
+The same binary also supports HTTP mode — a REST API with CORS enabled:
 
 ```bash
 cargo run --release -p agentstategraph-mcp -- --http --port 3001
@@ -99,7 +99,9 @@ OPTIONS:
   -h, --help            Print help with full endpoint list
 ```
 
-## Available Tools (59)
+## Available Tools (73)
+
+The most-used tools are listed below by category. See the full [MCP Tools Reference](/reference/mcp-tools/) for every tool with parameters and example payloads.
 
 ### State Operations
 
@@ -136,18 +138,32 @@ OPTIONS:
 | `agentstategraph_query` | Composable filters: agent, category, tags, reasoning text, confidence range. |
 | `agentstategraph_blame` | Find which commit last modified a path and why. |
 
+### Namespaces
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_create_namespace` | Create a ref-isolation namespace (idempotent). |
+| `agentstategraph_list_namespaces` | List all namespaces. |
+| `agentstategraph_delete_namespace` | Delete a namespace and its refs (not `default`). |
+| `agentstategraph_cross_namespace_merge` | Policy-gated merge across namespaces (deny-by-default). |
+
 ### Epochs
 
 | Tool | Description |
 |------|-------------|
 | `agentstategraph_create_epoch` | Create an epoch to group related work. |
 | `agentstategraph_seal_epoch` | Seal an epoch (immutable, tamper-evident). Cannot be undone. |
+| `agentstategraph_archive_epoch` | Move a sealed epoch to archived (cold storage). |
+| `agentstategraph_export_epoch` | Export a sealed/archived epoch as a JSON audit bundle. |
+| `agentstategraph_enter_epoch` / `agentstategraph_exit_epoch` | Set / clear the active epoch. |
 | `agentstategraph_list_epochs` | List all epochs with status, dates, and commit counts. |
 
 ### Sessions
 
 | Tool | Description |
 |------|-------------|
+| `agentstategraph_create_session` | Create an agent session (optionally namespace- and path-scoped). |
+| `agentstategraph_enter_session` / `agentstategraph_exit_session` | Set / clear the active session. |
 | `agentstategraph_sessions` | List active agent sessions with parent-child relationships. |
 
 ### Explorer & Viewer
@@ -160,6 +176,51 @@ OPTIONS:
 | `agentstategraph_stats` | Summary statistics: commits, branches, paths, epochs, agents. |
 | `agentstategraph_commit_graph` | Commit DAG with parents, agents, categories for visualization. |
 | `agentstategraph_intent_tree` | Intent decomposition hierarchy across agents. |
+
+### Plans & Tasks
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_create_plan` / `agentstategraph_list_plans` / `agentstategraph_get_plan` | Manage plans. |
+| `agentstategraph_add_task` / `agentstategraph_list_tasks` | Add and list tasks. |
+| `agentstategraph_start_task` / `agentstategraph_complete_task` / `agentstategraph_abandon_task` | Drive the task state machine. |
+| `agentstategraph_assign_task` / `agentstategraph_next_task` | Assign work; pull the next unblocked task. |
+
+See the [Plans & Tasks guide](/guides/plans-tasks/).
+
+### Policy
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_policy_propose` / `agentstategraph_policy_ratify` / `agentstategraph_policy_supersede` | Policy lifecycle. |
+| `agentstategraph_policy_list` / `agentstategraph_policy_show` / `agentstategraph_policy_history` | Inspect policies. |
+| `agentstategraph_policy_evaluate` / `agentstategraph_policy_evaluate_change` / `agentstategraph_policy_check_tokens` | Evaluate authorization and cost-of-change. |
+| `agentstategraph_policy_sign` / `agentstategraph_policy_verify` | Ed25519 signing and verification. |
+| `agentstategraph_policy_evaluate_change_with_taints` | Compose policy + taint into one decision. |
+
+See the [Policy guide](/guides/policy/).
+
+### Taint & Quarantine
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_taint` / `agentstategraph_untaint` | Apply / remove a taint (warn, block, review, isolate). |
+| `agentstategraph_quarantine` / `agentstategraph_unquarantine` | Restrict / release a path to authorized agents. |
+| `agentstategraph_watch` / `agentstategraph_unwatch` | Advisory watch with optional threshold escalation. |
+| `agentstategraph_list_taints` / `agentstategraph_check_taint` | List marks; check a path including ancestors. |
+
+See the [Taint & Quarantine guide](/guides/taint/).
+
+### Reminders
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_reminder_create` / `agentstategraph_reminder_list` | Create and list pull-based reminders. |
+| `agentstategraph_reminder_remind_me` | Get all currently due reminders, by priority. |
+| `agentstategraph_reminder_snooze` / `agentstategraph_reminder_approve` / `agentstategraph_reminder_cancel` | Manage reminder state. |
+| `agentstategraph_reminder_record_execution` | Record an execution result; advances repeating schedules. |
+
+See the [Reminders guide](/guides/reminders/).
 
 ## Example Conversation
 

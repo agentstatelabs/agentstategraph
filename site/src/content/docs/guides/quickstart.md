@@ -67,7 +67,7 @@ curl "http://localhost:3001/api/state/main/search?query=project"
 curl http://localhost:3001/api/stats/main
 ```
 
-22 endpoints with CORS enabled — see the [MCP Server guide](/guides/mcp-server/#http-rest-api) for the full list.
+A full REST API with CORS enabled — see the [MCP Server guide](/guides/mcp-server/#http-rest-api) for the full list.
 
 ## Option 3: Rust Library (embed in your own app)
 

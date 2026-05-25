@@ -51,9 +51,24 @@ Branches are named pointers to commits. Creation is O(1). Namespace conventions:
 - `explore/{description}` — speculative exploration
 - `proposals/{id}` — merge proposals
 
+## Namespaces
+
+A **namespace** is the isolation boundary at the ref layer. Every branch is keyed on a composite `(namespace, name)` primary key, so two namespaces can hold same-named branches without collision and never see each other's refs. One deployment can back many projects or tenants. Cross-namespace merges are deny-by-default and policy-gated. See the [Namespaces guide](/guides/namespaces/).
+
 ## Speculation
 
 A lightweight, disposable branch optimized for the "try many approaches, pick the winner" pattern. Create is O(1) (just a pointer), discard is instant.
+
+## Governance: Policy & Taint
+
+Two layers govern what agents are allowed to do, enforced at commit time:
+
+- **[Policy](/guides/policy/)** — authorization plus cost-of-change gating, with pluggable Cedar / Rego / WASM evaluators and Ed25519-signed ratification. Evaluate any proposed change before it lands.
+- **[Taint & Quarantine](/guides/taint/)** — mark-and-sweep markers that block, gate, or hide writes to suspect paths, with a full audit trail.
+
+## Plans & Tasks
+
+A shared, process-safe task primitive stored in the graph itself: plans containing tasks with a strict `pending → in_progress → done` state machine, blockers, agent assignment, and proof of completion. See [Plans & Tasks](/guides/plans-tasks/).
 
 ## Epochs
 

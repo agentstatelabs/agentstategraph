@@ -3,7 +3,9 @@ title: MCP Tools Reference
 description: Complete reference for all AgentStateGraph MCP tools with parameters and examples.
 ---
 
-> **66 tools** — 29 core (state, branching, speculation, query/audit, epochs, sessions, explorer) + 10 tasks + 11 policy + 9 taint + 7 reminders. Also available as [22 HTTP REST endpoints](/guides/mcp-server/#http-rest-api) via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
+> **73 tools** — 4 core state · 7 branching/speculation · 10 query/blame/explore · 4 namespaces · 7 epochs · 4 sessions · 10 plans/tasks · 12 policy · 8 taint · 7 reminders. Also available as HTTP REST endpoints via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
+>
+> **Namespace override:** the 17 ref-touching tools (`get`, `set`, `delete`, `branch`, `list_branches`, `merge`, `log`, `diff`, `speculate`, `query`, `blame`, `list_paths`, `get_tree`, `search`, `stats`, `commit_graph`, `intent_tree`) also accept an optional `namespace` field that overrides the server's configured namespace for that call. See [Namespaces](/guides/namespaces/).
 
 ## State Operations
 
@@ -211,6 +213,77 @@ Structured diff between two refs. Returns typed DiffOps, not text diffs.
   { "op": "SetValue", "path": "/app/version", "value": "2.0" },
   { "op": "AddKey", "path": "/app/features/dark-mode", "value": true }
 ]
+```
+
+---
+
+## Namespaces
+
+Namespaces are ref-layer isolation boundaries. Branches in different namespaces are invisible to each other and can share names. See the [Namespaces guide](/guides/namespaces/) for the full model.
+
+### agentstategraph_create_namespace
+
+Create a namespace (idempotent).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `name` | string | yes | | Namespace name (alphanumeric + `-_`, max 64 chars) |
+
+**Example output:**
+```
+Namespace 'acme' created
+```
+
+---
+
+### agentstategraph_list_namespaces
+
+List all namespaces in the repository.
+
+**Parameters:** None.
+
+**Example output:**
+```json
+["default", "acme", "globex"]
+```
+
+---
+
+### agentstategraph_delete_namespace
+
+Delete a namespace and all of its refs. Cannot delete `default`. Irreversible.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `name` | string | yes | | Namespace to delete |
+
+**Example output:**
+```
+Namespace 'globex' deleted (12 refs removed)
+```
+
+---
+
+### agentstategraph_cross_namespace_merge
+
+Merge a branch from another namespace into a branch in the active namespace. Policy-gated and audited — **denied by default** when no `PolicyStore` is configured.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `source_namespace` | string | yes | | Namespace to merge from |
+| `source_branch` | string | yes | | Branch in the source namespace |
+| `target_branch` | string | no | `"main"` | Branch in the active namespace to merge into |
+| `intent_description` | string | yes | | Why this cross-namespace merge |
+
+**Example output (denied):**
+```
+Denied: cross-namespace merge requires an active PolicyStore with a matching grant
 ```
 
 ---
@@ -570,7 +643,108 @@ List all epochs with their status, dates, and commit counts.
 
 ---
 
+### agentstategraph_archive_epoch
+
+Transition a sealed epoch to `Archived` (cold storage; still queryable).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Epoch ID (must be sealed) |
+
+**Example output:**
+```
+Epoch '2026-04-incident-node3' archived
+```
+
+---
+
+### agentstategraph_export_epoch
+
+Export a sealed or archived epoch as a self-contained JSON audit bundle (the epoch plus full commit records). Active epochs cannot be exported.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Epoch ID (sealed or archived) |
+
+**Example output:**
+```json
+{
+  "agentstategraph_export_version": 1,
+  "epoch": { "id": "2026-04-incident-node3", "status": "Sealed", "seal_hash": "..." },
+  "commits": [ /* full Commit records */ ],
+  "exported_at": "2026-05-25T10:00:00Z"
+}
+```
+
+---
+
+### agentstategraph_enter_epoch
+
+Set the active epoch for this server. Subsequent commits are associated with it.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Epoch ID to enter |
+
+---
+
+### agentstategraph_exit_epoch
+
+Clear the active epoch.
+
+**Parameters:** None.
+
+---
+
 ## Sessions
+
+### agentstategraph_create_session
+
+Create a new agent session, optionally scoped to a namespace and/or a path subtree.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `agent_id` | string | yes | | Agent identity for the session |
+| `branch` | string | no | `"main"` | Working branch |
+| `parent_session` | string | no | | Parent session id (for sub-agent orchestration) |
+| `delegated_intent` | string | no | | Intent this session was delegated |
+| `path_scope` | string | no | | Restrict the session to a path subtree |
+| `namespace_id` | string | no | | Namespace to scope the session to |
+
+**Example output:**
+```
+Session 'session-002' created for 'agent/executor'
+```
+
+---
+
+### agentstategraph_enter_session
+
+Set the active session for this server.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `id` | string | yes | | Session id to enter |
+
+---
+
+### agentstategraph_exit_session
+
+Clear the active session.
+
+**Parameters:** None.
+
+---
 
 ### agentstategraph_sessions
 
@@ -798,15 +972,14 @@ Create a new plan.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Unique plan identifier |
-| `title` | string | yes | | Plan title |
+| `ref` | string | no | `"main"` | Branch |
+| `name` | string | yes | | Plan name (e.g., `"deploy-v2"`) |
 | `description` | string | no | | Plan description |
 
 **Example input:**
 ```json
 {
-  "plan_id": "deploy-v2",
-  "title": "Deploy version 2.0",
+  "name": "deploy-v2",
   "description": "Rolling upgrade of all cluster nodes to v2.0"
 }
 ```
@@ -826,11 +999,12 @@ List all plans, optionally filtered by status.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `status` | string | no | | Filter by status: `active`, `completed`, or `all` (default) |
+| `ref` | string | no | `"main"` | Branch |
+| `status` | string | no | | Filter by status: `Active`, `Completed`, or `Archived` |
 
 **Example input:**
 ```json
-{ "status": "active" }
+{ "status": "Active" }
 ```
 
 **Example output:**
@@ -856,11 +1030,12 @@ Get a plan with all its tasks.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan identifier |
+| `ref` | string | no | `"main"` | Branch |
+| `name` | string | yes | | Plan name |
 
 **Example input:**
 ```json
-{ "plan_id": "deploy-v2" }
+{ "name": "deploy-v2" }
 ```
 
 **Example output:**
@@ -880,26 +1055,26 @@ Get a plan with all its tasks.
 
 ### agentstategraph_add_task
 
-Add a task to a plan.
+Add a task to a plan. The task ID (`t-NNN`) is auto-assigned and returned.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan to add the task to |
-| `task_id` | string | yes | | Unique task identifier within the plan |
+| `ref` | string | no | `"main"` | Branch |
+| `plan` | string | yes | | Plan name to add the task to |
 | `title` | string | yes | | Task title |
-| `description` | string | no | | Task description |
-| `priority` | string | no | `"medium"` | `"low"`, `"medium"`, or `"high"` |
+| `priority` | string | no | `"Medium"` | `Low`, `Medium`, `High`, or `Critical` |
+| `parent_id` | string | no | | Parent task ID for subtasks (e.g., `"t-001"`) |
 | `blocked_by` | string[] | no | | Task IDs that must complete first |
+| `assigned_to` | string | no | | Agent to assign the task to |
 
 **Example input:**
 ```json
 {
-  "plan_id": "deploy-v2",
-  "task_id": "t-004",
+  "plan": "deploy-v2",
   "title": "Update DNS records",
-  "priority": "high",
+  "priority": "High",
   "blocked_by": ["t-003"]
 }
 ```
@@ -913,19 +1088,18 @@ Task 't-004' added to plan 'deploy-v2'
 
 ### agentstategraph_list_tasks
 
-List tasks in a plan, optionally filtered by status or assigned agent.
+List all tasks in a plan.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan identifier |
-| `status` | string | no | | Filter by `pending`, `in_progress`, or `done` |
-| `assigned_to` | string | no | | Filter by assigned agent |
+| `ref` | string | no | `"main"` | Branch |
+| `plan` | string | yes | | Plan name |
 
 **Example input:**
 ```json
-{ "plan_id": "deploy-v2", "status": "pending" }
+{ "plan": "deploy-v2" }
 ```
 
 **Example output:**
@@ -946,13 +1120,13 @@ Transition a task from `pending` to `in_progress`.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan identifier |
-| `task_id` | string | yes | | Task identifier |
-| `agent_id` | string | no | | Agent taking ownership |
+| `ref` | string | no | `"main"` | Branch |
+| `plan` | string | yes | | Plan name |
+| `task_id` | string | yes | | Task identifier (e.g., `"t-002"`) |
 
 **Example input:**
 ```json
-{ "plan_id": "deploy-v2", "task_id": "t-002", "agent_id": "agent/ops" }
+{ "plan": "deploy-v2", "task_id": "t-002" }
 ```
 
 **Example output:**
@@ -964,24 +1138,27 @@ Task 't-002' started
 
 ### agentstategraph_complete_task
 
-Transition a task from `in_progress` to `done`. Optionally attach a proof of completion.
+Transition a task from `in_progress` to `done`. A typed proof is required.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan identifier |
+| `ref` | string | no | `"main"` | Branch |
+| `plan` | string | yes | | Plan name |
 | `task_id` | string | yes | | Task identifier |
-| `proof` | string | no | | Evidence of completion (commit ID, URL, description) |
-| `notes` | string | no | | Completion notes |
+| `proof_kind` | string | yes | | `Commit`, `File`, `Test`, or `Text` |
+| `proof_value` | string | yes | | Commit hash, file path, test name, or text |
+| `proof_note` | string | no | | Optional note |
 
 **Example input:**
 ```json
 {
-  "plan_id": "deploy-v2",
+  "plan": "deploy-v2",
   "task_id": "t-002",
-  "proof": "sg_f5b2c39e...",
-  "notes": "Node-1 upgraded and passing health checks"
+  "proof_kind": "Commit",
+  "proof_value": "sg_f5b2c39e...",
+  "proof_note": "Node-1 upgraded and passing health checks"
 }
 ```
 
@@ -994,19 +1171,20 @@ Task 't-002' completed
 
 ### agentstategraph_abandon_task
 
-Abandon a task, returning it to `pending` with a reason.
+Abandon a task with a reason. `abandoned` is terminal.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan identifier |
+| `ref` | string | no | `"main"` | Branch |
+| `plan` | string | yes | | Plan name |
 | `task_id` | string | yes | | Task identifier |
 | `reason` | string | yes | | Why the task is being abandoned |
 
 **Example input:**
 ```json
-{ "plan_id": "deploy-v2", "task_id": "t-002", "reason": "Node-1 failed pre-flight checks" }
+{ "plan": "deploy-v2", "task_id": "t-002", "reason": "Node-1 failed pre-flight checks" }
 ```
 
 **Example output:**
@@ -1024,13 +1202,14 @@ Assign a task to an agent.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan identifier |
+| `ref` | string | no | `"main"` | Branch |
+| `plan` | string | yes | | Plan name |
 | `task_id` | string | yes | | Task identifier |
-| `agent_id` | string | yes | | Agent to assign the task to |
+| `agent` | string | yes | | Agent to assign the task to |
 
 **Example input:**
 ```json
-{ "plan_id": "deploy-v2", "task_id": "t-003", "agent_id": "agent/verifier" }
+{ "plan": "deploy-v2", "task_id": "t-003", "agent": "agent/verifier" }
 ```
 
 **Example output:**
@@ -1042,18 +1221,19 @@ Task 't-003' assigned to 'agent/verifier'
 
 ### agentstategraph_next_task
 
-Get the next unblocked, unassigned pending task for an agent (or any agent if omitted).
+Get the next highest-priority unblocked task (optionally for a specific agent).
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `plan_id` | string | yes | | Plan identifier |
-| `agent_id` | string | no | | Prefer tasks assigned to this agent |
+| `ref` | string | no | `"main"` | Branch |
+| `plan` | string | yes | | Plan name |
+| `agent` | string | no | | Prefer tasks assigned to this agent |
 
 **Example input:**
 ```json
-{ "plan_id": "deploy-v2", "agent_id": "agent/ops" }
+{ "plan": "deploy-v2", "agent": "agent/ops" }
 ```
 
 **Example output:**
@@ -1065,105 +1245,115 @@ Get the next unblocked, unassigned pending task for an agent (or any agent if om
 
 ## Policy
 
-Policies express authorization rules and cost-of-change thresholds. A policy is proposed, ratified by one or more signers (Ed25519), and then active. Changes can be evaluated against the active policy before they are committed. Evaluation produces a `Decision` (`Allow`, `Deny`, or `Audit`) with a fail-safe fallback.
+Policies express authorization rules and cost-of-change thresholds. A policy is proposed, ratified, optionally signed (Ed25519), and then active. Changes can be evaluated against the active policy before they are committed, optionally through a pluggable Cedar / Rego / WASM evaluator. Evaluation produces a `Decision` — `Allow`, `Deny`, `RequireApproval` (with a fallback action), or `NoPolicyMatch` — with a fail-safe deny applied by the server when nothing matches. Precedence is `deny > require_approval > allow`. See the [Policy guide](/guides/policy/) for the full model.
 
 ### agentstategraph_policy_propose
 
-Propose a new policy document.
+Propose a new policy. The `policy` is a full Policy JSON document (it carries
+its own `path`). Proposed policies are unratified and ignored by the evaluator
+until ratified.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Unique policy identifier |
-| `title` | string | yes | | Policy title |
-| `body` | string | yes | | Policy body (plaintext or structured rules) |
-| `proposed_by` | string | yes | | Agent or principal proposing the policy |
+| `ref` | string | no | `"main"` | Branch |
+| `policy` | object | yes | | Full Policy JSON (`path`, `description`, `rules`, …) |
 
 **Example input:**
 ```json
 {
-  "policy_id": "p-001",
-  "title": "Cluster write gate",
-  "body": "Deny writes to /cluster/* when confidence < 0.7",
-  "proposed_by": "agent/compliance"
+  "policy": {
+    "path": "/cluster",
+    "description": "High-confidence gate for cluster writes",
+    "rules": [
+      { "match": { "path_prefix": "/cluster/" }, "min_confidence": 0.8, "effect": "require_approval" }
+    ]
+  }
 }
 ```
 
 **Example output:**
 ```
-Policy 'p-001' proposed (status: Proposed)
+Policy proposed at /cluster (version 1, unratified)
 ```
 
 ---
 
 ### agentstategraph_policy_ratify
 
-Ratify a proposed policy, advancing it to `Active` status.
+Ratify an unratified policy at `path`, making it active.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy to ratify |
-| `ratified_by` | string | yes | | Agent or principal ratifying |
-| `signature` | string | no | | Ed25519 signature (hex) if signed ratification |
+| `ref` | string | no | `"main"` | Branch |
+| `path` | string | yes | | Policy path to ratify |
+| `ratifier` | string | yes | | Agent or principal ratifying |
+| `reasoning` | string | yes | | Why this policy is being ratified |
 
 **Example input:**
 ```json
-{ "policy_id": "p-001", "ratified_by": "agent/lead" }
+{ "path": "/cluster", "ratifier": "agent/lead", "reasoning": "Reviewed and approved" }
 ```
 
 **Example output:**
 ```
-Policy 'p-001' ratified (status: Active)
+Policy /cluster ratified
 ```
 
 ---
 
 ### agentstategraph_policy_supersede
 
-Supersede an active policy with a newer one, archiving the old.
+Replace the active policy at `old_path` with a new version. Returns the new
+`path@version` handle.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `old_policy_id` | string | yes | | Policy being superseded |
-| `new_policy_id` | string | yes | | Replacement policy ID |
-| `reason` | string | yes | | Why this policy is being superseded |
+| `ref` | string | no | `"main"` | Branch |
+| `old_path` | string | yes | | Path of the policy being superseded |
+| `new_policy` | object | yes | | Full new Policy JSON |
 
 **Example input:**
 ```json
 {
-  "old_policy_id": "p-001",
-  "new_policy_id": "p-002",
-  "reason": "Raising confidence threshold to 0.8"
+  "old_path": "/cluster",
+  "new_policy": {
+    "path": "/cluster",
+    "description": "Raise confidence threshold to 0.9",
+    "rules": [ { "match": { "path_prefix": "/cluster/" }, "min_confidence": 0.9, "effect": "require_approval" } ]
+  }
 }
 ```
 
 **Example output:**
 ```
-Policy 'p-001' superseded by 'p-002'
+Policy /cluster superseded → /cluster@2
 ```
 
 ---
 
 ### agentstategraph_policy_list
 
-List all policies with their status.
+List policies, optionally filtered by path prefix, status, and tenant.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `status` | string | no | | Filter by `Proposed`, `Active`, `Superseded`, or `Archived` |
+| `ref` | string | no | `"main"` | Branch |
+| `prefix` | string | no | | Path prefix filter |
+| `status` | string | no | `"active"` | `"active"`, `"proposed"`, or `"all"` |
+| `tenant_filter` | string | no | | Restrict to a tenant (globals always apply) |
 
 **Example output:**
 ```json
 [
-  { "id": "p-001", "title": "Cluster write gate", "status": "Superseded" },
-  { "id": "p-002", "title": "Cluster write gate v2", "status": "Active" }
+  { "path": "/cluster", "version": 2, "status": "active", "description": "Cluster write gate v2" }
 ]
 ```
 
@@ -1171,24 +1361,25 @@ List all policies with their status.
 
 ### agentstategraph_policy_show
 
-Show the full details of a specific policy.
+Show a policy at a path (active version, or a pinned version).
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy identifier |
+| `ref` | string | no | `"main"` | Branch |
+| `path` | string | yes | | Policy path |
+| `version` | number | no | | Pin a specific version (default: active) |
 
 **Example output:**
 ```json
 {
-  "id": "p-002",
-  "title": "Cluster write gate v2",
-  "status": "Active",
-  "body": "Deny writes to /cluster/* when confidence < 0.8",
-  "proposed_by": "agent/compliance",
+  "path": "/cluster",
+  "version": 2,
+  "status": "active",
+  "description": "Cluster write gate v2",
   "ratified_by": "agent/lead",
-  "created": "2026-04-10T10:00:00Z"
+  "rules": [ { "match": { "path_prefix": "/cluster/" }, "min_confidence": 0.8, "effect": "require_approval" } ]
 }
 ```
 
@@ -1196,19 +1387,20 @@ Show the full details of a specific policy.
 
 ### agentstategraph_policy_history
 
-Show the version history of a policy, including superseded predecessors.
+Walk a policy's supersedes chain at a path.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy identifier (any version in the chain) |
+| `ref` | string | no | `"main"` | Branch |
+| `path` | string | yes | | Policy path |
 
 **Example output:**
 ```json
 [
-  { "id": "p-001", "title": "Cluster write gate", "status": "Superseded", "superseded_by": "p-002" },
-  { "id": "p-002", "title": "Cluster write gate v2", "status": "Active" }
+  { "path": "/cluster", "version": 1, "status": "superseded", "supersedes": null },
+  { "path": "/cluster", "version": 2, "status": "active", "supersedes": "/cluster@1" }
 ]
 ```
 
@@ -1216,28 +1408,31 @@ Show the version history of a policy, including superseded predecessors.
 
 ### agentstategraph_policy_evaluate
 
-Evaluate a free-form situation description against the active policy.
+Evaluate an authorization request against active policies. The `situation` is a
+flat string map of facts.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy to evaluate against |
-| `situation` | string | yes | | Description of the situation to evaluate |
-| `agent_id` | string | no | | Agent requesting the evaluation |
+| `ref` | string | no | `"main"` | Branch |
+| `situation` | object | yes | | Flat `{ string: string }` map of situation facts |
+| `action` | string | yes | | The action being requested |
+| `agent_id` | string | yes | | Agent requesting the evaluation |
+| `tenant_filter` | string | no | | Restrict to a tenant (globals always apply) |
 
 **Example input:**
 ```json
 {
-  "policy_id": "p-002",
-  "situation": "Writing /cluster/replicas = 5, confidence = 0.65",
+  "situation": { "path": "/cluster/replicas", "confidence": "0.65" },
+  "action": "write",
   "agent_id": "agent/scaler"
 }
 ```
 
 **Example output:**
 ```
-Decision: Deny
+Decision: RequireApproval
 Reason: Confidence 0.65 is below required threshold 0.8 for /cluster/* writes
 ```
 
@@ -1245,33 +1440,32 @@ Reason: Confidence 0.65 is below required threshold 0.8 for /cluster/* writes
 
 ### agentstategraph_policy_evaluate_change
 
-Evaluate a specific proposed state change against the active policy before committing.
+Evaluate a full `ChangeProposal` against active policies before committing.
+Returns a `Decision` with a fallback action.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy to evaluate against |
 | `ref` | string | no | `"main"` | Branch the change would be applied to |
-| `path` | string | yes | | Path being modified |
-| `value` | any | yes | | Proposed new value |
-| `agent_id` | string | no | | Agent proposing the change |
-| `confidence` | number | no | | Agent's confidence in the change |
+| `proposal` | object | yes | | Full ChangeProposal JSON (action, agent_id, intent, preferred_option, alternatives, tokens, attached_fields) |
+| `tenant_filter` | string | no | | Restrict to a tenant (globals always apply) |
 
 **Example input:**
 ```json
 {
-  "policy_id": "p-002",
-  "path": "/cluster/replicas",
-  "value": 5,
-  "agent_id": "agent/scaler",
-  "confidence": 0.65
+  "proposal": {
+    "action": "write",
+    "agent_id": "agent/scaler",
+    "preferred_option": { "path": "/cluster/replicas", "value": 5 },
+    "confidence": 0.65
+  }
 }
 ```
 
 **Example output:**
 ```
-Decision: Deny
+Decision: RequireApproval (fallback: KeepCurrentState)
 Reason: Confidence 0.65 is below required threshold 0.8 for /cluster/* writes
 ```
 
@@ -1279,81 +1473,73 @@ Reason: Confidence 0.65 is below required threshold 0.8 for /cluster/* writes
 
 ### agentstategraph_policy_check_tokens
 
-Check token/cost budget constraints in a policy for a proposed change.
+Pre-flight check: list the active policies whose triggers match the given
+tokens. Use it to discover which policies would fire before proposing a change.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy to check |
-| `estimated_tokens` | number | yes | | Estimated token cost of the proposed action |
-| `agent_id` | string | no | | Agent requesting the check |
+| `ref` | string | no | `"main"` | Branch |
+| `tokens` | string[] | yes | | Trigger tokens to match against |
 
 **Example input:**
 ```json
-{ "policy_id": "p-002", "estimated_tokens": 4500, "agent_id": "agent/planner" }
+{ "tokens": ["destructive", "/cluster/"] }
 ```
 
 **Example output:**
-```
-Decision: Allow
-Remaining budget: 5500 tokens
+```json
+[ { "path": "/cluster", "version": 2, "matched": ["destructive"] } ]
 ```
 
 ---
 
 ### agentstategraph_policy_sign
 
-Sign a policy with an Ed25519 key, producing a verifiable signature.
+Sign the active policy at a path with the server's registered `PolicySigner`.
+The signing key is configured on the server, not passed in the call.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy to sign |
-| `private_key_hex` | string | yes | | Ed25519 private key (hex, 64 bytes) |
-| `signer_id` | string | yes | | Identity of the signer |
+| `ref` | string | no | `"main"` | Branch |
+| `path` | string | yes | | Policy path to sign |
+| `signer_key_id` | string | no | | Hint for multi-key signers; `Ed25519Signer` ignores it |
 
 **Example input:**
 ```json
-{
-  "policy_id": "p-002",
-  "private_key_hex": "a1b2c3...",
-  "signer_id": "agent/lead"
-}
+{ "path": "/cluster" }
 ```
 
 **Example output:**
-```
-Signature: 3f8a2b... (Ed25519, signer: agent/lead)
+```json
+{ "algorithm": "ed25519", "signer_key_id": "lead-key-1", "signature_hex": "3f8a2b..." }
 ```
 
 ---
 
 ### agentstategraph_policy_verify
 
-Verify an Ed25519 signature on a policy.
+Verify the signature on the active policy at a path, using the verifying key
+looked up by `signer_key_id` in the server's key registry.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy to verify |
-| `signature_hex` | string | yes | | Signature to verify (hex) |
-| `public_key_hex` | string | yes | | Ed25519 public key (hex, 32 bytes) |
+| `ref` | string | no | `"main"` | Branch |
+| `path` | string | yes | | Policy path to verify |
 
 **Example input:**
 ```json
-{
-  "policy_id": "p-002",
-  "signature_hex": "3f8a2b...",
-  "public_key_hex": "e4d5f6..."
-}
+{ "path": "/cluster" }
 ```
 
 **Example output:**
-```
-Signature valid: policy 'p-002' verified against key e4d5f6...
+```json
+{ "valid": true, "algorithm": "ed25519", "signer_key_id": "lead-key-1" }
 ```
 
 ---
@@ -1364,7 +1550,8 @@ Taint marks paths as sensitive, suspicious, or under watch. Quarantined paths re
 
 ### agentstategraph_taint
 
-Apply a taint mark to a path.
+Apply a named taint to a path. The `effect` controls what the pre-commit hook
+does on subsequent writes.
 
 **Parameters:**
 
@@ -1372,31 +1559,37 @@ Apply a taint mark to a path.
 |------|------|----------|---------|-------------|
 | `ref` | string | no | `"main"` | Branch |
 | `path` | string | yes | | Path to taint |
-| `effect` | string | yes | | `"Quarantine"` or `"Watch"` |
-| `severity` | string | no | `"Medium"` | `"Low"`, `"Medium"`, `"High"`, or `"Critical"` |
+| `name` | string | yes | | Taint name (used to resolve it later) |
+| `effect` | string | yes | | `warn`, `block`, `review`, or `isolate` |
 | `reason` | string | yes | | Why this path is being tainted |
-| `expires_at` | string | no | | ISO 8601 expiry timestamp; taint auto-clears after this |
+| `severity` | string | no | `"medium"` | `low`, `medium`, `high`, or `critical` |
+| `expires` | string | no | | RFC3339 expiry; null = permanent |
+| `propagate` | bool | no | `true` | Cascade to descendant paths |
+| `agent_id` | string | yes | | Agent applying the taint |
 
 **Example input:**
 ```json
 {
   "path": "/cluster/credentials",
-  "effect": "Quarantine",
-  "severity": "High",
-  "reason": "Potential credential exposure detected"
+  "name": "cred-exposure-2026-05",
+  "effect": "block",
+  "severity": "high",
+  "reason": "Potential credential exposure detected",
+  "agent_id": "agent/security"
 }
 ```
 
 **Example output:**
 ```
-Taint applied: /cluster/credentials (Quarantine/High)
+Taint 'cred-exposure-2026-05' applied: /cluster/credentials (block/high)
 ```
 
 ---
 
 ### agentstategraph_untaint
 
-Remove a taint mark from a path.
+Resolve a named taint on a path. The taint is resolved (not deleted) to
+preserve the audit trail.
 
 **Parameters:**
 
@@ -1404,23 +1597,31 @@ Remove a taint mark from a path.
 |------|------|----------|---------|-------------|
 | `ref` | string | no | `"main"` | Branch |
 | `path` | string | yes | | Path to untaint |
+| `name` | string | yes | | Name of the taint to resolve |
 | `reason` | string | yes | | Why the taint is being lifted |
+| `proof` | string | no | | Evidence the issue is resolved |
+| `agent_id` | string | yes | | Agent resolving the taint |
 
 **Example input:**
 ```json
-{ "path": "/cluster/credentials", "reason": "Credentials rotated and verified clean" }
+{
+  "path": "/cluster/credentials",
+  "name": "cred-exposure-2026-05",
+  "reason": "Credentials rotated and verified clean",
+  "agent_id": "agent/security"
+}
 ```
 
 **Example output:**
 ```
-Taint removed: /cluster/credentials
+Taint 'cred-exposure-2026-05' removed: /cluster/credentials
 ```
 
 ---
 
 ### agentstategraph_quarantine
 
-Shorthand to apply a `Quarantine` taint effect to a path.
+Quarantine a path, restricting writes to an explicit list of authorized agents.
 
 **Parameters:**
 
@@ -1428,24 +1629,36 @@ Shorthand to apply a `Quarantine` taint effect to a path.
 |------|------|----------|---------|-------------|
 | `ref` | string | no | `"main"` | Branch |
 | `path` | string | yes | | Path to quarantine |
-| `severity` | string | no | `"Medium"` | Taint severity |
+| `name` | string | yes | | Quarantine name |
 | `reason` | string | yes | | Why |
+| `authorized_agents` | string[] | yes | | Agents permitted to write under the path |
+| `severity` | string | no | `"high"` | `low`, `medium`, `high`, or `critical` |
+| `expires` | string | no | | RFC3339 expiry; null = permanent |
+| `propagate` | bool | no | `true` | Cascade to descendant paths |
+| `agent_id` | string | yes | | Agent applying the quarantine |
 
 **Example input:**
 ```json
-{ "path": "/cluster/node-3", "severity": "Critical", "reason": "Node-3 compromised" }
+{
+  "path": "/cluster/node-3",
+  "name": "node-3-compromise",
+  "severity": "critical",
+  "reason": "Node-3 compromised",
+  "authorized_agents": ["agent/security"],
+  "agent_id": "agent/security"
+}
 ```
 
 **Example output:**
 ```
-Quarantine applied: /cluster/node-3 (Critical)
+Quarantine 'node-3-compromise' applied: /cluster/node-3 (critical)
 ```
 
 ---
 
 ### agentstategraph_unquarantine
 
-Lift a quarantine from a path.
+Lift a named quarantine from a path (resolved, not deleted).
 
 **Parameters:**
 
@@ -1453,23 +1666,32 @@ Lift a quarantine from a path.
 |------|------|----------|---------|-------------|
 | `ref` | string | no | `"main"` | Branch |
 | `path` | string | yes | | Path to unquarantine |
+| `name` | string | yes | | Name of the quarantine to lift |
 | `reason` | string | yes | | Why quarantine is being lifted |
+| `proof` | string | no | | Evidence the path is safe |
+| `agent_id` | string | yes | | Agent lifting the quarantine |
 
 **Example input:**
 ```json
-{ "path": "/cluster/node-3", "reason": "Node-3 reimaged and verified" }
+{
+  "path": "/cluster/node-3",
+  "name": "node-3-compromise",
+  "reason": "Node-3 reimaged and verified",
+  "agent_id": "agent/security"
+}
 ```
 
 **Example output:**
 ```
-Quarantine lifted: /cluster/node-3
+Quarantine 'node-3-compromise' lifted: /cluster/node-3
 ```
 
 ---
 
 ### agentstategraph_watch
 
-Apply a `Watch` taint to a path (audit notifications without blocking changes).
+Apply an advisory watch to a path. With a `metric`/`threshold`/`direction` it
+auto-escalates to a `warn` taint when a write crosses the threshold.
 
 **Parameters:**
 
@@ -1477,23 +1699,37 @@ Apply a `Watch` taint to a path (audit notifications without blocking changes).
 |------|------|----------|---------|-------------|
 | `ref` | string | no | `"main"` | Branch |
 | `path` | string | yes | | Path to watch |
+| `name` | string | yes | | Watch name |
 | `reason` | string | yes | | Why |
+| `metric` | string | no | | Numeric field to monitor for escalation |
+| `threshold` | number | no | | Escalation threshold |
+| `direction` | string | no | `"above"` | `above` or `below` |
+| `check_interval_secs` | number | no | | Re-check cadence |
+| `expires` | string | no | | RFC3339 expiry |
+| `severity` | string | no | | Severity if escalated |
+| `propagate` | bool | no | `true` | Cascade to descendant paths |
+| `agent_id` | string | yes | | Agent applying the watch |
 
 **Example input:**
 ```json
-{ "path": "/cluster/network", "reason": "Monitoring for unexpected topology changes" }
+{
+  "path": "/cluster/network",
+  "name": "topology-watch",
+  "reason": "Monitoring for unexpected topology changes",
+  "agent_id": "agent/monitor"
+}
 ```
 
 **Example output:**
 ```
-Watch applied: /cluster/network
+Watch 'topology-watch' applied: /cluster/network
 ```
 
 ---
 
 ### agentstategraph_unwatch
 
-Remove a watch from a path.
+Remove a named watch from a path.
 
 **Parameters:**
 
@@ -1501,49 +1737,46 @@ Remove a watch from a path.
 |------|------|----------|---------|-------------|
 | `ref` | string | no | `"main"` | Branch |
 | `path` | string | yes | | Path to unwatch |
-| `reason` | string | yes | | Why |
+| `name` | string | yes | | Name of the watch to remove |
+| `reason` | string | no | | Why |
+| `agent_id` | string | yes | | Agent removing the watch |
 
 **Example input:**
 ```json
-{ "path": "/cluster/network", "reason": "Monitoring period complete" }
+{ "path": "/cluster/network", "name": "topology-watch", "agent_id": "agent/monitor" }
 ```
 
 **Example output:**
 ```
-Watch removed: /cluster/network
+Watch 'topology-watch' removed: /cluster/network
 ```
 
 ---
 
 ### agentstategraph_list_taints
 
-List all active taint marks on a ref.
+List taints, quarantines, and watches, with optional filters.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `ref` | string | no | `"main"` | Branch |
-| `effect` | string | no | | Filter by `Quarantine` or `Watch` |
+| `path` | string | no | | Filter to a path |
+| `kind` | string | no | | `taint`, `quarantine`, or `watch` (default: all) |
+| `effect` | string | no | | `warn`, `block`, `review`, or `isolate` (client-side filter) |
+| `include_expired` | bool | no | `false` | Include expired marks |
 
 **Example output:**
 ```json
 [
   {
     "path": "/cluster/credentials",
-    "effect": "Quarantine",
-    "severity": "High",
+    "name": "cred-exposure-2026-05",
+    "kind": "quarantine",
+    "severity": "high",
     "reason": "Potential credential exposure detected",
-    "tainted_by": "agent/security",
-    "tainted_at": "2026-04-10T14:00:00Z"
-  },
-  {
-    "path": "/cluster/network",
-    "effect": "Watch",
-    "severity": "Low",
-    "reason": "Monitoring for unexpected topology changes",
-    "tainted_by": "agent/monitor",
-    "tainted_at": "2026-04-10T15:00:00Z"
+    "agent_id": "agent/security",
+    "created_at": "2026-04-10T14:00:00Z"
   }
 ]
 ```
@@ -1552,26 +1785,30 @@ List all active taint marks on a ref.
 
 ### agentstategraph_check_taint
 
-Check whether a specific path is tainted (and what effect applies).
+Check the full taint status for a path, including marks inherited from ancestor
+paths. Optionally evaluate write access for a specific agent and confidence.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `ref` | string | no | `"main"` | Branch |
 | `path` | string | yes | | Path to check |
+| `agent_id` | string | no | | Agent to evaluate access for |
+| `confidence` | number | no | | Commit confidence (for the `review` effect gate) |
 
 **Example input:**
 ```json
-{ "path": "/cluster/credentials" }
+{ "path": "/cluster/credentials", "agent_id": "agent/ops", "confidence": 0.95 }
 ```
 
 **Example output:**
 ```json
 {
   "tainted": true,
-  "effect": "Quarantine",
-  "severity": "High",
+  "kind": "quarantine",
+  "effect": "block",
+  "severity": "high",
+  "can_write": false,
   "reason": "Potential credential exposure detected"
 }
 ```
@@ -1580,34 +1817,38 @@ Check whether a specific path is tainted (and what effect applies).
 
 ### agentstategraph_policy_evaluate_change_with_taints
 
-Evaluate a proposed change against the active policy and any taint marks on the target path. Combines policy and taint evaluation in a single call.
+Evaluate a change proposal against active policies **and** the taints on each
+affected path in one call. Returns `{ decision, taint_status, can_proceed }`,
+where `can_proceed` is true only when the decision is not `deny` and every path
+is writable.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `policy_id` | string | yes | | Policy to evaluate against |
 | `ref` | string | no | `"main"` | Branch |
-| `path` | string | yes | | Path being modified |
-| `value` | any | yes | | Proposed new value |
-| `agent_id` | string | no | | Agent proposing the change |
-| `confidence` | number | no | | Agent's confidence |
+| `proposal` | object | yes | | Full ChangeProposal JSON |
+| `affected_paths` | string[] | no | | Paths the change would touch (each is taint-checked) |
+| `agent_id` | string | no | | Agent for the taint-check pass (falls back to `proposal.agent_id`) |
+| `confidence` | number | no | `1.0` | Confidence for the `review`-effect gate |
+| `tenant_filter` | string | no | | Restrict policies to a tenant |
 
 **Example input:**
 ```json
 {
-  "policy_id": "p-002",
-  "path": "/cluster/credentials",
-  "value": { "token": "new-token" },
-  "agent_id": "agent/ops",
-  "confidence": 0.9
+  "proposal": {
+    "action": "write",
+    "agent_id": "agent/ops",
+    "preferred_option": { "path": "/cluster/credentials", "value": { "token": "new-token" } }
+  },
+  "affected_paths": ["/cluster/credentials"],
+  "confidence": 0.95
 }
 ```
 
 **Example output:**
-```
-Decision: Deny
-Reason: Path '/cluster/credentials' is under Quarantine (High severity) — policy evaluation blocked
+```json
+{ "decision": "Allow", "taint_status": "Quarantine", "can_proceed": false }
 ```
 
 ---

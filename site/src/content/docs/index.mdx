@@ -1,9 +1,9 @@
 ---
 title: AgentStateGraph
-description: A content-addressed, branchable, blameable state primitive — built for AI agents as the primary actor.
+description: The state substrate for agentic development — content-addressed, branchable, blameable, and governed, with AI agents as the primary actor.
 template: splash
 hero:
-  tagline: AgentStateGraph is to agent state what Git was to source code — a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor.
+  tagline: The state substrate for agentic development. AgentStateGraph is to agent state what Git was to source code — content-addressed, branchable, blameable, and governed — designed from the ground up for AI agents as the primary actor.
   actions:
     - text: Get Started
       link: /guides/quickstart/
@@ -19,11 +19,17 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
+## The best substrate for agentic development
+
+Every agentic system — whether it's running infrastructure, orchestrating research, writing code, or driving a multi-agent workflow — needs the same thing underneath: a place to keep state that agents can branch, reason over, govern, and be held accountable to. Today that need is met with ad-hoc JSON blobs, a dict in memory, or a database that has no concept of *why* a value changed.
+
+AgentStateGraph is the missing layer. It gives any agent — and any fleet of agents — a content-addressed, branchable, blameable state store where **every change carries intent, confidence, authority, and provenance**, where speculation is O(1), and where what an agent is allowed to do is enforced by the data model rather than by convention.
+
 ## The vision
 
-A future where AI is responsible for an entire infrastructure — rollouts, tracing, observability, alerts, reports — and is **accountable for it mechanically rather than socially**. Every change carries why, who authorized it, what alternatives existed, and what the agent expected vs. observed, across every branch, forever.
+A future where AI is responsible for entire systems — infrastructure, codebases, research pipelines, ops — and is **accountable for them mechanically rather than socially**. Every change carries why, who authorized it, what alternatives existed, and what the agent expected vs. observed, across every branch, forever.
 
-This is what the substrate has to look like when the primary actor touching production systems is no longer a human who can be governed through PRs, code review, and Slack threads, but a fleet of agents that must be governed through data-model-enforced intent, confidence, authority, and blame. AgentStateGraph is that substrate.
+This is what the substrate has to look like when the primary actor is no longer a human who can be governed through PRs, code review, and Slack threads, but a fleet of agents that must be governed through data-model-enforced intent, confidence, authority, and blame. AgentStateGraph is that substrate.
 
 ## What it is not
 
@@ -48,14 +54,23 @@ AgentStateGraph is a **state primitive** — the layer on which a next-generatio
 	<Card title="Multi-Agent Native" icon="list-format">
 		Sub-agent orchestration with scoped sessions, path restrictions, and intent decomposition trees. Built for the orchestrator pattern.
 	</Card>
-	<Card title="Plans & Tasks" icon="list-format">
-		Shared `agentstategraph-tasks` primitive — plans, state machine (pending / in_progress / done), proofs, blockers, and agent assignment. Native `IntentCategory::Plan` for log and blame filtering.
+	<Card title="Namespaces" icon="puzzle">
+		Ref-layer isolation for multi-project and multi-tenant deployments. A validated `Namespace` keys every branch on a composite `(namespace, name)` primary key across all four backends. Cross-namespace merge is deny-by-default and policy-gated.
 	</Card>
 	<Card title="Policy" icon="approve-check-circle">
-		`agentstategraph-policy` — authorization + cost-of-change gating with fallback actions (soft enforcement + audit trail). Ed25519-signed ratification via `agentstategraph-policy-sign`. Evaluate any proposed change before it commits.
+		`agentstategraph-policy` — authorization + cost-of-change gating with fallback actions (soft enforcement + audit trail). Pluggable Cedar / Rego / WASM evaluators. Ed25519-signed ratification via `agentstategraph-policy-sign`. Evaluate any proposed change before it commits.
 	</Card>
 	<Card title="Taint & Quarantine" icon="warning">
-		`agentstategraph-taint` — mark-and-sweep for taint, quarantine, and watch. Gate changes through policy evaluation. Full audit trail with who tainted what and when.
+		`agentstategraph-taint` — mark-and-sweep for taint, quarantine, and watch. A pre-commit hook blocks, reviews, or isolates tainted paths. Full audit trail with who tainted what and when.
+	</Card>
+	<Card title="Plans & Tasks" icon="list-format">
+		Shared `agentstategraph-tasks` primitive — plans, state machine (pending / in_progress / done), proofs, blockers, and agent assignment. CAS-based writes are process-safe across concurrent agents. Native `IntentCategory::Plan` for log and blame filtering.
+	</Card>
+	<Card title="Reminders" icon="bell">
+		`agentstategraph-reminders` — pull-based reminders with priority, repeating schedules, soft refs, and an autonomous/approval flag. Agents call `remind_me()` at checkpoints; no background timers required. Durable on SQLite and Postgres.
+	</Card>
+	<Card title="Sealed Epochs" icon="seti:lock">
+		Bound a unit of work, seal it into a tamper-evident Merkle-rooted snapshot, then archive or export it as a self-contained JSON audit bundle. Immutable history you can hand to an auditor.
 	</Card>
 	<Card title="Schema Migrations" icon="rocket">
 		`/_meta/schema_version` lives in-band so upgrade history shows up in `log` and `blame`. `agentstategraph-migrate` provides the registry and runner; `agentstategraph-mcp migrate` is a one-shot CLI with dry-run and sysexits-style codes.
@@ -64,12 +79,14 @@ AgentStateGraph is a **state primitive** — the layer on which a next-generatio
 
 ## Use It From Anywhere
 
-- **MCP Server** — 59 tools, any MCP-compatible agent
-- **Rust** — native library, 220+ tests across 8 crates
+- **MCP Server** — 73 tools, any MCP-compatible agent
+- **Rust** — native library, 14 crates
 - **Python** — PyO3 bindings
 - **TypeScript/Node** — napi-rs bindings
 - **Go** — CGo via C FFI
-- **WASM** — runs in any browser
+- **WASM** — runs in any browser, with per-call namespace support
+
+**Storage backends:** in-memory, SQLite, Postgres (multi-tenant), and IndexedDB in the browser — the same API across every one.
 
 ## The Four Architecture Eras
 
