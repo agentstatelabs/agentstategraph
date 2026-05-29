@@ -57,6 +57,6 @@ publish-wheel:
     - maturin build --release -i python3 --out dist
     - >
       TWINE_USERNAME=gitlab-ci-token TWINE_PASSWORD="${CI_JOB_TOKEN}"
-      twine upload --non-interactive --skip-existing
+      twine upload --non-interactive
       --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
       dist/*.whl
