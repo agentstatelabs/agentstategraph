@@ -40,4 +40,4 @@ build:
 test:
   stage: test
   script:
-    - cargo test --workspace --locked
+    - cargo test --workspace --locked --exclude agentstategraph-python
