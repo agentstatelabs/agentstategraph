@@ -1,0 +1,43 @@
+# CI for AgentStateGraph (Rust Cargo workspace)
+stages:
+  - check
+  - test
+
+default:
+  image: rust:1-bookworm
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/
+      - target/
+  before_script:
+    - export CARGO_HOME="$CI_PROJECT_DIR/.cargo"
+    # Common system deps for FFI/wasm/policy crates; trim if unneeded
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler cmake clang libclang-dev pkg-config
+    - rustc --version && cargo --version
+
+fmt:
+  stage: check
+  script:
+    - rustup component add rustfmt
+    - cargo fmt --all -- --check
+  allow_failure: true        # style check, won't block the pipeline
+
+clippy:
+  stage: check
+  script:
+    - rustup component add clippy
+    - cargo clippy --workspace --all-targets -- -D warnings
+  allow_failure: true
+
+build:
+  stage: check
+  script:
+    - cargo build --workspace --locked
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace --locked
