@@ -26,8 +26,8 @@ edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
 description = "AI-native versioned state store for intent-based systems"
-repository = "https://github.com/agentstatelabs/AgentStateGraph"
-homepage = "https://github.com/agentstatelabs/AgentStateGraph"
+repository = "https://github.com/agentstategroup/agentstategraph"
+homepage = "https://github.com/agentstategroup/agentstategraph"
 documentation = "https://docs.rs/agentstategraph"
 
 [workspace.dependencies]

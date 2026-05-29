@@ -7,3 +7,6 @@ node_modules
 site/dist
 site/.astro
 .claude/
+
+# Local-only cargo config (e.g. machine-specific PYO3_PYTHON) — never commit machine paths
+.cargo/config.toml
