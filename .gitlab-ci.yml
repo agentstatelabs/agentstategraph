@@ -1,4 +1,3 @@
-# CI for AgentStateGraph (Rust Cargo workspace)
 stages:
   - check
   - test
@@ -14,16 +13,17 @@ default:
       - target/
   before_script:
     - export CARGO_HOME="$CI_PROJECT_DIR/.cargo"
-    # Common system deps for FFI/wasm/policy crates; trim if unneeded
-    - apt-get update -qq && apt-get install -y -qq protobuf-compiler cmake clang libclang-dev pkg-config
-    - rustc --version && cargo --version
+    - apt-get update -qq && apt-get install -y -qq protobuf-compiler cmake clang libclang-dev pkg-config python3 python3-dev
+    # Override the Mac-only PYO3_PYTHON pinned in .cargo/config.toml
+    - export PYO3_PYTHON="$(command -v python3)"
+    - rustc --version && cargo --version && python3 --version
 
 fmt:
   stage: check
   script:
     - rustup component add rustfmt
     - cargo fmt --all -- --check
-  allow_failure: true        # style check, won't block the pipeline
+  allow_failure: true
 
 clippy:
   stage: check
