@@ -255,7 +255,11 @@ impl TaskStore {
         assigned_to: Option<String>,
         opts: AddTaskOptions,
     ) -> Result<Task, TaskStoreError> {
-        let AddTaskOptions { payload, parent_change, on_complete } = opts;
+        let AddTaskOptions {
+            payload,
+            parent_change,
+            on_complete,
+        } = opts;
         if !self.plan_exists(ref_name, plan)? {
             return Err(TaskStoreError::PlanNotFound(plan.to_string()));
         }

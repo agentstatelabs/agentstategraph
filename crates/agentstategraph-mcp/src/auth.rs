@@ -184,7 +184,16 @@ impl TenantManager {
     /// forget it). Returns `None` if no key matches `key_prefix`.
     pub fn rotate_key(&self, key_prefix: &str) -> Option<ApiKey> {
         // Snapshot the old key's settings first.
-        let (tenant_id, name, plan, namespace_id, commit_agent_id, can_migrate, is_admin, expires_at) = {
+        let (
+            tenant_id,
+            name,
+            plan,
+            namespace_id,
+            commit_agent_id,
+            can_migrate,
+            is_admin,
+            expires_at,
+        ) = {
             let keys = self.keys.read().ok()?;
             let full = keys.keys().find(|k| k.starts_with(key_prefix)).cloned()?;
             let old = keys.get(&full)?;
@@ -204,7 +213,12 @@ impl TenantManager {
             &tenant_id,
             &name,
             &plan,
-            CreateKeyOptions { commit_agent_id, can_migrate, is_admin, expires_at },
+            CreateKeyOptions {
+                commit_agent_id,
+                can_migrate,
+                is_admin,
+                expires_at,
+            },
         );
         new_key.namespace_id = namespace_id;
         // Disable the old key.
@@ -452,7 +466,9 @@ pub async fn auth_middleware(
             .as_deref()
             .map(|k| tenant_mgr.can_migrate(k))
             .unwrap_or(false);
-        let namespace_id = api_key.as_deref().and_then(|k| tenant_mgr.get_namespace_id(k));
+        let namespace_id = api_key
+            .as_deref()
+            .and_then(|k| tenant_mgr.get_namespace_id(k));
         let key_prefix = api_key.as_deref().map(|k| {
             if k.len() > 8 {
                 k[..8].to_string()

@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run --example namespaces -p agentstategraph
 
-use agentstategraph::{CommitOptions, Repository, RepoError};
+use agentstategraph::{CommitOptions, RepoError, Repository};
 use agentstategraph_core::{IntentCategory, Namespace, Object};
 use agentstategraph_storage::SqliteStorage;
 

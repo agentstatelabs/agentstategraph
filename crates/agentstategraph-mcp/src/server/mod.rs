@@ -1244,16 +1244,15 @@ impl AgentStateGraphServer {
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
         }
-        match self
-            .repo
-            .cross_namespace_merge(&p.source_namespace, &p.source_branch, &p.target_branch, opts)
-        {
+        match self.repo.cross_namespace_merge(
+            &p.source_namespace,
+            &p.source_branch,
+            &p.target_branch,
+            opts,
+        ) {
             Ok(commit_id) => format!(
                 "Merged '{}/{}' into '{}': {}",
-                p.source_namespace,
-                p.source_branch,
-                p.target_branch,
-                commit_id
+                p.source_namespace, p.source_branch, p.target_branch, commit_id
             ),
             Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => {
                 format!(

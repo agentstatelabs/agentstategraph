@@ -50,7 +50,10 @@ fn main() {
             "agent/orchestrator",
             "main",
             repo.log("main", 1).unwrap()[0].id,
-            CreateSessionParams { delegated_intent: Some("intent-001".to_string()), ..Default::default() },
+            CreateSessionParams {
+                delegated_intent: Some("intent-001".to_string()),
+                ..Default::default()
+            },
         )
         .unwrap();
     println!("✓ Orchestrator session: {}\n", orchestrator_session.id);

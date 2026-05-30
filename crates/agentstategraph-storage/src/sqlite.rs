@@ -664,10 +664,16 @@ impl RefStore for SqliteStorage {
             ));
         }
         let conn = self.lock_conn()?;
-        conn.execute("DELETE FROM refs WHERE namespace = ?1", [namespace.as_str()])
-            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM refs WHERE namespace = ?1",
+            [namespace.as_str()],
+        )
+        .map_err(|e| StorageError::Backend(e.to_string()))?;
         let rows = conn
-            .execute("DELETE FROM namespaces WHERE name = ?1", [namespace.as_str()])
+            .execute(
+                "DELETE FROM namespaces WHERE name = ?1",
+                [namespace.as_str()],
+            )
             .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(rows > 0)
     }
@@ -1120,7 +1126,9 @@ impl SessionStore for SqliteStorage {
         for r in rows {
             let (id, agent, parent, sp, sb, sns, st, ca, ea, md) =
                 r.map_err(|e| StorageError::Backend(format!("list sessions row: {}", e)))?;
-            out.push(row_to_session(id, agent, parent, sp, sb, sns, st, ca, ea, md)?);
+            out.push(row_to_session(
+                id, agent, parent, sp, sb, sns, st, ca, ea, md,
+            )?);
         }
         Ok(out)
     }
@@ -1906,8 +1914,12 @@ mod tests {
     fn test_list_refs() {
         let store = test_store();
         let ns = Namespace::default_ns();
-        store.set_ref(&ns, "agents/a", ObjectId::hash(b"a")).unwrap();
-        store.set_ref(&ns, "agents/b", ObjectId::hash(b"b")).unwrap();
+        store
+            .set_ref(&ns, "agents/a", ObjectId::hash(b"a"))
+            .unwrap();
+        store
+            .set_ref(&ns, "agents/b", ObjectId::hash(b"b"))
+            .unwrap();
         store.set_ref(&ns, "main", ObjectId::hash(b"m")).unwrap();
 
         let agents = store.list_refs(&ns, "agents/").unwrap();

@@ -1,7 +1,7 @@
 //! Integration tests for namespace isolation and Repository namespace API.
 
-use agentstategraph::{CommitOptions, Repository, RepoError};
 use agentstategraph::session::CreateSessionParams;
+use agentstategraph::{CommitOptions, RepoError, Repository};
 use agentstategraph_core::{IntentCategory, Namespace, Object};
 use agentstategraph_storage::SqliteStorage;
 
@@ -158,7 +158,11 @@ fn cross_namespace_merge_same_namespace_succeeds() {
         "main",
         checkpoint("cross-ns merge (same)"),
     );
-    assert!(result.is_ok(), "same-ns cross_namespace_merge failed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "same-ns cross_namespace_merge failed: {:?}",
+        result
+    );
 
     let val = repo.get("main", "/x").unwrap();
     assert_eq!(
@@ -187,7 +191,7 @@ fn cross_namespace_merge_across_namespaces_denied_without_policy() {
 
     // dst-ns repo tries to merge from a different namespace
     let result = repo_dst.cross_namespace_merge(
-        "src-ns",  // different namespace
+        "src-ns", // different namespace
         "main",
         "main",
         checkpoint("cross-ns attempt"),
@@ -252,7 +256,8 @@ fn init_auto_creates_namespace() {
     let ns = Namespace::new("fresh-ns").unwrap();
     let repo = Repository::new(Box::new(storage)).with_namespace(ns);
     // No explicit create_namespace call — init() should handle it.
-    repo.init().expect("init() should auto-create the namespace");
+    repo.init()
+        .expect("init() should auto-create the namespace");
 }
 
 // ---------------------------------------------------------------------------

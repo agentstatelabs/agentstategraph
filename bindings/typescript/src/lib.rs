@@ -495,7 +495,13 @@ impl AgentStateGraph {
                 &agent_id,
                 &branch,
                 head,
-                CreateSessionParams { parent_session, delegated_intent, report_to, path_scope, ..Default::default() },
+                CreateSessionParams {
+                    parent_session,
+                    delegated_intent,
+                    report_to,
+                    path_scope,
+                    ..Default::default()
+                },
             )
             .map_err(err)?;
         Ok(session_to_json(&s))
@@ -1096,7 +1102,11 @@ impl TaskStore {
                 parent,
                 blockers,
                 assigned_to,
-                AddTaskOptions { payload: payload_val, parent_change, on_complete: on_complete_val },
+                AddTaskOptions {
+                    payload: payload_val,
+                    parent_change,
+                    on_complete: on_complete_val,
+                },
             )
             .map_err(task_err)?;
         Ok(task_to_json(&task))

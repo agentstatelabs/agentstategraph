@@ -1156,8 +1156,7 @@ impl Repository {
 
     /// Create a namespace. Returns `Ok(())` if already exists.
     pub fn create_namespace(&self, name: &str) -> Result<(), RepoError> {
-        let ns = Namespace::new(name)
-            .map_err(|e| RepoError::InvalidOperation(e.to_string()))?;
+        let ns = Namespace::new(name).map_err(|e| RepoError::InvalidOperation(e.to_string()))?;
         match self.storage.create_namespace(&ns) {
             Ok(()) => Ok(()),
             Err(StorageError::NamespaceAlreadyExists(_)) => Ok(()),
@@ -1173,8 +1172,7 @@ impl Repository {
     /// Delete a namespace and all its refs. The "default" namespace cannot be deleted.
     /// Returns `true` if it existed and was removed.
     pub fn delete_namespace(&self, name: &str) -> Result<bool, RepoError> {
-        let ns = Namespace::new(name)
-            .map_err(|e| RepoError::InvalidOperation(e.to_string()))?;
+        let ns = Namespace::new(name).map_err(|e| RepoError::InvalidOperation(e.to_string()))?;
         Ok(self.storage.delete_namespace(&ns)?)
     }
 

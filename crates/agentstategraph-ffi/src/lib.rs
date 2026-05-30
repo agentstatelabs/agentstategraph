@@ -782,7 +782,11 @@ pub extern "C" fn agentstategraph_taskstore_add_task_ex(
         parent,
         blockers,
         assigned,
-        AddTaskOptions { payload, parent_change: parent_change_opt, on_complete: on_complete_opt },
+        AddTaskOptions {
+            payload,
+            parent_change: parent_change_opt,
+            on_complete: on_complete_opt,
+        },
     ) {
         Ok(t) => json_ok(&t),
         Err(e) => json_err(&e.to_string()),

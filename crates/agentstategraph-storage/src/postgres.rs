@@ -1209,7 +1209,10 @@ impl SessionStore for PostgresStorage {
                         &session.parent_session,
                         &session.path_scope,
                         &session.working_branch,
-                        &session.scope_namespace.as_ref().map(|n| n.as_str().to_string()),
+                        &session
+                            .scope_namespace
+                            .as_ref()
+                            .map(|n| n.as_str().to_string()),
                         &session.status.as_str(),
                         &session.created_at.to_rfc3339(),
                         &session.ended_at.map(|t| t.to_rfc3339()),

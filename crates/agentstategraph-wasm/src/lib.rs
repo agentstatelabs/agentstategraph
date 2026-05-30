@@ -28,7 +28,9 @@ use agentstategraph_taint::{
     QuarantineParams, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
     UntaintParams, UnwatchParams, WatchDirection, WatchParams,
 };
-use agentstategraph_tasks::{AddTaskOptions, OnCompleteHook, Priority, Proof, ProofKind, TaskId, TaskStore};
+use agentstategraph_tasks::{
+    AddTaskOptions, OnCompleteHook, Priority, Proof, ProofKind, TaskId, TaskStore,
+};
 use semver::Version;
 
 fn parse_category(s: &str) -> IntentCategory {
@@ -157,7 +159,12 @@ impl WasmAgentStateGraph {
     }
 
     /// Get a JSON value at a path.
-    pub fn get(&self, path: &str, reference: Option<String>, namespace: Option<String>) -> Result<String, JsValue> {
+    pub fn get(
+        &self,
+        path: &str,
+        reference: Option<String>,
+        namespace: Option<String>,
+    ) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let forked;
         let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
@@ -232,7 +239,12 @@ impl WasmAgentStateGraph {
     }
 
     /// Create a branch.
-    pub fn branch(&self, name: &str, from: Option<String>, namespace: Option<String>) -> Result<String, JsValue> {
+    pub fn branch(
+        &self,
+        name: &str,
+        from: Option<String>,
+        namespace: Option<String>,
+    ) -> Result<String, JsValue> {
         let from_ref = from.unwrap_or_else(|| "main".to_string());
         let forked;
         let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
@@ -276,7 +288,12 @@ impl WasmAgentStateGraph {
     }
 
     /// Structured diff between two refs. Returns JSON.
-    pub fn diff(&self, ref_a: &str, ref_b: &str, namespace: Option<String>) -> Result<String, JsValue> {
+    pub fn diff(
+        &self,
+        ref_a: &str,
+        ref_b: &str,
+        namespace: Option<String>,
+    ) -> Result<String, JsValue> {
         let forked;
         let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
             let ns = agentstategraph_core::Namespace::new(&ns_str)
@@ -293,7 +310,12 @@ impl WasmAgentStateGraph {
     }
 
     /// Commit log. Returns JSON.
-    pub fn log(&self, reference: Option<String>, limit: Option<u32>, namespace: Option<String>) -> Result<String, JsValue> {
+    pub fn log(
+        &self,
+        reference: Option<String>,
+        limit: Option<u32>,
+        namespace: Option<String>,
+    ) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let max = limit.unwrap_or(10) as usize;
         let forked;
@@ -329,7 +351,12 @@ impl WasmAgentStateGraph {
     }
 
     /// Blame — who modified a path and why.
-    pub fn blame(&self, path: &str, reference: Option<String>, namespace: Option<String>) -> Result<String, JsValue> {
+    pub fn blame(
+        &self,
+        path: &str,
+        reference: Option<String>,
+        namespace: Option<String>,
+    ) -> Result<String, JsValue> {
         let ref_name = reference.unwrap_or_else(|| "main".to_string());
         let forked;
         let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
@@ -347,7 +374,12 @@ impl WasmAgentStateGraph {
     }
 
     /// Create a speculation. Returns handle ID.
-    pub fn speculate(&self, from: Option<String>, label: Option<String>, namespace: Option<String>) -> Result<u32, JsValue> {
+    pub fn speculate(
+        &self,
+        from: Option<String>,
+        label: Option<String>,
+        namespace: Option<String>,
+    ) -> Result<u32, JsValue> {
         let from_ref = from.unwrap_or_else(|| "main".to_string());
         let forked;
         let repo: &agentstategraph::Repository = if let Some(ns_str) = namespace {
@@ -626,7 +658,11 @@ impl WasmAgentStateGraph {
                 parent,
                 blockers,
                 assigned_to,
-                AddTaskOptions { payload, parent_change, on_complete },
+                AddTaskOptions {
+                    payload,
+                    parent_change,
+                    on_complete,
+                },
             )
             .map_err(js_err)?;
         serde_json::to_string(&task).map_err(js_err)

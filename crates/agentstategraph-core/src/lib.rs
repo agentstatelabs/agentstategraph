@@ -36,9 +36,9 @@ pub use intent::{
 };
 pub use lifecycle::{LifecycleError, is_valid_transition, transition};
 pub use merge::{Conflict, ConflictValue, MergeResult};
+pub use namespace::{MAX_NAMESPACE_LEN, Namespace, NamespaceError};
 pub use object::{Atom, Node, Object, ObjectId};
 pub use path::{PathComponent, PathError, StatePath};
 pub use query::{BlameEntry, Query, QueryFilters, QueryOptions, QueryTarget, filter_commits};
 pub use schema::{EnforcementMode, MergeHint, Schema, ValidationResult};
-pub use namespace::{Namespace, NamespaceError, MAX_NAMESPACE_LEN};
 pub use session::{Session, SessionStatus};

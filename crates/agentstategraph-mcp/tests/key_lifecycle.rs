@@ -45,7 +45,14 @@ fn make_api_key(key: &str, tenant_id: &str) -> ApiKey {
 }
 
 fn admin_key(key: &str) -> ApiKey {
-    ApiKey { is_admin: true, can_migrate: true, plan: "admin".into(), name: "admin".into(), tenant_id: "admin".into(), ..make_api_key(key, "admin") }
+    ApiKey {
+        is_admin: true,
+        can_migrate: true,
+        plan: "admin".into(),
+        name: "admin".into(),
+        tenant_id: "admin".into(),
+        ..make_api_key(key, "admin")
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

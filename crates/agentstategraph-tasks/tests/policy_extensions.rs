@@ -40,7 +40,10 @@ fn test_task_with_payload_roundtrips() {
             None,
             vec![],
             Some("oncall".into()),
-            AddTaskOptions { payload: Some(payload.clone()), ..Default::default() },
+            AddTaskOptions {
+                payload: Some(payload.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -65,7 +68,10 @@ fn test_task_with_parent_change_roundtrips() {
             None,
             vec![],
             None,
-            AddTaskOptions { parent_change: Some("spec-deadbeef".into()), ..Default::default() },
+            AddTaskOptions {
+                parent_change: Some("spec-deadbeef".into()),
+                ..Default::default()
+            },
         )
         .unwrap();
 

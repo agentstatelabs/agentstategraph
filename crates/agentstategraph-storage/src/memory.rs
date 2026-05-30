@@ -304,11 +304,7 @@ impl RefStore for MemoryStorage {
                 "cannot delete the 'default' namespace".to_string(),
             ));
         }
-        let existed = self
-            .namespaces
-            .write()
-            .unwrap()
-            .remove(namespace.as_str());
+        let existed = self.namespaces.write().unwrap().remove(namespace.as_str());
         if existed {
             let ns_str = namespace.as_str().to_string();
             self.refs

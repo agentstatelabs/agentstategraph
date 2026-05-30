@@ -9,6 +9,8 @@
 
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "providers")]
+use axum::extract::OriginalUri;
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State},
@@ -17,8 +19,6 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-#[cfg(feature = "providers")]
-use axum::extract::OriginalUri;
 use governor::middleware::NoOpMiddleware;
 use serde::Deserialize;
 use tower_governor::GovernorLayer;
@@ -792,15 +792,11 @@ async fn asd_proxy(
     let stripped = path_and_query
         .strip_prefix("/api/code")
         .unwrap_or(path_and_query);
-    let target = format!(
-        "{}/api/v1{}",
-        base_url.trim_end_matches('/'),
-        stripped
-    );
+    let target = format!("{}/api/v1{}", base_url.trim_end_matches('/'), stripped);
     match client.get(&target).send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let ct = resp
                 .headers()
                 .get("content-type")
@@ -808,12 +804,9 @@ async fn asd_proxy(
                 .unwrap_or("application/json")
                 .to_string();
             match resp.bytes().await {
-                Ok(body) => (
-                    status,
-                    [(axum::http::header::CONTENT_TYPE, ct)],
-                    body,
-                )
-                    .into_response(),
+                Ok(body) => {
+                    (status, [(axum::http::header::CONTENT_TYPE, ct)], body).into_response()
+                }
                 Err(_) => StatusCode::BAD_GATEWAY.into_response(),
             }
         }

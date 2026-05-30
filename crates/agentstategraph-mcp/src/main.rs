@@ -639,8 +639,12 @@ mod tests {
 
     #[test]
     fn parse_args_external_evaluators() {
-        let args: Vec<String> =
-            vec!["--external-evaluator".into(), "wasm".into(), "--external-evaluator".into(), "cedar".into()];
+        let args: Vec<String> = vec![
+            "--external-evaluator".into(),
+            "wasm".into(),
+            "--external-evaluator".into(),
+            "cedar".into(),
+        ];
         let parsed = super::parse_args(&args);
         assert_eq!(parsed.external_evaluators, vec!["wasm", "cedar"]);
     }

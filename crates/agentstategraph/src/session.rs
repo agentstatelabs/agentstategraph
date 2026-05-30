@@ -293,12 +293,27 @@ mod tests {
     fn test_list_by_agent() {
         let store = mgr_store();
         let mgr = SessionManager::new(&store);
-        mgr.create("agent/a", "br/a", ObjectId::hash(b"h"), CreateSessionParams::default())
-            .unwrap();
-        mgr.create("agent/b", "br/b", ObjectId::hash(b"h"), CreateSessionParams::default())
-            .unwrap();
-        mgr.create("agent/a", "br/a2", ObjectId::hash(b"h"), CreateSessionParams::default())
-            .unwrap();
+        mgr.create(
+            "agent/a",
+            "br/a",
+            ObjectId::hash(b"h"),
+            CreateSessionParams::default(),
+        )
+        .unwrap();
+        mgr.create(
+            "agent/b",
+            "br/b",
+            ObjectId::hash(b"h"),
+            CreateSessionParams::default(),
+        )
+        .unwrap();
+        mgr.create(
+            "agent/a",
+            "br/a2",
+            ObjectId::hash(b"h"),
+            CreateSessionParams::default(),
+        )
+        .unwrap();
 
         assert_eq!(mgr.list(Some("agent/a")).unwrap().len(), 2);
         assert_eq!(mgr.list(Some("agent/b")).unwrap().len(), 1);
