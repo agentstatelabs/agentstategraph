@@ -498,6 +498,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 here is just arbitrary float test data, not PI
     fn test_type_number_vs_integer() {
         // float is "number", not "integer"
         let schema = serde_json::json!({ "type": "number" });
