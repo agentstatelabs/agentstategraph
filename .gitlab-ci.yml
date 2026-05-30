@@ -33,8 +33,7 @@ clippy:
   stage: check
   script:
     - rustup component add clippy
-    - cargo clippy --workspace --all-targets -- -D warnings
-  allow_failure: true
+    - cargo clippy --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious
 
 build:
   stage: check
