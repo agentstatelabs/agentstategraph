@@ -7,7 +7,7 @@ export default defineConfig({
 	integrations: [
 		starlight({
 			title: 'AgentStateGraph',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/agentstatelabs/AgentStateGraph' }],
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/agentstatelabs/agentstategraph' }],
 			customCss: ['./src/styles/custom.css'],
 			sidebar: [
 				{

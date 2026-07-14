@@ -5,6 +5,21 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.9.2] — 2026-07-13
+
+Theme: **first public release.** Repository, license, and documentation prepared for open publication. No functional API changes from 0.9.1.
+
+### Changed
+- Canonical repository is now `github.com/agentstatelabs/agentstategraph`; all package metadata, install scripts, and docs point there.
+- License finalized as **BUSL-1.1** (valid SPDX identifier) with a concrete Change Date of **2030-07-13**, converting to Apache 2.0.
+- Rust toolchain pinned to 1.96 across the Dockerfile and CI.
+
+### Fixed
+- Documentation counts reconciled to the shipped implementation across README, website, and RFC: 73 MCP tools, 15 crates, 7 language bindings.
+
+### Removed
+- Internal planning/roadmap documents and the draft security threat model removed from the public tree.
+
 ## [0.9.1] — 2026-05-12
 
 Theme: **per-call namespace override** on all ref-touching operations.
@@ -101,8 +116,8 @@ audit — FFI Postgres constructor + WASM sign/verify parity.
 - **FFI `agentstategraph_new_postgres(url, tenant_id)`** —
   feature-gated constructor behind `--features postgres` on the
   FFI crate. Opens a multi-tenant Postgres-backed repository
-  through the C ABI; required for CTXone Pro and other
-  Postgres-first FFI consumers. Runtime is leaked for the process
+  through the C ABI; required for commercial Postgres-first FFI
+  consumers. Runtime is leaked for the process
   lifetime (matches `tokio::main` semantics); shutdown is by
   process exit. Symbol absent from the default `sqlite`-only
   build — consumers targeting both modes should `dlsym`-probe.
@@ -136,9 +151,8 @@ audit — FFI Postgres constructor + WASM sign/verify parity.
 
 ## [0.7.75-beta.2] — 2026-04-24
 
-Theme: **real Postgres `TaintStore`** — unblocks CTXone Pro (and
-any other Postgres-first consumer) from the 0.7.75-beta.1 taint
-substrate.
+Theme: **real Postgres `TaintStore`** — unblocks any Postgres-first
+consumer from the 0.7.75-beta.1 taint substrate.
 
 ### Added
 
@@ -946,8 +960,8 @@ each on its own commit per the ROADMAP.md section-granular rule.
 
 - Bindings for policy types across Py / TS / Go / WASM / C FFI (same
   pattern as the `-tasks` roll-out).
-- AgentStateConsole / CTXone / Lens UI surfaces for proposal review and
-  the approval task queue.
+- Console / review UI surfaces for proposal review and the approval
+  task queue.
 - `ctx policy` CLI subcommand.
 - External Rego / Cedar file references as an escape hatch for complex
   rules.
@@ -969,7 +983,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 ## [0.4.0-beta.2] — 2026-04-17
 
 ### Added
-- **New crate `agentstategraph-migrate`** — schema-evolution framework for ASG databases. Provides `Migration` trait, `Registry`, `check()` for startup introspection (returns `UpToDate` / `UpgradeAvailable` / `Downgrade` / `Unversioned` / `Corrupt`), and a `Runner` with `DryRun` and `Apply` modes. First shipped migration (`plan_assignments_sidecar_to_native`) walks legacy CTXone `/plan_assignments` entries onto native `Task.assigned_to` and bumps `/_meta/schema_version` atomically. Exit-code constants follow `sysexits.h` spirit (64 / 65 / 70 / 75) for ops tooling.
+- **New crate `agentstategraph-migrate`** — schema-evolution framework for ASG databases. Provides `Migration` trait, `Registry`, `check()` for startup introspection (returns `UpToDate` / `UpgradeAvailable` / `Downgrade` / `Unversioned` / `Corrupt`), and a `Runner` with `DryRun` and `Apply` modes. First shipped migration (`plan_assignments_sidecar_to_native`) walks legacy `/plan_assignments` entries onto native `Task.assigned_to` and bumps `/_meta/schema_version` atomically. Exit-code constants follow `sysexits.h` spirit (64 / 65 / 70 / 75) for ops tooling.
 - **`/_meta/*` reserved path guard** on `Repository::{set, set_json, spec_set, spec_set_json, delete}` and `commit_speculation`. Writes under `/_meta/*` now require `IntentCategory::Migrate` — a new `RepoError::ReservedPath` is returned otherwise. Protects schema metadata from accidental overwrites.
 - **`Repository::init()` stamps `/_meta/schema_version`** in its initial commit using a decoupled `SCHEMA_VERSION` constant. The schema version advances only when a migration runs, independent of the crate's release version.
 - **`agentstategraph-mcp migrate` subcommand** — one-shot maintenance CLI. Flags: `--db`, `--storage`, `--ref`, `--to`, `--dry-run`, `--yes`, `-h`. Refuses to start the MCP/HTTP surface. Prints per-step status, commit IDs, and final version.
@@ -982,7 +996,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 ## [0.4.0-beta.1] — 2026-04-15
 
 ### Added
-- **New crate `agentstategraph-tasks`** — shared task-store primitives for plan-rot prevention. Provides `Plan`, `Task`, `TaskStore`, `Proof`, `Verifier` trait, and a full state machine (`pending → in_progress → done`, with proof and blocker enforcement). Multiple ASG consumers (CTXone, ThreadWeaver, future apps) share a single implementation instead of reimplementing task types independently. Establishes the pattern for opinionated-but-shared sibling crates in the workspace.
+- **New crate `agentstategraph-tasks`** — shared task-store primitives for plan-rot prevention. Provides `Plan`, `Task`, `TaskStore`, `Proof`, `Verifier` trait, and a full state machine (`pending → in_progress → done`, with proof and blocker enforcement). Multiple ASG consumers (ThreadWeaver and future apps) share a single implementation instead of reimplementing task types independently. Establishes the pattern for opinionated-but-shared sibling crates in the workspace.
 - **`IntentCategory::Plan`** variant added to `agentstategraph-core` — plan/task operations are natively filterable in log and blame queries. Recognized in MCP, HTTP, FFI, and WASM parsers. **Consumer caveat**: the new native variant serializes as `"Plan"`; pre-existing data written as `{"Custom":"Plan"}` still deserializes as the `Custom` variant, so a filter on `IntentCategory::Plan` will NOT match legacy `Custom("Plan")` commits. Normalise at read time if you need unified filtering across the upgrade boundary.
 - **`Repository::spec_set_json`** convenience method on the high-level API — mirrors `set_json` for the speculation path, used by `agentstategraph-tasks` for atomic multi-path commits.
 - **`Task::assigned_to`** — optional agent-assignment field on `Task`, eliminating the need for consumer-side sidecar storage. New `TaskStore::assign_task`, `unassign_task`, and `next_task_for` methods support assignment-aware task selection. `list_plans_by_status` adds native status filtering.
@@ -998,14 +1012,14 @@ each on its own commit per the ROADMAP.md section-granular rule.
   - C FFI: all 12 extern symbols renamed (`agentstategraph_new_memory`, `agentstategraph_get`, etc.)
   - Python: class `StateGraph` → `AgentStateGraph`
   - TypeScript: class `StateGraph` → `AgentStateGraph`; npm package `stategraph` → `agentstategraph`
-  - Go: package `stategraph` → `agentstategraph`; struct and files renamed; module path `github.com/agentstatelabs/AgentStateGraph/bindings/go`
+  - Go: package `stategraph` → `agentstategraph`; struct and files renamed; module path `github.com/agentstatelabs/agentstategraph/bindings/go`
   - JSON Schema extensions: `x-stategraph-*` → `x-agentstategraph-*`
   - URI scheme: `stategraph://` → `agentstategraph://` (spec)
   - MCP server key in config examples: `"stategraph"` → `"agentstategraph"`
   - Default SQLite path: `./stategraph.db` → `./agentstategraph.db`
   - Default WASM IndexedDB name: `"stategraph"` → `"agentstategraph"`
   - Spec file: `spec/STATEGRAPH-RFC.md` → `spec/AGENTSTATEGRAPH-RFC.md`
-  - Repository URL in `Cargo.toml` points to `github.com/agentstatelabs/AgentStateGraph`
+  - Repository URL in `Cargo.toml` points to `github.com/agentstatelabs/agentstategraph`
 
 ### Added
 - **Sharpened positioning.** README and landing page now lead with the one-sentence Git-analogy framing: *"AgentStateGraph is to agent state what Git was to source code — a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor."* Followed by an explicit "what it is not" paragraph: not a Terraform replacement (wrong actor model), not a LangGraph helper (different layer of the stack), but a state primitive on which next-generation IaC, GitOps, and agent-native ops tooling can all be built.

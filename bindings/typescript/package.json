@@ -1,14 +1,35 @@
 {
   "name": "agentstategraph",
-  "version": "0.7.75-beta.3",
+  "version": "0.9.2",
   "description": "AI-native versioned state store for intent-based systems",
   "main": "index.js",
   "types": "index.d.ts",
-  "napi": {
-    "name": "agentstategraph",
-    "triples": {}
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentstatelabs/agentstategraph.git",
+    "directory": "bindings/typescript"
   },
-  "license": "BSL-1.1",
+  "homepage": "https://agentstategraph.dev",
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "agentstategraph.*.node"
+  ],
+  "napi": {
+    "binaryName": "agentstategraph",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc"
+    ]
+  },
   "devDependencies": {
     "@napi-rs/cli": "^3"
   },

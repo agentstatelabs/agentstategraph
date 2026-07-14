@@ -6,7 +6,7 @@ description: Connect AgentStateGraph to Claude Code, GPT, or any MCP-compatible 
 ## Build and Run
 
 ```bash
-git clone https://github.com/agentstatelabs/AgentStateGraph.git
+git clone https://github.com/agentstatelabs/agentstategraph.git
 cd AgentStateGraph
 cargo build --release -p agentstategraph-mcp
 cargo run --release -p agentstategraph-mcp

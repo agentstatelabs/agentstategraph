@@ -1,5 +1,5 @@
 // Demo data for the AgentStateGraph Explorer.
-// Simulates the output of the 26 MCP tools against a real cluster management scenario.
+// Simulates the output of the 73 MCP tools against a real cluster management scenario.
 
 const DEMO = {
   stats: {
@@ -47,7 +47,7 @@ const DEMO = {
     cluster: {
       name: "picoclaw-prod",
       region: "us-west-2",
-      version: "0.3.5-beta.2",
+      version: "0.9.2",
       nodes: [
         { hostname: "picorpi0", status: "healthy", gpu_memory_mb: 8192, role: "leader" },
         { hostname: "picorpi1", status: "healthy", gpu_memory_mb: 8192, role: "worker" },

@@ -1,11 +1,10 @@
 //! Consumer-shaped integration test.
 //!
-//! Simulates a realistic workflow — a miniature "CTXone-like" consumer
-//! that tracks a website rewrite plan, uses a stub git/filesystem
-//! verifier, and queries blame + log at the end to answer
-//! accountability questions. The test exists so we catch API-shape
-//! regressions from the *consumer's* point of view before CTXone or
-//! ThreadWeaver do.
+//! Simulates a realistic workflow — a miniature consumer that tracks a
+//! website rewrite plan, uses a stub git/filesystem verifier, and
+//! queries blame + log at the end to answer accountability questions.
+//! The test exists so we catch API-shape regressions from the
+//! *consumer's* point of view before real consumers do.
 
 mod common;
 
@@ -17,7 +16,7 @@ use agentstategraph_core::IntentCategory;
 use agentstategraph_storage::SqliteStorage;
 use agentstategraph_tasks::{Priority, Proof, ProofKind, TaskStore, Verifier, VerifyResult};
 
-/// A stand-in for CTXone's `GitFileTestVerifier`. Backed by in-memory
+/// A stand-in for a consumer's `GitFileTestVerifier`. Backed by in-memory
 /// sets rather than a real repo/filesystem — the point is to show the
 /// shape works end-to-end.
 struct StubGitFileVerifier {

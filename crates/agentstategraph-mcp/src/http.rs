@@ -774,7 +774,7 @@ fn parse_category(s: &str) -> IntentCategory {
 /// Build a router that proxies `GET /api/code/*` to ASD's `<base>/api/v1/*`.
 /// Merge this into the main router when `--asd-url` is configured so the
 /// embedded Lens can reach ASD without CORS issues when both are served from
-/// the same origin (e.g. `ctxone-hub --lens --asd-url http://localhost:8787`).
+/// the same origin (e.g. `your-hub --lens --asd-url http://localhost:8787`).
 #[cfg(feature = "providers")]
 pub fn asd_proxy_router(asd_base_url: String) -> Router {
     Router::new()

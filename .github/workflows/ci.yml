@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # .cargo/config.toml is gitignored (it pins a machine-local PYO3_PYTHON on
+  # dev machines); on CI there is none, so point pyo3 at the runner's python.
+  PYO3_PYTHON: python3
+
+jobs:
+  test:
+    name: check + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            protobuf-compiler cmake clang libclang-dev pkg-config \
+            python3 python3-dev
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (correctness gate)
+        run: cargo clippy --workspace --all-targets -- -D clippy::correctness
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked --exclude agentstategraph-python

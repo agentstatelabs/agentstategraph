@@ -8,7 +8,7 @@
 # MCP mode (stdio):
 #   docker run -i agentstategraph
 
-FROM rust:1.86-slim AS builder
+FROM rust:1.96-slim AS builder
 
 WORKDIR /build
 COPY . .

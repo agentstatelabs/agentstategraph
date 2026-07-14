@@ -4,7 +4,7 @@ stages:
   - publish
 
 default:
-  image: rust:1-bookworm
+  image: rust:1.96-bookworm
   cache:
     key:
       files:
@@ -45,9 +45,8 @@ test:
   script:
     - cargo test --workspace --locked --exclude agentstategraph-python
 
-# On a release tag, build the Python wheel (pyo3/maturin) and publish it to
-# this project's GitLab PyPI registry so downstream Python projects (Crucible,
-# Social) can `pip install agentstategraph` from the internal index.
+# On a release tag, build the Python wheel (pyo3/maturin) and publish it so
+# downstream Python projects can `pip install agentstategraph`.
 publish-wheel:
   stage: publish
   rules:

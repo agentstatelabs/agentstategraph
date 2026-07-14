@@ -18,7 +18,7 @@ agentstategraph-mcp
 ## Option 1: Build from source (MCP Server)
 
 ```bash
-git clone https://github.com/agentstatelabs/AgentStateGraph.git
+git clone https://github.com/agentstatelabs/agentstategraph.git
 cd AgentStateGraph
 cargo build --release -p agentstategraph-mcp
 cargo run --release -p agentstategraph-mcp

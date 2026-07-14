@@ -103,7 +103,7 @@ For enterprise adoption, work can be grouped into **epochs** — bounded, sealab
 
 ## Try It Now
 
-AgentStateGraph is source-available under [BSL 1.1](https://github.com/agentstatelabs/AgentStateGraph/blob/main/LICENSE) (free for all production use; converts to Apache 2.0 after four years) and available today:
+AgentStateGraph is source-available under [BSL 1.1](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE) (free for all production use; converts to Apache 2.0 after four years) and available today:
 
 **As an MCP server** (connect to Claude, GPT, or any MCP agent):
 ```bash
@@ -129,7 +129,7 @@ sg.set("/name", "prod", "init", category="Checkpoint")
 
 20 MCP tools. 137 tests. 6 reference implementations. Full RFC specification.
 
-**GitHub**: https://github.com/agentstatelabs/AgentStateGraph
+**GitHub**: https://github.com/agentstatelabs/agentstategraph
 
 ## What's Next
 
@@ -141,4 +141,4 @@ AgentStateGraph is one of the missing infrastructure primitives for the intent-b
 
 ---
 
-*Craig Brown — [GitHub](https://github.com/agentstatelabs/AgentStateGraph)*
+*Craig Brown — [GitHub](https://github.com/agentstatelabs/agentstategraph)*

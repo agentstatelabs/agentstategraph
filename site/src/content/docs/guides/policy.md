@@ -48,7 +48,7 @@ Built-in rules cover the common cases, but you can plug in an external evaluator
 
 - **Cedar** — shells out to `cedar authorize`. `Allow` → Allow, `Deny` → Deny, otherwise `NoPolicyMatch`.
 - **Rego** — shells out to `opa eval` (Open Policy Agent).
-- **WASM** — runs a WebAssembly module via a wasmtime host, following the [policy evaluator ABI](https://github.com/agentstatelabs/AgentStateGraph) (`asg_alloc` / `asg_free` / `asg_evaluate`).
+- **WASM** — runs a WebAssembly module via a wasmtime host, following the [policy evaluator ABI](https://github.com/agentstatelabs/agentstategraph) (`asg_alloc` / `asg_free` / `asg_evaluate`).
 
 Register them with `PolicyStore::with_external_evaluators`. Unregistered kinds are simply skipped (treated as not-matching).
 

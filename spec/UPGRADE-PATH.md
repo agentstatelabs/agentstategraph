@@ -2,7 +2,7 @@
 
 **Status:** Implemented. See `crates/agentstategraph-migrate/` and `agentstategraph-mcp migrate`. Consumer integration snippet in that crate's README.
 **Scope:** Schema evolution for `.db` files + consumer upgrade ergonomics.
-**Context:** No production deployments yet. Workspace at `0.4.0-beta.1`. First real migration candidate is CTXone's retired `/plan_assignments` sidecar → native `Task::assigned_to`.
+**Context:** Workspace at `0.9.2`. The first shipped migration walks a legacy `/plan_assignments` sidecar → native `Task::assigned_to`.
 
 ---
 
@@ -80,7 +80,7 @@ pub enum CheckResult {
 }
 ```
 
-Consumers (CTXone, ThreadWeaver, future apps) call `check()` at startup before handing the `Repository` to application code.
+Consumers (ThreadWeaver and future apps) call `check()` at startup before handing the `Repository` to application code.
 
 **Recommended consumer policy (document, don't enforce):**
 
@@ -101,7 +101,7 @@ Consumers (CTXone, ThreadWeaver, future apps) call `check()` at startup before h
 
 Codes live as constants in `agentstategraph-migrate::exit`. Consumers surface them through their own CLI.
 
-**CTXone integration:** one call at boot, before the server opens its listener. If policy is "prompt," CTXone prints the diff summary on stderr and reads y/n from stdin — non-interactive deployments set `ASG_MIGRATE=auto` explicitly.
+**Consumer integration:** one call at boot, before the server opens its listener. If policy is "prompt," the consumer prints the diff summary on stderr and reads y/n from stdin — non-interactive deployments set `ASG_MIGRATE=auto` explicitly.
 
 ---
 
@@ -248,12 +248,12 @@ Rough order, ~1–2 days:
    - Per-migration status lines, final version, commit IDs.
    - Non-server path; no listener.
 
-5. **CTXone consumer integration**
-   - Call `agentstategraph_migrate::check()` at the start of CTXone's `main()` before the server binds its listener.
-   - Preserve CTXone's existing `server/src/migrations.rs` for CTXone-schema concerns (it owns its own `/ctxone/schema_version`); the new crate handles the ASG-schema concerns.
+5. **Consumer integration**
+   - Call `agentstategraph_migrate::check()` at the start of the consumer's `main()` before the server binds its listener.
+   - The consumer preserves its own `server/src/migrations.rs` for app-schema concerns (it owns its own `/<app>/schema_version`); the new crate handles the ASG-schema concerns.
    - Document the `ASG_MIGRATE=auto|prompt|never` env var in the README.
 
 6. **Changelog + doc updates**
    - Workspace `CHANGELOG.md`: new crate, new `init()` semantics, new `RepoError::ReservedPath`, new `CommitOptions::allow_reserved()`.
-   - CTXone `CHANGELOG.md`: startup now runs ASG-level `check()` in addition to its own migrations.
+   - The consumer's `CHANGELOG.md`: startup now runs ASG-level `check()` in addition to its own migrations.
    - `agentstategraph-migrate/README.md`: carries the doctrine block and the code example from §2.

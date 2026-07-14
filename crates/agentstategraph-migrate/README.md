@@ -15,7 +15,7 @@ existing `.db` files need a forward-path. This crate provides:
    versions at startup.
 4. Stable exit codes (`exit::DOWNGRADE_REFUSED = 64`, etc.) for ops.
 5. Builtin migrations — starting with `plan_assignments_sidecar_to_native`
-   for CTXone's pre-0.4 sidecar.
+   for a legacy pre-0.4 sidecar.
 
 See `spec/UPGRADE-PATH.md` in the repo root for the design.
 

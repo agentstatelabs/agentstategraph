@@ -42,7 +42,7 @@ docker compose up -d
 agentstategraph-mcp
 
 # Or build from source:
-git clone https://github.com/agentstatelabs/AgentStateGraph.git
+git clone https://github.com/agentstatelabs/agentstategraph.git
 cd AgentStateGraph
 cargo build --release -p agentstategraph-mcp
 cargo run --release -p agentstategraph-mcp
@@ -72,7 +72,7 @@ curl http://localhost:3001/api/state/main?path=/
 curl "http://localhost:3001/api/blame/main?path=/cluster/name"
 ```
 
-22 REST endpoints with CORS enabled — connect from browsers, scripts, or any HTTP client. See `--help` for the full endpoint list.
+A CORS-enabled REST API — connect from browsers, scripts, or any HTTP client. See `--help` for the full endpoint list.
 
 ### As a Rust Library
 
@@ -104,6 +104,8 @@ repo.blame("main", "/cluster/name").unwrap();
 
 ### From Python
 
+Install as `agentstategraph` (PyPI); the import module is `agentstategraph_py`.
+
 ```python
 from agentstategraph_py import AgentStateGraph
 
@@ -114,16 +116,16 @@ asg.merge("feature", description="Adopt feature")
 asg.blame("/name")  # who changed it and why
 ```
 
-### From TypeScript, Go, or WASM — all supported.
+### From TypeScript, Go, .NET / C#, or WASM — all supported.
 
 ## Features
 
 - **73 MCP tools** — any agent can connect immediately
 - **HTTP REST API** — `--http` mode with CORS for browsers and scripts
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
-- **6 language bindings** — Rust, Python, TypeScript, Go, WASM, C FFI
+- **7 language bindings** — Rust, Python, TypeScript, Go, .NET / C#, WASM, C FFI
 - **4 storage backends** — Memory, SQLite, Postgres (multi-tenant), IndexedDB (browser)
-- **14 crates** — modular core, storage, MCP, policy, taint, tasks, reminders, and bindings
+- **15 crates** — modular core, storage, MCP, policy (+ pluggable Rego / Cedar / WASM evaluators), taint, tasks, reminders, migrate, FFI, and WASM
 - **Namespaces** — ref-layer isolation for multi-project / multi-tenant deployments
 - **Reminders** — pull-based scheduling with priority, recurrence, and approval gating
 - **Taint & quarantine** — `agentstategraph-taint` mark-and-sweep enforced at commit time
@@ -179,9 +181,12 @@ AgentStateGraph/
 │   ├── agentstategraph/          # High-level Repository API
 │   ├── agentstategraph-mcp/      # MCP server (73 tools over stdio) + HTTP + migrate CLI
 │   ├── agentstategraph-tasks/    # Shared Plan/Task store — state machine, proofs, assignment
+│   ├── agentstategraph-reminders/# Pull-based reminder scheduling with approval gating
 │   ├── agentstategraph-policy/   # Authorization + cost-of-change gating with fallback actions
-│   ├── agentstategraph-policy-sign/ # Ed25519 signing for policy ratification
-│   ├── agentstategraph-policy-wasm/ # WASM host runner for policy evaluation (stub)
+│   ├── agentstategraph-policy-sign/ # Ed25519 signing for policy ratification (Rust + MCP server; not yet exposed through the C ABI)
+│   ├── agentstategraph-policy-rego/ # OPA/Rego external evaluator
+│   ├── agentstategraph-policy-cedar/# Cedar external evaluator (shells to the `cedar` CLI)
+│   ├── agentstategraph-policy-wasm/ # WASM host runner for policy evaluation (wasmtime)
 │   ├── agentstategraph-taint/    # Taint/quarantine/watch mark-and-sweep primitive
 │   ├── agentstategraph-migrate/  # Schema-evolution framework + migration registry
 │   ├── agentstategraph-ffi/      # C ABI for language bindings
@@ -189,18 +194,20 @@ AgentStateGraph/
 ├── bindings/
 │   ├── python/                   # PyO3 + maturin
 │   ├── typescript/               # napi-rs
-│   └── go/                       # CGo via FFI
+│   ├── go/                       # CGo via FFI
+│   └── dotnet/                   # .NET / C# via P/Invoke over the C ABI
 ├── spec/
 │   ├── AGENTSTATEGRAPH-RFC.md    # Full specification (~2300 lines)
 │   ├── UPGRADE-PATH.md           # Schema versioning + migration design
-│   └── SECURITY-THREAT-MODEL.md
+│   ├── PERSISTENCE_SPEC.md       # Storage-backend design
+│   └── TAINT_SPEC.md             # Taint/quarantine/watch design
 ├── examples/                     # reference implementations + feature walkthroughs
 └── site/                         # agentstategraph.dev (Astro Starlight)
 ```
 
 ## Plans & Tasks
 
-`agentstategraph-tasks` is an opinionated sibling crate that layers a shared plan / task model on top of the raw state graph so multiple consumers (CTXone, ThreadWeaver, future apps) don't each reimplement `Task` independently.
+`agentstategraph-tasks` is an opinionated sibling crate that layers a shared plan / task model on top of the raw state graph so multiple consumers (ThreadWeaver and future apps) don't each reimplement `Task` independently.
 
 - `Plan` → `Task[]` with a strict state machine: `pending → in_progress → done`.
 - `Task::assigned_to` for agent assignment, plus `TaskStore::assign_task`, `unassign_task`, `next_task_for(agent)`.
@@ -232,7 +239,7 @@ agentstategraph-mcp migrate --db ./prod.db --yes
 agentstategraph-mcp migrate --db ./prod.db --ref main --to 0.4.0 --dry-run
 ```
 
-Full design discussion: [spec/UPGRADE-PATH.md](spec/UPGRADE-PATH.md) — versioning model, migration registry, consumer-side upgrade flow, downgrade / rollback semantics, and the first shipped migration (CTXone's `plan_assignments` sidecar → native `Task.assigned_to`) as a worked example.
+Full design discussion: [spec/UPGRADE-PATH.md](spec/UPGRADE-PATH.md) — versioning model, migration registry, consumer-side upgrade flow, downgrade / rollback semantics, and the first shipped migration (a legacy `plan_assignments` sidecar → native `Task.assigned_to`) as a worked example.
 
 ## Reference Implementations
 
@@ -243,8 +250,8 @@ cargo run --example multi_agent -p agentstategraph        # Orchestrator + sub-a
 cargo run --example schema_merge -p agentstategraph       # Schema validation + merge
 cargo run --example epochs_audit -p agentstategraph       # Epochs, blame, query
 cargo run --example namespaces -p agentstategraph         # Multi-tenant namespace isolation
-python3 examples/python_agent.py                          # Python workflow
-node examples/typescript_agent.ts                         # TypeScript workflow
+python3 examples/python_agent.py                          # Python workflow (after `maturin develop` in bindings/python)
+(cd bindings/typescript && npm install && npm run build && node ../../examples/typescript_agent.ts)  # TypeScript workflow
 ```
 
 MCP tool-call walkthroughs for the newer capabilities (work with any MCP-connected agent):
@@ -277,6 +284,6 @@ AgentStateGraph is a state primitive designed to become infrastructure. Infrastr
 
 **Why not MIT from day one?** Because the project wouldn't survive it. An MIT-licensed infrastructure primitive that gains traction gets absorbed by a hyperscaler within 18 months. BSL 1.1 lets the project grow, stay independent, and convert to a fully permissive license once it's established enough that strip-mining is no longer an existential threat.
 
-This is the same reasoning MongoDB, Elastic, and MariaDB used — with one difference: we committed to the conversion date upfront.
+This is the same reasoning MariaDB, CockroachDB, Sentry, and HashiCorp used — with one difference: we committed to the conversion date upfront.
 
 See [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md) for the full terms and plain-English FAQ.

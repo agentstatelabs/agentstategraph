@@ -1,6 +1,6 @@
 //! Migrate `/plan_assignments` sidecar → native `Task::assigned_to`.
 //!
-//! Shape of the sidecar, per CTXone's pre-0.4 deployments:
+//! Shape of the sidecar, per a legacy pre-0.4 deployment:
 //!
 //! ```json
 //! {
@@ -28,7 +28,7 @@ use serde_json::Value;
 
 use crate::{MigrateError, MigrationOutcome, migrate_commit_options, version_object};
 
-/// The sidecar path CTXone used pre-0.4.
+/// The legacy sidecar path used pre-0.4.
 pub const SIDECAR_PATH: &str = "/plan_assignments";
 
 /// Default prefix under which `agentstategraph-tasks` plans are stored.

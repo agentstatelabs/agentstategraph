@@ -1,5 +1,5 @@
 //! Taint / quarantine / watch substrate for AgentStateGraph
-//! (spec/TAINT_SPEC.md + spec/0.7.75-PLAN.md §2).
+//! (see spec/TAINT_SPEC.md).
 //!
 //! Dynamic runtime markers that bridge passive observation into
 //! enforcement. Every taint is a first-class commit (auditable,

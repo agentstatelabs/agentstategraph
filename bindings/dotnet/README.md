@@ -4,6 +4,13 @@ AI-native versioned state store for intent-based systems. This is the
 C# binding over the native Rust implementation of AgentStateGraph,
 exposed via P/Invoke over the stable C ABI.
 
+> **Policy signing note.** Ed25519 policy signing and verification are
+> available through the Rust API and the MCP server. Registering a
+> signer through the C ABI is not yet wired up, so `policy_sign` /
+> `policy_verify` are unavailable from the C-ABI bindings (.NET and Go);
+> policies can still be proposed, ratified, evaluated, and audited. Use
+> the MCP server for signed-ratification workflows in the meantime.
+
 NuGet package id: **`agentstatelabs.AgentStateGraph`** (reserved; NuGet
 auto-publish is still gated as manual-only while we warm up the
 release channel). See the repo

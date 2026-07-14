@@ -16,7 +16,7 @@ Authors:     Craig Brown
 
 AgentStateGraph is a content-addressed, versioned, branchable structured state store designed as an infrastructure primitive for intent-based systems. It provides AI agents and AI-native applications with a git-like state management layer that captures not just *what* changed, but *why*, *who authorized it*, *what alternatives were considered*, and *who was informed* — making every state transition auditable, reversible, and explainable.
 
-AgentStateGraph is implemented as an embeddable Rust library with language bindings for Python, TypeScript, Go, and .NET, and exposed as a Model Context Protocol (MCP) server with 66 tools for direct agent integration. As of v0.8.0, the system also provides declarative authorization policy with multi-engine evaluation and Ed25519 signing, taint/quarantine/watch safety controls, pull-based reminders, and a five-level priority task system — all integrated into the same provenance-bearing commit model.
+AgentStateGraph is implemented as an embeddable Rust library with language bindings for Python, TypeScript, Go, and .NET, and exposed as a Model Context Protocol (MCP) server with 73 tools for direct agent integration. As of v0.8.0, the system also provides declarative authorization policy with multi-engine evaluation and Ed25519 signing, taint/quarantine/watch safety controls, pull-based reminders, and a five-level priority task system — all integrated into the same provenance-bearing commit model.
 
 ---
 
@@ -1134,7 +1134,7 @@ Schema changes are themselves versioned as commits with intent category `Migrate
 
 AgentStateGraph exposes its operations as a Model Context Protocol server, allowing any MCP-compatible agent to interact with state stores directly.
 
-As of v0.8.0 there are **66 tools** across seven groups: 29 core (state, branching, speculation, query/audit, epochs, sessions, explorer), 10 task management, 11 policy, 9 taint, and 7 reminders.
+The MCP server exposes **73 tools** across five groups: 36 core (state, branching, speculation, query/audit, namespaces, epochs, sessions, explorer), 10 task management, 12 policy, 8 taint, and 7 reminders.
 
 The `intent_category` parameter accepted by write tools has been expanded to include plan/task lifecycle events, taint operations, and policy lifecycle events:
 
@@ -2199,7 +2199,7 @@ This integrates naturally with the MergeProposal approval gate pattern (§12.2).
 
 ### 9.5 MCP Tools
 
-11 tools: `policy_propose`, `policy_ratify`, `policy_sign`, `policy_verify`, `policy_supersede`, `policy_show`, `policy_list`, `policy_history`, `policy_evaluate`, `policy_evaluate_change`, `policy_check_tokens`.
+12 tools: `policy_propose`, `policy_ratify`, `policy_sign`, `policy_verify`, `policy_supersede`, `policy_show`, `policy_list`, `policy_history`, `policy_evaluate`, `policy_evaluate_change`, `policy_check_tokens`, `policy_evaluate_change_with_taints`.
 
 ---
 
@@ -2302,7 +2302,7 @@ The workspace contains 12 Rust crates organized by responsibility:
 | `agentstategraph-core` | Object model, types, content-addressed DAG, diff, merge, BLAKE3. Zero I/O. |
 | `agentstategraph-storage` | 7-trait `Storage` supertrait + four backends: Memory, SQLite, Postgres, IndexedDB |
 | `agentstategraph` | High-level Repository API: repo, session, speculation, watch, query |
-| `agentstategraph-mcp` | MCP server (66 tools), HTTP REST API, `migrate` CLI subcommand |
+| `agentstategraph-mcp` | MCP server (73 tools), HTTP REST API, `migrate` CLI subcommand |
 | `agentstategraph-tasks` | Shared Plan/Task state machine, proofs, assignment |
 | `agentstategraph-migrate` | Schema-evolution framework and migration registry |
 | `agentstategraph-policy` | Authorization engine: built-in rules, Rego, WASM, Cedar; cost-of-change gating |
@@ -2333,7 +2333,7 @@ AgentStateGraph/
 │   │   ├── watch.rs            # Watch/subscribe system
 │   │   └── query.rs            # Intent queries, search, blame
 │   │
-│   ├── agentstategraph-mcp/         # MCP server: 66 tools + HTTP REST + migrate CLI
+│   ├── agentstategraph-mcp/         # MCP server: 73 tools + HTTP REST + migrate CLI
 │   ├── agentstategraph-tasks/       # Plan/Task state machine, proofs, assignment
 │   ├── agentstategraph-migrate/     # Schema-evolution framework
 │   ├── agentstategraph-policy/      # Authorization + cost-of-change gating
@@ -2452,7 +2452,7 @@ All four backends (Memory, SQLite, Postgres, IndexedDB) fully implement all 7 su
 |----------|-----------|-------------|
 | **Python** | PyO3 + maturin | `pip install agentstategraph` |
 | **TypeScript/Node** | napi-rs | `npm install agentstategraph` |
-| **Go** | CGo wrapping `agentstategraph-ffi` | `go get github.com/agentstatelabs/AgentStateGraph/bindings/go` |
+| **Go** | CGo wrapping `agentstategraph-ffi` | `go get github.com/agentstatelabs/agentstategraph/bindings/go` |
 | **.NET** | C FFI wrapping `agentstategraph-ffi` | NuGet package `AgentStateGraph` |
 | **Browser/Deno** | wasm-bindgen (`agentstategraph-wasm`) | npm or direct WASM import |
 | **Any (C ABI)** | `agentstategraph-ffi` | Shared library (`.so`/`.dylib`/`.dll`) |
@@ -2822,7 +2822,7 @@ The core library, implemented in Rust, provides the complete AgentStateGraph API
 - Rust: `cargo add agentstategraph`
 - Python: `pip install agentstategraph`
 - TypeScript/Node: `npm install agentstategraph`
-- Go: `go get github.com/agentstatelabs/AgentStateGraph/bindings/go`
+- Go: `go get github.com/agentstatelabs/agentstategraph/bindings/go`
 
 **Implementation layers** (each layer builds on the previous and is independently shippable):
 
@@ -2948,7 +2948,7 @@ The reference implementation includes 848+ tests across 12 crates:
 | `test_policy_sign` | `agentstategraph-policy-sign` | Ed25519 key generation, signing, verification, ratification gating |
 | `test_taint` | `agentstategraph-taint` | Apply/resolve marks, propagation, quarantine blocking, watch audit |
 | `test_reminders` | `agentstategraph-reminders` | Create/list/snooze/approve, priority filtering, schedule next-due computation |
-| `test_mcp` | `agentstategraph-mcp` | All 66 MCP tools against the spec, round-trip request/response validation |
+| `test_mcp` | `agentstategraph-mcp` | All 73 MCP tools against the spec, round-trip request/response validation |
 
 A conformance test suite is also provided for third-party implementations: any implementation that passes the conformance suite is spec-compliant.
 
@@ -3095,4 +3095,4 @@ These questions are deferred for resolution during implementation or future RFCs
 
 ---
 
-*AgentStateGraph RFC-0001 — Draft, 2026-04-04*
+*AgentStateGraph RFC-0001 — Stable, updated 2026-05-02*

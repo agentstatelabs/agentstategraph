@@ -1,8 +1,7 @@
 # Taint / Quarantine / Watch Guide
 
-_User-facing guide to the 0.7.75 taint substrate. See
-`spec/TAINT_SPEC.md` for the design rationale and
-`spec/0.7.75-PLAN.md` for the implementation plan._
+_User-facing guide to the taint substrate. See
+`spec/TAINT_SPEC.md` for the design rationale._
 
 ## What is it for?
 
@@ -189,14 +188,13 @@ audit trail matters.
 `PostgresStorage` ships a stub that returns `Backend` on mutating
 calls; `IndexedDbStorage` delegates to an inner `MemoryStorage`
 (in-session taints; durable snapshotting lands in a later
-milestone). See `spec/POST-PRODUCTION-NOTES.md`.
+milestone).
 
 ## Soft enforcement — read this before marketing
 
-From `POLICY_V1.md` §11: CTXone cannot physically stop a
-misbehaving agent. A taint is a machine-readable boundary; pair
-with OPA / Cedar / IAM for hard enforcement at the infrastructure
-layer.
+AgentStateGraph cannot physically stop a misbehaving agent. A taint
+is a machine-readable boundary; pair with OPA / Cedar / IAM for hard
+enforcement at the infrastructure layer.
 
 The value:
 1. **Clarity** — the agent always knows which paths are degraded.
@@ -207,7 +205,5 @@ The value:
 ## Related docs
 
 - `spec/TAINT_SPEC.md` — design spec
-- `spec/0.7.75-PLAN.md` — implementation plan
 - `docs/POLICY_GUIDE.md` — policy primitive
 - `crates/agentstategraph-taint/README.md` — crate API reference
-- `spec/POST-PRODUCTION-NOTES.md` — deferred items

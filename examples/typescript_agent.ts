@@ -56,7 +56,7 @@ function main() {
   // ─── 4. Diff branches ───────────────────────────────────────
   const diff = sg.diff("main", "feature/oauth");
   console.log(`Diff main → feature/oauth (${diff.length} changes):`);
-  diff.forEach((d: any) => console.log(`  ${d.op}: ${d.path}`));
+  diff.forEach((d) => console.log(`  ${d.op}: ${d.path}`));
   console.log();
 
   // ─── 5. Speculation: explore rate limit approaches ───────────
@@ -88,7 +88,7 @@ function main() {
   // ─── 7. Query ────────────────────────────────────────────────
   console.log("--- Query: all Explore intents ---\n");
   const explores = sg.query(undefined, undefined, "Explore");
-  explores.forEach((e: any) => {
+  explores.forEach((e) => {
     console.log(`  [${e.intent.category}] ${e.intent.description}`);
     if (e.reasoning) console.log(`    reasoning: ${e.reasoning}`);
   });
@@ -109,7 +109,7 @@ function main() {
   console.log("✓ Epoch sealed\n");
 
   const epochs = sg.listEpochs();
-  epochs.forEach((e: any) => {
+  epochs.forEach((e) => {
     console.log(`  ${e.id} [${e.status}] — ${e.description}`);
   });
   console.log();
@@ -117,7 +117,7 @@ function main() {
   // ─── 10. Full audit trail ────────────────────────────────────
   console.log("--- Commit log ---\n");
   const log = sg.log();
-  [...log].reverse().forEach((c: any) => {
+  [...log].reverse().forEach((c) => {
     console.log(`  ${c.id} [${c.intent.category}] ${c.intent.description}`);
     if (c.reasoning) {
       const short = c.reasoning.length > 60 ? c.reasoning.slice(0, 60) + "..." : c.reasoning;

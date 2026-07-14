@@ -12,10 +12,9 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
 default = []
-# Enables Postgres-backed storage in the FFI — required for
-# CTXone Pro and any other Postgres-first consumer that links
-# through the C ABI. Adds the `agentstategraph_new_postgres`
-# extern.
+# Enables Postgres-backed storage in the FFI — for any
+# Postgres-first consumer that links through the C ABI.
+# Adds the `agentstategraph_new_postgres` extern.
 postgres = ["agentstategraph-storage/postgres", "dep:tokio"]
 
 [dependencies]

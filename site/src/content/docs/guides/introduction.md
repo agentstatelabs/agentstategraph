@@ -42,7 +42,7 @@ Every state change in AgentStateGraph captures the **full provenance chain**:
 - **73 MCP tools** — any agent can connect immediately
 - **HTTP REST API** — run with `--http`
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
-- **6 language bindings** — Rust, Python, TypeScript, Go, WASM, C FFI
+- **7 language bindings** — Rust, Python, TypeScript, Go, .NET / C#, WASM, C FFI
 - **4 storage backends** — in-memory, SQLite, Postgres (multi-tenant), and IndexedDB in the browser
 - **Plans & Tasks** — shared `agentstategraph-tasks` primitive with state machine, proofs, blockers, agent assignment, and process-safe CAS writes
 - **Reminders** — `agentstategraph-reminders` pull-based scheduling with priority, recurrence, and approval gating

@@ -8,7 +8,7 @@ use agentstategraph_tasks::{Priority, TaskStore};
 
 /// Two TaskStores with different prefixes sharing one Repository must
 /// not see each other's data. This is the core invariant of the
-/// prefix-binding pattern — CTXone and ThreadWeaver can coexist in the
+/// prefix-binding pattern — two consumers can coexist in the
 /// same repo by picking non-overlapping prefixes.
 #[test]
 fn two_stores_with_different_prefixes_do_not_interfere() {
@@ -17,7 +17,7 @@ fn two_stores_with_different_prefixes_do_not_interfere() {
     )));
     repo.init().unwrap();
 
-    let plans = TaskStore::new(repo.clone(), "/plans", "ctxone-agent");
+    let plans = TaskStore::new(repo.clone(), "/plans", "app-a-agent");
     let threads = TaskStore::new(repo.clone(), "/threads/tasks", "tw-agent");
 
     plans.create_plan("main", "website-v2", None).unwrap();

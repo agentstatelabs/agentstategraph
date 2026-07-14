@@ -1,8 +1,7 @@
 # Policy Guide
 
-_User-facing guide to the `agentstategraph-policy` crate and the 9 policy
-MCP tools. Shipped in 0.6.0-beta.1. For the canonical design rationale
-see `/strategy/POLICY_V1.md` (private to agentstatelabs)._
+_User-facing guide to the `agentstategraph-policy` crate and its policy
+MCP tools._
 
 ## What Policy is for
 
@@ -89,7 +88,7 @@ the same substrate as everything else.
   // Lifecycle
   "proposed_by": "claude-code",
   "proposed_at": "2026-04-21T14:30:00Z",
-  "ratified_by": "alice@agentstatelabs",
+  "ratified_by": "alice@example.com",
   "ratified_at": "2026-04-21T15:00:00Z",
   "active_from": "2026-04-21T15:00:00Z",
   "expires_at":  null,
@@ -253,9 +252,9 @@ Lens UI tomorrow) dispatches them.
 
 ## Soft enforcement — read this before marketing
 
-From `POLICY_V1.md` §11: *"CTXone cannot physically stop a misbehaving
-agent from doing something a policy denies. The evaluation tells the
-agent what's allowed; the agent still has to respect the decision."*
+AgentStateGraph cannot physically stop a misbehaving agent from doing
+something a policy denies. The evaluation tells the agent what's
+allowed; the agent still has to respect the decision.
 
 The value is:
 
@@ -356,10 +355,6 @@ verdicts in one response — `can_proceed` is the conjunction of
 ## Related docs
 
 - `spec/AGENTSTATEGRAPH-RFC.md` — the primitive substrate
-- `spec/POLICY-IMPLEMENTATION-PLAN.md` — the 0.6.0-beta.1 execution plan
-- `spec/SECURITY-THREAT-MODEL.md` — threat surfaces across the stack
-- `spec/0.7.5-PLAN.md` — advanced policy implementation plan
-- `spec/0.7.75-PLAN.md` — taint / quarantine / watch implementation plan
 - `docs/POLICY-EVALUATOR-ABI.md` — WASM external-evaluator ABI
 - `docs/TAINT_GUIDE.md` — taint substrate user guide
 - `crates/agentstategraph-mcp/README.md` — MCP tool surface

@@ -1,0 +1,91 @@
+name: npm
+
+# Builds the napi addon for every supported platform and publishes the
+# `agentstategraph` npm package (prebuilds bundled) on a tag push.
+#
+# Requires repo secret NPM_TOKEN (npm automation token).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: bindings/typescript
+
+jobs:
+  build:
+    name: addon (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross_linker: gcc-aarch64-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          targets: ${{ matrix.target }}
+
+      - name: Cross toolchain (aarch64 linux)
+        if: matrix.cross_linker != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cross_linker }}
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - run: npm ci
+
+      - name: Build addon
+        run: npx napi build --release --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: addon-${{ matrix.target }}
+          path: bindings/typescript/agentstategraph.*.node
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Collect prebuilt addons
+        uses: actions/download-artifact@v4
+        with:
+          pattern: addon-*
+          merge-multiple: true
+          path: bindings/typescript
+
+      - name: Publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

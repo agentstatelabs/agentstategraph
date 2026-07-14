@@ -121,7 +121,7 @@ A single AgentStateGraph deployment can back many projects or tenants without gi
 
 ## Try It Now
 
-AgentStateGraph is source-available under [BSL 1.1](https://github.com/agentstatelabs/AgentStateGraph/blob/main/LICENSE) (free for all production use; converts to Apache 2.0 after four years) and available today:
+AgentStateGraph is source-available under [BSL 1.1](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE) (free for all production use; converts to Apache 2.0 after four years) and available today:
 
 **As an MCP server** (connect to Claude, GPT, or any MCP agent):
 ```bash
@@ -145,9 +145,9 @@ sg.set("/name", "prod", "init", category="Checkpoint")
 
 **From TypeScript, Go, or WASM** -- all supported.
 
-73 MCP tools across 14 crates. Six language bindings. Four storage backends. Full RFC specification.
+73 MCP tools across 15 crates. Seven language bindings. Four storage backends. Full RFC specification.
 
-**GitHub**: [github.com/agentstatelabs/AgentStateGraph](https://github.com/agentstatelabs/AgentStateGraph)
+**GitHub**: [github.com/agentstatelabs/agentstategraph](https://github.com/agentstatelabs/agentstategraph)
 
 ## What's Next
 
@@ -159,4 +159,4 @@ AgentStateGraph is one of the missing infrastructure primitives for the intent-b
 
 ---
 
-*Craig Brown -- [GitHub](https://github.com/agentstatelabs/AgentStateGraph)*
+*Craig Brown -- [GitHub](https://github.com/agentstatelabs/agentstategraph)*

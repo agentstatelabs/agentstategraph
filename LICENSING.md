@@ -69,8 +69,8 @@ customers, you need a commercial license. Contact us at
 Every version of AgentStateGraph automatically converts to the
 **Apache License 2.0** four years after its release date:
 
-- **v0.4.0-beta.1** becomes Apache 2.0 four years after its
-  publication date
+- **v0.9.2** (published 2026-07-13) becomes Apache 2.0 on
+  **2030-07-13**
 - Future versions follow the same rolling per-version pattern
 
 After conversion, all BSL restrictions lift for that version — it

@@ -3,15 +3,15 @@ title: RFC Specification
 description: Overview of the AgentStateGraph RFC-0001 specification and what each section covers.
 ---
 
-The full specification lives at [`spec/AGENTSTATEGRAPH-RFC.md`](https://github.com/agentstatelabs/AgentStateGraph/blob/main/spec/AGENTSTATEGRAPH-RFC.md) in the repository.
+The full specification lives at [`spec/AGENTSTATEGRAPH-RFC.md`](https://github.com/agentstatelabs/agentstategraph/blob/main/spec/AGENTSTATEGRAPH-RFC.md) in the repository.
 
 **Status:** Stable
 **Authors:** Craig Brown
 **Created:** 2026-04-04
 **Updated:** 2026-05-02
-**RFC Version:** 0.8.0 · **Current implementation:** 0.9.1
+**RFC Version:** 0.8.0 · **Current implementation:** 0.9.2
 
-> The tool, crate, and capability counts on this page reflect the current 0.9.1 implementation. The formal RFC text is at 0.8.0; capabilities added since — most notably [Namespaces](/guides/namespaces/) (0.9.x) — are documented in the [Capabilities guides](/guides/policy/) pending a normative RFC revision.
+> The tool, crate, and capability counts on this page reflect the current 0.9.2 implementation. The formal RFC text is at 0.8.0; capabilities added since — most notably [Namespaces](/guides/namespaces/) (0.9.x) — are documented in the [Capabilities guides](/guides/policy/) pending a normative RFC revision.
 
 ---
 
@@ -69,7 +69,7 @@ Optional schema annotations for validation and merge behavior.
 
 How AgentStateGraph exposes itself as an MCP server.
 
-- **7.1 Tools** -- All 73 tools: 36 core (state, branching, speculation, query/audit, namespaces, epochs, sessions, explorer), 10 tasks, 11 policy, 9 taint, 7 reminders. Full parameter schemas, descriptions, and example inputs/outputs documented in the [MCP Tools Reference](/reference/mcp-tools).
+- **7.1 Tools** -- All 73 tools: 36 core (state, branching, speculation, query/audit, namespaces, epochs, sessions, explorer), 10 tasks, 12 policy, 8 taint, 7 reminders. Full parameter schemas, descriptions, and example inputs/outputs documented in the [MCP Tools Reference](/reference/mcp-tools).
 - **7.2 Resources** -- MCP resource endpoints for state at paths.
 - **7.3 Events** -- MCP event notifications for state changes.
 
@@ -90,7 +90,7 @@ Declarative, multi-engine access control with tamper-evident ratification.
 - **9.2 Evaluation Engines** -- Pluggable evaluators: built-in rule engine, Rego (OPA), WASM (any language compiled to WASM), Cedar (Amazon). Engine kind is stored with the policy.
 - **9.3 Ed25519 Signing** -- Policies can be signed with Ed25519 keys. `policy_sign` canonicalizes the policy (sorted JSON, signature field excluded) before signing. `policy_verify` checks all signatures. Ratification requires valid signatures from all required signers.
 - **9.4 Decisions and Cost-of-Change Gating** -- Evaluation yields a `Decision` (`Allow`, `Deny`, `RequireApproval`, `NoPolicyMatch`) with precedence `deny > require_approval > allow`. `RequireApproval` carries a fallback action (`Block`, `PickAlternative`, `LowestRiskAlternative`, `KeepCurrentState`, `DelegateTo`) so agents have a defined path while approval is pending. Policies can also encode token-cost thresholds for agents operating within budget constraints.
-- **9.5 MCP Tools** -- 11 tools: policy_propose, policy_ratify, policy_sign, policy_verify, policy_supersede, policy_show, policy_list, policy_history, policy_evaluate, policy_evaluate_change, policy_check_tokens.
+- **9.5 MCP Tools** -- 12 tools: policy_propose, policy_ratify, policy_sign, policy_verify, policy_supersede, policy_show, policy_list, policy_history, policy_evaluate, policy_evaluate_change, policy_check_tokens, policy_evaluate_change_with_taints.
 
 ### 10. Reminders
 
@@ -153,7 +153,7 @@ Implementation details and test coverage.
 - **14.2 Rust Reference Library** -- The `agentstategraph` crate with Repository API.
 - **14.3 MCP Server** -- The `agentstategraph-mcp` crate with all 73 tools plus the `migrate` subcommand.
 - **14.4 Getting Started Example** -- End-to-end code walkthrough.
-- **14.5 Implementation Test Suite** -- A comprehensive test suite across 14 crates covering all operations, storage backends, namespace isolation, policy engines, taint propagation, and reminder lifecycle.
+- **14.5 Implementation Test Suite** -- A comprehensive test suite across 15 crates covering all operations, storage backends, namespace isolation, policy engines, taint propagation, and reminder lifecycle.
 
 ### 15. Open Questions
 
