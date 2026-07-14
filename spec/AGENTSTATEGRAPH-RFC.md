@@ -2355,7 +2355,7 @@ AgentStateGraph/
 │   └── AGENTSTATEGRAPH-RFC.md  # This document
 │
 └── examples/
-    ├── cluster-management/     # Multi-node cluster state (AgentStateLabs/Jetson)
+    ├── cluster-management/     # Multi-node cluster state (multi-node edge cluster)
     ├── multi-agent/            # Three agents coordinating on shared state
     └── creative-app/           # Human-AI collaborative state editing
 ```

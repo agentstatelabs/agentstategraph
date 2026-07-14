@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# GitLab server-side pre-receive gate. Because GitLab push-mirroring to
+# GitHub is automatic (no hook between GitLab and GitHub), this is the
+# authoritative enforcement point: content that never enters GitLab can
+# never be mirrored to the public GitHub repo.
+#
+# Install on the GitLab server (self-managed):
+#   - copy this file to the repo's custom hooks dir, e.g.
+#       <repo>.git/custom_hooks/pre-receive   (per-project), or
+#       <gitlab-shell>/hooks/pre-receive.d/leak-scan   (global), and
+#   - make leak-scan.sh reachable (vendor it next to the hook or set SCAN=).
+#   - chmod +x both.
+#
+# GitLab passes "<old> <new> <ref>" lines on stdin.
+
+set -euo pipefail
+
+# Point this at a checked-out copy of leak-scan.sh on the server, or vendor
+# it alongside this hook.
+SCAN="${LEAKSCAN_BIN:-$(dirname "$0")/leak-scan.sh}"
+[ -x "$SCAN" ] || { echo "pre-receive: leak-scan not found at ${SCAN}" >&2; exit 1; }
+
+# Forward stdin (old/new/ref lines) straight to the scanner's pre-receive mode.
+if ! bash "$SCAN" --pre-receive; then
+  echo "pre-receive: BLOCKED — push contains internal/private content. Nothing was stored or mirrored." >&2
+  exit 1
+fi
+exit 0

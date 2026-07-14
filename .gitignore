@@ -6,7 +6,23 @@ node_modules
 *.node
 site/dist
 site/.astro
+
+# AI-assistant working/session artifacts — may expose local paths or agent
+# work. NOTE: editor configs (.vscode/) and committed-by-design guidance/rule
+# files (CLAUDE.md, AGENTS.md, .cursor/rules) are intentionally NOT ignored,
+# and neither are asd/ctx generated files.
 .claude/
+.cursor/chat/
+.aider*
+.gemini/
+.continue/
+.codeium/
+.specstory/
+.windsurf/
+.mcp.json
+
+# Org-specific leak-scan denylist — private, distributed via the enterprise repo
+.leakscan.local
 
 # Local-only cargo config (e.g. machine-specific PYO3_PYTHON) — never commit machine paths
 .cargo/config.toml

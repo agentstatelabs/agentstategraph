@@ -62,7 +62,7 @@ permitted.
 If you want to embed AgentStateGraph into a product you distribute
 to third parties, resell it, or run a hosted ASG service for
 customers, you need a commercial license. Contact us at
-**licensing@agentstatelabs.com**.
+**license@agentstatelabs.com**.
 
 ## Automatic conversion to Apache 2.0
 
@@ -114,7 +114,7 @@ Those releases retain their original license.
 If your use case requires terms beyond the BSL 1.1 grant — for
 example, you want to embed AgentStateGraph into a product you
 distribute, or offer a hosted ASG service to customers — contact us
-at **licensing@agentstatelabs.com** for commercial licensing options.
+at **license@agentstatelabs.com** for commercial licensing options.
 
 We offer two commercial tiers:
 
@@ -126,8 +126,8 @@ We offer two commercial tiers:
 ## Questions
 
 If you're unsure whether your use case is covered by the BSL 1.1
-grant, email **licensing@agentstatelabs.com** and we'll clarify.
+grant, email **license@agentstatelabs.com** and we'll clarify.
 The bar is straightforward: internal use is free; redistribution or
 hosted resale requires a commercial license.
 
-Contact: **licensing@agentstatelabs.com**
+Contact: **license@agentstatelabs.com**
