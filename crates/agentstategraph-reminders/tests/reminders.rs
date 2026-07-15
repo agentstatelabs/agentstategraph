@@ -146,25 +146,26 @@ fn remind_me_orders_by_priority_then_due_at() {
 }
 
 #[test]
-fn remind_me_includes_awaiting_permission() {
+fn remind_me_gates_non_autonomous_to_awaiting_permission() {
     let mgr = manager();
-    let r = mgr
-        .create(CreateReminder::new("needs approval", "i", past(1), "a").with_autonomous(false))
+    // Autonomous + past due → promoted straight to Due (pre-approved).
+    let auto = mgr
+        .create(CreateReminder::new("auto", "i", past(2), "a").with_autonomous(true))
         .unwrap();
-    // Manually set to AwaitingPermission (as manager would after non-autonomous creation path)
-    let mut reminder = mgr.get(&r.id).unwrap();
-    reminder.status = ReminderStatus::AwaitingPermission;
-    // Use list directly via the store indirection — test the manager's remind_me pick-up
-    // by setting status and re-saving via cancel+recreate workaround isn't clean;
-    // better to test via the approve flow below. Here just verify remind_me promotes it.
-    drop(reminder);
+    // Non-autonomous + past due → held at AwaitingPermission until approved.
+    let manual = mgr
+        .create(CreateReminder::new("manual", "i", past(1), "a").with_autonomous(false))
+        .unwrap();
 
-    mgr.remind_me().unwrap(); // promotes past-due pending → Due
-    let fetched = mgr.get(&r.id).unwrap();
-    // It should be Due now (past due + autonomous=false still gets promoted by remind_me)
-    assert!(
-        fetched.status == ReminderStatus::Due
-            || fetched.status == ReminderStatus::AwaitingPermission
+    let actionable = mgr.remind_me().unwrap();
+    // Both surface as actionable, but with different statuses.
+    assert!(actionable.iter().any(|x| x.id == auto.id));
+    assert!(actionable.iter().any(|x| x.id == manual.id));
+    assert_eq!(mgr.get(&auto.id).unwrap().status, ReminderStatus::Due);
+    assert_eq!(
+        mgr.get(&manual.id).unwrap().status,
+        ReminderStatus::AwaitingPermission,
+        "non-autonomous reminders must not auto-promote to Due"
     );
 }
 
@@ -221,9 +222,10 @@ fn approve_awaiting_permission_moves_to_due() {
     let r = mgr
         .create(CreateReminder::new("t", "i", past(1), "a").with_autonomous(false))
         .unwrap();
-    // remind_me promotes to Due (lazy); for non-autonomous the agent should set
-    // AwaitingPermission — we test approve from Due state (also valid)
+    // remind_me holds a non-autonomous past-due reminder at AwaitingPermission;
+    // approve then transitions it to Due.
     mgr.remind_me().unwrap();
+    assert_eq!(mgr.get(&r.id).unwrap().status, ReminderStatus::AwaitingPermission);
     let approved = mgr.approve(&r.id, "human/alice").unwrap();
     assert_eq!(approved.status, ReminderStatus::Due);
 }

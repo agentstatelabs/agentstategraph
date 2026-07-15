@@ -64,7 +64,14 @@ impl ReminderManager {
         })?;
         for mut r in pending {
             if r.due_at <= now {
-                r.status = ReminderStatus::Due;
+                // Non-autonomous reminders require approval before they become
+                // actionable — route them to AwaitingPermission, not straight
+                // to Due. (Autonomous ones are pre-approved.)
+                r.status = if r.autonomous {
+                    ReminderStatus::Due
+                } else {
+                    ReminderStatus::AwaitingPermission
+                };
                 self.store.update(&r)?;
             }
         }
@@ -77,7 +84,13 @@ impl ReminderManager {
         for mut r in snoozed {
             let wake = r.snoozed_until.unwrap_or(r.due_at);
             if wake <= now {
-                r.status = ReminderStatus::Due;
+                // Same approval gate on wake: a non-autonomous reminder must be
+                // re-approved before it can run again.
+                r.status = if r.autonomous {
+                    ReminderStatus::Due
+                } else {
+                    ReminderStatus::AwaitingPermission
+                };
                 r.snoozed_until = None;
                 self.store.update(&r)?;
             }
