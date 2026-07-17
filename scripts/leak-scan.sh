@@ -46,6 +46,13 @@ BLOCK=(
 # --- WARN: reported, does not fail ----------------------------------------
 WARN=()  # org-specific project names are appended by .leakscan.local
 
+# --- ALLOW_CONTENT: matching lines are dropped BEFORE counting -------------
+# Kills false positives from documentation placeholders (e.g. /Users/user in a
+# doc example is not a real home-path leak). Extend via .leakscan.local.
+ALLOW_CONTENT=(
+  '/(Users|home)/(x|you|me|user|username|name|alice|bob|carol|example|USER|USERNAME)([/."'\''<> ]|$)'
+)
+
 # --- ALLOW: pathspecs never scanned (this tool + noise) -------------------
 ALLOW_PATHS=(
   ':!scripts/leak-scan.sh'
@@ -75,6 +82,12 @@ scan_ref() {
       out=$(git grep -nIE -e "$p" -- "${ALLOW_PATHS[@]}" 2>/dev/null || true)
     fi
     [ -z "$out" ] && continue
+    # Drop lines matching an ALLOW_CONTENT placeholder before counting.
+    if [ "${#ALLOW_CONTENT[@]}" -gt 0 ]; then
+      allow_re=$(printf '%s|' "${ALLOW_CONTENT[@]}"); allow_re="${allow_re%|}"
+      out=$(printf '%s\n' "$out" | grep -vE "$allow_re" || true)
+      [ -z "$out" ] && continue
+    fi
     while IFS= read -r line; do
       # For a committish, git grep already prefixes "<commit>:"; only the
       # working-tree scan needs a label.
