@@ -65,7 +65,7 @@ publish-wheel:
 # prerequisites are missing. Without this, a mis-scoped publish job produces
 # no pipeline at all — silent, and easy to miss for days.
 ci-guard:
-  stage: build
+  stage: check
   image: alpine:latest
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
