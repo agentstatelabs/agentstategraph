@@ -61,3 +61,18 @@ publish-wheel:
       twine upload --non-interactive
       --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
       dist/*.whl
+# ci-guard: guarantees a NON-EMPTY pipeline and fails loudly if the publish
+# prerequisites are missing. Without this, a mis-scoped publish job produces
+# no pipeline at all — silent, and easy to miss for days.
+ci-guard:
+  stage: build
+  image: alpine:latest
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - echo "pipeline ran for $CI_COMMIT_SHORT_SHA on $CI_COMMIT_BRANCH"
+    - |
+      if [ -z "$GITHUB_REPO" ]; then
+        echo "ERROR: GITHUB_REPO unset -> publish-github will NOT run"; exit 1
+      fi
+      echo "publish-github target: $GITHUB_REPO"
