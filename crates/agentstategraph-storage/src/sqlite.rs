@@ -30,9 +30,25 @@ pub struct SqliteStorage {
 
 impl SqliteStorage {
     /// Open or create a SQLite database at the given path.
+    ///
+    /// Tunes durability for a write-heavy, single-writer graph store. The stock
+    /// SQLite defaults (`journal_mode=DELETE`, `synchronous=FULL`) fsync a
+    /// rollback journal on *every* commit; a bulk import that does thousands of
+    /// commits then lives entirely in the writer. `WAL` + `synchronous=NORMAL`
+    /// appends commits to one log and fsyncs only at checkpoints, which on a
+    /// full session import measured several times faster. The durability
+    /// trade-off is bounded and appropriate: under `NORMAL`+WAL a crash or power
+    /// loss can drop only the last few not-yet-checkpointed commits (never
+    /// corruption), and this store is rebuildable from its source transcripts.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let conn = Connection::open(path)
             .map_err(|e| StorageError::Backend(format!("sqlite open: {}", e)))?;
+        // Best-effort: a pragma failure leaves the slower-but-correct default.
+        // `journal_mode` returns the new mode as a row, so it needs a query
+        // rather than `pragma_update` (which rejects result rows).
+        let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0));
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let storage = Self {
             conn: Mutex::new(conn),
         };
