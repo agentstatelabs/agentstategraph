@@ -5,6 +5,11 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.9.6] — 2026-07-23
+
+### Added
+- `Repository::merge_base(source, target)` exposes the lowest-common-ancestor commit of two refs, so callers can reason about what each side changed relative to the branch point — required for correct domain-level merge policies (e.g. distinguishing a genuine `done→pending` regression from a source branch that simply predates the target's completion).
+
 ## [0.9.5] — 2026-07-23
 
 Theme: **merge data-loss fix and ref-spec resolution.**

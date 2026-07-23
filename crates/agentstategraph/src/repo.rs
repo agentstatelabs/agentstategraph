@@ -797,6 +797,15 @@ impl Repository {
         }
     }
 
+    /// Resolve the merge base (lowest common ancestor commit) of two refs.
+    /// Useful for callers that need to reason about what each side changed
+    /// relative to the branch point — e.g. domain-level merge policies.
+    pub fn merge_base(&self, source: &str, target: &str) -> Result<ObjectId, RepoError> {
+        let source_commit_id = self.resolve_ref(source)?;
+        let target_commit_id = self.resolve_ref(target)?;
+        self.find_common_ancestor(&source_commit_id, &target_commit_id)
+    }
+
     /// Compute what merging `source` into `target` WOULD do, without advancing
     /// any ref or storing a commit. Returns a summary of top-level additions,
     /// changes, and removals plus any conflicts — the basis for a `--dry-run`.

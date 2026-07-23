@@ -126,6 +126,18 @@ fn merge_checked_blocks_top_level_deletion() {
     assert!(r.get("main", "/plans/p1/status").is_err(), "/plans should be gone now");
 }
 
+/// merge_base returns the branch-point commit shared by two refs.
+#[test]
+fn merge_base_is_branch_point() {
+    let r = repo();
+    let base = r.set("main", "/x", &Object::int(1), opts("base")).unwrap();
+    r.branch("src", "main").unwrap();
+    r.set("main", "/y", &Object::int(2), opts("target moves")).unwrap();
+    r.set("src", "/z", &Object::int(3), opts("source moves")).unwrap();
+    assert_eq!(r.merge_base("src", "main").unwrap(), base);
+    assert_eq!(r.merge_base("main", "src").unwrap(), base);
+}
+
 /// preview_merge reports additions/removals without mutating the target.
 #[test]
 fn preview_merge_summarizes_without_committing() {
