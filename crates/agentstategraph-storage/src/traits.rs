@@ -93,6 +93,14 @@ pub trait CommitStore: Send + Sync {
     /// List commits reachable from a given commit, in reverse chronological order.
     /// Returns at most `limit` commits.
     fn list_commits(&self, from: &ObjectId, limit: usize) -> Result<Vec<Commit>, StorageError>;
+
+    /// Return the ids of every commit in the store, unordered.
+    ///
+    /// Unlike [`CommitStore::list_commits`] this is NOT reachability-scoped: it
+    /// includes commits that no ref currently points at (e.g. the tip of a
+    /// deleted branch). Used for prefix-based ref resolution and for recovering
+    /// orphaned historical commits.
+    fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError>;
 }
 
 /// Named ref management with atomic compare-and-swap.

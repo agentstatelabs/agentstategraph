@@ -5,6 +5,18 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [0.9.5] — 2026-07-23
+
+Theme: **merge data-loss fix and ref-spec resolution.**
+
+### Fixed
+- **Merge no longer erases nested maps.** When a merge combined a nested map that both branches had touched (e.g. `/plans`), the engine fabricated a new intermediate node but never persisted it — only its id was embedded in the parent — so the committed tree dangled with `ObjectNotFound` on readback, presenting as an erased subtree. `three_way_merge` now has a collecting variant (`three_way_merge_collect`) that returns every fabricated composite, and `Repository::merge` persists them all before advancing the ref. The dead `store_object_tree` helper is removed.
+- **Correct merge base.** `find_common_ancestor` walked only the first parent and fell back to the root commit, so once merge commits existed it could pick too old a base and treat the target's own keys as deletions. It now computes a true DAG-aware lowest common ancestor and errors on genuinely disjoint histories instead of guessing.
+
+### Added
+- **Ref-spec resolution.** `Repository::resolve_ref` (and therefore `branch --from`, `merge`, `diff`, `read`, …) now accepts a branch name, a full commit hash (with or without the `sg_` prefix), or a unique `sg_`/hex commit-id prefix, including orphaned commits from deleted branches. New `RepoError::CommitNotFound` and `RepoError::AmbiguousCommitPrefix` distinguish the failure modes; `ObjectId::from_hex` / `to_hex` / `normalize_hex_prefix` and `CommitStore::all_commit_ids` support it.
+- **Merge deletion guard and dry-run.** `Repository::merge_checked(source, target, opts, allow_deletions)` refuses to advance the target ref when the merge would remove a top-level entry unless `allow_deletions` is set (`RepoError::MergeWouldDelete`). `Repository::preview_merge` returns a `MergePreview` (added / changed / removed top-level keys and conflicts) without mutating anything.
+
 ## [0.9.2] — 2026-07-13
 
 Theme: **first public release.** Repository, license, and documentation prepared for open publication. No functional API changes from 0.9.1.

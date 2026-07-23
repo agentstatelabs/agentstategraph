@@ -91,32 +91,54 @@ pub fn three_way_merge(
     ours: &ObjectId,
     theirs: &ObjectId,
 ) -> MergeResult {
+    three_way_merge_collect(resolver, base, ours, theirs).0
+}
+
+/// Like [`three_way_merge`], but also returns every newly-created composite
+/// object produced during the merge.
+///
+/// The merged tree is content-addressed: parent nodes reference their children
+/// by `ObjectId`, so when the merge fabricates a new intermediate node (a map
+/// whose key set existed on neither side), only its id is embedded in the
+/// parent. Those fabricated objects are NOT in any store yet. Callers that
+/// intend to commit the merge MUST persist every object in the returned vec
+/// (which includes the root) before advancing a ref, or the resulting tree will
+/// dangle with `ObjectNotFound` on readback.
+///
+/// The vec is empty for fast-forward results (no new objects are created).
+pub fn three_way_merge_collect(
+    resolver: &dyn ObjectResolver,
+    base: &ObjectId,
+    ours: &ObjectId,
+    theirs: &ObjectId,
+) -> (MergeResult, Vec<Object>) {
     // Fast-forward cases
     if base == ours {
-        return MergeResult::FastForward(*theirs);
+        return (MergeResult::FastForward(*theirs), Vec::new());
     }
     if base == theirs {
-        return MergeResult::FastForward(*ours);
+        return (MergeResult::FastForward(*ours), Vec::new());
     }
     if ours == theirs {
-        return MergeResult::FastForward(*ours);
+        return (MergeResult::FastForward(*ours), Vec::new());
     }
 
     let base_obj = match resolver.resolve(base) {
         Some(obj) => obj,
-        None => return MergeResult::FastForward(*theirs),
+        None => return (MergeResult::FastForward(*theirs), Vec::new()),
     };
     let ours_obj = match resolver.resolve(ours) {
         Some(obj) => obj,
-        None => return MergeResult::FastForward(*theirs),
+        None => return (MergeResult::FastForward(*theirs), Vec::new()),
     };
     let theirs_obj = match resolver.resolve(theirs) {
         Some(obj) => obj,
-        None => return MergeResult::FastForward(*ours),
+        None => return (MergeResult::FastForward(*ours), Vec::new()),
     };
 
     let path = String::from("/");
     let mut conflicts = Vec::new();
+    let mut created = Vec::new();
 
     let merged = merge_objects(
         resolver,
@@ -125,16 +147,18 @@ pub fn three_way_merge(
         &ours_obj,
         &theirs_obj,
         &mut conflicts,
+        &mut created,
     );
 
-    if conflicts.is_empty() {
+    let result = if conflicts.is_empty() {
         MergeResult::Success(merged)
     } else {
         MergeResult::Conflicts {
             partial: merged,
             conflicts,
         }
-    }
+    };
+    (result, created)
 }
 
 /// Core recursive merge logic.
@@ -145,6 +169,7 @@ fn merge_objects(
     ours: &Object,
     theirs: &Object,
     conflicts: &mut Vec<Conflict>,
+    created: &mut Vec<Object>,
 ) -> Object {
     // If both sides are identical, no conflict
     if ours == theirs {
@@ -173,6 +198,7 @@ fn merge_objects(
             our_entries,
             their_entries,
             conflicts,
+            created,
         ),
 
         // All three are lists — element-wise merge (limited)
@@ -187,6 +213,7 @@ fn merge_objects(
             our_items,
             their_items,
             conflicts,
+            created,
         ),
 
         // All three are sets — union
@@ -194,7 +221,7 @@ fn merge_objects(
             Object::Node(Node::Set(_base_items)),
             Object::Node(Node::Set(our_items)),
             Object::Node(Node::Set(their_items)),
-        ) => merge_sets(our_items, their_items),
+        ) => merge_sets(our_items, their_items, created),
 
         // Both are atoms but different — conflict
         (Object::Atom(_), Object::Atom(_), Object::Atom(_)) => {
@@ -230,6 +257,7 @@ fn merge_maps(
     our_entries: &BTreeMap<String, ObjectId>,
     their_entries: &BTreeMap<String, ObjectId>,
     conflicts: &mut Vec<Conflict>,
+    created: &mut Vec<Object>,
 ) -> Object {
     let mut merged = BTreeMap::new();
 
@@ -265,9 +293,12 @@ fn merge_maps(
 
                     match (base_obj, our_obj, their_obj) {
                         (Some(bo), Some(oo), Some(to)) => {
-                            let merged_child =
-                                merge_objects(resolver, &child_path, &bo, &oo, &to, conflicts);
-                            // Store the merged object — we need to compute its ID
+                            let merged_child = merge_objects(
+                                resolver, &child_path, &bo, &oo, &to, conflicts, created,
+                            );
+                            // Reference the merged child by id. merge_objects has
+                            // already recorded any newly-created composite in
+                            // `created` so the caller can persist it.
                             let merged_id = merged_child.id();
                             merged.insert(key.clone(), merged_id);
                         }
@@ -364,7 +395,9 @@ fn merge_maps(
         }
     }
 
-    Object::map(merged)
+    let obj = Object::map(merged);
+    created.push(obj.clone());
+    obj
 }
 
 fn merge_lists(
@@ -374,11 +407,14 @@ fn merge_lists(
     our_items: &[ObjectId],
     their_items: &[ObjectId],
     conflicts: &mut Vec<Conflict>,
+    created: &mut Vec<Object>,
 ) -> Object {
     // Simple list merge: if lengths differ or elements differ, conflict
     // Future: smarter merge with move detection
     if our_items == their_items {
-        return Object::list(our_items.to_vec());
+        let obj = Object::list(our_items.to_vec());
+        created.push(obj.clone());
+        return obj;
     }
 
     // For now, if both sides modified the list differently, it's a conflict
@@ -400,15 +436,23 @@ fn merge_lists(
     });
 
     // Default to ours
-    Object::list(our_items.to_vec())
+    let obj = Object::list(our_items.to_vec());
+    created.push(obj.clone());
+    obj
 }
 
-fn merge_sets(our_items: &[ObjectId], their_items: &[ObjectId]) -> Object {
+fn merge_sets(
+    our_items: &[ObjectId],
+    their_items: &[ObjectId],
+    created: &mut Vec<Object>,
+) -> Object {
     // Sets merge via union — no conflicts possible
     let mut combined: std::collections::BTreeSet<ObjectId> = std::collections::BTreeSet::new();
     combined.extend(our_items.iter().copied());
     combined.extend(their_items.iter().copied());
-    Object::set(combined.into_iter().collect())
+    let obj = Object::set(combined.into_iter().collect());
+    created.push(obj.clone());
+    obj
 }
 
 #[cfg(test)]

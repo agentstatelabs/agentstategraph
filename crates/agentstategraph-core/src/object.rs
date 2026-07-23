@@ -36,6 +36,41 @@ impl ObjectId {
     pub fn short(&self) -> String {
         format!("sg_{}", to_hex(&self.0[..6]))
     }
+
+    /// Full 64-character lowercase hex of the 32-byte id, WITHOUT the `sg_`
+    /// display prefix. Useful for prefix matching against a stored id.
+    pub fn to_hex(&self) -> String {
+        to_hex(&self.0)
+    }
+
+    /// Parse a full commit id from hex, tolerating an optional `sg_` prefix and
+    /// surrounding whitespace. Returns `None` unless the input decodes to
+    /// exactly 32 bytes (64 hex chars). For partial ids use [`ObjectId::to_hex`]
+    /// and compare prefixes.
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let hex = s.trim().strip_prefix("sg_").unwrap_or(s.trim());
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            let hi = (chunk[0] as char).to_digit(16)?;
+            let lo = (chunk[1] as char).to_digit(16)?;
+            bytes[i] = (hi * 16 + lo) as u8;
+        }
+        Some(Self(bytes))
+    }
+
+    /// Normalize a user-supplied commit-ref fragment for prefix matching:
+    /// strips an optional `sg_` prefix and lowercases. Returns `None` if the
+    /// remainder is empty or contains non-hex characters.
+    pub fn normalize_hex_prefix(s: &str) -> Option<String> {
+        let frag = s.trim().strip_prefix("sg_").unwrap_or(s.trim());
+        if frag.is_empty() || !frag.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(frag.to_ascii_lowercase())
+    }
 }
 
 impl fmt::Display for ObjectId {

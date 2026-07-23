@@ -122,6 +122,14 @@ impl CommitStore for MemoryStorage {
         Ok(store.contains_key(id))
     }
 
+    fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
+        let store = self
+            .commits
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(store.keys().copied().collect())
+    }
+
     fn list_commits(&self, from: &ObjectId, limit: usize) -> Result<Vec<Commit>, StorageError> {
         let store = self
             .commits

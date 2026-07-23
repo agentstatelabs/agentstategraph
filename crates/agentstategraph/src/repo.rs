@@ -216,6 +216,12 @@ pub enum RepoError {
     #[error("ref not found: {0}")]
     RefNotFound(String),
 
+    #[error("commit not found: {0}")]
+    CommitNotFound(String),
+
+    #[error("ambiguous commit prefix: {prefix} matched {count} commits")]
+    AmbiguousCommitPrefix { prefix: String, count: usize },
+
     #[error("repository not initialized — call init() first")]
     NotInitialized,
 
@@ -226,6 +232,9 @@ pub enum RepoError {
 
     #[error("merge conflicts: {0:?}")]
     MergeConflicts(Vec<Conflict>),
+
+    #[error("merge would delete top-level entries {0:?}; pass allow_deletions to proceed")]
+    MergeWouldDelete(Vec<String>),
 
     #[error("write conflict: ref moved before CAS could land")]
     WriteConflict,
@@ -273,6 +282,55 @@ pub enum RepoError {
         source: agentstategraph_taint::TaintError,
         taint_id: Option<String>,
     },
+}
+
+/// Summary of what merging one ref into another would do, produced by
+/// [`Repository::preview_merge`] without mutating any ref. All key lists are
+/// top-level entries of the state root (e.g. `plans`, `memory`).
+#[derive(Debug, Clone)]
+pub struct MergePreview {
+    /// True if the merge resolves to a fast-forward.
+    pub fast_forward: bool,
+    /// Top-level keys present after the merge but not before.
+    pub added: Vec<String>,
+    /// Top-level keys whose subtree id changes.
+    pub changed: Vec<String>,
+    /// Top-level keys that would be removed (data-loss surface).
+    pub removed: Vec<String>,
+    /// Conflicts that block a clean merge, if any.
+    pub conflicts: Vec<Conflict>,
+}
+
+impl MergePreview {
+    /// Whether committing this merge would remove any top-level entry.
+    pub fn has_deletions(&self) -> bool {
+        !self.removed.is_empty()
+    }
+}
+
+/// Intermediate result of a merge computed but not yet committed.
+struct MergeComputation {
+    source_commit_id: ObjectId,
+    target_commit_id: ObjectId,
+    source_state_root: ObjectId,
+    target_state_root: ObjectId,
+    result: MergeResult,
+    created: Vec<Object>,
+}
+
+enum MergeResultKind {
+    Success,
+    Conflicts,
+    FastForward,
+}
+
+/// Top-level map entries (key -> child id) of an object, or empty if it is not
+/// a map node.
+fn map_entries(obj: &Object) -> std::collections::BTreeMap<String, ObjectId> {
+    match obj {
+        Object::Node(agentstategraph_core::Node::Map(entries)) => entries.clone(),
+        _ => std::collections::BTreeMap::new(),
+    }
 }
 
 impl From<agentstategraph_taint::TaintError> for RepoError {
@@ -681,6 +739,140 @@ impl Repository {
         target: &str,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
+        self.merge_checked(source, target, options, true)
+    }
+
+    /// Like [`Repository::merge`], but refuses to advance the target ref when
+    /// the merge would remove any top-level entry (e.g. an entire `/plans` or
+    /// `/memory` map) unless `allow_deletions` is true. This is a data-loss
+    /// guard: the merge algorithm is correct, but a mistaken source or a
+    /// genuine deletion should not silently drop a whole subtree.
+    pub fn merge_checked(
+        &self,
+        source: &str,
+        target: &str,
+        options: CommitOptions,
+        allow_deletions: bool,
+    ) -> Result<ObjectId, RepoError> {
+        let comp = self.compute_merge(source, target)?;
+
+        if !allow_deletions {
+            let removed = self.top_level_removals(&comp)?;
+            if !removed.is_empty() {
+                return Err(RepoError::MergeWouldDelete(removed));
+            }
+        }
+
+        match comp.result {
+            MergeResult::Success(merged_obj) => {
+                // Persist every newly-created composite node BEFORE storing the
+                // root. The merged tree references children by id; nodes the
+                // merge fabricated (key sets that existed on neither branch)
+                // are not in any store yet, so skipping this leaves the tree
+                // dangling with ObjectNotFound on readback.
+                for obj in &comp.created {
+                    self.storage.put_object(obj)?;
+                }
+                let merged_root = self.storage.put_object(&merged_obj)?;
+                let commit = self.create_commit(
+                    merged_root,
+                    vec![comp.target_commit_id, comp.source_commit_id],
+                    options,
+                )?;
+                self.guarded_set_ref(target, commit.id)?;
+                Ok(commit.id)
+            }
+            MergeResult::FastForward(ff_id) => {
+                // Find the commit that has this state root
+                // In fast-forward, we just advance the target ref
+                let ff_commit = if ff_id == comp.source_state_root {
+                    comp.source_commit_id
+                } else {
+                    comp.target_commit_id
+                };
+                self.guarded_set_ref(target, ff_commit)?;
+                Ok(ff_commit)
+            }
+            MergeResult::Conflicts { conflicts, .. } => Err(RepoError::MergeConflicts(conflicts)),
+        }
+    }
+
+    /// Compute what merging `source` into `target` WOULD do, without advancing
+    /// any ref or storing a commit. Returns a summary of top-level additions,
+    /// changes, and removals plus any conflicts — the basis for a `--dry-run`.
+    pub fn preview_merge(&self, source: &str, target: &str) -> Result<MergePreview, RepoError> {
+        let comp = self.compute_merge(source, target)?;
+        let result_root = match &comp.result {
+            MergeResult::Success(obj) => obj.id(),
+            MergeResult::Conflicts { partial, .. } => partial.id(),
+            MergeResult::FastForward(state_root) => *state_root,
+        };
+        let target_entries = self.top_level_entries(&comp.target_state_root)?;
+        let merged_entries = self.top_level_entries_of_obj(&comp.result, result_root)?;
+
+        let mut added = Vec::new();
+        let mut changed = Vec::new();
+        let mut removed = Vec::new();
+        for (k, v) in &merged_entries {
+            match target_entries.get(k) {
+                None => added.push(k.clone()),
+                Some(tv) if tv != v => changed.push(k.clone()),
+                _ => {}
+            }
+        }
+        for k in target_entries.keys() {
+            if !merged_entries.contains_key(k) {
+                removed.push(k.clone());
+            }
+        }
+        added.sort();
+        changed.sort();
+        removed.sort();
+
+        let fast_forward = matches!(self.result_kind(&comp), MergeResultKind::FastForward);
+        let conflicts = match comp.result {
+            MergeResult::Conflicts { conflicts, .. } => conflicts,
+            _ => Vec::new(),
+        };
+        Ok(MergePreview {
+            fast_forward,
+            added,
+            changed,
+            removed,
+            conflicts,
+        })
+    }
+
+    fn result_kind(&self, comp: &MergeComputation) -> MergeResultKind {
+        match &comp.result {
+            MergeResult::Success(_) => MergeResultKind::Success,
+            MergeResult::Conflicts { .. } => MergeResultKind::Conflicts,
+            MergeResult::FastForward(_) => MergeResultKind::FastForward,
+        }
+    }
+
+    /// The top-level entries that would disappear from `target` if this merge
+    /// were committed.
+    fn top_level_removals(&self, comp: &MergeComputation) -> Result<Vec<String>, RepoError> {
+        let result_root = match &comp.result {
+            MergeResult::Success(obj) => obj.id(),
+            MergeResult::Conflicts { partial, .. } => partial.id(),
+            MergeResult::FastForward(state_root) => *state_root,
+        };
+        let target_entries = self.top_level_entries(&comp.target_state_root)?;
+        let merged_entries = self.top_level_entries_of_obj(&comp.result, result_root)?;
+        let mut removed: Vec<String> = target_entries
+            .keys()
+            .filter(|k| !merged_entries.contains_key(*k))
+            .cloned()
+            .collect();
+        removed.sort();
+        Ok(removed)
+    }
+
+    /// Resolve, find base, and run the collecting three-way merge without
+    /// committing. Shared by `merge_checked` and `preview_merge`.
+    fn compute_merge(&self, source: &str, target: &str) -> Result<MergeComputation, RepoError> {
         let source_commit_id = self.resolve_ref(source)?;
         let target_commit_id = self.resolve_ref(target)?;
 
@@ -693,7 +885,6 @@ impl Repository {
             .get_commit(&target_commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(target.to_string()))?;
 
-        // Find common ancestor — walk both parent chains
         let base_commit_id = self.find_common_ancestor(&source_commit_id, &target_commit_id)?;
         let base_commit = self
             .storage
@@ -703,39 +894,47 @@ impl Repository {
         let resolver = StorageResolver {
             storage: self.storage.as_ref(),
         };
-
-        let result = agentstategraph_core::merge::three_way_merge(
+        let (result, created) = agentstategraph_core::merge::three_way_merge_collect(
             &resolver,
             &base_commit.state_root,
             &target_commit.state_root,
             &source_commit.state_root,
         );
 
+        Ok(MergeComputation {
+            source_commit_id,
+            target_commit_id,
+            source_state_root: source_commit.state_root,
+            target_state_root: target_commit.state_root,
+            result,
+            created,
+        })
+    }
+
+    /// Top-level map entries (key -> child ObjectId) at a state root id.
+    fn top_level_entries(
+        &self,
+        root: &ObjectId,
+    ) -> Result<std::collections::BTreeMap<String, ObjectId>, RepoError> {
+        match self.storage.get_object(root)? {
+            Some(obj) => Ok(map_entries(&obj)),
+            None => Ok(std::collections::BTreeMap::new()),
+        }
+    }
+
+    /// Top-level entries of a merge result. For Success/Conflicts the merged
+    /// object is in hand (its children may not be stored yet); for FastForward
+    /// only an id is available, so fall back to the store.
+    fn top_level_entries_of_obj(
+        &self,
+        result: &MergeResult,
+        fallback_root: ObjectId,
+    ) -> Result<std::collections::BTreeMap<String, ObjectId>, RepoError> {
         match result {
-            MergeResult::Success(merged_obj) => {
-                let merged_root = self.storage.put_object(&merged_obj)?;
-                // Store all sub-objects that the merge created
-                self.store_object_tree(&merged_obj)?;
-                let commit = self.create_commit(
-                    merged_root,
-                    vec![target_commit_id, source_commit_id],
-                    options,
-                )?;
-                self.guarded_set_ref(target, commit.id)?;
-                Ok(commit.id)
+            MergeResult::Success(obj) | MergeResult::Conflicts { partial: obj, .. } => {
+                Ok(map_entries(obj))
             }
-            MergeResult::FastForward(ff_id) => {
-                // Find the commit that has this state root
-                // In fast-forward, we just advance the target ref
-                let ff_commit = if ff_id == source_commit.state_root {
-                    source_commit_id
-                } else {
-                    target_commit_id
-                };
-                self.guarded_set_ref(target, ff_commit)?;
-                Ok(ff_commit)
-            }
-            MergeResult::Conflicts { conflicts, .. } => Err(RepoError::MergeConflicts(conflicts)),
+            MergeResult::FastForward(_) => self.top_level_entries(&fallback_root),
         }
     }
 
@@ -1474,68 +1673,127 @@ impl Repository {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    /// Find the common ancestor of two commits by walking parent chains.
-    /// Simple implementation: collect all ancestors of one, find first match in other.
+    /// Find the best common ancestor (merge base) of two commits.
+    ///
+    /// Walks the full commit DAG following EVERY parent (merge commits have
+    /// two), not just the first — a first-parent-only walk misses the true
+    /// lowest common ancestor once merge commits exist, and picking too old a
+    /// base makes the target's own additions look like deletions to the merge
+    /// engine. Among all common ancestors, returns the deepest one (closest to
+    /// the two heads); ties are broken deterministically by commit id.
     fn find_common_ancestor(&self, a: &ObjectId, b: &ObjectId) -> Result<ObjectId, RepoError> {
-        // Collect all ancestors of 'a'
-        let mut ancestors_a = std::collections::HashSet::new();
-        let mut current = Some(*a);
-        while let Some(id) = current {
-            ancestors_a.insert(id);
-            if let Some(commit) = self.storage.get_commit(&id)? {
-                current = commit.parents.first().copied();
-            } else {
-                break;
-            }
+        if a == b {
+            return Ok(*a);
         }
+        let ancestors_a = self.ancestor_set(a)?;
 
-        // Walk ancestors of 'b' and find the first match
-        let mut current = Some(*b);
-        while let Some(id) = current {
+        // Collect every ancestor of `b` that is also an ancestor of `a`.
+        let mut common = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![*b];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
             if ancestors_a.contains(&id) {
-                return Ok(id);
+                common.push(id);
             }
             if let Some(commit) = self.storage.get_commit(&id)? {
-                current = commit.parents.first().copied();
-            } else {
-                break;
+                for p in &commit.parents {
+                    if !seen.contains(p) {
+                        stack.push(*p);
+                    }
+                }
             }
         }
 
-        // If no common ancestor found, use the initial commit of 'a'
-        // (walk to the root)
-        let mut current = Some(*a);
-        let mut last = *a;
-        while let Some(id) = current {
-            last = id;
-            if let Some(commit) = self.storage.get_commit(&id)? {
-                current = commit.parents.first().copied();
-            } else {
-                break;
+        // Pick the deepest common ancestor (largest generation = closest to the
+        // heads). Deterministic tie-break by id bytes keeps merges reproducible.
+        let mut best: Option<(u64, ObjectId)> = None;
+        for id in common {
+            let depth = self.commit_depth(&id)?;
+            let candidate = (depth, id);
+            let better = match &best {
+                None => true,
+                Some(cur) => candidate.0 > cur.0 || (candidate.0 == cur.0 && candidate.1 > cur.1),
+            };
+            if better {
+                best = Some(candidate);
             }
         }
-        Ok(last)
+        best.map(|(_, id)| id).ok_or_else(|| {
+            // Disjoint histories share no ancestor — refuse rather than
+            // silently merging against an empty/arbitrary base.
+            RepoError::RefNotFound("no common ancestor between refs".to_string())
+        })
     }
 
-    /// Store all sub-objects of a merged Object tree.
-    /// The merge engine creates new Object instances that may contain
-    /// ObjectIds computed from their content but not yet in the store.
-    fn store_object_tree(&self, obj: &Object) -> Result<(), RepoError> {
-        self.storage.put_object(obj)?;
-        if let Object::Node(node) = obj {
-            let children = match node {
-                agentstategraph_core::Node::Map(entries) => {
-                    entries.values().copied().collect::<Vec<_>>()
+    /// Collect every ancestor of `id` (including `id` itself), following all
+    /// parents of every commit.
+    fn ancestor_set(
+        &self,
+        id: &ObjectId,
+    ) -> Result<std::collections::HashSet<ObjectId>, RepoError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![*id];
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            if let Some(commit) = self.storage.get_commit(&cur)? {
+                for p in &commit.parents {
+                    if !seen.contains(p) {
+                        stack.push(*p);
+                    }
                 }
-                agentstategraph_core::Node::List(items) => items.clone(),
-                agentstategraph_core::Node::Set(items) => items.clone(),
-            };
-            for _child_id in children {
-                // Children should already be in the store (from the original branches)
-                // Only new merge-created objects need storing, and those are the root nodes
             }
         }
-        Ok(())
+        Ok(seen)
+    }
+
+    /// Generation depth of a commit: the number of commits on the longest path
+    /// from `id` back to a root commit (a commit with no parents). Memoized per
+    /// call is unnecessary for the small histories we merge; a plain recursive
+    /// walk with a visited guard is sufficient and avoids unbounded recursion
+    /// via an explicit stack.
+    fn commit_depth(&self, id: &ObjectId) -> Result<u64, RepoError> {
+        // Iterative longest-path via post-order over the ancestor DAG.
+        let mut depth: std::collections::HashMap<ObjectId, u64> = std::collections::HashMap::new();
+        // Process in an order where all parents precede a node: repeatedly
+        // resolve nodes whose parents are all known.
+        let ancestors = self.ancestor_set(id)?;
+        let mut pending: Vec<ObjectId> = ancestors.iter().copied().collect();
+        // Bounded number of passes (== number of nodes) guarantees termination
+        // on a DAG.
+        for _ in 0..=ancestors.len() {
+            let mut progressed = false;
+            pending.retain(|node| {
+                if depth.contains_key(node) {
+                    return false;
+                }
+                let parents = match self.storage.get_commit(node) {
+                    Ok(Some(commit)) => commit.parents.clone(),
+                    _ => Vec::new(),
+                };
+                if parents.iter().all(|p| depth.contains_key(p)) {
+                    let d = parents
+                        .iter()
+                        .filter_map(|p| depth.get(p))
+                        .map(|d| d + 1)
+                        .max()
+                        .unwrap_or(0);
+                    depth.insert(*node, d);
+                    progressed = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if pending.is_empty() || !progressed {
+                break;
+            }
+        }
+        Ok(depth.get(id).copied().unwrap_or(0))
     }
 
     /// Walk the commit DAG backwards from `head`, returning every reachable
@@ -1656,11 +1914,63 @@ impl Repository {
     }
 
     /// Resolve a ref name to a commit ID.
+    /// Resolve a ref-spec to a commit id. Resolution order:
+    ///   1. exact branch name
+    ///   2. exact full commit hash (optionally `sg_`-prefixed)
+    ///   3. unique `sg_`/hex commit-id prefix
+    ///
+    /// A value that is neither an existing branch nor hex-shaped yields
+    /// `BranchNotFound`; a hex-shaped value that matches no commit yields
+    /// `CommitNotFound`; a prefix matching more than one commit yields
+    /// `AmbiguousCommitPrefix`.
+    ///
+    /// (Tags are reserved for step 2 in the spec but not yet stored, so they
+    /// are skipped here.)
     fn resolve_ref(&self, ref_name: &str) -> Result<ObjectId, RepoError> {
         let ns = self.active_namespace()?;
-        self.storage
-            .get_ref(&ns, ref_name)?
-            .ok_or_else(|| RepoError::BranchNotFound(ref_name.to_string()))
+        // 1. Exact branch name — always wins, even if it looks like hex.
+        if let Some(id) = self.storage.get_ref(&ns, ref_name)? {
+            return Ok(id);
+        }
+        // 2 & 3. Commit hash / prefix.
+        self.resolve_commit_ref(ref_name)
+    }
+
+    /// Resolve a value that is not a branch name as a commit id or id prefix.
+    fn resolve_commit_ref(&self, ref_name: &str) -> Result<ObjectId, RepoError> {
+        // Full 64-char hash (with or without sg_): direct existence check.
+        if let Some(id) = ObjectId::from_hex(ref_name) {
+            if self.storage.has_commit(&id)? {
+                return Ok(id);
+            }
+            return Err(RepoError::CommitNotFound(ref_name.to_string()));
+        }
+
+        // Non-hex input is not a commit ref — report it as a missing branch,
+        // matching the previous behaviour for ordinary bad names.
+        let prefix = match ObjectId::normalize_hex_prefix(ref_name) {
+            Some(p) => p,
+            None => return Err(RepoError::BranchNotFound(ref_name.to_string())),
+        };
+
+        // Unique prefix over ALL commits (including orphaned/unreferenced ones,
+        // which is the whole point of resolving historical ids).
+        let mut matches: Vec<ObjectId> = self
+            .storage
+            .all_commit_ids()?
+            .into_iter()
+            .filter(|id| id.to_hex().starts_with(&prefix))
+            .collect();
+        matches.sort();
+        matches.dedup();
+        match matches.len() {
+            0 => Err(RepoError::CommitNotFound(ref_name.to_string())),
+            1 => Ok(matches[0]),
+            n => Err(RepoError::AmbiguousCommitPrefix {
+                prefix: ref_name.to_string(),
+                count: n,
+            }),
+        }
     }
 
     /// Create a commit and store it.
