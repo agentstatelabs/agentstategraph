@@ -291,6 +291,10 @@ impl CommitStore for IndexedDbStorage {
     fn list_commits(&self, from: &ObjectId, limit: usize) -> Result<Vec<Commit>, StorageError> {
         self.memory.list_commits(from, limit)
     }
+
+    fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
+        self.memory.all_commit_ids()
+    }
 }
 
 impl RefStore for IndexedDbStorage {

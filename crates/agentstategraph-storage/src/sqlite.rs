@@ -386,6 +386,26 @@ impl ObjectStore for SqliteStorage {
 }
 
 impl CommitStore for SqliteStorage {
+    fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM commits")
+            .map_err(|e| StorageError::Backend(format!("all commit ids: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|e| StorageError::Backend(format!("all commit ids: {}", e)))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let bytes = row.map_err(|e| StorageError::Backend(format!("all commit ids: {}", e)))?;
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                ids.push(ObjectId::from_bytes(arr));
+            }
+        }
+        Ok(ids)
+    }
+
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
         let conn = self.lock_conn()?;
         let result: Option<Vec<u8>> = conn

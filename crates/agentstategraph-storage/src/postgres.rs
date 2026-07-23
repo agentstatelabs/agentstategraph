@@ -332,6 +332,33 @@ impl ObjectStore for PostgresStorage {
 // ─── CommitStore ────────────────────────────────────────────
 
 impl CommitStore for PostgresStorage {
+    fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let rows = client
+                .query(
+                    "SELECT id FROM commits WHERE tenant_id = $1",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("all commit ids: {}", e)))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                let bytes: Vec<u8> = row.get("id");
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    ids.push(ObjectId::from_bytes(arr));
+                }
+            }
+            Ok(ids)
+        })
+    }
+
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
         self.block_on(async {
             let client = self
