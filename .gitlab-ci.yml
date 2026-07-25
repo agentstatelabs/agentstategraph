@@ -61,6 +61,30 @@ publish-wheel:
       twine upload --non-interactive
       --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
       dist/*.whl
+
+# publish-github: mirror main + release tags to the PUBLIC GitHub repo, but only
+# after scripts/leak-scan.sh passes (fail closed). This replaces GitLab push
+# mirroring, which the ci-guard below was already written to expect — push
+# mirroring would also expose internal branches (claude/*, worktree-agent-*),
+# whereas scripts/publish-to-github.sh pushes ONLY main and matching release
+# tags. Set CI variables GITHUB_REPO (org/name) and GITHUB_TOKEN (repo scope,
+# masked + protected). Gated on GITHUB_REPO so it no-ops until configured.
+publish-github:
+  stage: publish
+  image: debian:bookworm-slim
+  variables:
+    # Full clone: leak-scan --range HEAD scans all history, and the
+    # fast-forward-only push must see GitHub's tip as an ancestor.
+    GIT_DEPTH: 0
+  cache: {}
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $GITHUB_REPO'
+    - if: '$CI_COMMIT_TAG && $GITHUB_REPO'
+  script:
+    - bash scripts/publish-to-github.sh
+
 # ci-guard: guarantees a NON-EMPTY pipeline and fails loudly if the publish
 # prerequisites are missing. Without this, a mis-scoped publish job produces
 # no pipeline at all — silent, and easy to miss for days.
