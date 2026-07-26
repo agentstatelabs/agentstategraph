@@ -7,7 +7,7 @@ name = "agentstategraph"
 version = "0.9.2"
 description = "AI-native versioned state store for intent-based systems"
 readme = "../../README.md"
-license = {text = "BUSL-1.1"}
+license = {text = "MIT OR Apache-2.0"}
 requires-python = ">=3.8"
 
 [project.optional-dependencies]

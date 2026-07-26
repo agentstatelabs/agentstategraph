@@ -104,5 +104,6 @@ search path (`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `PATH`, etc.).
 
 ## License
 
-Business Source License 1.1. See [`LICENSE`](../../LICENSE) and
-[`LICENSING.md`](../../LICENSING.md) in the repo root.
+Dual-licensed under MIT OR Apache-2.0, at your option. See
+[`LICENSE-MIT`](../../LICENSE-MIT), [`LICENSE-APACHE`](../../LICENSE-APACHE),
+and [`LICENSING.md`](../../LICENSING.md) in the repo root.

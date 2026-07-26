@@ -4,7 +4,7 @@
   "description": "AI-native versioned state store for intent-based systems",
   "main": "index.js",
   "types": "index.d.ts",
-  "license": "BUSL-1.1",
+  "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/agentstatelabs/agentstategraph.git",

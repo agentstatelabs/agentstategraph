@@ -3,7 +3,7 @@ name = "agentstategraph-python"
 version.workspace = true
 edition = "2024"
 description = "Python bindings for AgentStateGraph — AI-native versioned state store"
-license = "BUSL-1.1"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "agentstategraph_py"

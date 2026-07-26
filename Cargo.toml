@@ -23,8 +23,8 @@ members = [
 [workspace.package]
 version = "0.9.6"
 edition = "2024"
-authors = ["Craig Brown"]
-license = "BUSL-1.1"
+authors = ["AgentStateLabs, LLC"]
+license = "MIT OR Apache-2.0"
 description = "AI-native versioned state store for intent-based systems"
 repository = "https://github.com/agentstatelabs/agentstategraph"
 homepage = "https://github.com/agentstatelabs/agentstategraph"

@@ -15,7 +15,7 @@
       AI-native versioned state store for intent-based systems. C# binding
       over the native Rust implementation via P/Invoke.
     </Description>
-    <PackageLicenseExpression>BUSL-1.1</PackageLicenseExpression>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/agentstatelabs/agentstategraph</RepositoryUrl>
     <PackageProjectUrl>https://github.com/agentstatelabs/agentstategraph</PackageProjectUrl>
     <RepositoryType>git</RepositoryType>

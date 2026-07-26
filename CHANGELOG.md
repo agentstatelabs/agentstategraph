@@ -5,6 +5,15 @@ All notable changes to AgentStateGraph are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
+## [Unreleased]
+
+### Changed
+- **Relicensed to `MIT OR Apache-2.0`** (from BUSL-1.1), returning the project
+  to a fully permissive dual-license in preparation for publishing to
+  crates.io. The grant applies to all prior released versions as well, so
+  every published version is available under MIT OR Apache-2.0. See
+  [`LICENSING.md`](LICENSING.md).
+
 ## [0.9.6] — 2026-07-23
 
 ### Added
