@@ -5,20 +5,23 @@ version.workspace = true
 edition = "2021"
 authors.workspace = true
 license.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
 description = "WASM bindings for AgentStateGraph — browser, Deno, Node"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-agentstategraph = { path = "../agentstategraph", default-features = false }
-agentstategraph-core = { path = "../agentstategraph-core" }
-agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false, features = ["indexeddb"] }
-agentstategraph-tasks = { path = "../agentstategraph-tasks" }
-agentstategraph-taint = { path = "../agentstategraph-taint" }
-agentstategraph-policy = { path = "../agentstategraph-policy" }
-agentstategraph-policy-sign = { path = "../agentstategraph-policy-sign" }
-agentstategraph-migrate = { path = "../agentstategraph-migrate" }
+agentstategraph = { path = "../agentstategraph", default-features = false, version = "0.9.6" }
+agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
+agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false, features = ["indexeddb"], version = "0.9.6" }
+agentstategraph-tasks = { path = "../agentstategraph-tasks", version = "0.9.6" }
+agentstategraph-taint = { path = "../agentstategraph-taint", version = "0.9.6" }
+agentstategraph-policy = { path = "../agentstategraph-policy", version = "0.9.6" }
+agentstategraph-policy-sign = { path = "../agentstategraph-policy-sign", version = "0.9.6" }
+agentstategraph-migrate = { path = "../agentstategraph-migrate", version = "0.9.6" }
 hex = "0.4"
 ed25519-dalek = "2"
 semver = "1"
@@ -30,6 +33,6 @@ js-sys = "0.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
-agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false }
+agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false, version = "0.9.6" }
 hex = "0.4"
 ed25519-dalek = "2"

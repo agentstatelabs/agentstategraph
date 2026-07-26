@@ -5,6 +5,9 @@ version.workspace = true
 edition = "2021"
 authors.workspace = true
 license.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
 description = "C ABI for AgentStateGraph — enables Go, Ruby, Java, C# bindings"
 
 [lib]
@@ -18,13 +21,13 @@ default = []
 postgres = ["agentstategraph-storage/postgres", "dep:tokio"]
 
 [dependencies]
-agentstategraph = { path = "../agentstategraph" }
-agentstategraph-core = { path = "../agentstategraph-core" }
-agentstategraph-storage = { path = "../agentstategraph-storage" }
-agentstategraph-tasks = { path = "../agentstategraph-tasks" }
-agentstategraph-policy = { path = "../agentstategraph-policy" }
-agentstategraph-taint = { path = "../agentstategraph-taint" }
-agentstategraph-migrate = { path = "../agentstategraph-migrate" }
+agentstategraph = { path = "../agentstategraph", version = "0.9.6" }
+agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
+agentstategraph-storage = { path = "../agentstategraph-storage", version = "0.9.6" }
+agentstategraph-tasks = { path = "../agentstategraph-tasks", version = "0.9.6" }
+agentstategraph-policy = { path = "../agentstategraph-policy", version = "0.9.6" }
+agentstategraph-taint = { path = "../agentstategraph-taint", version = "0.9.6" }
+agentstategraph-migrate = { path = "../agentstategraph-migrate", version = "0.9.6" }
 chrono = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 semver = "1"

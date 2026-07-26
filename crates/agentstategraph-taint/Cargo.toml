@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
 description = "Taint / quarantine / watch substrate for AgentStateGraph"
 
 [dependencies]
-agentstategraph-core = { path = "../agentstategraph-core" }
+agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

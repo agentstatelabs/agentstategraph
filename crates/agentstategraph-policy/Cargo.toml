@@ -4,11 +4,14 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+repository.workspace = true
 description = "Policy primitive (authorization + change-cost gating + fallback) for AgentStateGraph"
 
 [dependencies]
-agentstategraph = { path = "../agentstategraph", default-features = false }
-agentstategraph-core = { path = "../agentstategraph-core" }
+agentstategraph = { path = "../agentstategraph", default-features = false, version = "0.9.6" }
+agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -17,4 +20,4 @@ regex = "1"
 once_cell = "1"
 
 [dev-dependencies]
-agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false }
+agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false, version = "0.9.6" }
