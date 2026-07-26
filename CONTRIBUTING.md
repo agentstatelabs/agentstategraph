@@ -2,6 +2,21 @@
 
 Thank you for your interest in AgentStateGraph! This project is building a new infrastructure primitive for the AI-native era, and contributions are welcome.
 
+## How this project is developed
+
+AgentStateGraph is developed on a private GitLab instance and **mirrored,
+read-only, to GitHub**. GitHub is the public home — it's where you file issues
+and open pull requests, and it always reflects the current `main` and release
+tags — but the canonical history lives on GitLab.
+
+One consequence matters for contributors: **GitHub's `main` is force-advanced
+from GitLab on every change, so pull requests are never merged with the GitHub
+"Merge" button** (that would be overwritten on the next sync). Instead, accepted
+changes are applied on the GitLab side by the project owner and then re-published
+to GitHub. Your commits and authorship are preserved, and the PR is closed with a
+link to the landed commit. If your merge doesn't come from the GitHub button,
+that's the mirror model working — not a rejection.
+
 ## Getting Started
 
 1. **Fork and clone** the repository
@@ -66,7 +81,19 @@ Look for issues labeled `good-first-issue`. These are designed to be approachabl
 4. Run formatter: `cargo fmt`
 5. Run clippy: `cargo clippy`
 6. Commit with a clear message describing what and why
-7. Open a pull request
+7. Open a pull request against `main` on GitHub
+
+**Review and merge.** A maintainer reviews the PR. All changes are merged by the
+**project owner**, who applies the change on GitLab; the mirror then brings it to
+GitHub and the PR is closed as landed. Keep PRs small and single-purpose — they
+review and land far more easily than large, multi-concern branches.
+
+## Licensing of contributions
+
+AgentStateGraph is dual-licensed under **MIT OR Apache-2.0**. Unless you state
+otherwise, any contribution you intentionally submit for inclusion is offered
+under those same terms, per the Apache-2.0 license's contribution clause — no
+separate agreement required. See [LICENSING.md](LICENSING.md).
 
 ## Code Style
 
