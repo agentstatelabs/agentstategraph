@@ -21,17 +21,33 @@ TAG_PREFIX="${TAG_PREFIX:-v}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-# --- leak-scan gate: scan working tree + full history of what we will push ---
-echo ">> leak-scan: working tree"
-scripts/leak-scan.sh --tree
-echo ">> leak-scan: full history of HEAD"
-scripts/leak-scan.sh --range HEAD
-echo ">> leak-scan clean"
-
 # --- configure the GitHub remote (token embedded only in-process) ------------
 GH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git"
 git remote remove github 2>/dev/null || true
 git remote add github "$GH_URL"
+
+# --- leak-scan gate (fail closed) --------------------------------------------
+# Scan the working tree, plus the COMMITS ABOUT TO BECOME PUBLIC — not all of
+# HEAD's history every time. GitHub's current main was already scanned when it
+# was published, so re-scanning it on every push is redundant and, on a large
+# repo, catastrophically slow (a 476-commit full-history scan ran for minutes).
+#
+# Incremental only when GitHub's main is a true ancestor of HEAD (the normal
+# fast-forward case). First publish (no remote main) or any divergence falls
+# back to a full HEAD scan — fail safe, never fail open.
+echo ">> leak-scan: working tree"
+scripts/leak-scan.sh --tree
+
+GH_MAIN="$(git ls-remote github refs/heads/main 2>/dev/null | cut -f1)"
+if [ -n "$GH_MAIN" ] && git cat-file -e "$GH_MAIN" 2>/dev/null \
+     && git merge-base --is-ancestor "$GH_MAIN" HEAD 2>/dev/null; then
+  echo ">> leak-scan: new commits ${GH_MAIN:0:12}..HEAD"
+  scripts/leak-scan.sh --range "${GH_MAIN}..HEAD"
+else
+  echo ">> leak-scan: full history of HEAD (first publish or divergence)"
+  scripts/leak-scan.sh --range HEAD
+fi
+echo ">> leak-scan clean"
 
 # --- push ONLY main (fast-forward only) --------------------------------------
 # --force-with-lease is deliberately NOT used: a non-fast-forward means GitHub

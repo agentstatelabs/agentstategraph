@@ -73,7 +73,11 @@ log() { printf '%s\n' "$*" | tee -a "$LOG_FILE"; }
 # scan_ref <BLOCK|WARN> <committish|"">   ("" = working tree)
 scan_ref() {
   tier="$1"; ref="$2"
-  if [ "$tier" = BLOCK ]; then set -- "${BLOCK[@]}"; else set -- "${WARN[@]}"; fi
+  # The `${arr[@]+"${arr[@]}"}` form expands to nothing when the array is
+  # empty/unset instead of tripping `set -u` — required on bash 3.2 (macOS
+  # default), where a bare "${arr[@]}" on an empty array is an "unbound
+  # variable" error. Bites any repo whose .leakscan.local leaves a tier empty.
+  if [ "$tier" = BLOCK ]; then set -- ${BLOCK[@]+"${BLOCK[@]}"}; else set -- ${WARN[@]+"${WARN[@]}"}; fi
   label="$ref"; [ -z "$ref" ] && label="(working tree)"
   for p in "$@"; do
     if [ -n "$ref" ]; then
