@@ -99,5 +99,8 @@ fn ambiguous_prefix_errors() {
             break;
         }
     }
-    assert!(saw_ambiguous, "expected some 1-hex-digit prefix to be ambiguous");
+    assert!(
+        saw_ambiguous,
+        "expected some 1-hex-digit prefix to be ambiguous"
+    );
 }

@@ -294,7 +294,13 @@ fn merge_maps(
                     match (base_obj, our_obj, their_obj) {
                         (Some(bo), Some(oo), Some(to)) => {
                             let merged_child = merge_objects(
-                                resolver, &child_path, &bo, &oo, &to, conflicts, created,
+                                resolver,
+                                &child_path,
+                                &bo,
+                                &oo,
+                                &to,
+                                conflicts,
+                                created,
                             );
                             // Reference the merged child by id. merge_objects has
                             // already recorded any newly-created composite in
