@@ -225,7 +225,10 @@ fn approve_awaiting_permission_moves_to_due() {
     // remind_me holds a non-autonomous past-due reminder at AwaitingPermission;
     // approve then transitions it to Due.
     mgr.remind_me().unwrap();
-    assert_eq!(mgr.get(&r.id).unwrap().status, ReminderStatus::AwaitingPermission);
+    assert_eq!(
+        mgr.get(&r.id).unwrap().status,
+        ReminderStatus::AwaitingPermission
+    );
     let approved = mgr.approve(&r.id, "human/alice").unwrap();
     assert_eq!(approved.status, ReminderStatus::Due);
 }
