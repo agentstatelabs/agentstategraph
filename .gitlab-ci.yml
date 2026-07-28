@@ -91,6 +91,7 @@ publish-github:
 ci-guard:
   stage: check
   image: alpine:latest
+  before_script: []   # alpine has no apt-get; skip the debian/rust default setup
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
   script:
