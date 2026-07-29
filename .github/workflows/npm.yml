@@ -5,9 +5,11 @@ name: npm
 #
 # Requires repo secret NPM_TOKEN (npm automation token).
 
+# npm publishing is manual-only: nothing currently consumes the agentstategraph
+# npm package (grep across repos = 0 dependents), and the napi addon build isn't
+# fully proven (aarch64-windows). Kept dispatchable for when a JS/TS consumer
+# appears; not run on every release tag.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 defaults:
