@@ -14,12 +14,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   every published version is available under MIT OR Apache-2.0. See
   [`LICENSING.md`](LICENSING.md).
 
-## [0.9.6] — 2026-07-23
+## [v0.9.6] — 2026-07-23
 
 ### Added
 - `Repository::merge_base(source, target)` exposes the lowest-common-ancestor commit of two refs, so callers can reason about what each side changed relative to the branch point — required for correct domain-level merge policies (e.g. distinguishing a genuine `done→pending` regression from a source branch that simply predates the target's completion).
 
-## [0.9.5] — 2026-07-23
+## [v0.9.5] — 2026-07-23
 
 Theme: **merge data-loss fix and ref-spec resolution.**
 
@@ -31,7 +31,7 @@ Theme: **merge data-loss fix and ref-spec resolution.**
 - **Ref-spec resolution.** `Repository::resolve_ref` (and therefore `branch --from`, `merge`, `diff`, `read`, …) now accepts a branch name, a full commit hash (with or without the `sg_` prefix), or a unique `sg_`/hex commit-id prefix, including orphaned commits from deleted branches. New `RepoError::CommitNotFound` and `RepoError::AmbiguousCommitPrefix` distinguish the failure modes; `ObjectId::from_hex` / `to_hex` / `normalize_hex_prefix` and `CommitStore::all_commit_ids` support it.
 - **Merge deletion guard and dry-run.** `Repository::merge_checked(source, target, opts, allow_deletions)` refuses to advance the target ref when the merge would remove a top-level entry unless `allow_deletions` is set (`RepoError::MergeWouldDelete`). `Repository::preview_merge` returns a `MergePreview` (added / changed / removed top-level keys and conflicts) without mutating anything.
 
-## [0.9.2] — 2026-07-13
+## [v0.9.2] — 2026-07-13
 
 Theme: **first public release.** Repository, license, and documentation prepared for open publication. No functional API changes from 0.9.1.
 
@@ -46,7 +46,7 @@ Theme: **first public release.** Repository, license, and documentation prepared
 ### Removed
 - Internal planning/roadmap documents and the draft security threat model removed from the public tree.
 
-## [0.9.1] — 2026-05-12
+## [v0.9.1] — 2026-05-12
 
 Theme: **per-call namespace override** on all ref-touching operations.
 
@@ -71,7 +71,7 @@ Theme: **per-call namespace override** on all ref-touching operations.
   Same semantics as the MCP param: pass `null` / `undefined` to use the
   repository's configured namespace.
 
-## [0.9.0] — 2026-05-12
+## [v0.9.0] — 2026-05-12
 
 Theme: **namespace primitive** — ref-layer isolation boundary for
 multi-project and multi-tenant deployments.
@@ -132,7 +132,7 @@ multi-project and multi-tenant deployments.
 - Full build clean; the pre-existing PyO3 dyld failure on the
   Python bindings is unchanged (unrelated to this release).
 
-## [0.7.75-beta.3] — 2026-04-24
+## [v0.7.75-beta.3] — 2026-04-24
 
 Theme: **remaining stub closures** flagged in the 0.7.75-beta.2
 audit — FFI Postgres constructor + WASM sign/verify parity.
@@ -175,7 +175,7 @@ audit — FFI Postgres constructor + WASM sign/verify parity.
   tests (was 20 in -beta.2), all pass.
 - All other 0.7.75-beta.2 suites unchanged and green.
 
-## [0.7.75-beta.2] — 2026-04-24
+## [v0.7.75-beta.2] — 2026-04-24
 
 Theme: **real Postgres `TaintStore`** — unblocks any Postgres-first
 consumer from the 0.7.75-beta.1 taint substrate.
@@ -223,7 +223,7 @@ consumer from the 0.7.75-beta.1 taint substrate.
   `spec/POST-PRODUCTION-NOTES.md`).
 - All 0.7.75-beta.1 test suites continue to pass unchanged.
 
-## [0.7.75-beta.1] — 2026-04-21
+## [v0.7.75-beta.1] — 2026-04-21
 
 Theme: **taint / quarantine / watch** — dynamic runtime markers
 that bridge passive observation into enforcement. Every taint is
@@ -317,7 +317,7 @@ decision on every `set` / `set_json` / `delete` / `merge`.
 Counts: MCP tools 52 → 61. FFI externs 56 → 64. IntentCategory
 variants +6.
 
-## [0.7.5-beta.2] — 2026-04-21
+## [v0.7.5-beta.2] — 2026-04-21
 
 Theme: **follow-up polish on 0.7.5-beta.1.** Small patch release
 that closes the post-ship caveats — no new primitives, but the
@@ -388,7 +388,7 @@ toolchain we have locally.
 
 FFI extern count 54 → 56. No MCP tool count change.
 
-## [0.7.5-beta.1] — 2026-04-18
+## [v0.7.5-beta.1] — 2026-04-18
 
 Theme: **advanced policy — signing + multi-tenant + external
 evaluators.** Biggest single milestone so far: ~14 section commits
@@ -465,7 +465,7 @@ Per ROADMAP defaults accepted by the principal:
 Key rotation + CRL semantics, authoring UX for Rego / Cedar, and
 first-class FFI dispatcher wiring are scheduled for pre-GA.
 
-## [0.7.25-beta.2] — 2026-04-21
+## [v0.7.25-beta.2] — 2026-04-21
 
 Theme: **close the three FFI gaps + fix Decision polymorphism.**
 Small patch release on top of 0.7.25-beta.1 that promotes the
@@ -526,7 +526,7 @@ C# binding from experimental to first-class.
   declarations are unchanged, so every consumer compiling against
   0.7.25-beta.1 continues to compile.
 
-## [0.7.25-beta.1] — 2026-04-21
+## [v0.7.25-beta.1] — 2026-04-21
 
 Theme: **C# / .NET binding (experimental).** Brand-new language
 binding joining Python / TypeScript / Go / WASM / C FFI.
@@ -634,7 +634,7 @@ until the test suite goes green.
   through C# via the same FFI since C# rides on the C ABI.
 - Watch API exposure in C# — 0.7.75-beta.1.
 
-## [0.7.0-beta.1] — 2026-04-21
+## [v0.7.0-beta.1] — 2026-04-21
 
 Theme: **bring all existing bindings current.** The policy primitive
 (0.6.0) and the Task extensions (0.6.0) and the Session relocation
@@ -730,7 +730,7 @@ section-granular rule.
   intersection). Candidate for hoisting into `PolicyStore` proper
   in a follow-up so the behaviour lives in one place.
 
-## [0.6.75-beta.1] — 2026-04-21
+## [v0.6.75-beta.1] — 2026-04-21
 
 Theme: **complete the 0.6 line.** Every deferral flagged in 0.6.0 +
 0.6.5 is now closed. Six engineering sections plus a release commit,
@@ -824,7 +824,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 - Watch API — 0.7.75-beta.1
 - AgentStateConsole Phase 1 support — 0.8.0-beta.1
 
-## [0.6.5-beta.1] — 2026-04-21
+## [v0.6.5-beta.1] — 2026-04-21
 
 ### Added
 
@@ -895,7 +895,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 - Plans and policies were already persisted via the state tree at
   `/plans/*` and `/policies/*`. No change.
 
-## [0.6.0-beta.1] — 2026-04-21
+## [v0.6.0-beta.1] — 2026-04-21
 
 ### Added
 
@@ -995,18 +995,18 @@ each on its own commit per the ROADMAP.md section-granular rule.
 - Multi-tenant namespace isolation for policies.
 - Cryptographic signing of policies.
 
-## [0.5.0-beta.1] — 2026-04-17
+## [v0.5.0-beta.1] — 2026-04-17
 
 ### Changed
 - Minor version bump from `0.4.0-beta.3` to `0.5.0-beta.1`. The migration framework, `/_meta/*` guard, and upgrade CLI landed in the 0.4 series but are significant enough to reflect as a minor bump in the release line. No API changes from `0.4.0-beta.3` — same code, larger version number.
 - All bindings (Python, TypeScript) aligned to `0.5.0-beta.1`.
 
-## [0.4.0-beta.3] — 2026-04-17
+## [v0.4.0-beta.3] — 2026-04-17
 
 ### Changed
 - Aligned Python and TypeScript bindings (both Cargo and package files) to the workspace version `0.4.0-beta.3`. Bindings had been stranded at `0.3.5-beta.2` through the `0.4.0-beta.1` and `0.4.0-beta.2` workspace bumps.
 
-## [0.4.0-beta.2] — 2026-04-17
+## [v0.4.0-beta.2] — 2026-04-17
 
 ### Added
 - **New crate `agentstategraph-migrate`** — schema-evolution framework for ASG databases. Provides `Migration` trait, `Registry`, `check()` for startup introspection (returns `UpToDate` / `UpgradeAvailable` / `Downgrade` / `Unversioned` / `Corrupt`), and a `Runner` with `DryRun` and `Apply` modes. First shipped migration (`plan_assignments_sidecar_to_native`) walks legacy `/plan_assignments` entries onto native `Task.assigned_to` and bumps `/_meta/schema_version` atomically. Exit-code constants follow `sysexits.h` spirit (64 / 65 / 70 / 75) for ops tooling.
@@ -1019,7 +1019,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 - Workspace version bumped from `0.4.0-beta.1` to `0.4.0-beta.2`.
 - `SCHEMA_VERSION` constant in `agentstategraph` is now a literal `"0.4.0"`, decoupled from `env!("CARGO_PKG_VERSION")`. Bump only when a migration advances the on-disk shape.
 
-## [0.4.0-beta.1] — 2026-04-15
+## [v0.4.0-beta.1] — 2026-04-15
 
 ### Added
 - **New crate `agentstategraph-tasks`** — shared task-store primitives for plan-rot prevention. Provides `Plan`, `Task`, `TaskStore`, `Proof`, `Verifier` trait, and a full state machine (`pending → in_progress → done`, with proof and blocker enforcement). Multiple ASG consumers (ThreadWeaver and future apps) share a single implementation instead of reimplementing task types independently. Establishes the pattern for opinionated-but-shared sibling crates in the workspace.
@@ -1030,7 +1030,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 ### Changed
 - Workspace version bumped from `0.3.5-beta.2` to `0.4.0-beta.1` (new public crate).
 
-## [0.3.5-beta.2] — 2026-04-09
+## [v0.3.5-beta.2] — 2026-04-09
 
 ### Changed
 - **Naming hygiene pass.** Every standalone "StateGraph" reference replaced with the full "AgentStateGraph" across prose, identifiers, symbols, and packages. Eliminates collision surface with LangGraph's `StateGraph` class (the primary primitive LangChain developers use) and Terrateam's Stategraph Terraform backend.
@@ -1056,7 +1056,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 ### Fixed
 - **Previously leaked short forms** in: MCP server key shown in README config example (visible on-screen as `mcp__stategraph__…` during recorded demos), Rust struct names, crate descriptions, doc comments across all six crates, spec file, Python/TypeScript/Go/Rust/WASM examples, browser demo, blog post, and all site guides.
 
-## [0.3.0-beta.1] — 2026-04-09
+## [v0.3.0-beta.1] — 2026-04-09
 
 ### Status
 **Beta** — Specification complete, all features implemented and tested. Not yet published to crates.io / PyPI / npm. ThreadWeaver chat app uses it as the reference implementation. Awaiting community feedback.
@@ -1134,7 +1134,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 - No commit signing yet
 - Time-travel queries deferred
 
-## [0.1.0] — 2026-04-04
+## [v0.1.0] — 2026-04-04
 
 ### Added
 - Initial RFC specification
