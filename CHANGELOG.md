@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **`TaskStore::archive_plan` no longer loses concurrent archivals.** Archive
+  used a plain `set_json` (an unconditional ref advance), so two archives racing
+  on the same branch both branched off the pre-archive head and the second
+  silently overwrote the first — the "archived" plan reappeared as active. It
+  now uses the same CAS retry loop as `add_task` (`set_json_cas` on a snapshotted
+  head, retrying on `WriteConflict`, surfacing `TaskStoreError::WriteConflict`
+  once `MAX_CAS_RETRIES` is exhausted). Archive remains valid for any status
+  (active, completed, empty) and never touches tasks, proofs, or abandonment
+  reasons. New `archive_plan` test suite covers active/empty archival and the
+  concurrent no-lost-update guarantee.
+
 ### Changed
 - **Relicensed to `MIT OR Apache-2.0`** (from BUSL-1.1), returning the project
   to a fully permissive dual-license in preparation for publishing to

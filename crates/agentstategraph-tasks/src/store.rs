@@ -176,21 +176,38 @@ impl TaskStore {
     }
 
     /// Archive a plan — a soft, reversible transition that marks the
-    /// plan as no longer active but leaves all task data intact.
+    /// plan as no longer active but leaves all task data intact. Valid
+    /// for any status (active, completed, empty) — archival never
+    /// touches tasks, proofs, or abandonment reasons.
+    ///
+    /// Uses a CAS retry loop so concurrent plan mutations on the same
+    /// branch can't silently overwrite one another. Each retry re-reads
+    /// the plan from the snapshotted head, so a competing write that
+    /// advanced the ref is picked up on the next pass rather than lost.
     pub fn archive_plan(&self, ref_name: &str, name: &str) -> Result<Plan, TaskStoreError> {
-        let mut plan = self.get_plan(ref_name, name)?;
-        plan.status = PlanStatus::Archived;
-        plan.archived_at = Some(Utc::now());
-
         let meta_path = paths::plan_meta(&self.prefix, name);
-        let value = serde_json::to_value(&plan)?;
-        self.repo.set_json(
-            ref_name,
-            &meta_path,
-            &value,
-            self.commit_opts(format!("Archive plan {}", name)),
-        )?;
-        Ok(plan)
+        for _ in 0..Self::MAX_CAS_RETRIES {
+            // Snapshot the head, then read the plan from that same head so
+            // the commit we build applies on top of what we validated.
+            let head = self.repo.head(ref_name)?;
+            let mut plan = self.get_plan(ref_name, name)?;
+            plan.status = PlanStatus::Archived;
+            plan.archived_at = Some(Utc::now());
+
+            let value = serde_json::to_value(&plan)?;
+            match self.repo.set_json_cas(
+                ref_name,
+                head,
+                &meta_path,
+                &value,
+                self.commit_opts(format!("Archive plan {}", name)),
+            ) {
+                Ok(_) => return Ok(plan),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(TaskStoreError::WriteConflict)
     }
 
     /// Delete a plan and every task it contains. Destructive — use
