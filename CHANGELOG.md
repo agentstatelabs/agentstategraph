@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.9.11] — 2026-07-29
+
 ### Fixed
 - **`TaskStore::archive_plan` no longer loses concurrent archivals.** Archive
   used a plain `set_json` (an unconditional ref advance), so two archives racing
