@@ -236,6 +236,11 @@ pub enum RepoError {
     #[error("merge would delete top-level entries {0:?}; pass allow_deletions to proceed")]
     MergeWouldDelete(Vec<String>),
 
+    #[error(
+        "integrity violation: object {missing} reachable from state root {root} is missing from the store; ref not advanced"
+    )]
+    IntegrityViolation { root: ObjectId, missing: ObjectId },
+
     #[error("write conflict: ref moved before CAS could land")]
     WriteConflict,
 
@@ -765,15 +770,29 @@ impl Repository {
 
         match comp.result {
             MergeResult::Success(merged_obj) => {
-                // Persist every newly-created composite node BEFORE storing the
-                // root. The merged tree references children by id; nodes the
-                // merge fabricated (key sets that existed on neither branch)
-                // are not in any store yet, so skipping this leaves the tree
-                // dangling with ObjectNotFound on readback.
-                for obj in &comp.created {
-                    self.storage.put_object(obj)?;
+                // Persist every newly-created composite node AND the root in a
+                // single atomic batch. The merged tree references children by
+                // id; nodes the merge fabricated (key sets that existed on
+                // neither branch) are not in any store yet, so a partial write
+                // would leave the tree dangling with ObjectNotFound on readback.
+                let merged_root = merged_obj.id();
+                let mut to_store: Vec<Object> = Vec::with_capacity(comp.created.len() + 1);
+                to_store.extend(comp.created.iter().cloned());
+                to_store.push(merged_obj);
+                self.storage.batch_put_objects(&to_store)?;
+
+                // Integrity gate: never advance a ref to a tree that isn't
+                // fully readable. This catches both a partial write above and a
+                // `created` set that failed to include a node the root
+                // references — the exact defect that silently corrupted a
+                // `/plans` subtree and made every plan appear to vanish.
+                if let Some(missing) = self.first_missing_reachable(&merged_root)? {
+                    return Err(RepoError::IntegrityViolation {
+                        root: merged_root,
+                        missing,
+                    });
                 }
-                let merged_root = self.storage.put_object(&merged_obj)?;
+
                 let commit = self.create_commit(
                     merged_root,
                     vec![comp.target_commit_id, comp.source_commit_id],
@@ -1805,6 +1824,74 @@ impl Repository {
         Ok(depth.get(id).copied().unwrap_or(0))
     }
 
+    /// Walk the state tree from `root`, returning the id of the first object
+    /// that is referenced but absent from the store, or `None` if the whole
+    /// tree is fully readable. Iterative with a visited-set so shared subtrees
+    /// and cycles (content-addressing makes true cycles impossible, but the
+    /// guard is cheap) are each visited once. Used as the pre-ref-advance
+    /// integrity gate for merges.
+    fn first_missing_reachable(
+        &self,
+        root: &ObjectId,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        use agentstategraph_core::Node;
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![*root];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match self.storage.get_object(&id)? {
+                None => return Ok(Some(id)),
+                Some(Object::Node(node)) => match node {
+                    Node::Map(entries) => stack.extend(entries.values().copied()),
+                    Node::List(items) | Node::Set(items) => stack.extend(items.iter().copied()),
+                },
+                Some(Object::Atom(_)) => {}
+            }
+        }
+        Ok(None)
+    }
+
+    /// Integrity check for tooling (e.g. `ctx db fsck`): the id of the first
+    /// object referenced by `commit`'s state tree that is missing from the
+    /// store, or `None` if the commit's tree is fully readable. Shares the
+    /// exact walk used by the merge integrity gate.
+    pub fn first_missing_object(
+        &self,
+        commit_id: &ObjectId,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        let commit = self
+            .storage
+            .get_commit(commit_id)?
+            .ok_or_else(|| RepoError::CommitNotFound(commit_id.short()))?;
+        self.first_missing_reachable(&commit.state_root)
+    }
+
+    /// The nearest commit at or before `commit_id` (walking first-parent) whose
+    /// state tree is fully readable — the safe rewind target when a ref points
+    /// at a commit with a dangling tree. Returns `None` if no ancestor in the
+    /// chain is intact (e.g. corruption at the root of history). Because no GC
+    /// ever deletes objects, an intact ancestor's tree stays intact.
+    pub fn nearest_readable_ancestor(
+        &self,
+        commit_id: &ObjectId,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        let mut current = Some(*commit_id);
+        while let Some(id) = current {
+            match self.storage.get_commit(&id)? {
+                None => return Ok(None),
+                Some(commit) => {
+                    if self.first_missing_reachable(&commit.state_root)?.is_none() {
+                        return Ok(Some(id));
+                    }
+                    current = commit.parents.first().copied();
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Walk the commit DAG backwards from `head`, returning every reachable
     /// commit id (including `head` itself). Follows every parent — merge
     /// commits include both sides.
@@ -2584,6 +2671,42 @@ mod tests {
         // Both changes should be present
         assert_eq!(repo.get("main", "/a").unwrap(), Object::int(10)); // ours
         assert_eq!(repo.get("main", "/b").unwrap(), Object::int(20)); // theirs
+
+        // The merged state tree must be fully readable — no dangling nodes.
+        let head = repo.resolve_ref("main").unwrap();
+        let root = repo.storage.get_commit(&head).unwrap().unwrap().state_root;
+        assert_eq!(repo.first_missing_reachable(&root).unwrap(), None);
+    }
+
+    #[test]
+    fn test_first_missing_reachable_detects_dangling_child() {
+        let repo = test_repo();
+        // A map whose "x" points at an object we never store — the exact shape
+        // of the `/plans` corruption (parent present, interior child absent).
+        let missing = Object::int(42).id();
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert("x".to_string(), missing);
+        let root = Object::map(entries);
+        let root_id = repo.storage.put_object(&root).unwrap();
+
+        assert_eq!(
+            repo.first_missing_reachable(&root_id).unwrap(),
+            Some(missing),
+            "a referenced-but-absent child must be reported"
+        );
+
+        // Once the child exists, the tree is clean.
+        repo.storage.put_object(&Object::int(42)).unwrap();
+        assert_eq!(repo.first_missing_reachable(&root_id).unwrap(), None);
+    }
+
+    #[test]
+    fn test_first_missing_reachable_clean_tree() {
+        let repo = test_repo();
+        let head = repo.resolve_ref("main").unwrap();
+        let root = repo.storage.get_commit(&head).unwrap().unwrap().state_root;
+        // A freshly-initialised repo's root tree is fully present.
+        assert_eq!(repo.first_missing_reachable(&root).unwrap(), None);
     }
 
     #[test]

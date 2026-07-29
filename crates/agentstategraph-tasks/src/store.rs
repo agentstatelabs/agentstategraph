@@ -814,8 +814,17 @@ struct BlockerCheck {
     missing: Vec<TaskId>,
 }
 
+/// True only when a read failed because the *path* is genuinely absent — a
+/// key that was never written. This must NOT match `TreeError::ObjectNotFound`,
+/// which means an object referenced by the tree is missing from the store
+/// (repository corruption / a dangling interior node). Conflating the two made
+/// `list_plans`/`list_tasks` silently return an empty collection over a
+/// corrupt tree, masking data loss as "no plans". Corruption now propagates.
 fn is_path_not_found(e: &agentstategraph::RepoError) -> bool {
-    matches!(e, agentstategraph::RepoError::Tree(_))
+    matches!(
+        e,
+        agentstategraph::RepoError::Tree(agentstategraph::tree::TreeError::PathNotFound(_))
+    )
 }
 
 fn map_not_found<F>(e: agentstategraph::RepoError, make: F) -> TaskStoreError
@@ -826,5 +835,30 @@ where
         make()
     } else {
         e.into()
+    }
+}
+
+#[cfg(test)]
+mod path_not_found_tests {
+    use super::is_path_not_found;
+    use agentstategraph::RepoError;
+    use agentstategraph::core::ObjectId;
+    use agentstategraph::tree::TreeError;
+
+    #[test]
+    fn path_not_found_is_classified_as_empty() {
+        let e = RepoError::Tree(TreeError::PathNotFound("/plans/foo".into()));
+        assert!(is_path_not_found(&e));
+    }
+
+    #[test]
+    fn object_not_found_is_not_empty() {
+        // A dangling interior object is corruption, not an absent path — it must
+        // NOT be swallowed as an empty collection.
+        let e = RepoError::Tree(TreeError::ObjectNotFound(ObjectId::from_bytes([7u8; 32])));
+        assert!(
+            !is_path_not_found(&e),
+            "ObjectNotFound must propagate as an error, not read as empty"
+        );
     }
 }
