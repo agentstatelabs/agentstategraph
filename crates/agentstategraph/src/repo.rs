@@ -1830,10 +1830,7 @@ impl Repository {
     /// and cycles (content-addressing makes true cycles impossible, but the
     /// guard is cheap) are each visited once. Used as the pre-ref-advance
     /// integrity gate for merges.
-    fn first_missing_reachable(
-        &self,
-        root: &ObjectId,
-    ) -> Result<Option<ObjectId>, RepoError> {
+    fn first_missing_reachable(&self, root: &ObjectId) -> Result<Option<ObjectId>, RepoError> {
         use agentstategraph_core::Node;
         let mut seen = std::collections::HashSet::new();
         let mut stack = vec![*root];
