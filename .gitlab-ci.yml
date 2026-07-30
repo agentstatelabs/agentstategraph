@@ -88,6 +88,28 @@ publish-wheel:
       --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
       dist/*.whl
 
+# On a release tag, build the napi-rs native addon and publish the Node package
+# to the GitLab npm registry. Scoped to Linux x64 only — the same single-platform
+# scope as publish-wheel (manylinux). A full cross-platform matrix (macOS/Windows/
+# arm64 via optionalDependencies) is a napi build-matrix follow-up. allow_failure
+# so an internal-registry hiccup never blocks the release/mirror.
+publish-npm:
+  stage: publish
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - apt-get install -y -qq nodejs npm
+    - cd bindings/typescript
+    - npm install --no-audit --no-fund
+    - npm run build   # napi build --release --platform -> agentstategraph.linux-x64-gnu.node
+    - |
+      cat > .npmrc <<EOF
+      registry=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/
+      //${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken=${CI_JOB_TOKEN}
+      EOF
+    - npm publish
+
 # publish-github: mirror main + release tags to the PUBLIC GitHub repo, but only
 # after scripts/leak-scan.sh passes (fail closed). This replaces GitLab push
 # mirroring, which the ci-guard below was already written to expect — push
