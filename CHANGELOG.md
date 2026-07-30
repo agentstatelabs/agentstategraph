@@ -7,7 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.9.13] — 2026-07-29
+
+### Added
+- **npm publishing for the TypeScript (napi-rs) binding.** A `publish-npm` CI
+  job builds the native addon and publishes the Node package to the GitLab npm
+  registry on release tags (Linux x64, matching the wheel's single-platform
+  scope). A cross-platform matrix remains a follow-up.
+
 ## [v0.9.12] — 2026-07-29
+
+### Fixed
+- **Release artifacts no longer drift from the tag.** The Python wheel was
+  hardcoded to `0.9.8` in `pyproject.toml`, so every release rebuilt a `0.9.8`
+  wheel and the upload failed on the GitLab PyPI registry with a duplicate
+  `400 Bad Request`. The wheel version is now derived from the Cargo workspace
+  version (`dynamic`), the TypeScript `package.json` is kept in sync, internal
+  crate deps inherit from `[workspace.dependencies]` (no more stale `0.9.6`
+  pins), and a `version-guard` CI job fails any tag whose versions disagree
+  before it can publish. `scripts/release.sh` bumps everything in one command.
 
 ## [v0.9.11] — 2026-07-29
 
