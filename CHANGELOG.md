@@ -7,6 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.9.14] — 2026-07-29
+
+### Fixed
+- **`publish-npm` now installs Node 20.** `@napi-rs/cli@3` requires Node >= 20,
+  but the CI image's apt ships Node 18, so the addon build crashed on a missing
+  `node:util` export. The job now installs Node from the official tarball.
+
 ## [v0.9.13] — 2026-07-29
 
 ### Added
