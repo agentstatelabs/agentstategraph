@@ -57,7 +57,14 @@ echo ">> leak-scan clean"
 # --force-with-lease is still deliberately NOT used, so only a genuine
 # divergence (neither ref an ancestor of the other) is fatal.
 HEAD_SHA="$(git rev-parse HEAD)"
-if [ -z "$GH_MAIN" ]; then
+if [ -n "${FORCE_MIRROR:-}" ]; then
+  # One-time override for the security history-rewrite: GitHub's old history has
+  # diverged (every SHA changed), so the normal push below would refuse. Set the
+  # FORCE_MIRROR CI variable ONLY for the scrub push, then remove it afterward.
+  echo ">> FORCE_MIRROR set — force-pushing rewritten main + tags to github (one-time)"
+  git push --force github "HEAD:refs/heads/main"
+  git push --force --tags github
+elif [ -z "$GH_MAIN" ]; then
   echo ">> pushing main -> github (first publish)"
   git push github "HEAD:refs/heads/main"
 elif [ "$GH_MAIN" = "$HEAD_SHA" ]; then
@@ -85,6 +92,17 @@ if [ -n "${CI_COMMIT_TAG:-}" ]; then
       git push github "refs/tags/${CI_COMMIT_TAG}" ;;
     *) echo ">> tag ${CI_COMMIT_TAG} does not match ${TAG_PREFIX}* — not published" ;;
   esac
+fi
+
+# --- enforce policy: only main + release tags are public --------------------
+# Internal branches must NEVER be public. If any exist on GitHub — e.g. left
+# over from an older push-mirror — delete them. Runs on the main mirror pass.
+if [ "${CI_COMMIT_BRANCH:-}" = "main" ] || [ -n "${FORCE_MIRROR:-}" ]; then
+  git ls-remote --heads github 2>/dev/null | sed 's#.*refs/heads/##' | grep -vx main | while IFS= read -r b; do
+    [ -z "$b" ] && continue
+    echo ">> pruning non-canonical github branch: $b"
+    git push github --delete "refs/heads/$b" || true
+  done
 fi
 
 git remote remove github 2>/dev/null || true
