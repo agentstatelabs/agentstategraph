@@ -3,7 +3,6 @@
 > **AgentStateGraph is to agent state what Git was to source code — a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor.**
 
 **Website:** [agentstategraph.dev](https://agentstategraph.dev)
-**Demo app:** [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — AI chat with branchable conversations, powered by AgentStateGraph
 **Disambiguation:** [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](site/src/content/docs/compare.md)
 
 ## What AgentStateGraph is (and isn't)
@@ -207,7 +206,7 @@ AgentStateGraph/
 
 ## Plans & Tasks
 
-`agentstategraph-tasks` is an opinionated sibling crate that layers a shared plan / task model on top of the raw state graph so multiple consumers (ThreadWeaver and future apps) don't each reimplement `Task` independently.
+`agentstategraph-tasks` is an opinionated sibling crate that layers a shared plan / task model on top of the raw state graph so multiple consumers don't each reimplement `Task` independently.
 
 - `Plan` → `Task[]` with a strict state machine: `pending → in_progress → done`.
 - `Task::assigned_to` for agent assignment, plus `TaskStore::assign_task`, `unassign_task`, `next_task_for(agent)`.
@@ -269,7 +268,6 @@ See [spec/AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md) for the complete 
 - **Website**: [agentstategraph.dev](https://agentstategraph.dev)
 - **Explorer**: [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/) — interactive data viewer
 - **Disambiguation**: [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](https://agentstategraph.dev/compare/)
-- **Demo app**: [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) — branchable AI chat
 - **RFC Spec**: [AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md)
 
 ## License — Why BSL 1.1?

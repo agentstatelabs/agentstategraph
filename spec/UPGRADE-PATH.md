@@ -80,7 +80,7 @@ pub enum CheckResult {
 }
 ```
 
-Consumers (ThreadWeaver and future apps) call `check()` at startup before handing the `Repository` to application code.
+Consumers call `check()` at startup before handing the `Repository` to application code.
 
 **Recommended consumer policy (document, don't enforce):**
 

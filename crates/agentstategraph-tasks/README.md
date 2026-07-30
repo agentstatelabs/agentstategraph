@@ -3,7 +3,7 @@
 Shared task-store primitives built on [AgentStateGraph](https://github.com/agentstatelabs/agentstategraph).
 
 This crate provides `Plan`, `Task`, `Proof`, and `TaskStore` types so that
-multiple ASG consumers (ThreadWeaver and future apps) share a single set
+multiple ASG consumers share a single set
 of types, a single state machine, and a single verification surface instead of
 reimplementing them independently.
 
@@ -62,7 +62,7 @@ environment:
 
 - A **code/CI consumer** ships a `GitFileTestVerifier` (checks commit
   reachability, file existence, test suite membership).
-- **ThreadWeaver** ships `ChatVerifier` (validates text proofs against chat
+- **A chat app** ships `ChatVerifier` (validates text proofs against chat
   log content).
 - A `NoopVerifier` is included for tests and fallback.
 
@@ -97,4 +97,3 @@ let sub = repo.watches().subscribe(
 ## Links
 
 - [AgentStateGraph](https://github.com/agentstatelabs/agentstategraph)
-- [ThreadWeaver](https://github.com/agentstatelabs/ThreadWeaver) (consumer)

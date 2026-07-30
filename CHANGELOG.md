@@ -1063,7 +1063,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 ## [v0.4.0-beta.1] — 2026-04-15
 
 ### Added
-- **New crate `agentstategraph-tasks`** — shared task-store primitives for plan-rot prevention. Provides `Plan`, `Task`, `TaskStore`, `Proof`, `Verifier` trait, and a full state machine (`pending → in_progress → done`, with proof and blocker enforcement). Multiple ASG consumers (ThreadWeaver and future apps) share a single implementation instead of reimplementing task types independently. Establishes the pattern for opinionated-but-shared sibling crates in the workspace.
+- **New crate `agentstategraph-tasks`** — shared task-store primitives for plan-rot prevention. Provides `Plan`, `Task`, `TaskStore`, `Proof`, `Verifier` trait, and a full state machine (`pending → in_progress → done`, with proof and blocker enforcement). Multiple ASG consumers share a single implementation instead of reimplementing task types independently. Establishes the pattern for opinionated-but-shared sibling crates in the workspace.
 - **`IntentCategory::Plan`** variant added to `agentstategraph-core` — plan/task operations are natively filterable in log and blame queries. Recognized in MCP, HTTP, FFI, and WASM parsers. **Consumer caveat**: the new native variant serializes as `"Plan"`; pre-existing data written as `{"Custom":"Plan"}` still deserializes as the `Custom` variant, so a filter on `IntentCategory::Plan` will NOT match legacy `Custom("Plan")` commits. Normalise at read time if you need unified filtering across the upgrade boundary.
 - **`Repository::spec_set_json`** convenience method on the high-level API — mirrors `set_json` for the speculation path, used by `agentstategraph-tasks` for atomic multi-path commits.
 - **`Task::assigned_to`** — optional agent-assignment field on `Task`, eliminating the need for consumer-side sidecar storage. New `TaskStore::assign_task`, `unassign_task`, and `next_task_for` methods support assignment-aware task selection. `list_plans_by_status` adds native status filtering.
@@ -1100,7 +1100,7 @@ each on its own commit per the ROADMAP.md section-granular rule.
 ## [v0.3.0-beta.1] — 2026-04-09
 
 ### Status
-**Beta** — Specification complete, all features implemented and tested. Not yet published to crates.io / PyPI / npm. ThreadWeaver chat app uses it as the reference implementation. Awaiting community feedback.
+**Beta** — Specification complete, all features implemented and tested. Not yet published to crates.io / PyPI / npm. Awaiting community feedback.
 
 ### Specification
 - Complete RFC at `spec/STATEGRAPH-RFC.md` (~2200 lines, 12 sections)

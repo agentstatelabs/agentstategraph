@@ -2,7 +2,7 @@
 //!
 //! The crate defines the shape; concrete implementations live in
 //! consumers (a code/CI consumer ships a `GitFileTestVerifier`,
-//! ThreadWeaver a `ChatVerifier`, etc.). A `NoopVerifier` is included for fallbacks
+//! a chat app a `ChatVerifier`, etc.). A `NoopVerifier` is included for fallbacks
 //! and tests.
 //!
 //! # Framing: `Unverifiable` is a flag, not a verdict
