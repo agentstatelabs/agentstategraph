@@ -98,8 +98,14 @@ publish-npm:
   allow_failure: true
   rules:
     - if: $CI_COMMIT_TAG
+  variables:
+    NODE_VERSION: "20.18.1"   # @napi-rs/cli@3 needs Node >= 20; bookworm apt ships 18
   script:
-    - apt-get install -y -qq nodejs npm
+    # Install Node from the official tarball (same idiom as the sccache install
+    # in default.before_script) — apt's nodejs is 18 and lacks node:util styleText.
+    - curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz" | tar -xz -C /opt
+    - export PATH="/opt/node-v${NODE_VERSION}-linux-x64/bin:$PATH"
+    - node --version && npm --version
     - cd bindings/typescript
     - npm install --no-audit --no-fund
     - npm run build   # napi build --release --platform -> agentstategraph.linux-x64-gnu.node
