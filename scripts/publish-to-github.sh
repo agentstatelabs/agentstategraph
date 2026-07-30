@@ -103,6 +103,13 @@ if [ "${CI_COMMIT_BRANCH:-}" = "main" ] || [ -n "${FORCE_MIRROR:-}" ]; then
     echo ">> pruning non-canonical github branch: $b"
     git push github --delete "refs/heads/$b" || true
   done
+  # Prune orphaned tags: GitHub must mirror GitLab's tags exactly. A tag deleted
+  # on GitLab (e.g. a superseded/failed release) must not linger public.
+  local_tags="$(git tag)"
+  git ls-remote --tags github 2>/dev/null | sed 's#.*refs/tags/##' | grep -v '\^{}$' | sort -u | while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    printf '%s\n' "$local_tags" | grep -qx "$t" || { echo ">> pruning orphaned github tag: $t"; git push github --delete "refs/tags/$t" || true; }
+  done
 fi
 
 git remote remove github 2>/dev/null || true
