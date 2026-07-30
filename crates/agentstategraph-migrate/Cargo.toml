@@ -10,13 +10,13 @@ repository.workspace = true
 description = "Schema migration registry for AgentStateGraph databases"
 
 [dependencies]
-agentstategraph = { path = "../agentstategraph", default-features = false, version = "0.9.6" }
-agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
+agentstategraph = { workspace = true, default-features = false }
+agentstategraph-core = { workspace = true }
 semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-agentstategraph-storage = { path = "../agentstategraph-storage", features = ["sqlite"], version = "0.9.6" }
-agentstategraph-tasks = { path = "../agentstategraph-tasks", version = "0.9.6" }
+agentstategraph-storage = { workspace = true, features = ["sqlite"] }
+agentstategraph-tasks = { workspace = true }

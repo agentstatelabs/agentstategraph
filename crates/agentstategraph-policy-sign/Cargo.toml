@@ -10,7 +10,7 @@ repository.workspace = true
 description = "Ed25519 signing + canonical-JSON for AgentStateGraph policies"
 
 [dependencies]
-agentstategraph-policy = { path = "../agentstategraph-policy", version = "0.9.6" }
+agentstategraph-policy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

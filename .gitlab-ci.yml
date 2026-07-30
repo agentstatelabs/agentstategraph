@@ -45,6 +45,31 @@ test:
   script:
     - cargo test --workspace --locked --exclude agentstategraph-python
 
+# version-guard: on a release tag, prove every version the publish stage will
+# stamp agrees with the tag BEFORE anything publishes. This is the backstop for
+# the drift that produced a 0.9.8 wheel from a 0.9.11 tag: if the workspace
+# version or the TS package.json disagree with $CI_COMMIT_TAG, fail here in the
+# check stage. scripts/release.sh keeps all of these in sync; this enforces it.
+version-guard:
+  stage: check
+  image: alpine:latest
+  before_script: []   # alpine has no apt-get; skip the debian/rust default setup
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      TAG="${CI_COMMIT_TAG#v}"
+      WS=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+      PJ=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' bindings/typescript/package.json | head -1)
+      echo "tag=$TAG  workspace=$WS  ts-package.json=$PJ"
+      fail=0
+      [ "$WS" = "$TAG" ] || { echo "ERROR: [workspace.package].version ($WS) != tag ($TAG)"; fail=1; }
+      [ "$PJ" = "$TAG" ] || { echo "ERROR: bindings/typescript/package.json ($PJ) != tag ($TAG)"; fail=1; }
+      if [ "$fail" != 0 ]; then
+        echo "Run scripts/release.sh $TAG on a clean tree, then retag."; exit 1
+      fi
+      echo "version-guard OK: all versions at $TAG"
+
 # On a release tag, build the Python wheel (pyo3/maturin) and publish it so
 # downstream Python projects can `pip install agentstategraph`.
 publish-wheel:

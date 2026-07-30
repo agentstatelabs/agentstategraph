@@ -14,10 +14,10 @@ default = ["sqlite"]
 sqlite = ["agentstategraph-storage/sqlite"]
 
 [dependencies]
-agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
-agentstategraph-storage = { path = "../agentstategraph-storage", default-features = false, version = "0.9.6" }
-agentstategraph-taint = { path = "../agentstategraph-taint", version = "0.9.6" }
-agentstategraph-reminders = { path = "../agentstategraph-reminders", version = "0.9.6" }
+agentstategraph-core = { workspace = true }
+agentstategraph-storage = { workspace = true, default-features = false }
+agentstategraph-taint = { workspace = true }
+agentstategraph-reminders = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

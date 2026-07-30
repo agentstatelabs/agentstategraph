@@ -10,7 +10,7 @@ repository.workspace = true
 description = "WASM host runner implementing ExternalEvaluator for AgentStateGraph policies (stub; full integration lands as a follow-up)"
 
 [dependencies]
-agentstategraph-policy = { path = "../agentstategraph-policy", version = "0.9.6" }
+agentstategraph-policy = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 wasmtime = "26"

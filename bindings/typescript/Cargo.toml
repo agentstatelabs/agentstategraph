@@ -9,14 +9,14 @@ license = "MIT OR Apache-2.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-agentstategraph = { path = "../../crates/agentstategraph", version = "0.9.6" }
-agentstategraph-core = { path = "../../crates/agentstategraph-core", version = "0.9.6" }
-agentstategraph-migrate = { path = "../../crates/agentstategraph-migrate", version = "0.9.6" }
-agentstategraph-storage = { path = "../../crates/agentstategraph-storage", version = "0.9.6" }
-agentstategraph-tasks = { path = "../../crates/agentstategraph-tasks", version = "0.9.6" }
-agentstategraph-policy = { path = "../../crates/agentstategraph-policy", version = "0.9.6" }
-agentstategraph-policy-sign = { path = "../../crates/agentstategraph-policy-sign", version = "0.9.6" }
-agentstategraph-taint = { path = "../../crates/agentstategraph-taint", version = "0.9.6" }
+agentstategraph = { workspace = true, features = ["sqlite"] }
+agentstategraph-core = { workspace = true }
+agentstategraph-migrate = { workspace = true }
+agentstategraph-storage = { workspace = true, features = ["sqlite"] }
+agentstategraph-tasks = { workspace = true }
+agentstategraph-policy = { workspace = true }
+agentstategraph-policy-sign = { workspace = true }
+agentstategraph-taint = { workspace = true }
 ed25519-dalek = "2"
 hex = "0.4"
 semver = "1"

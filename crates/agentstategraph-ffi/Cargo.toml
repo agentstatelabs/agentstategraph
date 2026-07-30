@@ -21,13 +21,13 @@ default = []
 postgres = ["agentstategraph-storage/postgres", "dep:tokio"]
 
 [dependencies]
-agentstategraph = { path = "../agentstategraph", version = "0.9.6" }
-agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
-agentstategraph-storage = { path = "../agentstategraph-storage", version = "0.9.6" }
-agentstategraph-tasks = { path = "../agentstategraph-tasks", version = "0.9.6" }
-agentstategraph-policy = { path = "../agentstategraph-policy", version = "0.9.6" }
-agentstategraph-taint = { path = "../agentstategraph-taint", version = "0.9.6" }
-agentstategraph-migrate = { path = "../agentstategraph-migrate", version = "0.9.6" }
+agentstategraph = { workspace = true, features = ["sqlite"] }
+agentstategraph-core = { workspace = true }
+agentstategraph-storage = { workspace = true, features = ["sqlite"] }
+agentstategraph-tasks = { workspace = true }
+agentstategraph-policy = { workspace = true }
+agentstategraph-taint = { workspace = true }
+agentstategraph-migrate = { workspace = true }
 chrono = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 semver = "1"

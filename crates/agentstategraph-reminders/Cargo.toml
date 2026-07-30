@@ -10,7 +10,7 @@ repository.workspace = true
 description = "Agent reminder substrate for AgentStateGraph — schedule, track, and execute future-oriented agent tasks"
 
 [dependencies]
-agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
+agentstategraph-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

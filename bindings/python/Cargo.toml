@@ -10,13 +10,13 @@ name = "agentstategraph_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-agentstategraph = { path = "../../crates/agentstategraph", version = "0.9.6" }
-agentstategraph-core = { path = "../../crates/agentstategraph-core", version = "0.9.6" }
-agentstategraph-migrate = { path = "../../crates/agentstategraph-migrate", version = "0.9.6" }
-agentstategraph-policy = { path = "../../crates/agentstategraph-policy", version = "0.9.6" }
-agentstategraph-storage = { path = "../../crates/agentstategraph-storage", version = "0.9.6" }
-agentstategraph-tasks = { path = "../../crates/agentstategraph-tasks", version = "0.9.6" }
-agentstategraph-taint = { path = "../../crates/agentstategraph-taint", version = "0.9.6" }
+agentstategraph = { workspace = true, features = ["sqlite"] }
+agentstategraph-core = { workspace = true }
+agentstategraph-migrate = { workspace = true }
+agentstategraph-policy = { workspace = true }
+agentstategraph-storage = { workspace = true, features = ["sqlite"] }
+agentstategraph-tasks = { workspace = true }
+agentstategraph-taint = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 semver = "1"
 pyo3 = { version = "0.24", features = ["extension-module", "multiple-pymethods"] }

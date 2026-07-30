@@ -10,7 +10,7 @@ repository.workspace = true
 description = "Taint / quarantine / watch substrate for AgentStateGraph"
 
 [dependencies]
-agentstategraph-core = { path = "../agentstategraph-core", version = "0.9.6" }
+agentstategraph-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
