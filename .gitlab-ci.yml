@@ -1,3 +1,16 @@
+# Only run pipelines that matter, and never the same SHA twice:
+#  * internal working branches (claude/*, worktree-agent-*, …) get no pipeline;
+#  * a `release: vX` commit on main is validated by its tag pipeline (pushed
+#    right after — same SHA, plus the publish stage), so its branch pipeline is
+#    skipped to avoid a duplicate full compile.
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /^release: v/'
+      when: never
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: never
+
 stages:
   - check
   - test
@@ -6,9 +19,13 @@ stages:
 default:
   image: rust:1.96-bookworm
   cache:
+    # Per-job cache lineage (prefix) so concurrent check/test jobs don't clobber
+    # a single shared key on push — each keeps its own warm target/ + sccache
+    # across runs, keyed by the resolved dependency set (Cargo.lock).
     key:
       files:
         - Cargo.lock
+      prefix: "$CI_JOB_NAME"
     paths:
       - .cargo/
       - target/
@@ -25,6 +42,7 @@ default:
 
 fmt:
   stage: check
+  cache: {}   # rustfmt only — no compilation, so skip the cache restore/upload
   script:
     - rustup component add rustfmt
     - cargo fmt --all -- --check
