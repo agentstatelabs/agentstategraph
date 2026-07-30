@@ -49,11 +49,33 @@ else
 fi
 echo ">> leak-scan clean"
 
-# --- push ONLY main (fast-forward only) --------------------------------------
-# --force-with-lease is deliberately NOT used: a non-fast-forward means GitHub
-# diverged unexpectedly — fail loudly rather than overwrite.
-echo ">> pushing main -> github"
-git push github "HEAD:refs/heads/main"
+# --- push main, but only when we actually advance it -------------------------
+# Pipelines can run out of order on a busy runner: an older commit's pipeline
+# may execute AFTER a newer commit already advanced GitHub's main. Pushing the
+# older HEAD is a non-fast-forward — but GitHub already has newer content, so
+# that is a no-op, not a failure. Decide from the HEAD<->GH_MAIN relationship;
+# --force-with-lease is still deliberately NOT used, so only a genuine
+# divergence (neither ref an ancestor of the other) is fatal.
+HEAD_SHA="$(git rev-parse HEAD)"
+if [ -z "$GH_MAIN" ]; then
+  echo ">> pushing main -> github (first publish)"
+  git push github "HEAD:refs/heads/main"
+elif [ "$GH_MAIN" = "$HEAD_SHA" ]; then
+  echo ">> github main already at HEAD (${HEAD_SHA:0:12}) — nothing to push"
+elif ! git cat-file -e "$GH_MAIN" 2>/dev/null; then
+  echo ">> github main ${GH_MAIN:0:12} not present locally; attempting push"
+  git push github "HEAD:refs/heads/main"
+elif git merge-base --is-ancestor "$GH_MAIN" HEAD 2>/dev/null; then
+  echo ">> pushing main -> github (fast-forward ${GH_MAIN:0:12}..${HEAD_SHA:0:12})"
+  git push github "HEAD:refs/heads/main"
+elif git merge-base --is-ancestor HEAD "$GH_MAIN" 2>/dev/null; then
+  echo ">> github main (${GH_MAIN:0:12}) is ahead of HEAD (${HEAD_SHA:0:12}) —"
+  echo ">> stale/out-of-order pipeline, main already current; skipping main push"
+else
+  echo "ERROR: github main (${GH_MAIN:0:12}) has diverged from HEAD (${HEAD_SHA:0:12});" >&2
+  echo "       refusing to overwrite. Reconcile the GitHub repo manually." >&2
+  exit 1
+fi
 
 # --- push release tags matching TAG_PREFIX -----------------------------------
 if [ -n "${CI_COMMIT_TAG:-}" ]; then
