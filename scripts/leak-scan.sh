@@ -37,9 +37,12 @@ LOG_FILE="${LOG_DIR}/last-scan.log"
 BLOCK=(
   '/Users/[A-Za-z0-9._-]+'                 # local home paths (macOS)
   '/home/[A-Za-z0-9._-]+'                  # local home paths (linux)
+  '-(Users|home)-[A-Za-z0-9._-]+-'         # dash-munged home paths (e.g. Claude Code project dirs)
   '-----BEGIN [A-Z ]*PRIVATE KEY-----'     # private keys
   'AKIA[0-9A-Z]{16}'                       # AWS access key id
   'gh[pousr]_[A-Za-z0-9]{36,}'             # GitHub tokens
+  'glpat-[A-Za-z0-9_-]{20,}'               # GitLab personal access tokens
+  'glrt-[A-Za-z0-9_-]{20,}'                # GitLab runner tokens
   'xox[baprs]-[A-Za-z0-9-]{10,}'           # Slack tokens
 )
 
@@ -47,10 +50,12 @@ BLOCK=(
 WARN=()  # org-specific project names are appended by .leakscan.local
 
 # --- ALLOW_CONTENT: matching lines are dropped BEFORE counting -------------
-# Kills false positives from documentation placeholders (e.g. /Users/user in a
+# Kills false positives from documentation placeholders (e.g. /Users/you in a
 # doc example is not a real home-path leak). Extend via .leakscan.local.
 ALLOW_CONTENT=(
   '/(Users|home)/(x|you|me|user|username|name|alice|bob|carol|example|USER|USERNAME)([/."'\''<> ]|$)'
+  '-(Users|home)-(user|you|example)-'  # dash-munged placeholder paths
+  '(info|license|licensing|release-bot|noreply|no-reply)@agentstatelabs\.com'  # allowed public contact emails
 )
 
 # --- ALLOW: pathspecs never scanned (this tool + noise) -------------------
@@ -127,6 +132,19 @@ for r in ${refs[@]+"${refs[@]}"}; do
   scan_ref BLOCK "$r"
   scan_ref WARN "$r"
 done
+
+# --- tracked-file guard: some leaks are file-TYPE, not content -------------
+# The content scan cannot catch a committed SQLite DB, keystore, or private
+# key. Fail closed if any sensitive file type is tracked (example/sample envs
+# are exempt). Only meaningful for tree/HEAD scans.
+tracked_bad="$(git ls-files 2>/dev/null | grep -Ei '\.(db|sqlite3?|db-wal|db-shm|pem|key|p12|pfx|keystore)$|\.db\.bak|(^|/)id_rsa|(^|/)\.env$|credential' | grep -viE '\.env\.(example|sample|template)' || true)"
+if [ -n "$tracked_bad" ]; then
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    log "  [BLOCK] tracked sensitive file: $f"
+    hits_block=$((hits_block + 1))
+  done <<< "$tracked_bad"
+fi
 
 log ""
 log "leak-scan: ${hits_block} BLOCK hit(s), ${hits_warn} WARN hit(s)  (log: ${LOG_FILE})"
