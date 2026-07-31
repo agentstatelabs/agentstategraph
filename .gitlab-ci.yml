@@ -151,7 +151,7 @@ publish-github:
   cache: {}
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
-    - if [ -n "${LEAKSCAN_LOCAL:-}" ] && [ -f "$LEAKSCAN_LOCAL" ]; then cp "$LEAKSCAN_LOCAL" .leakscan.local && echo ">> loaded .leakscan.local"; else echo ">> no LEAKSCAN_LOCAL var - public patterns only"; fi
+    - printf '%s' "${LEAKSCAN_LOCAL:-}" > .leakscan.local
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $GITHUB_REPO'
     - if: '$CI_COMMIT_TAG && $GITHUB_REPO'
