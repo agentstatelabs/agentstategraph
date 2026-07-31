@@ -98,16 +98,18 @@ fi
 # Internal branches must NEVER be public. If any exist on GitHub — e.g. left
 # over from an older push-mirror — delete them. Runs on the main mirror pass.
 if [ "${CI_COMMIT_BRANCH:-}" = "main" ] || [ -n "${FORCE_MIRROR:-}" ]; then
-  git ls-remote --heads github 2>/dev/null | sed 's#.*refs/heads/##' | grep -vx main | while IFS= read -r b; do
-    [ -z "$b" ] && continue
+  # Capture into vars with `|| true` so an empty result (nothing to prune) does
+  # not trip `set -e`/pipefail. Ref names never contain spaces, so for-loop split is safe.
+  gh_branches="$(git ls-remote --heads github 2>/dev/null | sed 's#.*refs/heads/##' | grep -vx main || true)"
+  for b in $gh_branches; do
     echo ">> pruning non-canonical github branch: $b"
     git push github --delete "refs/heads/$b" || true
   done
   # Prune orphaned tags: GitHub must mirror GitLab's tags exactly. A tag deleted
   # on GitLab (e.g. a superseded/failed release) must not linger public.
   local_tags="$(git tag)"
-  git ls-remote --tags github 2>/dev/null | sed 's#.*refs/tags/##' | grep -v '\^{}$' | sort -u | while IFS= read -r t; do
-    [ -z "$t" ] && continue
+  gh_tags="$(git ls-remote --tags github 2>/dev/null | sed 's#.*refs/tags/##' | grep -v '\^{}$' | sort -u || true)"
+  for t in $gh_tags; do
     printf '%s\n' "$local_tags" | grep -qx "$t" || { echo ">> pruning orphaned github tag: $t"; git push github --delete "refs/tags/$t" || true; }
   done
 fi
