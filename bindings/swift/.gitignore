@@ -1,0 +1,7 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Prebuilt native framework (produced by scripts/build-swift-xcframework.sh)
+artifacts/AgentStateGraphFFI.xcframework/

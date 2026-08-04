@@ -1,0 +1,13 @@
+// Clang module for the AgentStateGraph C ABI (agentstategraph-ffi).
+//
+// This map backs the "local dylib" build mode (systemLibrary target),
+// where the Swift package links directly against a host-built
+// `libagentstategraph_ffi` in `target/release`.
+//
+// The XCFramework build mode ships its own identical `CAgentStateGraph`
+// module map inside each slice's `Headers/` directory, so Swift code can
+// always `import CAgentStateGraph` regardless of which mode is active.
+module CAgentStateGraph {
+    header "include/agentstategraph.h"
+    export *
+}

@@ -48,3 +48,27 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked --exclude agentstategraph-python
+
+  swift:
+    name: swift binding (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Local-dylib mode: link the host build directly and run XCTest.
+      # The device-capable XCFramework is exercised by the release workflow.
+      - name: Build FFI (release)
+        run: cargo build --release --locked -p agentstategraph-ffi
+
+      - name: Swift test (local-dylib mode)
+        working-directory: bindings/swift
+        env:
+          AGENTSTATEGRAPH_SWIFT_LOCAL: "1"
+        run: swift test
