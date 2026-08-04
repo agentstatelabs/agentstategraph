@@ -17,7 +17,7 @@
 # whose versions disagree fails in the `check` stage, before anything publishes.
 #
 # Usage:  scripts/release.sh 0.9.12
-# Then:   git push --follow-tags        (this is the deploy trigger)
+# Then:   git push --follow-tags origin main   (the annotated tag is the deploy trigger)
 set -euo pipefail
 
 [ $# -eq 1 ] || { echo "usage: $0 <X.Y.Z>"; exit 2; }
@@ -64,5 +64,8 @@ git --no-pager diff --stat
 echo
 echo "Next steps:"
 echo "  git commit -am 'release: v$NEW'"
-echo "  git tag v$NEW"
-echo "  git push --follow-tags     # triggers the publish/deploy pipeline"
+echo "  git tag -a v$NEW -m 'release: v$NEW'   # annotated: --follow-tags won't push a lightweight tag"
+echo "  git push --follow-tags origin main     # pushes main + the annotated tag; triggers publish/deploy"
+echo
+echo "  # (belt-and-suspenders, works for lightweight tags too:)"
+echo "  #   git push origin main v$NEW"

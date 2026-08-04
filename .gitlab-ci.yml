@@ -1,5 +1,9 @@
 # Only run pipelines that matter, and never the same SHA twice:
-#  * internal working branches (claude/*, worktree-agent-*, …) get no pipeline;
+#  * merge requests get a detached pipeline so feature branches are validated
+#    (fmt/clippy/build/test) BEFORE they merge — the team workflow lands all
+#    feature work via MR;
+#  * a plain push of an internal working branch (claude/*, worktree-agent-*, …)
+#    with no open MR gets no pipeline — the MR pipeline covers it;
 #  * a `release: vX` commit on main is validated by its tag pipeline (pushed
 #    right after — same SHA, plus the publish stage), so its branch pipeline is
 #    skipped to avoid a duplicate full compile.
@@ -7,7 +11,13 @@ workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /^release: v/'
       when: never
+    # Detached pipeline for merge requests (feature-branch validation).
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_TAG
+    # Don't also run a branch pipeline when that branch has an open MR — the
+    # merge_request_event pipeline above already covers the same commits.
+    - if: '$CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - when: never
 
