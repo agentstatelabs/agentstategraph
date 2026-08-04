@@ -46,7 +46,8 @@ AgentStateGraph/
 ├── bindings/
 │   ├── python/                     # PyO3 bindings
 │   ├── typescript/                 # napi-rs bindings
-│   └── go/                         # CGo bindings
+│   ├── go/                         # CGo bindings
+│   └── swift/                      # Swift Package (macOS + iOS) over the C ABI
 └── examples/                       # Reference implementations
 ```
 
@@ -87,6 +88,45 @@ Look for issues labeled `good-first-issue`. These are designed to be approachabl
 **project owner**, who applies the change on GitLab; the mirror then brings it to
 GitHub and the PR is closed as landed. Keep PRs small and single-purpose — they
 review and land far more easily than large, multi-concern branches.
+
+## Maintainer & agent workflow (GitLab origin)
+
+This section is for those with write access to the canonical GitLab instance —
+maintainers and the automated agents that develop this project. Public
+contributors use the GitHub PR flow above.
+
+**Feature work always lands via a merge request — never a local merge to
+`main`.**
+
+1. Branch off `main` (a git worktree is fine) and commit incrementally.
+2. Push and open an MR with the [`glab`](https://gitlab.com/gitlab-org/cli) CLI:
+   ```sh
+   git push -u origin my-branch
+   glab mr create --fill --target-branch main --remove-source-branch
+   ```
+3. Merge through the MR (`glab mr merge <id>`), so origin history reflects
+   review. Merge requests get a detached CI pipeline (fmt, clippy, build, test)
+   that must be green before merge.
+4. **Traceability:** record the MR URL as the completion evidence for the unit
+   of work (e.g. in the closing summary of the plan/branch it belongs to), so
+   every landed change traces back to its reviewed MR.
+
+**Cutting a release** is the one exception — it goes straight to `main`, never
+through an MR (routing a version bump through review invites tag/commit-SHA
+drift). There is exactly one place a human edits the version: the workspace.
+[`scripts/release.sh`](scripts/release.sh) propagates it everywhere the publish
+pipeline reads a version and stamps the changelog:
+
+```sh
+scripts/release.sh X.Y.Z
+git commit -am "release: vX.Y.Z"
+git tag -a vX.Y.Z -m "release: vX.Y.Z"    # annotated — the deploy trigger
+git push --follow-tags origin main
+```
+
+The **tag** is the deploy trigger: a `version-guard` job fails the pipeline if
+any version disagrees with the tag before anything publishes, then the release
+artifacts build and the mirror publishes `main` and the tag to GitHub.
 
 ## Licensing of contributions
 
