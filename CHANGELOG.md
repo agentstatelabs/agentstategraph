@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+- **SwiftPM releases are now checksum-correct and consumable from the repository root.** GitLab dispatches a pre-tag GitHub macOS build for the exact mirrored source SHA, stages the immutable XCFramework in GitLab, generates the root binary-target manifest, publishes those exact bytes to GitHub Releases, and verifies a clean remote consumer. Apple builds now pin macOS 11 and iOS 14 deployment targets instead of inheriting runner defaults.
+
 ## [v0.9.16] — 2026-08-04
 
 ### Added

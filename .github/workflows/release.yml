@@ -78,40 +78,11 @@ jobs:
             agentstategraph-mcp-*.tar.gz
             agentstategraph-mcp-*.tar.gz.sha256
 
-  swift-xcframework:
-    name: swift xcframework
-    runs-on: macos-14 # Apple-silicon runner with Xcode + lipo/xcodebuild
-    steps:
-      - uses: actions/checkout@v4
-
-      # All five Apple slices the binding ships: macOS (arm64 + x86_64),
-      # iOS device (arm64), iOS simulator (arm64 + x86_64).
-      - name: Install Rust + Apple targets
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.96.0"
-          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-
-      - name: Build XCFramework
-        run: scripts/build-swift-xcframework.sh
-
-      - name: Package
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME}"
-          dist="agentstategraph-swift-${version}.xcframework"
-          # ditto preserves the framework's symlink layout inside the zip.
-          ditto -c -k --keepParent \
-            bindings/swift/artifacts/AgentStateGraphFFI.xcframework \
-            "${dist}.zip"
-          shasum -a 256 "${dist}.zip" > "${dist}.zip.sha256"
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            agentstategraph-swift-*.xcframework.zip
-            agentstategraph-swift-*.xcframework.zip.sha256
+  # The checksum-pinned Swift XCFramework is prepared before this tag exists.
+  # GitLab dispatches prepare-swift.yml, stages the exact bytes, generates the
+  # root Package.swift, and uploads those bytes to this release from the tag
+  # pipeline. Rebuilding here would risk publishing a ZIP whose checksum no
+  # longer matches the tagged manifest.
 
   docker:
     name: container image

@@ -1,0 +1,68 @@
+name: Verify Swift release
+run-name: verify Swift v${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published semantic version without the leading v
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  consumer:
+    name: clean remote SwiftPM consumer
+    runs-on: macos-14
+    steps:
+      - name: Create consumer package
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p consumer/Sources/Smoke
+          cat > consumer/Package.swift <<EOF
+          // swift-tools-version:5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "AgentStateGraphRemoteSmoke",
+              platforms: [.macOS(.v11)],
+              dependencies: [
+                  .package(
+                      url: "https://github.com/agentstatelabs/agentstategraph.git",
+                      exact: "$VERSION"
+                  ),
+              ],
+              targets: [
+                  .executableTarget(
+                      name: "Smoke",
+                      dependencies: [
+                          .product(name: "AgentStateGraph", package: "agentstategraph"),
+                      ]
+                  ),
+              ]
+          )
+          EOF
+          cat > consumer/Sources/Smoke/main.swift <<'EOF'
+          import AgentStateGraph
+
+          let graph = try AgentStateGraph()
+          defer { graph.close() }
+          try graph.set(
+              "/release-smoke",
+              json: "\"ok\"",
+              category: .checkpoint,
+              description: "remote SwiftPM release smoke test"
+          )
+          guard try graph.get("/release-smoke") == "\"ok\"" else {
+              fatalError("AgentStateGraph round-trip failed")
+          }
+          EOF
+
+      - name: Resolve, build, and run
+        working-directory: consumer
+        run: swift run Smoke

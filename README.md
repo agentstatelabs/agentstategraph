@@ -17,7 +17,7 @@ It is deliberately **not** an application and **not** a framework you have to ad
 - **Every commit is accountable** — structured intent, reasoning, confidence, agent id, authority/delegation chain, and expected-vs-observed resolution. Governance is mechanical, not social.
 - **Batteries for real agent systems** — shared plans & tasks (state machine + proofs + assignment), pull-based reminders, policy + taint/quarantine gating, epochs (tamper-evident audit bundles), and blame/query across all of it.
 - **Connect anything** — MCP tools work with any MCP agent, plus an HTTP REST API and a browser explorer.
-- **Embed anywhere** — language bindings for Rust, Python, TypeScript, Go, .NET/C#, WASM, and C FFI, over pluggable storage backends (Memory, SQLite, Postgres, IndexedDB) — with more of both on the way.
+- **Embed anywhere** — language bindings for Rust, Python, TypeScript, Go, Swift, .NET/C#, WASM, and C FFI, over pluggable storage backends (Memory, SQLite, Postgres, IndexedDB) — with more of both on the way.
 - **Multi-tenant & multi-agent by design** — namespace isolation, scoped sessions, delegation, and intent trees.
 
 This is what the substrate has to look like when the primary actor touching production systems is no longer a human who can be governed socially (via PRs, code review, Slack threads) but a fleet of agents that must be governed mechanically.
@@ -126,6 +126,20 @@ asg.merge("feature", description="Adopt feature")
 asg.blame("/name")  # who changed it and why
 ```
 
+### From Swift
+
+Add the repository directly with SwiftPM (available from `v0.9.17`):
+
+```swift
+.package(
+    url: "https://github.com/agentstatelabs/agentstategraph.git",
+    from: "0.9.17"
+)
+```
+
+The checksum-pinned XCFramework includes macOS arm64/x86_64, iOS device arm64,
+and iOS Simulator arm64/x86_64 slices.
+
 ### From TypeScript, Go, .NET / C#, or WASM — all supported.
 
 ## Features
@@ -133,7 +147,7 @@ asg.blame("/name")  # who changed it and why
 - **73 MCP tools** — any agent can connect immediately
 - **HTTP REST API** — `--http` mode with CORS for browsers and scripts
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
-- **7 language bindings** — Rust, Python, TypeScript, Go, .NET / C#, WASM, C FFI
+- **8 language bindings** — Rust, Python, TypeScript, Go, Swift, .NET / C#, WASM, C FFI
 - **4 storage backends** — Memory, SQLite, Postgres (multi-tenant), IndexedDB (browser)
 - **15 crates** — modular core, storage, MCP, policy (+ pluggable Rego / Cedar / WASM evaluators), taint, tasks, reminders, migrate, FFI, and WASM
 - **Namespaces** — ref-layer isolation for multi-project / multi-tenant deployments
@@ -205,6 +219,7 @@ AgentStateGraph/
 │   ├── python/                   # PyO3 + maturin
 │   ├── typescript/               # napi-rs
 │   ├── go/                       # CGo via FFI
+│   ├── swift/                    # SwiftPM + XCFramework for macOS and iOS
 │   └── dotnet/                   # .NET / C# via P/Invoke over the C ABI
 ├── spec/
 │   ├── AGENTSTATEGRAPH-RFC.md    # Full specification (~2300 lines)

@@ -17,7 +17,22 @@ It mirrors the surface of the Go, Python, and TypeScript bindings:
 
 All calls are `throws`; results are decoded into `Codable` Swift types.
 
-## Two build modes
+## Remote installation (recommended)
+
+Released versions are consumable directly from the repository root:
+
+```swift
+.package(
+    url: "https://github.com/agentstatelabs/agentstategraph.git",
+    from: "0.9.17"
+)
+```
+
+In Xcode, choose File ▸ Add Package Dependencies and enter the same repository
+URL. SwiftPM downloads the checksum-pinned release XCFramework automatically;
+consumers do not build Rust or generate native artifacts.
+
+## Local development build modes
 
 The native Rust library is linked one of two ways, chosen at configure
 time. Both expose the same `CAgentStateGraph` Clang module, so the Swift

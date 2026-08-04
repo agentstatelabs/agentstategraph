@@ -72,3 +72,12 @@ jobs:
         env:
           AGENTSTATEGRAPH_SWIFT_LOCAL: "1"
         run: swift test
+
+      - name: Validate Swift distribution manifest
+        run: |
+          version="$(python3 -c 'import json; print(json.load(open("bindings/swift/release.json"))["version"])')"
+          checksum="$(python3 -c 'import json; print(json.load(open("bindings/swift/release.json"))["checksum"])')"
+          temporary_manifest="$(mktemp)"
+          scripts/render-swift-package.sh "$version" "$checksum" "$temporary_manifest"
+          diff -u Package.swift "$temporary_manifest"
+          swift package dump-package > /dev/null

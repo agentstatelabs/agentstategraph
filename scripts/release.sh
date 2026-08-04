@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# release.sh <X.Y.Z> — one command to cut a release.
+# release.sh <X.Y.Z> — prepare the version bump for the two-phase release.
 #
 # Version drift (a wheel named 0.9.8 built from a 0.9.11 tag) has bitten this
 # repo before, so there is exactly ONE place a human edits the version — the
@@ -13,11 +13,12 @@
 # The Python wheel needs no edit: bindings/python/pyproject.toml is
 # `dynamic = ["version"]` and reads the Cargo workspace version at build time.
 #
-# CI then enforces this with the `version-guard` job (see .gitlab-ci.yml): a tag
-# whose versions disagree fails in the `check` stage, before anything publishes.
+# CI builds the Apple XCFramework on GitHub before the final tag exists, stages
+# the exact bytes in GitLab, generates the checksum-pinned root Package.swift,
+# then creates the final release commit and tag.
 #
-# Usage:  scripts/release.sh 0.9.12
-# Then:   git push --follow-tags origin main   (the annotated tag is the deploy trigger)
+# Usage:  scripts/release.sh 0.9.17
+# Then:   git commit -am "release-prep: v0.9.17" && git push origin main
 set -euo pipefail
 
 [ $# -eq 1 ] || { echo "usage: $0 <X.Y.Z>"; exit 2; }
@@ -63,9 +64,8 @@ echo "Changed files:"
 git --no-pager diff --stat
 echo
 echo "Next steps:"
-echo "  git commit -am 'release: v$NEW'"
-echo "  git tag -a v$NEW -m 'release: v$NEW'   # annotated: --follow-tags won't push a lightweight tag"
-echo "  git push --follow-tags origin main     # pushes main + the annotated tag; triggers publish/deploy"
+echo "  git commit -am 'release-prep: v$NEW'"
+echo "  git push origin main"
 echo
-echo "  # (belt-and-suspenders, works for lightweight tags too:)"
-echo "  #   git push origin main v$NEW"
+echo "GitLab will mirror the preparation commit, dispatch the GitHub macOS build,"
+echo "stage the exact artifact, generate Package.swift, and create/push v$NEW."

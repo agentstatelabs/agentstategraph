@@ -39,7 +39,16 @@ done
 echo "==> Building $CRATE (release) for each Apple target"
 for t in "${ALL_TARGETS[@]}"; do
     echo "    - $t"
-    cargo build --release -p "$CRATE" --target "$t"
+    case "$t" in
+        *-apple-darwin)
+            MACOSX_DEPLOYMENT_TARGET=11.0 \
+                cargo build --release --locked -p "$CRATE" --target "$t"
+            ;;
+        *-apple-ios*)
+            IPHONEOS_DEPLOYMENT_TARGET=14.0 \
+                cargo build --release --locked -p "$CRATE" --target "$t"
+            ;;
+    esac
 done
 
 # Staging dir for fat libs + shared headers.

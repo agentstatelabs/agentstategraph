@@ -25,6 +25,8 @@ stages:
   - check
   - test
   - publish
+  - package
+  - release
 
 default:
   image: rust:1.96-bookworm
@@ -89,12 +91,18 @@ version-guard:
       TAG="${CI_COMMIT_TAG#v}"
       WS=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
       PJ=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' bindings/typescript/package.json | head -1)
-      echo "tag=$TAG  workspace=$WS  ts-package.json=$PJ"
+      SWIFT=$(sed -n 's/^let nativeVersion = "\(.*\)"/\1/p' Package.swift)
+      SWIFT_META=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' bindings/swift/release.json | head -1)
+      SWIFT_SUM=$(sed -n 's/^let nativeChecksum = "\(.*\)"/\1/p' Package.swift)
+      echo "tag=$TAG  workspace=$WS  ts-package.json=$PJ  swift=$SWIFT  swift-meta=$SWIFT_META"
       fail=0
       [ "$WS" = "$TAG" ] || { echo "ERROR: [workspace.package].version ($WS) != tag ($TAG)"; fail=1; }
       [ "$PJ" = "$TAG" ] || { echo "ERROR: bindings/typescript/package.json ($PJ) != tag ($TAG)"; fail=1; }
+      [ "$SWIFT" = "$TAG" ] || { echo "ERROR: Package.swift nativeVersion ($SWIFT) != tag ($TAG)"; fail=1; }
+      [ "$SWIFT_META" = "$TAG" ] || { echo "ERROR: bindings/swift/release.json ($SWIFT_META) != tag ($TAG)"; fail=1; }
+      echo "$SWIFT_SUM" | grep -Eq '^[0-9a-f]{64}$' || { echo "ERROR: invalid Swift binary checksum"; fail=1; }
       if [ "$fail" != 0 ]; then
-        echo "Run scripts/release.sh $TAG on a clean tree, then retag."; exit 1
+        echo "Release metadata is inconsistent; do not publish or retag manually."; exit 1
       fi
       echo "version-guard OK: all versions at $TAG"
 
@@ -168,6 +176,41 @@ publish-github:
   script:
     - bash scripts/publish-to-github.sh
 
+# A release is prepared in two commits so SwiftPM's binary checksum can be
+# known before the final version tag exists. scripts/release.sh creates a
+# `release-prep: vX` commit. After that commit passes CI and is mirrored to
+# GitHub, this job dispatches the macOS builder there, stages the exact output
+# in GitLab's Generic Package Registry, commits the generated root
+# Package.swift, and atomically pushes that manifest commit plus the final tag.
+prepare-swift-release:
+  stage: package
+  image: debian:bookworm-slim
+  variables:
+    GIT_DEPTH: 0
+  cache: {}
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl gh git jq unzip
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_TITLE =~ /^release-prep: v/'
+  script:
+    - bash scripts/prepare-swift-release-ci.sh
+
+# The tag pipeline publishes the byte-identical artifact staged above. GitHub
+# remains the public download surface, but never rebuilds the checksum-pinned
+# Swift asset after the tag has been created.
+publish-swift-release:
+  stage: release
+  image: debian:bookworm-slim
+  variables:
+    GIT_DEPTH: 0
+  cache: {}
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl gh git jq
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - bash scripts/publish-swift-release-ci.sh
+
 # ci-guard: guarantees a NON-EMPTY pipeline and fails loudly if the publish
 # prerequisites are missing. Without this, a mis-scoped publish job produces
 # no pipeline at all — silent, and easy to miss for days.
@@ -184,3 +227,11 @@ ci-guard:
         echo "ERROR: GITHUB_REPO unset -> publish-github will NOT run"; exit 1
       fi
       echo "publish-github target: $GITHUB_REPO"
+      if echo "$CI_COMMIT_TITLE" | grep -q "^release-prep: v"; then
+        for name in GITHUB_TOKEN GITLAB_RELEASE_TOKEN; do
+          eval "value=\${$name:-}"
+          if [ -z "$value" ]; then
+            echo "ERROR: $name unset -> Swift release preparation cannot run"; exit 1
+          fi
+        done
+      fi
