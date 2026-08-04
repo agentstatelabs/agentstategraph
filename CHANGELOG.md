@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.9.16] — 2026-08-04
+
 ### Added
 - **Swift binding for macOS and iOS.** A complete Swift Package
   (`bindings/swift`) over the `agentstategraph-ffi` C ABI, at parity with the
