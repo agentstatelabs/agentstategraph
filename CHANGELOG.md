@@ -7,6 +7,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **Swift binding for macOS and iOS.** A complete Swift Package
+  (`bindings/swift`) over the `agentstategraph-ffi` C ABI, at parity with the
+  Go/Python/TypeScript bindings: repository (`get`/`set`/`delete`, branches,
+  `diff`/`merge`, `log`, `blame`), `TaskStore`, `PolicyStore`, taint /
+  quarantine / watch, and migrate — with `Codable` models and a throwing API.
+  It builds two ways (selected by `AGENTSTATEGRAPH_SWIFT_LOCAL`): the default
+  XCFramework mode links a device-capable fat framework built by
+  `scripts/build-swift-xcframework.sh` (macOS arm64+x86_64, iOS device arm64,
+  iOS simulator arm64+x86_64), and a local-dylib mode links `target/release`
+  for fast macOS/simulator development. A `swift-xcframework` release job
+  publishes the XCFramework as a GitHub release asset, and a `swift` CI job
+  runs the XCTest suite on macOS.
+
 ## [v0.9.15] — 2026-08-03
 
 ## [v0.9.14] — 2026-07-29
