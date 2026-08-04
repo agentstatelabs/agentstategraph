@@ -1,13 +1,24 @@
 # AgentStateGraph
 
-> **AgentStateGraph is to agent state what Git was to source code — a content-addressed, branchable, blameable state primitive, designed from the ground up for AI agents as the primary actor.**
+> **The canonical state-and-memory substrate for AI agents — the surface any agentic app should be built on.**
 
 **Website:** [agentstategraph.dev](https://agentstategraph.dev)
 **Disambiguation:** [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](site/src/content/docs/compare.md)
 
-## What AgentStateGraph is (and isn't)
+## The agent-building surface
 
-AgentStateGraph is **not** a Terraform replacement. The Terraform-replacement space is crowded with evolutionary players, and the actor model is wrong — Terraform assumes humans writing HCL and opening PRs, while AgentStateGraph assumes agents making low-confidence decisions at scale and needing to be held mechanically accountable. AgentStateGraph is **not** a LangGraph helper. LangGraph's `StateGraph` is an in-process Python dict used inside a single agent's execution; AgentStateGraph is a persistent, content-addressed substrate used *between and above* agents. AgentStateGraph is a **state primitive** — the layer on which a next-generation IaC tool, a next-generation GitOps tool, and agent-native ops tooling can all be built. Every change it records carries *why*, *who authorized it*, *what alternatives existed*, and *what the agent expected vs. observed*, across every branch, forever.
+Every serious agentic application re-invents the same plumbing: where does agent state live, how do you branch and compare speculative work, how do you know *who* changed *what* and *why*, how do multiple agents share plans and memory without clobbering each other, and how do you govern low-confidence decisions at scale. AgentStateGraph is that layer, built once, done right — **a content-addressed, branchable, blameable state primitive with AI agents as the primary actor.** If you're building an agent, a multi-agent system, or an agent-native tool, this is the substrate you should be standing on instead of rebuilding.
+
+It is deliberately **not** an application and **not** a framework you have to adopt wholesale. It's a primitive — the layer a next-generation IaC tool, a GitOps tool, an agent memory system (see [CTXone](https://github.com/agentstatelabs/ctxone)), or your own product can all be built on. Every change it records carries *why*, *who authorized it*, *what alternatives existed*, and *what the agent expected vs. observed* — across every branch, forever.
+
+### Why build on it
+
+- **Git-like semantics for state, not text** — content-addressed Merkle DAG, O(1) speculative branching, schema-aware (CRDT-inspired) merge, instant discard. Agents explore state spaces; this is the primitive that lets them.
+- **Every commit is accountable** — structured intent, reasoning, confidence, agent id, authority/delegation chain, and expected-vs-observed resolution. Governance is mechanical, not social.
+- **Batteries for real agent systems** — shared plans & tasks (state machine + proofs + assignment), pull-based reminders, policy + taint/quarantine gating, epochs (tamper-evident audit bundles), and blame/query across all of it.
+- **Connect anything** — MCP tools work with any MCP agent, plus an HTTP REST API and a browser explorer.
+- **Embed anywhere** — language bindings for Rust, Python, TypeScript, Go, .NET/C#, WASM, and C FFI, over pluggable storage backends (Memory, SQLite, Postgres, IndexedDB) — with more of both on the way.
+- **Multi-tenant & multi-agent by design** — namespace isolation, scoped sessions, delegation, and intent trees.
 
 This is what the substrate has to look like when the primary actor touching production systems is no longer a human who can be governed socially (via PRs, code review, Slack threads) but a fleet of agents that must be governed mechanically.
 
