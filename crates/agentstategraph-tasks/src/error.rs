@@ -9,6 +9,12 @@ pub enum TaskStoreError {
     #[error("plan not found: {0}")]
     PlanNotFound(String),
 
+    #[error("summary required to close a plan")]
+    SummaryRequired,
+
+    #[error("cannot close plan '{plan}': {reason}")]
+    CannotClose { plan: String, reason: String },
+
     #[error("plan already exists: {0}")]
     PlanAlreadyExists(String),
 

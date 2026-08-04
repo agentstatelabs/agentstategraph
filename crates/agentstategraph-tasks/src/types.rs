@@ -14,6 +14,18 @@ pub struct Plan {
     pub created_at: DateTime<Utc>,
     pub created_by: String,
     pub archived_at: Option<DateTime<Utc>>,
+    /// Closing summary, set by `close_plan`. A plan cannot be closed
+    /// without one — the plan-level analog of a task's `proof`. `None`
+    /// until the plan is explicitly closed (and on legacy plans that
+    /// predate this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// When the plan was closed via `close_plan`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<DateTime<Utc>>,
+    /// Agent that closed the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<String>,
 }
 
 /// A unit of work inside a plan.
@@ -248,6 +260,9 @@ mod tests {
             created_at: Utc::now(),
             created_by: "claude-code".to_string(),
             archived_at: None,
+            summary: None,
+            closed_at: None,
+            closed_by: None,
         };
         let json = serde_json::to_value(&plan).unwrap();
         let back: Plan = serde_json::from_value(json).unwrap();

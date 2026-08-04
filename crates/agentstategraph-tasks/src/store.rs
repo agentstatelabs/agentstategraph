@@ -123,6 +123,9 @@ impl TaskStore {
                 created_at: Utc::now(),
                 created_by: self.agent_id.clone(),
                 archived_at: None,
+                summary: None,
+                closed_at: None,
+                closed_by: None,
             };
 
             let meta_path = paths::plan_meta(&self.prefix, name);
@@ -201,6 +204,80 @@ impl TaskStore {
                 &meta_path,
                 &value,
                 self.commit_opts(format!("Archive plan {}", name)),
+            ) {
+                Ok(_) => return Ok(plan),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(TaskStoreError::WriteConflict)
+    }
+
+    /// Close a plan, recording a required `summary`.
+    ///
+    /// This is the explicit, gated replacement for the old auto-promotion:
+    /// terminal task transitions no longer complete the plan on their own.
+    /// Closing requires (1) a non-empty `summary` — the plan-level analog of
+    /// a task's `proof` — and (2) that every task is already terminal
+    /// (`Done`/`Abandoned`), so a plan cannot be closed with work still open.
+    ///
+    /// Idempotent on an already-closed (`Completed`) plan: returns it
+    /// unchanged. Refuses an `Archived` plan. Sets `status = Completed`,
+    /// `summary`, `closed_at`, and `closed_by`.
+    pub fn close_plan(
+        &self,
+        ref_name: &str,
+        name: &str,
+        summary: &str,
+    ) -> Result<Plan, TaskStoreError> {
+        if summary.trim().is_empty() {
+            return Err(TaskStoreError::SummaryRequired);
+        }
+        let meta_path = paths::plan_meta(&self.prefix, name);
+        for _ in 0..Self::MAX_CAS_RETRIES {
+            let head = self.repo.head(ref_name)?;
+            let mut plan = self.get_plan(ref_name, name)?;
+            match plan.status {
+                // Idempotent: closing a closed plan is a no-op.
+                PlanStatus::Completed => return Ok(plan),
+                PlanStatus::Archived => {
+                    return Err(TaskStoreError::CannotClose {
+                        plan: name.to_string(),
+                        reason: "plan is archived".to_string(),
+                    });
+                }
+                PlanStatus::Active => {}
+            }
+
+            let tasks = self.list_tasks(ref_name, name)?;
+            if tasks.is_empty() {
+                return Err(TaskStoreError::CannotClose {
+                    plan: name.to_string(),
+                    reason: "plan has no tasks".to_string(),
+                });
+            }
+            if let Some(open) = tasks.iter().find(|t| !t.status.is_terminal()) {
+                return Err(TaskStoreError::CannotClose {
+                    plan: name.to_string(),
+                    reason: format!(
+                        "task {} is still {:?}; every task must be done or abandoned first",
+                        open.id.0, open.status
+                    ),
+                });
+            }
+
+            plan.status = PlanStatus::Completed;
+            plan.summary = Some(summary.trim().to_string());
+            plan.closed_at = Some(Utc::now());
+            plan.closed_by = Some(self.agent_id.clone());
+
+            let value = serde_json::to_value(&plan)?;
+            match self.repo.set_json_cas(
+                ref_name,
+                head,
+                &meta_path,
+                &value,
+                self.commit_opts(format!("Close plan {}", name)),
             ) {
                 Ok(_) => return Ok(plan),
                 Err(RepoError::WriteConflict) => continue,
@@ -473,9 +550,15 @@ impl TaskStore {
     }
 
     /// Shared back-end for `complete_task` and `abandon_task` — writes
-    /// the task in its new terminal state and, if the plan's open-task
-    /// queue is now empty, promotes the plan's `_meta` to `Completed`
-    /// in the same commit.
+    /// the task in its new terminal state.
+    ///
+    /// A terminal task transition NO LONGER auto-promotes the plan to
+    /// `Completed`. Closing a plan is an explicit, summary-gated action
+    /// (`close_plan`) so implementations own their close workflow and can
+    /// require a summary — the plan-level analog of a task's `proof`.
+    /// The engine no longer imposes the "plan is Completed iff every task
+    /// is terminal" invariant; a plan with all tasks terminal simply stays
+    /// `Active` until it is explicitly closed.
     fn commit_terminal_transition(
         &self,
         ref_name: &str,
@@ -485,38 +568,10 @@ impl TaskStore {
     ) -> Result<(), TaskStoreError> {
         debug_assert!(task.status.is_terminal());
 
-        let all_tasks = self.list_tasks(ref_name, plan)?;
-        let all_terminal = all_tasks
-            .iter()
-            .filter(|t| t.id != task.id)
-            .all(|t| t.status.is_terminal())
-            && all_tasks.iter().any(|t| t.id == task.id);
-
-        let mut plan_meta_update: Option<Plan> = None;
-        if all_terminal {
-            let mut plan_meta = self.get_plan(ref_name, plan)?;
-            if plan_meta.status == PlanStatus::Active {
-                plan_meta.status = PlanStatus::Completed;
-                plan_meta_update = Some(plan_meta);
-            }
-        }
-
         let task_path = paths::task(&self.prefix, plan, &task.id);
         let task_value = serde_json::to_value(task)?;
-
-        if let Some(plan_meta) = plan_meta_update {
-            let meta_path = paths::plan_meta(&self.prefix, plan);
-            let meta_value = serde_json::to_value(&plan_meta)?;
-
-            let handle = self.repo.speculate(ref_name, Some(desc.clone()))?;
-            self.repo.spec_set_json(handle, &task_path, &task_value)?;
-            self.repo.spec_set_json(handle, &meta_path, &meta_value)?;
-            self.repo
-                .commit_speculation(handle, self.commit_opts(desc))?;
-        } else {
-            self.repo
-                .set_json(ref_name, &task_path, &task_value, self.commit_opts(desc))?;
-        }
+        self.repo
+            .set_json(ref_name, &task_path, &task_value, self.commit_opts(desc))?;
 
         Ok(())
     }

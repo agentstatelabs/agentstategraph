@@ -198,11 +198,22 @@ fn full_consumer_workflow() {
     assert_eq!(blame.agent_id, "claude-code");
     assert!(blame.intent_category.contains("Plan"));
 
-    // --- Plan should now be Completed since all tasks are terminal. --
+    // --- Terminal tasks no longer auto-complete the plan; it stays
+    //     Active until an explicit, summary-gated close. ---------------
     let plan = store.get_plan("main", "website-v2").unwrap();
     assert_eq!(
         plan.status,
-        agentstategraph_tasks::PlanStatus::Completed,
-        "plan should auto-complete when every task is terminal"
+        agentstategraph_tasks::PlanStatus::Active,
+        "plan should stay Active until explicitly closed"
     );
+
+    let closed = store
+        .close_plan("main", "website-v2", "brand pivot shipped")
+        .unwrap();
+    assert_eq!(
+        closed.status,
+        agentstategraph_tasks::PlanStatus::Completed,
+        "explicit close promotes the plan"
+    );
+    assert_eq!(closed.summary.as_deref(), Some("brand pivot shipped"));
 }
