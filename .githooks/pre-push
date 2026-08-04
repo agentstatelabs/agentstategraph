@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# pre-push hook: run the same rustfmt gate CI runs, before anything reaches
+# origin. CI fails the whole pipeline on a diff/violation — this catches it
+# locally where it's a quick fix, not a round-trip through a failed build.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# (scripts/setup-hooks.sh does this for you.)
+# Emergency bypass:       git push --no-verify
+set -uo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-push: cargo not found — skipping rustfmt check" >&2
+  exit 0
+fi
+
+echo "pre-push: cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+  cat >&2 <<'MSG'
+
+✗ pre-push blocked: CI's rustfmt check would fail.
+
+  Fix:   cargo fmt --all
+  Then re-commit and re-push.
+  Emergency bypass (discouraged): git push --no-verify
+MSG
+  exit 1
+fi
+exit 0
