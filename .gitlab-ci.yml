@@ -91,20 +91,18 @@ version-guard:
       TAG="${CI_COMMIT_TAG#v}"
       WS=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
       PJ=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' bindings/typescript/package.json | head -1)
-      SWIFT=$(sed -n 's/^let nativeVersion = "\(.*\)"/\1/p' Package.swift)
-      SWIFT_META=$(sed -n 's/.*"version": "\(.*\)".*/\1/p' bindings/swift/release.json | head -1)
-      SWIFT_SUM=$(sed -n 's/^let nativeChecksum = "\(.*\)"/\1/p' Package.swift)
-      echo "tag=$TAG  workspace=$WS  ts-package.json=$PJ  swift=$SWIFT  swift-meta=$SWIFT_META"
+      echo "tag=$TAG  workspace=$WS  ts-package.json=$PJ"
       fail=0
       [ "$WS" = "$TAG" ] || { echo "ERROR: [workspace.package].version ($WS) != tag ($TAG)"; fail=1; }
       [ "$PJ" = "$TAG" ] || { echo "ERROR: bindings/typescript/package.json ($PJ) != tag ($TAG)"; fail=1; }
-      [ "$SWIFT" = "$TAG" ] || { echo "ERROR: Package.swift nativeVersion ($SWIFT) != tag ($TAG)"; fail=1; }
-      [ "$SWIFT_META" = "$TAG" ] || { echo "ERROR: bindings/swift/release.json ($SWIFT_META) != tag ($TAG)"; fail=1; }
-      echo "$SWIFT_SUM" | grep -Eq '^[0-9a-f]{64}$' || { echo "ERROR: invalid Swift binary checksum"; fail=1; }
+      # Swift binding metadata (Package.swift / release.json) is intentionally
+      # NOT checked here: the swift xcframework release is a separate, opt-in
+      # ASG step (prepare-swift-release, manual) and must never gate a Rust/TS
+      # release or its GitHub mirror. See create-release-tag.
       if [ "$fail" != 0 ]; then
         echo "Release metadata is inconsistent; do not publish or retag manually."; exit 1
       fi
-      echo "version-guard OK: all versions at $TAG"
+      echo "version-guard OK: workspace + ts at $TAG"
 
 # On a release tag, build the Python wheel (pyo3/maturin) and publish it so
 # downstream Python projects can `pip install agentstategraph`.
@@ -176,15 +174,45 @@ publish-github:
   script:
     - bash scripts/publish-to-github.sh
 
-# A release is prepared in two commits so SwiftPM's binary checksum can be
-# known before the final version tag exists. scripts/release.sh creates a
-# `release-prep: vX` commit. After that commit passes CI and is mirrored to
-# GitHub, this job dispatches the macOS builder there, stages the exact output
-# in GitLab's Generic Package Registry, commits the generated root
-# Package.swift, and atomically pushes that manifest commit plus the final tag.
+# create-release-tag: THE tag authority. On a `release-prep: vX` commit (after
+# build/clippy/test pass in the earlier stages), create and push the version
+# tag. Rust, TS/npm, Python/wheel, and the GitHub mirror all depend only on
+# this — decoupled from the swift xcframework build so a swift-only issue can
+# never block a release (that was prepare-swift-release's failure mode).
+create-release-tag:
+  stage: package
+  image: alpine:latest
+  before_script: []
+  cache: {}
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_TITLE =~ /^release-prep: v/'
+  script:
+    - apk add --no-cache git >/dev/null
+    - |
+      VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+      TAG="v${VERSION}"
+      if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+        echo "tag ${TAG} already exists on origin; nothing to do"; exit 0
+      fi
+      case "$CI_SERVER_URL" in
+        https://*) push_url="https://oauth2:${GITHUB_TOKEN}@${CI_SERVER_URL#https://}/${CI_PROJECT_PATH}.git" ;;
+        http://*)  push_url="http://oauth2:${GITHUB_TOKEN}@${CI_SERVER_URL#http://}/${CI_PROJECT_PATH}.git" ;;
+        *) echo "ERROR: unexpected CI_SERVER_URL '$CI_SERVER_URL'"; exit 1 ;;
+      esac
+      git tag -a "$TAG" -m "$TAG" "$CI_COMMIT_SHA"
+      git push "$push_url" "refs/tags/${TAG}"
+      echo "pushed ${TAG} at ${CI_COMMIT_SHA}"
+
+# Swift xcframework release prep — an OPT-IN, ASG-only step (SwiftPM consumers).
+# Manual + allow_failure so it never gates a release: the tag is already cut by
+# create-release-tag. Dispatches the macOS builder on GitHub, stages the exact
+# output in GitLab's Generic Package Registry, and prepares the root
+# Package.swift. Run it by hand from a `release-prep: vX` pipeline when the
+# swift bindings are being cut.
 prepare-swift-release:
   stage: package
   image: debian:bookworm-slim
+  allow_failure: true
   variables:
     GIT_DEPTH: 0
   cache: {}
@@ -192,6 +220,7 @@ prepare-swift-release:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl gh git jq unzip
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_TITLE =~ /^release-prep: v/'
+      when: manual
   script:
     - bash scripts/prepare-swift-release-ci.sh
 
@@ -201,6 +230,7 @@ prepare-swift-release:
 publish-swift-release:
   stage: release
   image: debian:bookworm-slim
+  allow_failure: true   # swift is opt-in; a tag cut without a staged xcframework must not fail
   variables:
     GIT_DEPTH: 0
   cache: {}
