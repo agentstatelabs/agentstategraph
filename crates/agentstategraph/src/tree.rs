@@ -142,6 +142,74 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
     }
 }
 
+/// Like [`tree_to_json`] but stops at `max_depth` levels below `obj`: a Node at
+/// the depth limit is rendered as a compact `{ "_truncated": true, ... }`
+/// placeholder (its child keys, or length) instead of being recursed into, so
+/// deep subtrees are never loaded or materialized. Used for cheap shallow reads
+/// of a large ref (plan perf-slow-endpoints t-007). Depth is counted from
+/// `obj`: `max_depth = 0` summarizes a Node immediately; an Atom is always
+/// returned as its value.
+pub fn tree_to_json_capped(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    max_depth: usize,
+) -> Result<serde_json::Value, TreeError> {
+    to_json_capped(store, obj, max_depth, 0)
+}
+
+fn to_json_capped(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    max_depth: usize,
+    depth: usize,
+) -> Result<serde_json::Value, TreeError> {
+    match obj {
+        Object::Atom(atom) => Ok(atom_to_json(atom)),
+        Object::Node(node) => {
+            if depth >= max_depth {
+                // Boundary: summarize from the node itself — its keys/length are
+                // in hand, so we never load (or serialize) any child object.
+                let summary = match node {
+                    Node::Map(entries) => serde_json::json!({
+                        "_truncated": true,
+                        "_keys": entries.keys().cloned().collect::<Vec<_>>(),
+                    }),
+                    Node::List(items) | Node::Set(items) => serde_json::json!({
+                        "_truncated": true,
+                        "_len": items.len(),
+                    }),
+                };
+                return Ok(summary);
+            }
+            match node {
+                Node::Map(entries) => {
+                    let mut map = serde_json::Map::new();
+                    for (key, child_id) in entries {
+                        let child = store
+                            .get_object(child_id)?
+                            .ok_or(TreeError::ObjectNotFound(*child_id))?;
+                        map.insert(
+                            key.clone(),
+                            to_json_capped(store, &child, max_depth, depth + 1)?,
+                        );
+                    }
+                    Ok(serde_json::Value::Object(map))
+                }
+                Node::List(items) | Node::Set(items) => {
+                    let mut arr = Vec::new();
+                    for child_id in items {
+                        let child = store
+                            .get_object(child_id)?
+                            .ok_or(TreeError::ObjectNotFound(*child_id))?;
+                        arr.push(to_json_capped(store, &child, max_depth, depth + 1)?);
+                    }
+                    Ok(serde_json::Value::Array(arr))
+                }
+            }
+        }
+    }
+}
+
 /// List all paths in the state tree under a given prefix.
 /// Returns leaf paths (paths that point to atoms/values, not intermediate maps).
 pub fn tree_list_paths(
@@ -343,6 +411,246 @@ fn search_recursive(
                         results,
                     )?;
                 }
+            }
+        },
+    }
+    Ok(())
+}
+
+/// Collect EVERY `(path, value)` string leaf of the tree at `root`, with no
+/// query filter and no result cap — the one-time full walk that seeds the
+/// leaf-value index (plan perf-slow-endpoints t-006). Unlike
+/// [`tree_search_values`] it does not emit key-name matches; the index is over
+/// values only. Depth is bounded by [`LIST_PATHS_HARD_CEILING`], mirroring the
+/// other tree walks.
+pub fn tree_collect_leaves(
+    store: &dyn ObjectStore,
+    root: &ObjectId,
+) -> Result<Vec<(String, String)>, TreeError> {
+    let root_obj = store
+        .get_object(root)?
+        .ok_or(TreeError::ObjectNotFound(*root))?;
+    let mut out = Vec::new();
+    collect_leaves_recursive(store, &root_obj, "", 0, &mut out)?;
+    Ok(out)
+}
+
+fn collect_leaves_recursive(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    current_path: &str,
+    depth: usize,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), TreeError> {
+    if depth > LIST_PATHS_HARD_CEILING {
+        return Ok(());
+    }
+    match obj {
+        Object::Atom(atom) => {
+            let value_str = match atom {
+                Atom::String(s) => s.clone(),
+                Atom::Int(i) => i.to_string(),
+                Atom::Float(f) => f.to_string(),
+                Atom::Bool(b) => b.to_string(),
+                _ => return Ok(()),
+            };
+            let path = if current_path.is_empty() {
+                "/".to_string()
+            } else {
+                current_path.to_string()
+            };
+            out.push((path, value_str));
+        }
+        Object::Node(node) => match node {
+            Node::Map(entries) => {
+                for (key, child_id) in entries {
+                    let child = store
+                        .get_object(child_id)?
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
+                    let child_path = format!("{}/{}", current_path, key);
+                    collect_leaves_recursive(store, &child, &child_path, depth + 1, out)?;
+                }
+            }
+            Node::List(items) | Node::Set(items) => {
+                for (i, child_id) in items.iter().enumerate() {
+                    let child = store
+                        .get_object(child_id)?
+                        .ok_or(TreeError::ObjectNotFound(*child_id))?;
+                    let child_path = format!("{}/{}", current_path, i);
+                    collect_leaves_recursive(store, &child, &child_path, depth + 1, out)?;
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+/// Stringify an atom the way the value index/search does. `None` for atom
+/// kinds that are not indexed (Null, Bytes).
+fn atom_value_string(atom: &Atom) -> Option<String> {
+    match atom {
+        Atom::String(s) => Some(s.clone()),
+        Atom::Int(i) => Some(i.to_string()),
+        Atom::Float(f) => Some(f.to_string()),
+        Atom::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Collect just the leaf PATHS under `obj` (for removals during a diff).
+fn collect_leaf_paths(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    current_path: &str,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<(), TreeError> {
+    if depth > LIST_PATHS_HARD_CEILING {
+        return Ok(());
+    }
+    match obj {
+        Object::Atom(atom) => {
+            if atom_value_string(atom).is_some() {
+                out.push(if current_path.is_empty() {
+                    "/".to_string()
+                } else {
+                    current_path.to_string()
+                });
+            }
+        }
+        Object::Node(node) => {
+            let children: Vec<(String, ObjectId)> = match node {
+                Node::Map(entries) => entries
+                    .iter()
+                    .map(|(k, id)| (format!("{}/{}", current_path, k), *id))
+                    .collect(),
+                Node::List(items) | Node::Set(items) => items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (format!("{}/{}", current_path, i), *id))
+                    .collect(),
+            };
+            for (child_path, child_id) in children {
+                let child = store
+                    .get_object(&child_id)?
+                    .ok_or(TreeError::ObjectNotFound(child_id))?;
+                collect_leaf_paths(store, &child, &child_path, depth + 1, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Diff the string leaves of two trees, returning `(removed_paths, added
+/// (path, value))` for the transition `old_root -> new_root`. Content-addressed:
+/// a subtree whose ObjectId is unchanged is skipped whole, so the cost is
+/// proportional to what a commit actually changed — not the tree size. This is
+/// what makes incremental index maintenance on the write path cheap. `old_root
+/// = None` treats every leaf of `new_root` as added. See plan t-006.
+pub fn tree_diff_leaves(
+    store: &dyn ObjectStore,
+    old_root: Option<&ObjectId>,
+    new_root: &ObjectId,
+) -> Result<(Vec<String>, Vec<(String, String)>), TreeError> {
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    diff_recursive(
+        store,
+        old_root.copied(),
+        Some(*new_root),
+        "",
+        0,
+        &mut removed,
+        &mut added,
+    )?;
+    Ok((removed, added))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_recursive(
+    store: &dyn ObjectStore,
+    old_id: Option<ObjectId>,
+    new_id: Option<ObjectId>,
+    path: &str,
+    depth: usize,
+    removed: &mut Vec<String>,
+    added: &mut Vec<(String, String)>,
+) -> Result<(), TreeError> {
+    // Content-addressing: identical ids (or both absent) => identical subtree.
+    if old_id == new_id {
+        return Ok(());
+    }
+    if depth > LIST_PATHS_HARD_CEILING {
+        return Ok(());
+    }
+    let old_obj = match old_id {
+        Some(id) => store.get_object(&id)?,
+        None => None,
+    };
+    let new_obj = match new_id {
+        Some(id) => store.get_object(&id)?,
+        None => None,
+    };
+    match (old_obj, new_obj) {
+        (None, None) => {}
+        (Some(o), None) => collect_leaf_paths(store, &o, path, depth, removed)?,
+        (None, Some(n)) => collect_leaves_recursive(store, &n, path, depth, added)?,
+        (Some(Object::Atom(_)), Some(Object::Atom(new_atom))) => {
+            // Same path, changed value: drop the old row, add the new one.
+            let leaf = if path.is_empty() { "/" } else { path }.to_string();
+            removed.push(leaf.clone());
+            if let Some(v) = atom_value_string(&new_atom) {
+                added.push((leaf, v));
+            }
+        }
+        (Some(o @ Object::Node(_)), Some(Object::Atom(new_atom))) => {
+            collect_leaf_paths(store, &o, path, depth, removed)?;
+            let leaf = if path.is_empty() { "/" } else { path }.to_string();
+            if let Some(v) = atom_value_string(&new_atom) {
+                added.push((leaf, v));
+            }
+        }
+        (Some(Object::Atom(_)), Some(n @ Object::Node(_))) => {
+            let leaf = if path.is_empty() { "/" } else { path }.to_string();
+            removed.push(leaf);
+            collect_leaves_recursive(store, &n, path, depth, added)?;
+        }
+        (Some(Object::Node(on)), Some(Object::Node(nn))) => match (on, nn) {
+            (Node::Map(oe), Node::Map(ne)) => {
+                let mut keys: std::collections::BTreeSet<&String> = oe.keys().collect();
+                keys.extend(ne.keys());
+                for k in keys {
+                    let child_path = format!("{}/{}", path, k);
+                    diff_recursive(
+                        store,
+                        oe.get(k).copied(),
+                        ne.get(k).copied(),
+                        &child_path,
+                        depth + 1,
+                        removed,
+                        added,
+                    )?;
+                }
+            }
+            (Node::List(oi) | Node::Set(oi), Node::List(ni) | Node::Set(ni)) => {
+                let max = oi.len().max(ni.len());
+                for i in 0..max {
+                    let child_path = format!("{}/{}", path, i);
+                    diff_recursive(
+                        store,
+                        oi.get(i).copied(),
+                        ni.get(i).copied(),
+                        &child_path,
+                        depth + 1,
+                        removed,
+                        added,
+                    )?;
+                }
+            }
+            // Container kind changed (map <-> sequence): treat as full replace.
+            (old_node, new_node) => {
+                collect_leaf_paths(store, &Object::Node(old_node), path, depth, removed)?;
+                collect_leaves_recursive(store, &Object::Node(new_node), path, depth, added)?;
             }
         },
     }
@@ -867,6 +1175,34 @@ mod tests {
         // returned a plausible, bounded result set.
         assert!(!paths.is_empty());
         assert!(paths.len() <= LIST_PATHS_MAX_RESULTS);
+    }
+
+    #[test]
+    fn test_to_json_capped_truncates_nodes_at_depth() {
+        let (store, root_id) = setup();
+        let root = tree_get(&store, &root_id, &StatePath::root()).unwrap();
+        let capped = tree_to_json_capped(&store, &root, 1).unwrap();
+
+        // Atom child is returned as-is.
+        assert_eq!(capped["name"], "test-cluster");
+        // A List child at the cap becomes a length placeholder, not its items.
+        assert_eq!(capped["nodes"]["_truncated"], true);
+        assert_eq!(capped["nodes"]["_len"], 2);
+        assert!(capped["nodes"].get("0").is_none());
+        // A Map child at the cap becomes a keys placeholder.
+        assert_eq!(capped["config"]["_truncated"], true);
+        assert_eq!(capped["config"]["_keys"][0], "network");
+        assert!(capped["config"]["network"].is_null());
+    }
+
+    #[test]
+    fn test_to_json_capped_deep_enough_matches_full() {
+        let (store, root_id) = setup();
+        let root = tree_get(&store, &root_id, &StatePath::root()).unwrap();
+        // A cap deeper than the tree yields the same result as the full walk.
+        let full = tree_to_json(&store, &root).unwrap();
+        let capped = tree_to_json_capped(&store, &root, 64).unwrap();
+        assert_eq!(full, capped);
     }
 
     #[test]

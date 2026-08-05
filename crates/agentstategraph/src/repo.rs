@@ -503,6 +503,21 @@ impl Repository {
         Ok(json)
     }
 
+    /// Like [`Repository::get_json`] but stops materializing `max_depth` levels
+    /// below `path`: nodes at the cap become `{ "_truncated": true, ... }`
+    /// placeholders and their subtrees are never loaded. A cheap shallow read of
+    /// a large ref — avoids walking and serializing the whole tree (plan t-007).
+    pub fn get_json_capped(
+        &self,
+        ref_name: &str,
+        path: &str,
+        max_depth: usize,
+    ) -> Result<serde_json::Value, RepoError> {
+        let obj = self.get(ref_name, path)?;
+        let json = tree::tree_to_json_capped(self.storage.as_ref(), &obj, max_depth)?;
+        Ok(json)
+    }
+
     /// Get a value with an explicit intent, permitting reads of
     /// `/_meta/_secret/*` when the intent category is `Migrate`.
     pub fn get_with_intent(
@@ -1575,6 +1590,42 @@ impl Repository {
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
         let limit = max_results.unwrap_or(50);
+
+        // Leaf-value index fast path (plan perf-slow-endpoints t-006). The index
+        // is keyed by (namespace, ref) and maintained incrementally on the write
+        // path (see `guarded_set_ref`). The first search of a ref after the
+        // feature is enabled backfills it once (a full walk of the current
+        // tree); every search after that — and after every write — is a trigram
+        // substring probe. Backends without an index return `None` and we fall
+        // through to the un-indexed tree walk unchanged.
+        //
+        // The index over-fetches (`limit * 4`, capped) before the secret filter
+        // so dropping secret rows can't starve the result below `limit`; the
+        // walk applies the same filter after its own cap.
+        let ns = self.active_namespace()?;
+        let ns_str = ns.as_str();
+        let query_lower = query.to_lowercase();
+        let index_fetch = limit.saturating_mul(4).min(tree::LIST_PATHS_MAX_RESULTS);
+
+        if !self.storage.leaf_index_is_built(ns_str, ref_name)? {
+            // One-time backfill. Non-fatal on error — we simply fall back to the
+            // tree walk below and can retry the backfill on a later search.
+            if let Ok(leaves) = tree::tree_collect_leaves(self.storage.as_ref(), &commit.state_root)
+            {
+                let _ = self.storage.leaf_index_build(ns_str, ref_name, &leaves);
+            }
+        }
+
+        if let Some(mut hits) =
+            self.storage
+                .leaf_index_search(ns_str, ref_name, &query_lower, index_fetch)?
+        {
+            hits.retain(|(path, _)| !path_is_secret(path));
+            hits.truncate(limit);
+            return Ok(hits);
+        }
+
+        // Fallback: un-indexed tree walk (backend has no leaf index).
         let mut results =
             tree::tree_search_values(self.storage.as_ref(), &commit.state_root, query, limit)?;
         // Never surface values from the secret sub-prefix.
@@ -1995,7 +2046,35 @@ impl Repository {
     fn guarded_set_ref(&self, ref_name: &str, new_target: ObjectId) -> Result<(), RepoError> {
         let ns = self.active_namespace()?;
         self.enforce_epoch_seals(ref_name, &new_target)?;
+        // Capture the outgoing state root before the ref moves, so the leaf
+        // index can be updated with just the delta this write introduces.
+        let old_root = self
+            .storage
+            .get_ref(&ns, ref_name)
+            .ok()
+            .flatten()
+            .and_then(|cid| self.storage.get_commit(&cid).ok().flatten())
+            .map(|c| c.state_root);
         self.storage.set_ref(&ns, ref_name, new_target)?;
+        // Incremental leaf-index maintenance (plan t-006). Best-effort: index
+        // upkeep must never fail a write, and it only runs for a set that has
+        // already been backfilled — otherwise the first search will build it
+        // from the current state anyway.
+        if self
+            .storage
+            .leaf_index_is_built(ns.as_str(), ref_name)
+            .unwrap_or(false)
+            && let Ok(Some(new_commit)) = self.storage.get_commit(&new_target)
+            && let Ok((removed, added)) = tree::tree_diff_leaves(
+                self.storage.as_ref(),
+                old_root.as_ref(),
+                &new_commit.state_root,
+            )
+        {
+            let _ = self
+                .storage
+                .leaf_index_apply(ns.as_str(), ref_name, &removed, &added);
+        }
         Ok(())
     }
 
