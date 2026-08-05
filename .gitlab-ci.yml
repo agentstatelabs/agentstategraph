@@ -188,6 +188,7 @@ create-release-tag:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_TITLE =~ /^release-prep: v/'
   script:
     - apk add --no-cache git >/dev/null
+    - git config user.email "ci@agentstategraph" && git config user.name "GitLab CI"
     - |
       VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
       TAG="v${VERSION}"
