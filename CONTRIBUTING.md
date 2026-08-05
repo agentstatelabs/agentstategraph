@@ -111,18 +111,40 @@ contributors use the GitHub PR flow above.
    of work (e.g. in the closing summary of the plan/branch it belongs to), so
    every landed change traces back to its reviewed MR.
 
-**Cutting a release** is the one exception — it goes straight to `main`, never
-through an MR (routing a version bump through review invites tag/commit-SHA
-drift). There is exactly one place a human edits the version: the workspace.
-[`scripts/release.sh`](scripts/release.sh) propagates it everywhere the publish
-pipeline reads a version and stamps the changelog:
+**Cutting a release** is the one exception — its two generated commits go
+straight to `main`, never through an MR. There is exactly one place a human
+edits the version: the workspace. [`scripts/release.sh`](scripts/release.sh)
+propagates it everywhere the publish pipeline reads a version and stamps the
+changelog:
 
 ```sh
 scripts/release.sh X.Y.Z
-git commit -am "release: vX.Y.Z"
-git tag -a vX.Y.Z -m "release: vX.Y.Z"    # annotated — the deploy trigger
-git push --follow-tags origin main
+git commit -am "release-prep: vX.Y.Z"
+git push origin main
 ```
+
+That preparation commit passes the normal GitLab pipeline and is mirrored to
+GitHub without a release tag. GitLab then dispatches the protected GitHub
+`prepare-swift.yml` workflow for the exact mirrored SHA. Its macOS runner builds
+the XCFramework; GitLab downloads and stages those exact bytes, generates the
+root checksum-pinned `Package.swift`, and atomically pushes a `release: vX.Y.Z`
+manifest commit plus the annotated tag. The tag pipeline publishes the staged
+Swift asset and verifies a clean remote SwiftPM consumer. Do not create the tag
+manually.
+
+The protected GitLab release jobs require:
+
+- `GITHUB_REPO=agentstatelabs/agentstategraph`.
+- `GITHUB_TOKEN`, masked and protected, with repository Contents and Actions
+  read/write access. It mirrors main/tags, dispatches the macOS build, downloads
+  its artifact, and uploads the final GitHub release asset.
+- `GITLAB_RELEASE_TOKEN`, masked and protected, from a project access token that
+  may push to protected `main` and protected release tags. It is used only for
+  the generated manifest commit and atomic tag push.
+
+GitHub receives no GitLab credential. The prepared ZIP is copied immediately
+into the project Generic Package Registry so an expiring Actions artifact is
+never the release source of truth.
 
 The **tag** is the deploy trigger: a `version-guard` job fails the pipeline if
 any version disagrees with the tag before anything publishes, then the release

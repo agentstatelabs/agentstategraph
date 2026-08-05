@@ -1,0 +1,102 @@
+name: Prepare Swift release
+run-name: prepare Swift v${{ inputs.version }} @ ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v
+        required: true
+        type: string
+      source_sha:
+        description: Exact mirrored GitLab main commit to build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-swift-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build Swift XCFramework
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Verify source and version
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main
+          actual=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "$actual" = "$EXPECTED_VERSION"
+
+      - name: Install Rust and Apple targets
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build XCFramework
+        run: scripts/build-swift-xcframework.sh
+
+      - name: Package immutable release payload
+        id: package
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          asset="agentstategraph-swift-v${VERSION}.xcframework.zip"
+          ditto -c -k --keepParent \
+            bindings/swift/artifacts/AgentStateGraphFFI.xcframework \
+            "$asset"
+          checksum=$(swift package compute-checksum "$asset")
+          printf '%s  %s\n' "$checksum" "$asset" > "${asset}.sha256"
+          python3 - "$VERSION" "$SOURCE_SHA" "$asset" "$checksum" > swift-release.json <<'PY'
+          import json
+          import sys
+
+          version, source_sha, asset, checksum = sys.argv[1:]
+          json.dump(
+              {
+                  "asset": asset,
+                  "checksum": checksum,
+                  "source_sha": source_sha,
+                  "version": version,
+              },
+              sys.stdout,
+              indent=2,
+              sort_keys=True,
+          )
+          sys.stdout.write("\n")
+          PY
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Upload prepared payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-release-v${{ inputs.version }}-${{ inputs.source_sha }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256
+            swift-release.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
