@@ -503,6 +503,21 @@ impl Repository {
         Ok(json)
     }
 
+    /// Like [`Repository::get_json`] but stops materializing `max_depth` levels
+    /// below `path`: nodes at the cap become `{ "_truncated": true, ... }`
+    /// placeholders and their subtrees are never loaded. A cheap shallow read of
+    /// a large ref — avoids walking and serializing the whole tree (plan t-007).
+    pub fn get_json_capped(
+        &self,
+        ref_name: &str,
+        path: &str,
+        max_depth: usize,
+    ) -> Result<serde_json::Value, RepoError> {
+        let obj = self.get(ref_name, path)?;
+        let json = tree::tree_to_json_capped(self.storage.as_ref(), &obj, max_depth)?;
+        Ok(json)
+    }
+
     /// Get a value with an explicit intent, permitting reads of
     /// `/_meta/_secret/*` when the intent category is `Migrate`.
     pub fn get_with_intent(

@@ -142,6 +142,74 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
     }
 }
 
+/// Like [`tree_to_json`] but stops at `max_depth` levels below `obj`: a Node at
+/// the depth limit is rendered as a compact `{ "_truncated": true, ... }`
+/// placeholder (its child keys, or length) instead of being recursed into, so
+/// deep subtrees are never loaded or materialized. Used for cheap shallow reads
+/// of a large ref (plan perf-slow-endpoints t-007). Depth is counted from
+/// `obj`: `max_depth = 0` summarizes a Node immediately; an Atom is always
+/// returned as its value.
+pub fn tree_to_json_capped(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    max_depth: usize,
+) -> Result<serde_json::Value, TreeError> {
+    to_json_capped(store, obj, max_depth, 0)
+}
+
+fn to_json_capped(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    max_depth: usize,
+    depth: usize,
+) -> Result<serde_json::Value, TreeError> {
+    match obj {
+        Object::Atom(atom) => Ok(atom_to_json(atom)),
+        Object::Node(node) => {
+            if depth >= max_depth {
+                // Boundary: summarize from the node itself — its keys/length are
+                // in hand, so we never load (or serialize) any child object.
+                let summary = match node {
+                    Node::Map(entries) => serde_json::json!({
+                        "_truncated": true,
+                        "_keys": entries.keys().cloned().collect::<Vec<_>>(),
+                    }),
+                    Node::List(items) | Node::Set(items) => serde_json::json!({
+                        "_truncated": true,
+                        "_len": items.len(),
+                    }),
+                };
+                return Ok(summary);
+            }
+            match node {
+                Node::Map(entries) => {
+                    let mut map = serde_json::Map::new();
+                    for (key, child_id) in entries {
+                        let child = store
+                            .get_object(child_id)?
+                            .ok_or(TreeError::ObjectNotFound(*child_id))?;
+                        map.insert(
+                            key.clone(),
+                            to_json_capped(store, &child, max_depth, depth + 1)?,
+                        );
+                    }
+                    Ok(serde_json::Value::Object(map))
+                }
+                Node::List(items) | Node::Set(items) => {
+                    let mut arr = Vec::new();
+                    for child_id in items {
+                        let child = store
+                            .get_object(child_id)?
+                            .ok_or(TreeError::ObjectNotFound(*child_id))?;
+                        arr.push(to_json_capped(store, &child, max_depth, depth + 1)?);
+                    }
+                    Ok(serde_json::Value::Array(arr))
+                }
+            }
+        }
+    }
+}
+
 /// List all paths in the state tree under a given prefix.
 /// Returns leaf paths (paths that point to atoms/values, not intermediate maps).
 pub fn tree_list_paths(
@@ -1107,6 +1175,34 @@ mod tests {
         // returned a plausible, bounded result set.
         assert!(!paths.is_empty());
         assert!(paths.len() <= LIST_PATHS_MAX_RESULTS);
+    }
+
+    #[test]
+    fn test_to_json_capped_truncates_nodes_at_depth() {
+        let (store, root_id) = setup();
+        let root = tree_get(&store, &root_id, &StatePath::root()).unwrap();
+        let capped = tree_to_json_capped(&store, &root, 1).unwrap();
+
+        // Atom child is returned as-is.
+        assert_eq!(capped["name"], "test-cluster");
+        // A List child at the cap becomes a length placeholder, not its items.
+        assert_eq!(capped["nodes"]["_truncated"], true);
+        assert_eq!(capped["nodes"]["_len"], 2);
+        assert!(capped["nodes"].get("0").is_none());
+        // A Map child at the cap becomes a keys placeholder.
+        assert_eq!(capped["config"]["_truncated"], true);
+        assert_eq!(capped["config"]["_keys"][0], "network");
+        assert!(capped["config"]["network"].is_null());
+    }
+
+    #[test]
+    fn test_to_json_capped_deep_enough_matches_full() {
+        let (store, root_id) = setup();
+        let root = tree_get(&store, &root_id, &StatePath::root()).unwrap();
+        // A cap deeper than the tree yields the same result as the full walk.
+        let full = tree_to_json(&store, &root).unwrap();
+        let capped = tree_to_json_capped(&store, &root, 64).unwrap();
+        assert_eq!(full, capped);
     }
 
     #[test]
