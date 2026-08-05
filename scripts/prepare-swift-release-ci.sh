@@ -32,11 +32,6 @@ echo "$CI_COMMIT_SHA" | grep -Eq '^[0-9a-f]{40}$' || {
   exit 2
 }
 
-if git rev-parse "$TAG" >/dev/null 2>&1; then
-  echo "error: tag $TAG already exists" >&2
-  exit 1
-fi
-
 github_sha=$(gh api "repos/${GITHUB_REPO}/commits/main" --jq .sha)
 if [ "$github_sha" != "$CI_COMMIT_SHA" ]; then
   echo "error: GitHub main is ${github_sha}, expected mirrored preparation commit ${CI_COMMIT_SHA}" >&2
@@ -156,8 +151,10 @@ git diff --cached --quiet && { echo "error: release manifest did not change" >&2
 git config user.name "agentstategraph-release-bot"
 git config user.email "release-bot@agentstatelabs.com"
 git commit -m "release: $TAG"
-git tag -a "$TAG" -m "release: $TAG"
 
-echo ">> pushing manifest commit and $TAG atomically to GitLab"
-git push --atomic release-origin HEAD:refs/heads/main "refs/tags/$TAG"
-echo ">> Swift release prepared; the $TAG pipeline will publish the staged artifact"
+# Push ONLY the manifest commit to main. create-release-tag (next stage) tags
+# this commit — keeping the checksum-pinned Package.swift inside the tag while
+# leaving tag creation to the single tag authority.
+echo ">> pushing release manifest commit to GitLab main (create-release-tag will tag it)"
+git push release-origin HEAD:refs/heads/main
+echo ">> Swift release staged; create-release-tag will tag this commit and the $TAG pipeline will publish the artifact"
