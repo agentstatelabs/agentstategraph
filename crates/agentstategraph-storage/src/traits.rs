@@ -76,6 +76,61 @@ pub trait ObjectStore: Send + Sync {
         // Default implementation: sequential puts. Backends can optimize.
         objs.iter().map(|obj| self.put_object(obj)).collect()
     }
+
+    // ---- Optional leaf-value index (plan perf-slow-endpoints t-006) ----
+    //
+    // An optional, backend-provided index over the string leaves of a ref's
+    // tree, keyed by `(namespace, ref)` and maintained in place: a one-time
+    // backfill, then incremental add/remove as the ref advances. It turns value
+    // search from an un-indexed full DFS (linear in graph size; multi-second on
+    // a large ref) into a trigram substring probe. A backend that does not
+    // implement it reports "not indexed" so callers fall back to the tree walk,
+    // making the whole feature purely additive.
+
+    /// Whether the `(namespace, ref)` leaf set has been built.
+    fn leaf_index_is_built(&self, _namespace: &str, _ref_name: &str) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
+    /// One-time backfill: replace any existing rows for `(namespace, ref)` with
+    /// `entries` and mark the set built. Called once, from the read path, the
+    /// first time a ref is searched after the feature is enabled.
+    fn leaf_index_build(
+        &self,
+        _namespace: &str,
+        _ref_name: &str,
+        _entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Incremental maintenance: for a built `(namespace, ref)`, delete the rows
+    /// at `removed_paths` and insert `added` `(path, value)` rows. A no-op if
+    /// the set has not been built (the backfill will pick up the new state).
+    /// Called from the write path as a ref advances.
+    fn leaf_index_apply(
+        &self,
+        _namespace: &str,
+        _ref_name: &str,
+        _removed_paths: &[String],
+        _added: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Substring-search the built leaves of `(namespace, ref)`. `Ok(None)` means
+    /// the set is not built / backend has no index (caller falls back to the
+    /// tree walk); `Ok(Some(..))` is authoritative (possibly empty), capped at
+    /// `limit`.
+    fn leaf_index_search(
+        &self,
+        _namespace: &str,
+        _ref_name: &str,
+        _query_lower: &str,
+        _limit: usize,
+    ) -> Result<Option<Vec<(String, String)>>, StorageError> {
+        Ok(None)
+    }
 }
 
 /// Commit storage. Commits are also content-addressed but stored

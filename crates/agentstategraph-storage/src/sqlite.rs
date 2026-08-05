@@ -165,6 +165,42 @@ impl SqliteStorage {
             );
 
             CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp DESC);
+
+            -- Leaf-value index (plan perf-slow-endpoints t-006). Turns value
+            -- search from a full tree walk into a trigram substring probe.
+            -- Keyed by (namespace, ref) and maintained IN PLACE as a ref
+            -- advances: a one-time backfill on first use, then incremental
+            -- add/remove of only the leaves a commit changed.
+            --
+            -- `leaf_rows` is the base table (real indexes for the ns/ref filter
+            -- and for incremental delete-by-path); `leaf_fts` is a trigram FTS5
+            -- external-content index over `value`, kept in sync by triggers;
+            -- `leaf_index_refs` records which (namespace, ref) sets are built.
+            CREATE TABLE IF NOT EXISTS leaf_rows (
+                id        INTEGER PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                ref       TEXT NOT NULL,
+                path      TEXT NOT NULL,
+                value     TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_leaf_rows_nsref
+                ON leaf_rows(namespace, ref);
+            CREATE INDEX IF NOT EXISTS idx_leaf_rows_nsrefpath
+                ON leaf_rows(namespace, ref, path);
+            CREATE VIRTUAL TABLE IF NOT EXISTS leaf_fts USING fts5(
+                value, content='leaf_rows', content_rowid='id', tokenize='trigram'
+            );
+            CREATE TRIGGER IF NOT EXISTS leaf_rows_ai AFTER INSERT ON leaf_rows BEGIN
+                INSERT INTO leaf_fts(rowid, value) VALUES (new.id, new.value);
+            END;
+            CREATE TRIGGER IF NOT EXISTS leaf_rows_ad AFTER DELETE ON leaf_rows BEGIN
+                INSERT INTO leaf_fts(leaf_fts, rowid, value) VALUES ('delete', old.id, old.value);
+            END;
+            CREATE TABLE IF NOT EXISTS leaf_index_refs (
+                namespace TEXT NOT NULL,
+                ref       TEXT NOT NULL,
+                PRIMARY KEY (namespace, ref)
+            );
             CREATE INDEX IF NOT EXISTS idx_epochs_status ON epochs(status);
             CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
             CREATE INDEX IF NOT EXISTS idx_taints_path    ON taints(path);
@@ -342,6 +378,170 @@ impl ObjectStore for SqliteStorage {
         .map_err(|e| StorageError::Backend(format!("put object: {}", e)))?;
 
         Ok(id)
+    }
+
+    fn leaf_index_is_built(&self, namespace: &str, ref_name: &str) -> Result<bool, StorageError> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM leaf_index_refs WHERE namespace = ?1 AND ref = ?2)",
+            params![namespace, ref_name],
+            |row| row.get(0),
+        )
+        .map_err(|e| StorageError::Backend(format!("leaf_index_is_built: {}", e)))
+    }
+
+    fn leaf_index_build(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build tx: {}", e)))?;
+        // Idempotent rebuild: clear any prior rows for this (ns, ref) first.
+        tx.execute(
+            "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2",
+            params![namespace, ref_name],
+        )
+        .map_err(|e| StorageError::Backend(format!("leaf_index_build clear: {}", e)))?;
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| StorageError::Backend(format!("leaf_index_build prep: {}", e)))?;
+            for (path, value) in entries {
+                stmt.execute(params![namespace, ref_name, path, value])
+                    .map_err(|e| StorageError::Backend(format!("leaf_index_build row: {}", e)))?;
+            }
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO leaf_index_refs (namespace, ref) VALUES (?1, ?2)",
+            params![namespace, ref_name],
+        )
+        .map_err(|e| StorageError::Backend(format!("leaf_index_build mark: {}", e)))?;
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build commit: {}", e)))
+    }
+
+    fn leaf_index_apply(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        removed_paths: &[String],
+        added: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply tx: {}", e)))?;
+        // Only maintain a set that has actually been built; otherwise the
+        // eventual backfill reads the current state and this diff would be lost.
+        let built: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM leaf_index_refs WHERE namespace = ?1 AND ref = ?2)",
+                params![namespace, ref_name],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply check: {}", e)))?;
+        if built {
+            {
+                let mut del = tx
+                    .prepare_cached(
+                        "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2 AND path = ?3",
+                    )
+                    .map_err(|e| {
+                        StorageError::Backend(format!("leaf_index_apply del prep: {}", e))
+                    })?;
+                for path in removed_paths {
+                    del.execute(params![namespace, ref_name, path])
+                        .map_err(|e| {
+                            StorageError::Backend(format!("leaf_index_apply del: {}", e))
+                        })?;
+                }
+                let mut ins = tx
+                    .prepare_cached(
+                        "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .map_err(|e| StorageError::Backend(format!("leaf_index_apply ins prep: {}", e)))?;
+                for (path, value) in added {
+                    ins.execute(params![namespace, ref_name, path, value])
+                        .map_err(|e| {
+                            StorageError::Backend(format!("leaf_index_apply ins: {}", e))
+                        })?;
+                }
+            }
+        }
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply commit: {}", e)))
+    }
+
+    fn leaf_index_search(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        query_lower: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<(String, String)>>, StorageError> {
+        let conn = self.lock_conn()?;
+        let built: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM leaf_index_refs WHERE namespace = ?1 AND ref = ?2)",
+                params![namespace, ref_name],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("leaf_index_search check: {}", e)))?;
+        if !built {
+            return Ok(None); // caller falls back to the tree walk
+        }
+        // Trigram FTS5 gives substring MATCH for needles >= 3 chars. Quote the
+        // needle as a phrase and escape embedded quotes so punctuation in the
+        // query can't be read as FTS syntax. Shorter needles can't use the
+        // trigram index, so fall back to a scan-assisted LIKE on the base rows.
+        let mut out = Vec::new();
+        if query_lower.chars().count() >= 3 {
+            let match_expr = format!("\"{}\"", query_lower.replace('"', "\"\""));
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT r.path, r.value FROM leaf_rows r \
+                     WHERE r.namespace = ?1 AND r.ref = ?2 \
+                       AND r.id IN (SELECT rowid FROM leaf_fts WHERE leaf_fts MATCH ?3) \
+                     LIMIT ?4",
+                )
+                .map_err(|e| StorageError::Backend(format!("leaf_index_search prep: {}", e)))?;
+            let rows = stmt
+                .query_map(
+                    params![namespace, ref_name, match_expr, limit as i64],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(|e| StorageError::Backend(format!("leaf_index_search query: {}", e)))?;
+            for r in rows {
+                out.push(
+                    r.map_err(|e| StorageError::Backend(format!("leaf_index_search row: {}", e)))?,
+                );
+            }
+        } else {
+            let pattern = format!("%{}%", query_lower);
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT path, value FROM leaf_rows \
+                     WHERE namespace = ?1 AND ref = ?2 AND value LIKE ?3 LIMIT ?4",
+                )
+                .map_err(|e| StorageError::Backend(format!("leaf_index_search prep2: {}", e)))?;
+            let rows = stmt
+                .query_map(params![namespace, ref_name, pattern, limit as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| StorageError::Backend(format!("leaf_index_search query2: {}", e)))?;
+            for r in rows {
+                out.push(r.map_err(|e| {
+                    StorageError::Backend(format!("leaf_index_search row2: {}", e))
+                })?);
+            }
+        }
+        Ok(Some(out))
     }
 
     fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
