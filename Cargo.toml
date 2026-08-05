@@ -21,7 +21,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.17"
+version = "0.9.18"
 edition = "2024"
 authors = ["AgentStateLabs, LLC"]
 license = "MIT OR Apache-2.0"
@@ -33,19 +33,19 @@ documentation = "https://docs.rs/agentstategraph"
 [workspace.dependencies]
 # Internal crates — version tracks [workspace.package].version so it never drifts.
 # default-features off here so members can opt in/out; feature-relying members name features explicitly.
-agentstategraph = { path = "crates/agentstategraph", version = "0.9.17", default-features = false }
-agentstategraph-core = { path = "crates/agentstategraph-core", version = "0.9.17" }
-agentstategraph-storage = { path = "crates/agentstategraph-storage", version = "0.9.17", default-features = false }
-agentstategraph-tasks = { path = "crates/agentstategraph-tasks", version = "0.9.17" }
-agentstategraph-policy = { path = "crates/agentstategraph-policy", version = "0.9.17" }
-agentstategraph-policy-sign = { path = "crates/agentstategraph-policy-sign", version = "0.9.17" }
-agentstategraph-policy-wasm = { path = "crates/agentstategraph-policy-wasm", version = "0.9.17" }
-agentstategraph-policy-rego = { path = "crates/agentstategraph-policy-rego", version = "0.9.17" }
-agentstategraph-policy-cedar = { path = "crates/agentstategraph-policy-cedar", version = "0.9.17" }
-agentstategraph-taint = { path = "crates/agentstategraph-taint", version = "0.9.17" }
-agentstategraph-reminders = { path = "crates/agentstategraph-reminders", version = "0.9.17" }
-agentstategraph-migrate = { path = "crates/agentstategraph-migrate", version = "0.9.17" }
-agentstategraph-ffi = { path = "crates/agentstategraph-ffi", version = "0.9.17" }
+agentstategraph = { path = "crates/agentstategraph", version = "0.9.18", default-features = false }
+agentstategraph-core = { path = "crates/agentstategraph-core", version = "0.9.18" }
+agentstategraph-storage = { path = "crates/agentstategraph-storage", version = "0.9.18", default-features = false }
+agentstategraph-tasks = { path = "crates/agentstategraph-tasks", version = "0.9.18" }
+agentstategraph-policy = { path = "crates/agentstategraph-policy", version = "0.9.18" }
+agentstategraph-policy-sign = { path = "crates/agentstategraph-policy-sign", version = "0.9.18" }
+agentstategraph-policy-wasm = { path = "crates/agentstategraph-policy-wasm", version = "0.9.18" }
+agentstategraph-policy-rego = { path = "crates/agentstategraph-policy-rego", version = "0.9.18" }
+agentstategraph-policy-cedar = { path = "crates/agentstategraph-policy-cedar", version = "0.9.18" }
+agentstategraph-taint = { path = "crates/agentstategraph-taint", version = "0.9.18" }
+agentstategraph-reminders = { path = "crates/agentstategraph-reminders", version = "0.9.18" }
+agentstategraph-migrate = { path = "crates/agentstategraph-migrate", version = "0.9.18" }
+agentstategraph-ffi = { path = "crates/agentstategraph-ffi", version = "0.9.18" }
 
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
