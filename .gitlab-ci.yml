@@ -196,8 +196,8 @@ create-release-tag:
         echo "tag ${TAG} already exists on origin; nothing to do"; exit 0
       fi
       case "$CI_SERVER_URL" in
-        https://*) push_url="https://oauth2:${GITHUB_TOKEN}@${CI_SERVER_URL#https://}/${CI_PROJECT_PATH}.git" ;;
-        http://*)  push_url="http://oauth2:${GITHUB_TOKEN}@${CI_SERVER_URL#http://}/${CI_PROJECT_PATH}.git" ;;
+        https://*) push_url="https://oauth2:${GITLAB_RELEASE_TOKEN}@${CI_SERVER_URL#https://}/${CI_PROJECT_PATH}.git" ;;
+        http://*)  push_url="http://oauth2:${GITLAB_RELEASE_TOKEN}@${CI_SERVER_URL#http://}/${CI_PROJECT_PATH}.git" ;;
         *) echo "ERROR: unexpected CI_SERVER_URL '$CI_SERVER_URL'"; exit 1 ;;
       esac
       git tag -a "$TAG" -m "$TAG" "$CI_COMMIT_SHA"
@@ -259,7 +259,7 @@ ci-guard:
       fi
       echo "publish-github target: $GITHUB_REPO"
       if echo "$CI_COMMIT_TITLE" | grep -q "^release-prep: v"; then
-        for name in GITHUB_TOKEN; do
+        for name in GITLAB_RELEASE_TOKEN; do
           eval "value=\${$name:-}"
           if [ -z "$value" ]; then
             echo "ERROR: $name unset -> Swift release preparation cannot run"; exit 1
