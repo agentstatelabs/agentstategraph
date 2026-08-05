@@ -6,7 +6,7 @@ set -euo pipefail
 
 required=(
   CI_API_V4_URL CI_COMMIT_SHA CI_JOB_TOKEN CI_PROJECT_ID CI_PROJECT_PATH
-  CI_SERVER_URL GITHUB_REPO GITHUB_TOKEN GITLAB_RELEASE_TOKEN
+  CI_SERVER_URL GITHUB_REPO GITHUB_TOKEN
 )
 for name in "${required[@]}"; do
   [ -n "${!name:-}" ] || { echo "error: required variable $name is unset" >&2; exit 2; }
@@ -132,8 +132,8 @@ GITHUB_REPO="$GITHUB_REPO" scripts/render-swift-package.sh \
   "$VERSION" "$metadata_checksum" "$STAGE/Package.swift"
 
 case "$CI_SERVER_URL" in
-  https://*) push_url="https://oauth2:${GITLAB_RELEASE_TOKEN}@${CI_SERVER_URL#https://}/${CI_PROJECT_PATH}.git" ;;
-  http://*) push_url="http://oauth2:${GITLAB_RELEASE_TOKEN}@${CI_SERVER_URL#http://}/${CI_PROJECT_PATH}.git" ;;
+  https://*) push_url="https://oauth2:${GITHUB_TOKEN}@${CI_SERVER_URL#https://}/${CI_PROJECT_PATH}.git" ;;
+  http://*) push_url="http://oauth2:${GITHUB_TOKEN}@${CI_SERVER_URL#http://}/${CI_PROJECT_PATH}.git" ;;
   *) echo "error: unsupported CI_SERVER_URL '$CI_SERVER_URL'" >&2; exit 2 ;;
 esac
 
