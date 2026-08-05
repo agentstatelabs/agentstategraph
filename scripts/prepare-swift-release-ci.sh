@@ -55,7 +55,6 @@ for _ in $(seq 1 60); do
   run_id=$(gh run list \
     --repo "$GITHUB_REPO" \
     --workflow prepare-swift.yml \
-    --event workflow_dispatch \
     --limit 30 \
     --json databaseId,displayTitle \
     --jq ".[] | select(.displayTitle == \"$RUN_TITLE\") | .databaseId" \
