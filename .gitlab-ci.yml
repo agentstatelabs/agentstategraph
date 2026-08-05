@@ -228,7 +228,7 @@ ci-guard:
       fi
       echo "publish-github target: $GITHUB_REPO"
       if echo "$CI_COMMIT_TITLE" | grep -q "^release-prep: v"; then
-        for name in GITHUB_TOKEN GITLAB_RELEASE_TOKEN; do
+        for name in GITHUB_TOKEN; do
           eval "value=\${$name:-}"
           if [ -z "$value" ]; then
             echo "ERROR: $name unset -> Swift release preparation cannot run"; exit 1
