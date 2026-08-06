@@ -39,6 +39,39 @@ final class RepositoryTests: XCTestCase {
         XCTAssertFalse(try asg.deleteBranch("does-not-exist"))
     }
 
+    func testBranchFromExactHistoricalCommit() throws {
+        let asg = try AgentStateGraph()
+        defer { asg.close() }
+        let historicalCommit = try asg.set(
+            "/decision",
+            json: "\"original\"",
+            category: .checkpoint,
+            description: "record original decision"
+        )
+        _ = try asg.set(
+            "/later",
+            json: "true",
+            category: .refinement,
+            description: "advance main"
+        )
+
+        let forkedAt = try asg.branch(
+            "historical",
+            fromCommit: historicalCommit
+        )
+
+        XCTAssertEqual(forkedAt, historicalCommit)
+        XCTAssertEqual(
+            try asg.get("/decision", ref: "historical"),
+            "\"original\""
+        )
+        XCTAssertThrowsError(try asg.get("/later", ref: "historical"))
+        XCTAssertEqual(
+            try asg.listBranches().first(where: { $0.name == "historical" })?.target,
+            historicalCommit
+        )
+    }
+
     func testLogRecordsIntent() throws {
         let asg = try AgentStateGraph()
         defer { asg.close() }
