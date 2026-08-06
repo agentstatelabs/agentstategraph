@@ -11,6 +11,7 @@ done
 export GH_TOKEN="$GITHUB_TOKEN"
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
+source scripts/lib/github-actions.sh
 
 VERSION="${CI_COMMIT_TAG#v}"
 TAG="v$VERSION"
@@ -83,26 +84,19 @@ gh release upload "$TAG" \
   "$STAGE/swift-release.json"
 
 echo ">> dispatching clean remote SwiftPM verification"
+run_title="verify Swift $TAG"
+previous_run_id=$(github_latest_workflow_run_id \
+  "$GITHUB_REPO" verify-swift-release.yml "$run_title")
 gh workflow run verify-swift-release.yml \
   --repo "$GITHUB_REPO" \
   --ref main \
   -f "version=$VERSION"
 
-run_title="verify Swift $TAG"
-run_id=""
-for _ in $(seq 1 60); do
-  run_id=$(gh run list \
-    --repo "$GITHUB_REPO" \
-    --workflow verify-swift-release.yml \
-    --event workflow_dispatch \
-    --limit 30 \
-    --json databaseId,displayTitle \
-    --jq ".[] | select(.displayTitle == \"$run_title\") | .databaseId" \
-    | head -1)
-  [ -n "$run_id" ] && break
-  sleep 5
-done
-[ -n "$run_id" ] || { echo "error: verification workflow run was not found" >&2; exit 1; }
+run_id=$(github_wait_for_new_workflow_run \
+  "$GITHUB_REPO" verify-swift-release.yml "$run_title" "$previous_run_id") || {
+  echo "error: verification workflow run was not found" >&2
+  exit 1
+}
 gh run watch "$run_id" --repo "$GITHUB_REPO" --exit-status
 
 echo ">> published and verified Swift package $TAG"
