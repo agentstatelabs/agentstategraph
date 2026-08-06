@@ -174,13 +174,16 @@ publish-github:
   script:
     - bash scripts/publish-to-github.sh
 
-# create-release-tag: THE tag authority. On a `release-prep: vX` commit (after
-# build/clippy/test pass in the earlier stages), create and push the version
-# tag. Rust, TS/npm, Python/wheel, and the GitHub mirror all depend only on
-# this — decoupled from the swift xcframework build so a swift-only issue can
-# never block a release (that was prepare-swift-release's failure mode).
+# create-release-tag: THE tag authority, and the FINAL act of a release. It runs
+# in the last stage, so everything before it in the release-prep pipeline — the
+# GitHub mirror and the (non-blocking) swift xcframework prep — has already run.
+# It tags the CURRENT main HEAD: when prepare-swift-release succeeds it has
+# pushed a `release: vX` manifest commit (checksum-pinned Package.swift) on top
+# of the prep commit, so the tag captures it; when swift fails (allow_failure)
+# main is unchanged and the tag lands on the prep commit — the release still
+# ships. Rust, TS/npm, Python/wheel, and the GitHub mirror all key off this tag.
 create-release-tag:
-  stage: package
+  stage: release
   image: alpine:latest
   before_script: []
   cache: {}
@@ -200,16 +203,21 @@ create-release-tag:
         http://*)  push_url="http://oauth2:${GITLAB_RELEASE_TOKEN}@${CI_SERVER_URL#http://}/${CI_PROJECT_PATH}.git" ;;
         *) echo "ERROR: unexpected CI_SERVER_URL '$CI_SERVER_URL'"; exit 1 ;;
       esac
-      git tag -a "$TAG" -m "$TAG" "$CI_COMMIT_SHA"
+      # Tag the latest main: prepare-swift-release may have pushed the
+      # checksum-pinned Package.swift manifest commit on top of the prep commit.
+      git fetch -q origin main
+      TARGET=$(git rev-parse FETCH_HEAD)
+      git tag -a "$TAG" -m "$TAG" "$TARGET"
       git push "$push_url" "refs/tags/${TAG}"
-      echo "pushed ${TAG} at ${CI_COMMIT_SHA}"
+      echo "pushed ${TAG} at ${TARGET}"
 
-# Swift xcframework release prep — an OPT-IN, ASG-only step (SwiftPM consumers).
-# Manual + allow_failure so it never gates a release: the tag is already cut by
-# create-release-tag. Dispatches the macOS builder on GitHub, stages the exact
-# output in GitLab's Generic Package Registry, and prepares the root
-# Package.swift. Run it by hand from a `release-prep: vX` pipeline when the
-# swift bindings are being cut.
+# Swift xcframework release prep — runs on EVERY `release-prep: vX` pipeline, in
+# the stage BEFORE create-release-tag. It dispatches the macOS builder on
+# GitHub, stages the exact output in GitLab's Generic Package Registry, renders
+# the checksum-pinned root Package.swift, and pushes a `release: vX` manifest
+# commit to main (NO tag — create-release-tag owns the tag, in the next stage).
+# allow_failure so a swift-only problem never blocks the release: if it fails,
+# main is unchanged and create-release-tag simply tags the prep commit.
 prepare-swift-release:
   stage: package
   image: debian:bookworm-slim
@@ -221,7 +229,6 @@ prepare-swift-release:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl gh git jq unzip
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_TITLE =~ /^release-prep: v/'
-      when: manual
   script:
     - bash scripts/prepare-swift-release-ci.sh
 
