@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "reviewed_core_version": "0.9.20",
+  "advanced_abi_contract_version": 1,
+  "capabilities": [
+    "repository_base",
+    "tasks",
+    "policy",
+    "taint",
+    "migration",
+    "speculation",
+    "commit_query",
+    "sessions",
+    "epochs",
+    "namespaces",
+    "cas_writes",
+    "merge_safety",
+    "explorer",
+    "schema_registration"
+  ],
+  "advanced_abi_operations": [
+    "head",
+    "set_cas",
+    "query.commits",
+    "namespace.current",
+    "namespace.create",
+    "namespace.list",
+    "namespace.delete",
+    "merge.base",
+    "merge.preview",
+    "merge.checked",
+    "explore.list_paths",
+    "explore.get_tree",
+    "explore.search_values",
+    "explore.stats",
+    "explore.commit_graph",
+    "explore.intent_tree",
+    "spec.create",
+    "spec.set",
+    "spec.delete",
+    "spec.compare",
+    "spec.commit",
+    "spec.discard",
+    "spec.list",
+    "session.create",
+    "session.get",
+    "session.list",
+    "session.children",
+    "session.update_head",
+    "session.end",
+    "session.active.get",
+    "session.active.set",
+    "epoch.create",
+    "epoch.get",
+    "epoch.list",
+    "epoch.seal",
+    "epoch.archive",
+    "epoch.export",
+    "epoch.active.get",
+    "epoch.active.set"
+  ],
+  "bindings": {
+    "rust": {
+      "source": "crates/agentstategraph",
+      "tier": "reference",
+      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer"],
+      "partial": ["schema_registration"],
+      "unavailable": []
+    },
+    "c": {
+      "source": "crates/agentstategraph-ffi",
+      "tier": "native-contract",
+      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer"],
+      "partial": [],
+      "unavailable": ["schema_registration"]
+    },
+    "swift": {
+      "source": "bindings/swift",
+      "tier": "release-required",
+      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer"],
+      "partial": [],
+      "unavailable": ["schema_registration"]
+    },
+    "python": {
+      "source": "bindings/python",
+      "tier": "tracked",
+      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs"],
+      "partial": [],
+      "unavailable": ["namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+    },
+    "typescript": {
+      "source": "bindings/typescript",
+      "tier": "tracked",
+      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs"],
+      "partial": [],
+      "unavailable": ["namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+    },
+    "wasm": {
+      "source": "crates/agentstategraph-wasm",
+      "tier": "tracked",
+      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "sessions", "epochs"],
+      "partial": [],
+      "unavailable": ["commit_query", "namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+    },
+    "go": {
+      "source": "bindings/go",
+      "tier": "tracked",
+      "full": ["repository_base", "tasks", "policy", "taint", "migration"],
+      "partial": [],
+      "unavailable": ["speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+    },
+    "dotnet": {
+      "source": "bindings/dotnet",
+      "tier": "tracked",
+      "full": ["repository_base", "tasks", "policy", "taint"],
+      "partial": ["migration"],
+      "unavailable": ["speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+    }
+  }
+}

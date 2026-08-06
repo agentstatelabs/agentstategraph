@@ -59,6 +59,14 @@ fmt:
     - rustup component add rustfmt
     - cargo fmt --all -- --check
 
+binding-contract:
+  stage: check
+  image: python:3.13-slim
+  before_script: []
+  cache: {}
+  script:
+    - python3 scripts/check-binding-capabilities.py
+
 clippy:
   stage: check
   script:

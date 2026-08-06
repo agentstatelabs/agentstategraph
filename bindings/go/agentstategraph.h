@@ -34,6 +34,10 @@ extern char* agentstategraph_merge(SgRepo repo, const char* source, const char* 
     const char* description);
 extern char* agentstategraph_log(SgRepo repo, const char* ref_name, unsigned int limit);
 extern char* agentstategraph_blame(SgRepo repo, const char* ref_name, const char* path);
+extern char* agentstategraph_repository_capabilities(void);
+extern SgRepo agentstategraph_fork_namespace(SgRepo repo, const char* namespace_name);
+extern char* agentstategraph_repository_call(SgRepo repo, const char* operation,
+    const char* request_json);
 
 /* TaskStore */
 extern SgTaskStore agentstategraph_taskstore_new(SgRepo repo, const char* prefix, const char* agent_id);

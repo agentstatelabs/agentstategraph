@@ -4,7 +4,8 @@ An AI-native, versioned, intent-carrying state store. This is the Swift
 binding over the native Rust implementation via the stable C ABI
 (`agentstategraph-ffi`), packaged as a Swift Package for macOS and iOS.
 
-It mirrors the surface of the Go, Python, and TypeScript bindings:
+It provides the established cross-language surface plus the advanced native
+repository contract required by branch-aware applications:
 
 - **`AgentStateGraph`** — repository: `get` / `set` / `delete`, branches,
   `diff` / `merge`, `log`, `blame`, plus taint & migrate (below).
@@ -14,6 +15,13 @@ It mirrors the surface of the Go, Python, and TypeScript bindings:
   evaluation, tenant-scoped variants, signing envelopes.
 - **Taint / Quarantine / Watch** — protective markers on paths.
 - **Migrate** — schema check / run.
+- **Advanced repository** — namespaces, expected-head CAS, merge base and
+  preview, state exploration/search, commit queries, atomic speculation,
+  durable sessions, and epochs.
+
+Binding capability status is tracked in `../capabilities.json`; see
+`../../docs/BINDING_RELEASE_POLICY.md`. Bindings share a release version but do
+not gain new Core APIs automatically.
 
 All calls are `throws`; results are decoded into `Codable` Swift types.
 
@@ -24,7 +32,7 @@ Released versions are consumable directly from the repository root:
 ```swift
 .package(
     url: "https://github.com/agentstatelabs/agentstategraph.git",
-    from: "0.9.17"
+    from: "0.9.20"
 )
 ```
 

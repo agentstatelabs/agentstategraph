@@ -16,6 +16,14 @@ env:
   PYO3_PYTHON: python3
 
 jobs:
+  binding-contract:
+    name: binding capability contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate binding review and ABI parity
+        run: python3 scripts/check-binding-capabilities.py
+
   test:
     name: check + test
     runs-on: ubuntu-latest

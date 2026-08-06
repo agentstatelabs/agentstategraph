@@ -77,7 +77,7 @@ public struct LogEntry: Codable, Sendable, Equatable {
 public final class AgentStateGraph {
     private var repo: UnsafeMutableRawPointer?
 
-    private init(repo: UnsafeMutableRawPointer?) throws {
+    init(repo: UnsafeMutableRawPointer?) throws {
         guard let repo = repo else {
             throw AgentStateGraphError.operationFailed("open repository")
         }
