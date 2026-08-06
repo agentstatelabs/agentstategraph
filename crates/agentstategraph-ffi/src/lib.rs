@@ -21,8 +21,8 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, Repository, SCHEMA_VERSION};
-use agentstategraph_core::IntentCategory;
+use agentstategraph::{CommitOptions, CreateSessionParams, Repository, SpecHandle, SCHEMA_VERSION};
+use agentstategraph_core::{IntentCategory, Namespace, ObjectId, QueryFilters, SessionStatus};
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore, Situation};
 use agentstategraph_storage::SqliteStorage;
@@ -420,6 +420,491 @@ pub extern "C" fn agentstategraph_blame(
         Ok(entry) => to_c_string(&serde_json::to_string(&entry).unwrap_or_default()),
         Err(_) => ptr::null_mut(),
     }
+}
+
+/// Return the advanced repository API contract implemented by
+/// [`agentstategraph_repository_call`]. Keeping this contract data-driven gives
+/// native bindings one stable ABI entry point while still allowing their
+/// public APIs to remain strongly typed and idiomatic.
+#[no_mangle]
+pub extern "C" fn agentstategraph_repository_capabilities() -> *mut c_char {
+    json_ok(&serde_json::json!({
+        "contract_version": 1,
+        "operations": [
+            "head", "set_cas", "query.commits",
+            "namespace.current", "namespace.create", "namespace.list", "namespace.delete",
+            "merge.base", "merge.preview", "merge.checked",
+            "explore.list_paths", "explore.get_tree", "explore.search_values",
+            "explore.stats", "explore.commit_graph", "explore.intent_tree",
+            "spec.create", "spec.set", "spec.delete", "spec.compare", "spec.commit",
+            "spec.discard", "spec.list",
+            "session.create", "session.get", "session.list", "session.children",
+            "session.update_head", "session.end", "session.active.get", "session.active.set",
+            "epoch.create", "epoch.get", "epoch.list", "epoch.seal", "epoch.archive",
+            "epoch.export", "epoch.active.get", "epoch.active.set"
+        ]
+    }))
+}
+
+/// Create another repository handle over the same storage, scoped to
+/// `namespace`. The returned handle has independent active session/epoch state
+/// and must be released with [`agentstategraph_free`].
+#[no_mangle]
+pub extern "C" fn agentstategraph_fork_namespace(
+    repo: *const SgRepo,
+    namespace: *const c_char,
+) -> *mut SgRepo {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let namespace = match Namespace::new(unsafe { c_to_str(namespace) }) {
+        Ok(ns) => ns,
+        Err(_) => return ptr::null_mut(),
+    };
+    let fork = repo.inner.fork_namespace(namespace);
+    if fork.init().is_err() {
+        return ptr::null_mut();
+    }
+    Box::into_raw(Box::new(SgRepo {
+        inner: Arc::new(fork),
+    }))
+}
+
+/// Invoke an advanced repository operation through the stable JSON ABI.
+///
+/// `request_json` must be a JSON object. Successful results and failures are
+/// JSON values; failures use the existing `{"error":"..."}` convention.
+/// Bindings should query [`agentstategraph_repository_capabilities`] instead of
+/// assuming that a newer operation exists in an older native artifact.
+#[no_mangle]
+pub extern "C" fn agentstategraph_repository_call(
+    repo: *const SgRepo,
+    operation: *const c_char,
+    request_json: *const c_char,
+) -> *mut c_char {
+    let Some(repo) = (unsafe { repo.as_ref() }) else {
+        return ptr::null_mut();
+    };
+    let operation = unsafe { c_to_str(operation) };
+    let request: serde_json::Value = if request_json.is_null() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_str(&unsafe { c_to_str(request_json) }) {
+            Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+            Ok(_) => return json_err("request_json must be a JSON object"),
+            Err(e) => return json_err(&format!("invalid request_json: {e}")),
+        }
+    };
+
+    match repository_call(&repo.inner, &operation, &request) {
+        Ok(value) => json_ok(&value),
+        Err(error) => json_err(&error),
+    }
+}
+
+fn repository_call(
+    repo: &Repository,
+    operation: &str,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let s = |key: &str| request_string(request, key);
+    let optional = |key: &str| request_optional_string(request, key);
+    let ref_name = || optional("ref").unwrap_or_else(|| "main".to_string());
+    let commit_options = || -> Result<CommitOptions, String> {
+        let mut options = CommitOptions::new(
+            optional("agent_id").unwrap_or_else(|| "ffi".to_string()),
+            parse_category(&optional("category").unwrap_or_else(|| "checkpoint".to_string())),
+            s("description")?,
+        );
+        if let Some(reasoning) = optional("reasoning") {
+            options = options.with_reasoning(reasoning);
+        }
+        if let Some(confidence) = request.get("confidence").and_then(|v| v.as_f64()) {
+            options = options.with_confidence(confidence);
+        }
+        if request.get("tags").is_some() {
+            options = options.with_tags(request_string_array(request, "tags")?);
+        }
+        Ok(options)
+    };
+
+    match operation {
+        "head" => Ok(
+            serde_json::json!({ "head": repo.head(&ref_name()).map_err(err_string)?.to_string() }),
+        ),
+        "set_cas" => {
+            let expected = parse_object_id(&s("expected_head")?)?;
+            let value = request
+                .get("value")
+                .cloned()
+                .ok_or_else(|| "missing field: value".to_string())?;
+            let id = repo
+                .set_json_cas(
+                    &ref_name(),
+                    expected,
+                    &s("path")?,
+                    &value,
+                    commit_options()?,
+                )
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "commit": id.to_string() }))
+        }
+        "query.commits" => {
+            let confidence_range = request
+                .get("confidence_min")
+                .and_then(|v| v.as_f64())
+                .zip(request.get("confidence_max").and_then(|v| v.as_f64()));
+            let filters = QueryFilters {
+                agent_id: optional("agent_id"),
+                intent_category: optional("intent_category"),
+                tags: request
+                    .get("tags")
+                    .map(|_| request_string_array(request, "tags"))
+                    .transpose()?,
+                reasoning_contains: optional("reasoning_contains"),
+                confidence_range,
+                has_deviations: request.get("has_deviations").and_then(|v| v.as_bool()),
+                ..Default::default()
+            };
+            let commits = repo
+                .query_commits(
+                    &ref_name(),
+                    &filters,
+                    request_usize(request, "limit").unwrap_or(50),
+                )
+                .map_err(err_string)?;
+            Ok(serde_json::Value::Array(commits.iter().map(|commit| serde_json::json!({
+                "id": commit.id.to_string(), "agent_id": commit.agent_id,
+                "intent_category": format!("{:?}", commit.intent.category),
+                "intent_description": commit.intent.description, "tags": commit.intent.tags,
+                "reasoning": commit.reasoning, "confidence": commit.confidence,
+                "parents": commit.parents.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "timestamp": commit.timestamp.to_rfc3339()
+            })).collect()))
+        }
+        "namespace.current" => Ok(serde_json::json!({ "namespace": repo.namespace().as_str() })),
+        "namespace.create" => {
+            let namespace = Namespace::new(s("name")?).map_err(err_string)?;
+            repo.create_namespace(namespace.as_str())
+                .map_err(err_string)?;
+            repo.fork_namespace(namespace).init().map_err(err_string)?;
+            Ok(serde_json::json!({ "created": true }))
+        }
+        "namespace.list" => Ok(
+            serde_json::to_value(repo.list_namespaces().map_err(err_string)?)
+                .map_err(err_string)?,
+        ),
+        "namespace.delete" => Ok(serde_json::json!({
+            "deleted": repo.delete_namespace(&s("name")?).map_err(err_string)?
+        })),
+        "merge.base" => Ok(serde_json::json!({
+            "commit": repo.merge_base(&s("source")?, &s("target")?).map_err(err_string)?.to_string()
+        })),
+        "merge.preview" => {
+            let p = repo
+                .preview_merge(&s("source")?, &s("target")?)
+                .map_err(err_string)?;
+            Ok(serde_json::json!({
+                "fast_forward": p.fast_forward, "added": p.added, "changed": p.changed,
+                "removed": p.removed, "conflicts": p.conflicts
+            }))
+        }
+        "merge.checked" => {
+            let id = repo
+                .merge_checked(
+                    &s("source")?,
+                    &s("target")?,
+                    commit_options()?,
+                    request
+                        .get("allow_deletions")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                )
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "commit": id.to_string() }))
+        }
+        "explore.list_paths" => Ok(serde_json::to_value(
+            repo.list_paths(
+                &ref_name(),
+                &optional("prefix").unwrap_or_else(|| "/".to_string()),
+                request_usize(request, "max_depth"),
+            )
+            .map_err(err_string)?,
+        )
+        .map_err(err_string)?),
+        "explore.get_tree" => repo
+            .get_tree(
+                &ref_name(),
+                &optional("prefix").unwrap_or_else(|| "/".to_string()),
+            )
+            .map_err(err_string),
+        "explore.search_values" => {
+            let rows = repo
+                .search_values(
+                    &ref_name(),
+                    &s("query")?,
+                    request_usize(request, "max_results"),
+                )
+                .map_err(err_string)?;
+            Ok(serde_json::Value::Array(
+                rows.into_iter()
+                    .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
+                    .collect(),
+            ))
+        }
+        "explore.stats" => repo.stats(&ref_name()).map_err(err_string),
+        "explore.commit_graph" => Ok(serde_json::Value::Array(
+            repo.commit_graph(&ref_name(), request_usize(request, "depth").unwrap_or(100))
+                .map_err(err_string)?,
+        )),
+        "explore.intent_tree" => repo
+            .intent_tree(&ref_name(), optional("root_commit_id").as_deref())
+            .map_err(err_string),
+        "spec.create" => Ok(serde_json::json!({
+            "handle": repo.speculate(&ref_name(), optional("label")).map_err(err_string)?.id()
+        })),
+        "spec.set" => {
+            let value = request
+                .get("value")
+                .cloned()
+                .ok_or_else(|| "missing field: value".to_string())?;
+            repo.spec_set_json(spec_handle(request)?, &s("path")?, &value)
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "updated": true }))
+        }
+        "spec.delete" => {
+            repo.spec_delete(spec_handle(request)?, &s("path")?)
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "deleted": true }))
+        }
+        "spec.compare" => {
+            let ids = request
+                .get("handles")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "missing field: handles".to_string())?;
+            let handles: Result<Vec<_>, _> = ids
+                .iter()
+                .map(|v| {
+                    v.as_u64()
+                        .map(SpecHandle::from_id)
+                        .ok_or_else(|| "handles must contain integers".to_string())
+                })
+                .collect();
+            let comparison = repo.compare_speculations(&handles?).map_err(err_string)?;
+            Ok(serde_json::json!({
+                "base_ref": comparison.base_ref,
+                "entries": comparison.entries.into_iter().map(|entry| serde_json::json!({
+                    "handle": entry.handle.id(), "label": entry.label, "diff": entry.diff_from_base
+                })).collect::<Vec<_>>()
+            }))
+        }
+        "spec.commit" => Ok(serde_json::json!({
+            "commit": repo.commit_speculation(spec_handle(request)?, commit_options()?)
+                .map_err(err_string)?.to_string()
+        })),
+        "spec.discard" => {
+            repo.discard_speculation(spec_handle(request)?)
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "discarded": true }))
+        }
+        "spec.list" => Ok(serde_json::Value::Array(
+            repo.list_speculations()
+                .into_iter()
+                .map(|(handle, label)| serde_json::json!({ "handle": handle.id(), "label": label }))
+                .collect(),
+        )),
+        "session.create" => {
+            let branch = optional("working_branch").unwrap_or_else(|| "main".to_string());
+            let namespace = match optional("scope_namespace") {
+                Some(name) => Some(Namespace::new(name).map_err(err_string)?),
+                None => None,
+            };
+            let session = repo
+                .sessions()
+                .create(
+                    &s("agent_id")?,
+                    &branch,
+                    repo.head(&branch).map_err(err_string)?,
+                    CreateSessionParams {
+                        parent_session: optional("parent_session"),
+                        delegated_intent: optional("delegated_intent"),
+                        report_to: optional("report_to"),
+                        path_scope: optional("path_scope"),
+                        scope_namespace: namespace,
+                    },
+                )
+                .map_err(err_string)?;
+            Ok(session_json(&session))
+        }
+        "session.get" => Ok(repo
+            .sessions()
+            .get(&s("id")?)
+            .map_err(err_string)?
+            .as_ref()
+            .map(session_json)
+            .unwrap_or(serde_json::Value::Null)),
+        "session.list" => Ok(serde_json::Value::Array(
+            repo.sessions()
+                .list(optional("agent_id").as_deref())
+                .map_err(err_string)?
+                .iter()
+                .map(session_json)
+                .collect(),
+        )),
+        "session.children" => Ok(serde_json::Value::Array(
+            repo.sessions()
+                .children(&s("parent_id")?)
+                .map_err(err_string)?
+                .iter()
+                .map(session_json)
+                .collect(),
+        )),
+        "session.update_head" => {
+            repo.sessions()
+                .update_head(&s("id")?, parse_object_id(&s("head")?)?)
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "updated": true }))
+        }
+        "session.end" => {
+            let status = match s("status")?.to_ascii_lowercase().as_str() {
+                "completed" => SessionStatus::Completed,
+                "abandoned" => SessionStatus::Abandoned,
+                _ => return Err("status must be completed or abandoned".to_string()),
+            };
+            repo.sessions().end(&s("id")?, status).map_err(err_string)?;
+            Ok(serde_json::json!({ "ended": true }))
+        }
+        "session.active.get" => {
+            Ok(serde_json::json!({ "session": repo.active_session().map_err(err_string)? }))
+        }
+        "session.active.set" => {
+            repo.set_active_session(optional("id"))
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "updated": true }))
+        }
+        "epoch.create" => Ok(epoch_json(
+            &repo
+                .create_epoch(
+                    &s("id")?,
+                    &s("description")?,
+                    request_string_array(request, "root_intents")?,
+                )
+                .map_err(err_string)?,
+        )),
+        "epoch.get" => Ok(epoch_json(&repo.get_epoch(&s("id")?).map_err(err_string)?)),
+        "epoch.list" => Ok(serde_json::Value::Array(
+            repo.list_epochs()
+                .map_err(err_string)?
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "id": entry.id, "description": entry.description,
+                        "status": format!("{:?}", entry.status),
+                        "created_at": entry.created_at.to_rfc3339(),
+                        "sealed_at": entry.sealed_at.map(|v| v.to_rfc3339()),
+                        "root_intents": entry.root_intents, "agents": entry.agents,
+                        "commit_count": entry.commit_count,
+                        "seal_hash": entry.seal_hash.map(|v| v.to_string()), "tags": entry.tags
+                    })
+                })
+                .collect(),
+        )),
+        "epoch.seal" => {
+            repo.seal_epoch(&s("id")?, &s("summary")?)
+                .map_err(err_string)?;
+            Ok(serde_json::json!({ "sealed": true }))
+        }
+        "epoch.archive" => {
+            repo.archive_epoch(&s("id")?).map_err(err_string)?;
+            Ok(serde_json::json!({ "archived": true }))
+        }
+        "epoch.export" => repo.export_epoch(&s("id")?).map_err(err_string),
+        "epoch.active.get" => {
+            Ok(serde_json::json!({ "epoch": repo.active_epoch().map_err(err_string)? }))
+        }
+        "epoch.active.set" => {
+            repo.set_active_epoch(optional("id")).map_err(err_string)?;
+            Ok(serde_json::json!({ "updated": true }))
+        }
+        _ => Err(format!("unsupported repository operation: {operation}")),
+    }
+}
+
+fn request_string(request: &serde_json::Value, key: &str) -> Result<String, String> {
+    request
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing field: {key}"))
+}
+
+fn request_optional_string(request: &serde_json::Value, key: &str) -> Option<String> {
+    request.get(key).and_then(|v| v.as_str()).map(str::to_owned)
+}
+
+fn request_usize(request: &serde_json::Value, key: &str) -> Option<usize> {
+    request
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .and_then(|v| usize::try_from(v).ok())
+}
+
+fn request_string_array(request: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
+    request
+        .get(key)
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("missing field: {key}"))?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{key} must contain strings"))
+        })
+        .collect()
+}
+
+fn parse_object_id(value: &str) -> Result<ObjectId, String> {
+    ObjectId::from_hex(value).ok_or_else(|| format!("invalid object id: {value}"))
+}
+
+fn spec_handle(request: &serde_json::Value) -> Result<SpecHandle, String> {
+    request
+        .get("handle")
+        .and_then(|v| v.as_u64())
+        .map(SpecHandle::from_id)
+        .ok_or_else(|| "missing field: handle".to_string())
+}
+
+fn err_string(error: impl std::fmt::Display) -> String {
+    error.to_string()
+}
+
+fn session_json(session: &agentstategraph::Session) -> serde_json::Value {
+    serde_json::json!({
+        "id": session.id, "agent_id": session.agent_id,
+        "working_branch": session.working_branch, "head": session.head.to_string(),
+        "parent_session": session.parent_session,
+        "delegated_intent": session.delegated_intent, "report_to": session.report_to,
+        "path_scope": session.path_scope, "scope_tenant": session.scope_tenant,
+        "scope_namespace": session.scope_namespace.as_ref().map(|v| v.as_str()),
+        "status": format!("{:?}", session.status),
+        "created_at": session.created_at.to_rfc3339(),
+        "ended_at": session.ended_at.map(|v| v.to_rfc3339())
+    })
+}
+
+fn epoch_json(epoch: &agentstategraph_core::Epoch) -> serde_json::Value {
+    serde_json::json!({
+        "id": epoch.id, "description": epoch.description,
+        "root_intents": epoch.root_intents, "status": format!("{:?}", epoch.status),
+        "created_at": epoch.created_at.to_rfc3339(),
+        "sealed_at": epoch.sealed_at.map(|v| v.to_rfc3339()),
+        "seal_summary": epoch.seal_summary,
+        "seal_hash": epoch.seal_hash.map(|v| v.to_string()),
+        "commits": epoch.commits.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "agents": epoch.agents, "branches": epoch.branches, "tags": epoch.tags,
+        "sealed_commits": epoch.sealed_commits.iter().map(ToString::to_string).collect::<Vec<_>>()
+    })
 }
 
 // ===========================================================================
@@ -2109,9 +2594,9 @@ unsafe fn parse_repo_ref_path<'a>(
 
 fn parse_category(s: &str) -> IntentCategory {
     match s.to_lowercase().as_str() {
-        "explore" => IntentCategory::Explore,
-        "refine" => IntentCategory::Refine,
-        "fix" => IntentCategory::Fix,
+        "explore" | "exploration" => IntentCategory::Explore,
+        "refine" | "refinement" => IntentCategory::Refine,
+        "fix" | "correction" => IntentCategory::Fix,
         "rollback" => IntentCategory::Rollback,
         "checkpoint" => IntentCategory::Checkpoint,
         "merge" => IntentCategory::Merge,
