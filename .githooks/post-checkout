@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# ASD post-checkout hook — installed by `asd init`
+# Plan B: align the local ledger with the checked-out branch's committed
+# conclusions, then rebuild the derived semantic index.
+# $3 is 1 for branch checkout, 0 for file checkout — only run on branch.
+[ "$3" = "1" ] || exit 0
+set -e
+asd conclusions import 2>/dev/null || true
+asd index .

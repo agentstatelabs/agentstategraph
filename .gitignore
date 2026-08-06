@@ -26,3 +26,7 @@ site/.astro
 
 # Local-only cargo config (e.g. machine-specific PYO3_PYTHON) — never commit machine paths
 .cargo/config.toml
+.asd-state.db
+.asd/v1/
+.asd/cache/
+.asd/index.log
