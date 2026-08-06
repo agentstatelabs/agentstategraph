@@ -67,6 +67,15 @@ binding-contract:
   script:
     - python3 scripts/check-binding-capabilities.py
 
+release-script-contract:
+  stage: check
+  image: alpine:latest
+  before_script: []
+  cache: {}
+  script:
+    - apk add --no-cache bash jq >/dev/null
+    - bash scripts/test-github-actions-ci.sh
+
 clippy:
   stage: check
   script:

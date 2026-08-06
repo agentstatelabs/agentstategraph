@@ -15,6 +15,7 @@ done
 export GH_TOKEN="$GITHUB_TOKEN"
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
+source scripts/lib/github-actions.sh
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 TAG="v$VERSION"
@@ -39,25 +40,18 @@ if [ "$github_sha" != "$CI_COMMIT_SHA" ]; then
 fi
 
 echo ">> dispatching GitHub macOS build for $TAG at $CI_COMMIT_SHA"
+previous_run_id=$(github_latest_workflow_run_id "$GITHUB_REPO" prepare-swift.yml "$RUN_TITLE")
 gh workflow run prepare-swift.yml \
   --repo "$GITHUB_REPO" \
   --ref main \
   -f "version=$VERSION" \
   -f "source_sha=$CI_COMMIT_SHA"
 
-run_id=""
-for _ in $(seq 1 60); do
-  run_id=$(gh run list \
-    --repo "$GITHUB_REPO" \
-    --workflow prepare-swift.yml \
-    --limit 30 \
-    --json databaseId,displayTitle \
-    --jq ".[] | select(.displayTitle == \"$RUN_TITLE\") | .databaseId" \
-    | head -1)
-  [ -n "$run_id" ] && break
-  sleep 5
-done
-[ -n "$run_id" ] || { echo "error: dispatched GitHub workflow run was not found" >&2; exit 1; }
+run_id=$(github_wait_for_new_workflow_run \
+  "$GITHUB_REPO" prepare-swift.yml "$RUN_TITLE" "$previous_run_id") || {
+  echo "error: dispatched GitHub workflow run was not found" >&2
+  exit 1
+}
 
 echo ">> waiting for GitHub Actions run $run_id"
 gh run watch "$run_id" --repo "$GITHUB_REPO" --exit-status
