@@ -7,6 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.9.21] — 2026-08-05
+
+### Added
+
+- Swift and C binding support for namespaces, expected-head CAS writes,
+  commit queries, merge base and preview, safe merges, repository exploration,
+  atomic speculation, durable sessions, and epochs.
+- A versioned advanced repository ABI with runtime capability discovery.
+- A cross-language capability manifest and GitLab/GitHub release gates that
+  require every binding to be reviewed for each Core release.
+
+### Fixed
+
+- Swift intent categories `Correction`, `Refinement`, and `Exploration` now
+  map to their native Core variants instead of custom categories.
+
 ## [v0.9.20] — 2026-08-05
 
 ## [v0.9.19] — 2026-08-05

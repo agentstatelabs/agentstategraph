@@ -32,7 +32,7 @@ Released versions are consumable directly from the repository root:
 ```swift
 .package(
     url: "https://github.com/agentstatelabs/agentstategraph.git",
-    from: "0.9.20"
+    from: "0.9.21"
 )
 ```
 

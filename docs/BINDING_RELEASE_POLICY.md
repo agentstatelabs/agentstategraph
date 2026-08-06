@@ -57,7 +57,7 @@ must classify the same capability groups.
 7. Build and smoke-test published artifacts, including the Swift XCFramework,
    before creating the final tag.
 
-## Current 0.9.20 audit
+## Current 0.9.21 audit
 
 C and Swift now expose the ThreadWeaver-critical advanced surface: namespaces,
 CAS writes, safe merge inspection, state exploration/search, commit queries,

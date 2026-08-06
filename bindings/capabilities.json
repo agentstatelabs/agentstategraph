@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_core_version": "0.9.20",
+  "reviewed_core_version": "0.9.21",
   "advanced_abi_contract_version": 1,
   "capabilities": [
     "repository_base",
