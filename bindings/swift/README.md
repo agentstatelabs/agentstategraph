@@ -99,6 +99,13 @@ try asg.set("/nodes/pico1", value: Node(host: "pico1", cores: 4),
             category: .checkpoint, description: "add node")
 let node = try asg.get("/nodes/pico1", as: Node.self)
 
+// Fork from an exact historical commit, even after main advances
+let origin = try asg.set("/decision", json: "\"option-a\"",
+                         category: .checkpoint, description: "choose option A")
+try asg.set("/later", json: "true",
+            category: .refinement, description: "advance main")
+try asg.branch("reconsider-option-a", fromCommit: origin)
+
 // Tasks
 let tasks = try TaskStore(asg, prefix: "/tasks", agentId: "builder")
 try tasks.createPlan("launch")

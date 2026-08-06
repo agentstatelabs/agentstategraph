@@ -176,13 +176,27 @@ public final class AgentStateGraph {
 
     // MARK: - Branches
 
-    /// Create branch `name` starting from ref `from`. Returns the commit id.
+    /// Create branch `name` from a ref specifier and return its commit id.
+    ///
+    /// `from` may be a branch name, a full commit id (with or without the
+    /// `sg_` prefix), or a unique commit-id prefix.
     @discardableResult
     public func branch(_ name: String, from: String) throws -> String {
         let r = try handle()
         let cName = sgDup(name); defer { free(cName) }
         let cFrom = sgDup(from); defer { free(cFrom) }
         return try consume(agentstategraph_branch(r, cName, cFrom), "branch")
+    }
+
+    /// Create branch `name` at an exact historical commit and return that
+    /// commit id.
+    ///
+    /// Pass a full commit id returned by `set`, `delete`, `merge`, or another
+    /// mutation. This overload makes exact-commit forks explicit at Swift call
+    /// sites while using the same native ref-spec resolver as `branch(_:from:)`.
+    @discardableResult
+    public func branch(_ name: String, fromCommit commitID: String) throws -> String {
+        try branch(name, from: commitID)
     }
 
     /// List branches whose name starts with `prefix` (pass `nil` for all).
