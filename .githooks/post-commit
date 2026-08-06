@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# ASD post-commit hook — installed by `asd init`
+# Attaches semantic residue from the commit message to touched symbols
+# (decisions, invariants, hazards, proofs, validation outcomes), then
+# rebuilds the FTS index so queries immediately reflect the new state.
+SHA=$(git rev-parse HEAD 2>/dev/null)
+if [ -n "$SHA" ]; then
+    asd annotate-commit --write "$SHA" 2>/dev/null || true
+fi
+asd index . 2>/dev/null || true

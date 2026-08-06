@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# ASD pre-commit hook — installed by `asd init`
+# Plan B: write the compact, byte-stable conclusion JSONL files to
+# .asd/conclusions/. These files travel with the commit (kilobytes, not MB)
+# and carry the expensive LLM-formed conclusions a fresh clone needs.
+# The big derived cache lives at .asd/cache/ and is gitignored.
+set -e
+asd conclusions export --quiet
+git add .asd/conclusions/ 2>/dev/null || true

@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# ASD post-merge hook — installed by `asd init`
+# Plan B: pull any new conclusion entries from the merged branch into
+# the local ASG database, then rebuild the derived semantic index.
+set -e
+asd conclusions import 2>/dev/null || true
+asd index .
