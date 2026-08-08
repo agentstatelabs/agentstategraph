@@ -27,6 +27,10 @@ site/.astro
 # Local-only cargo config (e.g. machine-specific PYO3_PYTHON) — never commit machine paths
 .cargo/config.toml
 .asd-state.db
-.asd/v1/
-.asd/cache/
-.asd/index.log
+# Ignore the entire .asd/ working tree (generated index, caches, and the
+# hook-written conclusions/*.jsonl), but keep the intentionally-tracked
+# conclusions/README.md.
+.asd/*
+!.asd/conclusions/
+.asd/conclusions/*
+!.asd/conclusions/README.md
