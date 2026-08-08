@@ -296,18 +296,19 @@ See [spec/AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md) for the complete 
 - **Disambiguation**: [AgentStateGraph vs. Stategraph vs. LangGraph's StateGraph](https://agentstategraph.dev/compare/)
 - **RFC Spec**: [AGENTSTATEGRAPH-RFC.md](spec/AGENTSTATEGRAPH-RFC.md)
 
-## License — Why BSL 1.1?
+## License — MIT OR Apache-2.0
 
-AgentStateGraph is a state primitive designed to become infrastructure. Infrastructure primitives are strip-mining targets: cloud providers offer them as managed services, capture the value, and contribute nothing back. BSL 1.1 closes that gap.
+AgentStateGraph is dual-licensed under either of:
+
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option — the standard permissive dual-license used across the Rust ecosystem.
 
 **What this means in practice:**
 
-- **Individuals, startups, and enterprises** using AgentStateGraph internally — including in production — are **unaffected**.
-- The restriction covers **one specific case**: offering AgentStateGraph as a hosted or managed service to third parties without a commercial agreement.
-- After **four years**, each version converts to **Apache 2.0 permanently**, with no conditions. This is a binding commitment, not a marketing promise.
+- **Use it anywhere** — internal tools, production systems, commercial and closed-source products, and hosted or managed services — with no fee and no separate commercial license.
+- **Pick either license.** MIT for simplicity, or Apache-2.0 for its explicit patent grant. You satisfy whichever you prefer, not both.
+- **Permanent.** No usage restriction, no conversion clock, no relicensing clause. What's open stays open.
 
-**Why not MIT from day one?** Because the project wouldn't survive it. An MIT-licensed infrastructure primitive that gains traction gets absorbed by a hyperscaler within 18 months. BSL 1.1 lets the project grow, stay independent, and convert to a fully permissive license once it's established enough that strip-mining is no longer an existential threat.
-
-This is the same reasoning MariaDB, CockroachDB, Sentry, and HashiCorp used — with one difference: we committed to the conversion date upfront.
-
-See [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md) for the full terms and plain-English FAQ.
+The project earlier shipped under BSL 1.1 (v0.3.5-beta.2 through v0.9.6); it has since returned to MIT OR Apache-2.0, and that grant also covers those prior releases. See [LICENSING.md](LICENSING.md) for the full terms and license history.
