@@ -1701,8 +1701,20 @@ impl Repository {
         Ok(nodes)
     }
 
-    /// Get intent decomposition tree starting from a root commit.
-    /// Walks the parent_intent chain to build the hierarchy.
+    /// Build the intent-decomposition tree for a ref.
+    ///
+    /// Links intents by [`Intent::parent_intent`] — the sub-intent threading
+    /// the RFC describes ("Sub-intent links to parent intent via
+    /// `parent_intent`, forming a queryable tree"). Roots are the intents with
+    /// no parent (or, when `root_commit_id` is given, that single commit's
+    /// intent); a node's children are the commits whose `intent.parent_intent`
+    /// equals this node's intent id.
+    ///
+    /// This is deliberately NOT a commit-lineage walk — for a tree structured
+    /// by commit parents, use [`Repository::commit_graph`]. Until producers
+    /// populate `parent_intent` (via [`Intent::with_parent`]), every intent is
+    /// its own root and the result is a flat list — an honest "no threading
+    /// recorded yet", not a lie about hierarchy that isn't there.
     pub fn intent_tree(
         &self,
         ref_name: &str,
@@ -1710,23 +1722,44 @@ impl Repository {
     ) -> Result<serde_json::Value, RepoError> {
         let commits = self.log(ref_name, 10000)?;
 
-        // Find root commits (those with no parent_intent, or the specified root)
+        // Roots: an explicit commit's intent, else every intent with no parent.
         let roots: Vec<&Commit> = if let Some(root_id) = root_commit_id {
             commits.iter().filter(|c| c.id.short() == root_id).collect()
         } else {
-            commits.iter().filter(|c| c.parents.is_empty()).collect()
+            commits
+                .iter()
+                .filter(|c| c.intent.parent_intent.is_none())
+                .collect()
         };
 
-        fn build_intent_node(commit: &Commit, all_commits: &[Commit]) -> serde_json::Value {
-            // Find children: commits whose first parent is this commit
-            let children: Vec<serde_json::Value> = all_commits
-                .iter()
-                .filter(|c| c.parents.first() == Some(&commit.id))
-                .map(|child| build_intent_node(child, all_commits))
-                .collect();
+        // `visiting` carries the ancestor intent-ids on the current path so a
+        // user-authored `parent_intent` cycle can't spin the recursion forever.
+        fn build_intent_node(
+            commit: &Commit,
+            all_commits: &[Commit],
+            visiting: &mut std::collections::HashSet<String>,
+        ) -> serde_json::Value {
+            let inserted = visiting.insert(commit.intent.id.clone());
+            let children: Vec<serde_json::Value> = if inserted {
+                all_commits
+                    .iter()
+                    .filter(|c| {
+                        c.intent.parent_intent.as_deref() == Some(commit.intent.id.as_str())
+                    })
+                    .map(|child| build_intent_node(child, all_commits, visiting))
+                    .collect()
+            } else {
+                // Cycle: this intent is already an ancestor on the path. Emit the
+                // node without descending again.
+                Vec::new()
+            };
+            if inserted {
+                visiting.remove(&commit.intent.id);
+            }
 
             serde_json::json!({
                 "id": commit.id.short(),
+                "intent_id": commit.intent.id,
                 "agent": commit.agent_id,
                 "category": format!("{:?}", commit.intent.category),
                 "description": commit.intent.description,
@@ -1739,7 +1772,10 @@ impl Repository {
 
         let tree: Vec<serde_json::Value> = roots
             .iter()
-            .map(|c| build_intent_node(c, &commits))
+            .map(|c| {
+                let mut visiting = std::collections::HashSet::new();
+                build_intent_node(c, &commits, &mut visiting)
+            })
             .collect();
 
         Ok(serde_json::json!({
@@ -3285,5 +3321,69 @@ mod tests {
             repo.export_epoch("e1"),
             Err(RepoError::InvalidOperation(_))
         ));
+    }
+
+    #[test]
+    fn test_intent_tree_threads_by_parent_intent() {
+        let repo = test_repo();
+
+        // A parent intent, then a child intent decomposed from it via
+        // `Intent::with_parent` — the RFC's sub-intent threading.
+        let parent_opts = CommitOptions::new("agent/test", IntentCategory::Explore, "parent goal");
+        let parent_intent_id = parent_opts.intent.id.clone();
+        repo.set("main", "/a", &Object::string("1"), parent_opts)
+            .unwrap();
+
+        let mut child_opts = CommitOptions::new("agent/test", IntentCategory::Refine, "child goal");
+        child_opts.intent = child_opts.intent.with_parent(parent_intent_id.clone());
+        repo.set("main", "/b", &Object::string("2"), child_opts)
+            .unwrap();
+
+        let tree = repo.intent_tree("main", None).unwrap();
+        let roots = tree["roots"].as_array().unwrap();
+
+        // The child threads UNDER the parent — it must not appear as a root.
+        assert!(
+            roots.iter().all(|r| r["description"] != "child goal"),
+            "child intent must not be a root; it is decomposed from a parent"
+        );
+
+        // The parent root carries the child among its children, matched by
+        // intent id (NOT by commit lineage).
+        let parent_node = roots
+            .iter()
+            .find(|r| r["description"] == "parent goal")
+            .expect("parent intent should be a root");
+        let children = parent_node["children"].as_array().unwrap();
+        assert_eq!(
+            children.len(),
+            1,
+            "parent should have exactly one sub-intent"
+        );
+        assert_eq!(children[0]["description"], "child goal");
+        assert_eq!(parent_node["intent_id"], parent_intent_id.as_str());
+    }
+
+    #[test]
+    fn test_intent_tree_flat_without_threading() {
+        // With no parent_intent set (today's reality), every intent is its own
+        // root — an honest flat list, not a fabricated hierarchy.
+        let repo = test_repo();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("first"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("second"))
+            .unwrap();
+
+        let tree = repo.intent_tree("main", None).unwrap();
+        let roots = tree["roots"].as_array().unwrap();
+        assert!(
+            roots
+                .iter()
+                .all(|r| r["children"].as_array().unwrap().is_empty()),
+            "no threading recorded → no node should have children"
+        );
+        // Both of our writes (plus the init commit) are top-level roots.
+        assert!(roots.iter().any(|r| r["description"] == "first"));
+        assert!(roots.iter().any(|r| r["description"] == "second"));
     }
 }

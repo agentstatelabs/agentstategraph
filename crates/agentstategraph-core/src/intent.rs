@@ -38,7 +38,9 @@ pub struct Intent {
     pub description: String,
     /// Queryable labels for filtering and search.
     pub tags: Vec<String>,
-    /// If this intent was decomposed from a parent, the parent's ID.
+    /// If this intent was decomposed from a parent, the parent's ID. Set via
+    /// [`Intent::with_parent`]; consumed by `Repository::intent_tree` to build
+    /// the sub-intent hierarchy.
     pub parent_intent: Option<IntentId>,
     /// Current lifecycle state.
     pub lifecycle: IntentLifecycle,
