@@ -22,7 +22,9 @@ use std::ptr;
 use std::sync::Arc;
 
 use agentstategraph::{CommitOptions, CreateSessionParams, Repository, SpecHandle, SCHEMA_VERSION};
-use agentstategraph_core::{IntentCategory, Namespace, ObjectId, QueryFilters, SessionStatus};
+use agentstategraph_core::{
+    IntentCategory, Namespace, ObjectId, QueryFilters, SessionStatus, ToolCall,
+};
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore, Situation};
 use agentstategraph_storage::SqliteStorage;
@@ -525,6 +527,10 @@ fn repository_call(
         if request.get("tags").is_some() {
             options = options.with_tags(request_string_array(request, "tags")?);
         }
+        let tool_calls = request_tool_calls(request)?;
+        if !tool_calls.is_empty() {
+            options = options.with_tool_calls(tool_calls);
+        }
         Ok(options)
     };
 
@@ -859,6 +865,47 @@ fn request_string_array(request: &serde_json::Value, key: &str) -> Result<Vec<St
             v.as_str()
                 .map(str::to_owned)
                 .ok_or_else(|| format!("{key} must contain strings"))
+        })
+        .collect()
+}
+
+/// Parse the optional `tool_calls` array from a request. Each entry needs a
+/// `tool_name`; `arguments` (any JSON) and `result` (string) are optional, and
+/// `timestamp` (RFC3339) defaults to now when omitted — agents needn't supply
+/// one. Absent `tool_calls` yields an empty vec.
+fn request_tool_calls(request: &serde_json::Value) -> Result<Vec<ToolCall>, String> {
+    let Some(array) = request.get("tool_calls") else {
+        return Ok(Vec::new());
+    };
+    let array = array
+        .as_array()
+        .ok_or_else(|| "tool_calls must be an array".to_string())?;
+    array
+        .iter()
+        .map(|entry| {
+            let tool_name = entry
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "each tool_call needs a tool_name".to_string())?
+                .to_owned();
+            let timestamp = match entry.get("timestamp").and_then(|v| v.as_str()) {
+                Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+                    .map_err(|e| format!("invalid tool_call timestamp: {e}"))?
+                    .with_timezone(&chrono::Utc),
+                None => chrono::Utc::now(),
+            };
+            Ok(ToolCall {
+                tool_name,
+                arguments: entry
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                result: entry
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                timestamp,
+            })
         })
         .collect()
 }

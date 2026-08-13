@@ -16,7 +16,7 @@ use serde::Deserialize;
 use agentstategraph::session::CreateSessionParams;
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::{DiffOp, IntentCategory, Namespace, Object, QueryFilters};
+use agentstategraph_core::{DiffOp, IntentCategory, Namespace, Object, QueryFilters, ToolCall};
 use agentstategraph_policy::{
     ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry, PolicyStore,
     SignatureVerifier,
@@ -24,6 +24,7 @@ use agentstategraph_policy::{
 use agentstategraph_policy_sign::PolicySigner;
 use agentstategraph_reminders::ReminderManager;
 use agentstategraph_tasks::TaskStore;
+use chrono::{DateTime, Utc};
 
 /// Threshold above which a change is tagged `large` in token inference.
 pub const LARGE_CHANGE_THRESHOLD: usize = 50;
@@ -76,6 +77,43 @@ pub struct GetParams {
     pub namespace: Option<String>,
 }
 
+/// Input form of a [`ToolCall`] provenance record. `timestamp` defaults to now
+/// when omitted, so agents need not supply one.
+#[derive(Deserialize, JsonSchema)]
+pub struct ToolCallInput {
+    /// Name of the tool (e.g. "kubectl_apply", "agentstategraph_set").
+    pub tool_name: String,
+    /// Input arguments (any JSON).
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+    /// Short summary of the result — not the full output.
+    #[serde(default)]
+    pub result: Option<String>,
+    /// When the tool was called (RFC3339). Defaults to now if omitted.
+    #[serde(default)]
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
+impl ToolCallInput {
+    pub(crate) fn into_tool_call(self) -> ToolCall {
+        ToolCall {
+            tool_name: self.tool_name,
+            arguments: self.arguments,
+            result: self.result,
+            timestamp: self.timestamp.unwrap_or_else(Utc::now),
+        }
+    }
+}
+
+/// Convert an optional list of tool-call inputs into core `ToolCall`s.
+pub(crate) fn tool_calls_from(inputs: Option<Vec<ToolCallInput>>) -> Vec<ToolCall> {
+    inputs
+        .unwrap_or_default()
+        .into_iter()
+        .map(ToolCallInput::into_tool_call)
+        .collect()
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct SetParams {
     /// Branch to commit to (default: "main").
@@ -95,6 +133,9 @@ pub struct SetParams {
     pub confidence: Option<f64>,
     /// Optional queryable tags.
     pub tags: Option<Vec<String>>,
+    /// Optional tool calls that contributed to this change (provenance).
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCallInput>>,
     /// Optional namespace override. When set, this operation runs against
     /// the specified namespace instead of the server's configured default.
     #[serde(default)]
@@ -1126,6 +1167,10 @@ impl AgentStateGraphServer {
         }
         if let Some(t) = p.tags {
             opts = opts.with_tags(t);
+        }
+        let tool_calls = tool_calls_from(p.tool_calls);
+        if !tool_calls.is_empty() {
+            opts = opts.with_tool_calls(tool_calls);
         }
 
         match repo.set_json(&p.r#ref, &p.path, &p.value, opts) {
