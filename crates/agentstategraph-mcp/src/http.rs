@@ -369,6 +369,8 @@ struct SetRequest {
     reasoning: Option<String>,
     confidence: Option<f64>,
     agent: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<crate::server::ToolCallInput>>,
 }
 
 async fn set_value(
@@ -385,6 +387,10 @@ async fn set_value(
     }
     if let Some(c) = req.confidence {
         opts = opts.with_confidence(c);
+    }
+    let tool_calls = crate::server::tool_calls_from(req.tool_calls);
+    if !tool_calls.is_empty() {
+        opts = opts.with_tool_calls(tool_calls);
     }
     let commit_id = repo.set_json(&ref_name, &req.path, &req.value, opts)?;
     Ok(Json(

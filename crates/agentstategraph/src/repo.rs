@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Conflict, DiffOp, Intent, IntentCategory, MergeResult,
-    Namespace, Object, ObjectId, ObjectResolver, StatePath,
+    Namespace, Object, ObjectId, ObjectResolver, StatePath, ToolCall,
 };
 use agentstategraph_storage::{Storage, StorageError};
 
@@ -161,6 +161,10 @@ pub struct CommitOptions {
     pub intent: Intent,
     pub reasoning: Option<String>,
     pub confidence: Option<f64>,
+    /// Tool calls that contributed to this change. Persisted on the commit as
+    /// provenance; empty by default. Capped at [`Commit`]'s tool-call limit on
+    /// build (excess is truncated).
+    pub tool_calls: Vec<ToolCall>,
 }
 
 impl CommitOptions {
@@ -176,6 +180,7 @@ impl CommitOptions {
             intent: Intent::new(intent_category, description),
             reasoning: None,
             confidence: None,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -194,6 +199,12 @@ impl CommitOptions {
     /// Set confidence.
     pub fn with_confidence(mut self, confidence: f64) -> Self {
         self.confidence = Some(confidence);
+        self
+    }
+
+    /// Set the tool calls that contributed to this change.
+    pub fn with_tool_calls(mut self, tool_calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = tool_calls;
         self
     }
 
@@ -2202,6 +2213,9 @@ impl Repository {
         if let Some(confidence) = options.confidence {
             builder = builder.confidence(confidence);
         }
+        if !options.tool_calls.is_empty() {
+            builder = builder.tool_calls(options.tool_calls);
+        }
 
         let commit = builder.build();
         self.storage.put_commit(&commit)?;
@@ -3385,5 +3399,38 @@ mod tests {
         // Both of our writes (plus the init commit) are top-level roots.
         assert!(roots.iter().any(|r| r["description"] == "first"));
         assert!(roots.iter().any(|r| r["description"] == "second"));
+    }
+
+    #[test]
+    fn test_commit_persists_tool_calls() {
+        let repo = test_repo();
+
+        let tc = ToolCall {
+            tool_name: "kubectl_apply".to_string(),
+            arguments: serde_json::json!({ "file": "deploy.yaml" }),
+            result: Some("configured".to_string()),
+            timestamp: chrono::Utc::now(),
+        };
+        let opts = CommitOptions::new("agent/test", IntentCategory::Fix, "apply manifest")
+            .with_tool_calls(vec![tc.clone()]);
+        let commit_id = repo
+            .set("main", "/deploy", &Object::string("ok"), opts)
+            .unwrap();
+
+        // Round-trips out of storage on the persisted commit.
+        let commit = repo.get_commit(&commit_id).unwrap().unwrap();
+        assert_eq!(commit.tool_calls.len(), 1);
+        assert_eq!(commit.tool_calls[0].tool_name, "kubectl_apply");
+        assert_eq!(commit.tool_calls[0].result.as_deref(), Some("configured"));
+    }
+
+    #[test]
+    fn test_commit_without_tool_calls_is_empty() {
+        let repo = test_repo();
+        let commit_id = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("no tools"))
+            .unwrap();
+        let commit = repo.get_commit(&commit_id).unwrap().unwrap();
+        assert!(commit.tool_calls.is_empty());
     }
 }
