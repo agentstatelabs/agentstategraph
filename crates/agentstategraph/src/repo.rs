@@ -171,14 +171,23 @@ pub struct CommitOptions {
 
 impl CommitOptions {
     /// Create minimal commit options — the simplest way to commit.
+    ///
+    /// The authorizing principal defaults to `agent_id`: absent delegation, the
+    /// actor making the change is also the authorizer (Plan C t-002 — minimal
+    /// authority capture). Previously every commit hardcoded a constant
+    /// `"default"` principal, so the authority field carried no real
+    /// provenance. Override with [`CommitOptions::with_principal`] when the
+    /// authorizer differs from the actor, or [`CommitOptions::with_authority`]
+    /// for a full scoped/delegated `Authority` (t-004).
     pub fn new(
         agent_id: impl Into<String>,
         intent_category: IntentCategory,
         description: impl Into<String>,
     ) -> Self {
+        let agent_id = agent_id.into();
         Self {
-            agent_id: agent_id.into(),
-            authority: Authority::simple("default"),
+            authority: Authority::simple(agent_id.clone()),
+            agent_id,
             intent: Intent::new(intent_category, description),
             reasoning: None,
             confidence: None,
@@ -186,9 +195,20 @@ impl CommitOptions {
         }
     }
 
-    /// Set the authority.
+    /// Set the full authority (scope, delegation chain, expiry). For the common
+    /// case of just naming the authorizing principal, prefer
+    /// [`CommitOptions::with_principal`].
     pub fn with_authority(mut self, authority: Authority) -> Self {
         self.authority = authority;
+        self
+    }
+
+    /// Set the authorizing principal (minimal authority capture: principal +
+    /// wildcard scope, no delegation). Use when the authorizer differs from the
+    /// actor `agent_id`; for a full delegated `Authority`, use
+    /// [`CommitOptions::with_authority`].
+    pub fn with_principal(mut self, principal: impl Into<String>) -> Self {
+        self.authority = Authority::simple(principal);
         self
     }
 
@@ -3474,5 +3494,36 @@ mod tests {
             .unwrap();
         let commit = repo.get_commit(&commit_id).unwrap().unwrap();
         assert!(commit.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_commit_authority_principal_defaults_to_agent() {
+        // A commit records the acting agent as its authorizing principal — not
+        // the old constant "default" (Plan C t-002).
+        let repo = test_repo();
+        let opts = CommitOptions::new("human/alice", IntentCategory::Fix, "patch");
+        let commit_id = repo.set("main", "/a", &Object::string("1"), opts).unwrap();
+
+        let commit = repo.get_commit(&commit_id).unwrap().unwrap();
+        assert_eq!(commit.agent_id, "human/alice");
+        assert_eq!(
+            commit.authority.principal, "human/alice",
+            "principal should default to the acting agent, not a constant"
+        );
+        assert_ne!(commit.authority.principal, "default");
+    }
+
+    #[test]
+    fn test_commit_with_principal_overrides_actor() {
+        // When the authorizer differs from the actor, `with_principal` wins for
+        // the authority while `agent_id` still records who acted.
+        let repo = test_repo();
+        let opts = CommitOptions::new("agent/bot", IntentCategory::Refine, "act")
+            .with_principal("human/alice");
+        let commit_id = repo.set("main", "/a", &Object::string("1"), opts).unwrap();
+
+        let commit = repo.get_commit(&commit_id).unwrap().unwrap();
+        assert_eq!(commit.agent_id, "agent/bot");
+        assert_eq!(commit.authority.principal, "human/alice");
     }
 }
