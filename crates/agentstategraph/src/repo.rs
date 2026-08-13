@@ -143,10 +143,12 @@ pub struct Repository {
     active_epoch: std::sync::RwLock<Option<String>>,
     /// Active session id — same semantics as `active_epoch`.
     active_session: std::sync::RwLock<Option<String>>,
-    /// When true, ref updates that orphan sealed commits are rejected with
-    /// `RepoError::EpochSealViolated`. When false (default), violations log
-    /// a warning and the update proceeds. Opt-in via `Repository::with_epoch_seal_strict`
-    /// or `ASG_EPOCH_SEAL_STRICT=1`.
+    /// When true (**the default**), ref updates that would orphan a sealed
+    /// commit are rejected with `RepoError::EpochSealViolated` — the guard
+    /// Plan B's GC relies on so sealed history can't be silently dropped. Opt
+    /// OUT to the legacy warn-and-proceed behavior via
+    /// `Repository::with_epoch_seal_strict(false)` or a falsey
+    /// `ASG_EPOCH_SEAL_STRICT` (`0`/`false`/`warn`/`off`).
     epoch_seal_strict: bool,
     /// Cached namespace override from the active session's scope_namespace.
     /// Populated eagerly in `set_active_session`; cleared when session is None.
@@ -353,14 +355,22 @@ impl From<agentstategraph_taint::TaintError> for RepoError {
 impl Repository {
     /// Create a new Repository wrapping the given storage backend.
     ///
-    /// The epoch-seal enforcement mode defaults to warn. If the environment
-    /// variable `ASG_EPOCH_SEAL_STRICT=1` is set at construction time, the
-    /// repository starts in strict mode. Use
-    /// [`Repository::with_epoch_seal_strict`] to opt in programmatically.
+    /// Epoch-seal enforcement is **strict by default**: a ref update that would
+    /// orphan a sealed commit is rejected. Opt out to the legacy
+    /// warn-and-proceed behavior by setting `ASG_EPOCH_SEAL_STRICT` to a falsey
+    /// value (`0`/`false`/`warn`/`off`) at construction time, or programmatically
+    /// via [`Repository::with_epoch_seal_strict`]`(false)`.
     pub fn new(storage: Box<dyn Storage + Send + Sync>) -> Self {
+        // Strict unless explicitly disabled. An unset or unrecognized value
+        // keeps the safe default; only a clearly falsey value opts out.
         let strict = std::env::var(EPOCH_SEAL_STRICT_ENV)
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| {
+                !(v == "0"
+                    || v.eq_ignore_ascii_case("false")
+                    || v.eq_ignore_ascii_case("warn")
+                    || v.eq_ignore_ascii_case("off"))
+            })
+            .unwrap_or(true);
         Self {
             storage: Arc::from(storage),
             specs: SpeculationManager::new(),
@@ -416,9 +426,9 @@ impl Repository {
     /// Return a Repository with epoch-seal enforcement set to the given mode.
     /// Overrides the `ASG_EPOCH_SEAL_STRICT` environment variable.
     ///
-    /// Strict mode rejects ref updates that would render any sealed-epoch
-    /// commit unreachable from the new target. Warn mode (default) logs
-    /// a warning and proceeds. (security threat model v3+, V8)
+    /// Strict mode (the default) rejects ref updates that would render any
+    /// sealed-epoch commit unreachable from the new target. Pass `false` for
+    /// the legacy warn-and-proceed behavior. (security threat model v3+, V8)
     pub fn with_epoch_seal_strict(mut self, strict: bool) -> Self {
         self.epoch_seal_strict = strict;
         self
@@ -2000,8 +2010,8 @@ impl Repository {
     }
 
     /// Enforce epoch seals against a proposed `set_ref` to `ref_name`.
-    /// In warn mode (default) logs to stderr and proceeds. In strict mode
-    /// returns `RepoError::EpochSealViolated`.
+    /// In strict mode (default) returns `RepoError::EpochSealViolated`. In
+    /// warn mode (opt-out) logs to stderr and proceeds.
     fn enforce_epoch_seals(&self, ref_name: &str, new_target: &ObjectId) -> Result<(), RepoError> {
         // Only `main` is the canonical seal anchor; branch/spec updates
         // don't orphan sealed commits reachable from main because main
@@ -3152,11 +3162,12 @@ mod tests {
 
     #[test]
     fn test_epoch_seal_violation_in_warn_mode_is_logged_not_rejected() {
-        // Warn mode is the default — a rewind past a sealed commit logs
-        // but still succeeds.
+        // Warn mode is now opt-out (strict is the default) — a rewind past a
+        // sealed commit logs but still succeeds.
         let repo = Repository::new(Box::new(
             SqliteStorage::in_memory().expect("in-memory sqlite"),
-        ));
+        ))
+        .with_epoch_seal_strict(false);
         repo.init().unwrap();
         let _ = repo
             .set("main", "/a", &Object::string("1"), quick_opts("a"))
@@ -3174,6 +3185,37 @@ mod tests {
         // Rewind main to pre_seal via set_ref. In warn mode this succeeds.
         let res = repo.set_ref("main", pre_seal);
         assert!(res.is_ok(), "warn mode must accept the rewind; got {res:?}");
+    }
+
+    #[test]
+    fn test_epoch_seal_strict_is_the_default() {
+        // The hard guard must fire through a PLAIN `Repository::new` — no
+        // `.with_epoch_seal_strict(true)`, no env var. This is the production
+        // constructor every shipped surface (MCP/HTTP/FFI/CLI) goes through, so
+        // this asserts the guard Plan B relies on is engaged by default.
+        assert!(
+            std::env::var(EPOCH_SEAL_STRICT_ENV).is_err(),
+            "test assumes {EPOCH_SEAL_STRICT_ENV} is unset in the test environment"
+        );
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        let pre_seal = repo
+            .set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+        repo.set("main", "/c", &Object::string("3"), quick_opts("c"))
+            .unwrap();
+
+        repo.create_epoch("e1", "scoped work", vec![]).unwrap();
+        repo.seal_epoch("e1", "ship").unwrap();
+
+        match repo.set_ref("main", pre_seal) {
+            Err(RepoError::EpochSealViolated { .. }) => {}
+            other => panic!("expected EpochSealViolated by default, got {other:?}"),
+        }
     }
 
     #[test]
