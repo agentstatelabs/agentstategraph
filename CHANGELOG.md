@@ -7,6 +7,36 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+
+- **Epoch-seal enforcement is now strict by default.** A ref update to
+  `main` that would orphan a sealed-epoch commit is rejected with
+  `RepoError::EpochSealViolated` instead of logging a warning and
+  proceeding. This is the guard the garbage collector relies on so
+  sealed history can't be silently dropped. Opt back into the legacy
+  warn-and-proceed behavior with `Repository::with_epoch_seal_strict(false)`
+  or a falsey `ASG_EPOCH_SEAL_STRICT` (`0`/`false`/`warn`/`off`). Only a
+  workflow that intentionally rewinds `main` behind sealed history is
+  affected. (Plan C t-005)
+- `CommitOptions::new` now records the acting `agent_id` as the
+  authorizing principal instead of a constant `"default"`, so every
+  commit's `authority` carries real provenance. Use
+  `CommitOptions::with_principal` when the authorizer differs from the
+  actor. (Plan C t-002)
+
+### Added
+
+- `CommitOptions::tool_calls` / `with_tool_calls`, threaded through the
+  commit builder and the MCP/HTTP/FFI `set` surfaces, so a commit can
+  carry the tool calls that produced it. Empty by default. (Plan C t-001)
+
+### Fixed
+
+- `Repository::intent_tree` now builds the sub-intent hierarchy from
+  `Intent::parent_intent` as documented, rather than walking the commit
+  DAG (which duplicated `commit_graph`). Until producers set
+  `parent_intent`, the result is a flat, honest list. (Plan C t-003)
+
 ## [v0.9.21] — 2026-08-05
 
 ### Added
