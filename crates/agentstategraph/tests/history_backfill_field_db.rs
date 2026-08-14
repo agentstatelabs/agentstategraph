@@ -149,13 +149,34 @@ fn gc_sweep_vacuum_on_field_db() {
     // Distill first (so the sweep's safety gate passes).
     repo.extract_history(5000).expect("extract");
 
-    // Lean policy: keep only recent + sparse checkpoints (+ tips, sealed,
-    // milestones always).
-    let policy = agentstategraph::RetentionPolicy {
-        keep_recent: 200,
-        checkpoint_every: 1000,
-        keep_milestones: true,
+    // Policy is tunable from the env so a single test can sweep at different
+    // aggressiveness. Defaults are conservative (keep milestones + recent).
+    let env_usize = |k: &str, d: usize| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
     };
+    let policy = agentstategraph::RetentionPolicy {
+        keep_recent: env_usize("GC_KEEP_RECENT", 200),
+        checkpoint_every: env_usize("GC_CHECKPOINT_EVERY", 1000),
+        keep_milestones: std::env::var("GC_KEEP_MILESTONES")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true),
+    };
+
+    // Capture the distilled history BEFORE the sweep — this is the signal Plan
+    // A preserves so Plan B can safely reclaim the raw snapshots.
+    let hist_before = repo
+        .history_report(None, "day", 1000, false, false)
+        .unwrap();
+    println!(
+        "history BEFORE sweep: commits={}, days={}, agents={}, milestones={}",
+        hist_before["totals"]["commits"],
+        hist_before["velocity"]["series"].as_array().unwrap().len(),
+        hist_before["authorship"].as_array().unwrap().len(),
+        hist_before["milestones"].as_array().unwrap().len(),
+    );
 
     let t0 = Instant::now();
     let report = repo.gc_sweep(policy, true, true).expect("sweep+vacuum");
@@ -171,4 +192,22 @@ fn gc_sweep_vacuum_on_field_db() {
     assert!(after < before, "sweep should delete objects");
     let vac = &report["vacuum"];
     assert!(vac["bytes_after"].as_i64().unwrap() <= vac["bytes_before"].as_i64().unwrap());
+
+    // The distilled history is UNCHANGED by the sweep — the metric tables aren't
+    // touched, only unreachable `objects` are deleted. The project's history
+    // survives even though most raw snapshots are gone.
+    let hist_after = repo
+        .history_report(None, "day", 1000, false, false)
+        .unwrap();
+    println!(
+        "history AFTER sweep:  commits={}, days={}, agents={}, milestones={}",
+        hist_after["totals"]["commits"],
+        hist_after["velocity"]["series"].as_array().unwrap().len(),
+        hist_after["authorship"].as_array().unwrap().len(),
+        hist_after["milestones"].as_array().unwrap().len(),
+    );
+    assert_eq!(
+        hist_before, hist_after,
+        "distilled history must be identical before and after the sweep"
+    );
 }
