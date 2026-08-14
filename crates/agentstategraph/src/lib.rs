@@ -28,8 +28,8 @@ pub use agentstategraph_storage as storage;
 
 // Re-export primary types
 pub use repo::{
-    CommitOptions, META_PATH_PREFIX, META_SCHEMA_VERSION_PATH, RepoError, Repository,
-    SCHEMA_VERSION,
+    CommitOptions, HistoryExtractReport, META_PATH_PREFIX, META_SCHEMA_VERSION_PATH, RepoError,
+    Repository, RetentionPolicy, SCHEMA_VERSION,
 };
 pub use session::{CreateSessionParams, Session, SessionError, SessionManager};
 pub use speculation::{SpecComparison, SpecHandle, SpeculationManager};

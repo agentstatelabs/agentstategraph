@@ -21,7 +21,9 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, CreateSessionParams, Repository, SpecHandle, SCHEMA_VERSION};
+use agentstategraph::{
+    CommitOptions, CreateSessionParams, Repository, RetentionPolicy, SpecHandle, SCHEMA_VERSION,
+};
 use agentstategraph_core::{
     IntentCategory, Namespace, ObjectId, QueryFilters, SessionStatus, ToolCall,
 };
@@ -438,7 +440,7 @@ pub extern "C" fn agentstategraph_repository_capabilities() -> *mut c_char {
             "merge.base", "merge.preview", "merge.checked",
             "explore.list_paths", "explore.get_tree", "explore.search_values",
             "explore.stats", "explore.commit_graph", "explore.intent_tree",
-            "explore.history", "gc.dry_run",
+            "explore.history", "gc.dry_run", "gc.sweep",
             "spec.create", "spec.set", "spec.delete", "spec.compare", "spec.commit",
             "spec.discard", "spec.list",
             "session.create", "session.get", "session.list", "session.children",
@@ -683,6 +685,23 @@ fn repository_call(
             )
             .map_err(err_string),
         "gc.dry_run" => repo.gc_dry_run().map_err(err_string),
+        "gc.sweep" => {
+            let default = RetentionPolicy::default();
+            let policy = RetentionPolicy {
+                keep_recent: request_usize(request, "keep_recent").unwrap_or(default.keep_recent),
+                checkpoint_every: request_usize(request, "checkpoint_every")
+                    .unwrap_or(default.checkpoint_every),
+                keep_milestones: request
+                    .get("keep_milestones")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(default.keep_milestones),
+            };
+            let mutate = request
+                .get("mutate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            repo.gc_sweep(policy, mutate).map_err(err_string)
+        }
         "spec.create" => Ok(serde_json::json!({
             "handle": repo.speculate(&ref_name(), optional("label")).map_err(err_string)?.id()
         })),

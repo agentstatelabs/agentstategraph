@@ -27,7 +27,7 @@ use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
-use agentstategraph::{CommitOptions, RepoError, Repository};
+use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
 use agentstategraph_core::IntentCategory;
 
 use crate::auth::{self, AuthContext, CreateKeyOptions, TenantManager};
@@ -148,6 +148,7 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
         .route("/intents/{ref_name}", get(intent_tree))
         .route("/history", get(history))
         .route("/gc/dry-run", get(gc_dry_run))
+        .route("/gc/sweep", post(gc_sweep))
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::auth_middleware,
@@ -577,6 +578,28 @@ async fn history(
 
 async fn gc_dry_run(State(repo): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
     Ok(Json(repo.gc_dry_run()?))
+}
+
+#[derive(Deserialize)]
+struct SweepRequest {
+    keep_recent: Option<usize>,
+    checkpoint_every: Option<usize>,
+    keep_milestones: Option<bool>,
+    /// Must be explicitly true to delete; omitted/false previews (dry-run).
+    mutate: Option<bool>,
+}
+
+async fn gc_sweep(
+    State(repo): State<AppState>,
+    Json(req): Json<SweepRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let default = RetentionPolicy::default();
+    let policy = RetentionPolicy {
+        keep_recent: req.keep_recent.unwrap_or(default.keep_recent),
+        checkpoint_every: req.checkpoint_every.unwrap_or(default.checkpoint_every),
+        keep_milestones: req.keep_milestones.unwrap_or(default.keep_milestones),
+    };
+    Ok(Json(repo.gc_sweep(policy, req.mutate.unwrap_or(false))?))
 }
 
 // ─── Branches ───────────────────────────────────────────────

@@ -193,6 +193,17 @@ pub struct GcReachability {
     pub roots_walked: usize,
 }
 
+/// Result of a GC sweep (Plan B t-003): how many objects were deleted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GcSweep {
+    pub objects_before: i64,
+    pub objects_deleted: i64,
+    pub objects_after: i64,
+    /// Objects the sweep set out to delete (unreachable from the keep-set).
+    /// Equals `objects_deleted` on a complete run.
+    pub deleted_target: i64,
+}
+
 /// Commit storage. Commits are also content-addressed but stored
 /// separately from objects for efficient history queries.
 pub trait CommitStore: Send + Sync {
@@ -299,6 +310,25 @@ pub trait CommitStore: Send + Sync {
         _batch: usize,
     ) -> Result<GcReachability, StorageError> {
         Ok(GcReachability::default())
+    }
+
+    /// Sweep: mark the closure of `roots` and DELETE every object outside it
+    /// (Plan B t-003). Transactional and resumable — deletes in bounded batches,
+    /// so a crash mid-sweep leaves a consistent DB and re-running finishes it.
+    /// Destructive; callers gate it (dry-run default, safety predicate).
+    /// Backends without object storage report an empty sweep.
+    fn history_gc_sweep(
+        &self,
+        _roots: &[ObjectId],
+        _batch: usize,
+    ) -> Result<GcSweep, StorageError> {
+        Ok(GcSweep::default())
+    }
+
+    /// Every commit's `state_root`, newest first (insertion order), for the GC
+    /// retention policy (Plan B t-003) to pick keep-recent + checkpoint-every.
+    fn commit_state_roots_recent_first(&self) -> Result<Vec<ObjectId>, StorageError> {
+        Ok(Vec::new())
     }
 }
 

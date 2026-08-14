@@ -175,6 +175,30 @@ fn iso_week_key(day: &str) -> Option<String> {
     Some(format!("{}-W{:02}", wk.year(), wk.week()))
 }
 
+/// GC retention policy (Plan B t-003): which historical commits' state stays
+/// materializable. Ref tips, sealed-epoch commits, and milestones are always
+/// kept regardless of this policy.
+#[derive(Debug, Clone, Copy)]
+pub struct RetentionPolicy {
+    /// Keep the `keep_recent` most-recent commits' state in full.
+    pub keep_recent: usize,
+    /// Among older commits, keep every `checkpoint_every`-th as a sparse
+    /// checkpoint (0 disables checkpointing — only recent + always-kept remain).
+    pub checkpoint_every: usize,
+    /// Keep the milestone snapshots (the human-meaningful spine).
+    pub keep_milestones: bool,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self {
+            keep_recent: 100,
+            checkpoint_every: 100,
+            keep_milestones: true,
+        }
+    }
+}
+
 /// Outcome of a [`Repository::extract_history`] run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryExtractReport {
@@ -2026,6 +2050,110 @@ impl Repository {
                     )
                 },
             },
+        }))
+    }
+
+    /// The keep-set a [`RetentionPolicy`] resolves to (Plan B t-003): the
+    /// `state_root`s the GC must keep reachable. Always includes every ref tip
+    /// (current state) and every sealed-epoch commit (the epoch-seal invariant —
+    /// sealed history must stay materializable); adds milestones and the
+    /// recent/checkpoint selection per the policy.
+    pub fn gc_keep_roots(&self, policy: RetentionPolicy) -> Result<Vec<ObjectId>, RepoError> {
+        let mut set = std::collections::BTreeSet::new();
+
+        // Current state — never prune a live ref.
+        for ns in self.storage.list_namespaces()? {
+            for (_name, target) in self.storage.list_refs(&ns, "")? {
+                if let Some(c) = self.storage.get_commit(&target)? {
+                    set.insert(c.state_root);
+                }
+            }
+        }
+        // Sealed-epoch commits must stay materializable (epoch-seal invariant).
+        for entry in self.list_epochs()? {
+            let epoch = self.get_epoch(&entry.id)?;
+            for cid in &epoch.sealed_commits {
+                if let Some(c) = self.storage.get_commit(cid)? {
+                    set.insert(c.state_root);
+                }
+            }
+        }
+        // The human-meaningful spine.
+        if policy.keep_milestones {
+            set.extend(self.history_retained_state_roots()?);
+        }
+        // Recent in full + every Kth older commit as a sparse checkpoint.
+        for (i, state_root) in self
+            .storage
+            .commit_state_roots_recent_first()?
+            .into_iter()
+            .enumerate()
+        {
+            if i < policy.keep_recent
+                || (policy.checkpoint_every > 0 && i % policy.checkpoint_every == 0)
+            {
+                set.insert(state_root);
+            }
+        }
+        Ok(set.into_iter().collect())
+    }
+
+    /// Run (or preview) a GC sweep under a [`RetentionPolicy`] (Plan B t-003).
+    ///
+    /// `mutate=false` (the safe default) previews what would be reclaimed and
+    /// never touches the store. `mutate=true` DELETES every object unreachable
+    /// from the policy's keep-set — but only after the Plan A safety gate:
+    /// if any commit is not yet distilled it refuses (returns `refused:true`,
+    /// no mutation), so pruning can't lose not-yet-captured history.
+    pub fn gc_sweep(
+        &self,
+        policy: RetentionPolicy,
+        mutate: bool,
+    ) -> Result<serde_json::Value, RepoError> {
+        let keep = self.gc_keep_roots(policy)?;
+        let undistilled = self.storage.history_undistilled_commit_count()?;
+        let safe = undistilled == 0;
+        let policy_json = serde_json::json!({
+            "keep_recent": policy.keep_recent,
+            "checkpoint_every": policy.checkpoint_every,
+            "keep_milestones": policy.keep_milestones,
+        });
+
+        if !mutate {
+            let would = self.gc_reachability_from(&keep)?;
+            return Ok(serde_json::json!({
+                "dry_run": true,
+                "mutated": false,
+                "policy": policy_json,
+                "keep_roots": keep.len(),
+                "would_reclaim": would,
+                "safe": safe,
+                "undistilled_commits": undistilled,
+            }));
+        }
+
+        if !safe {
+            return Ok(serde_json::json!({
+                "dry_run": false,
+                "mutated": false,
+                "refused": true,
+                "policy": policy_json,
+                "undistilled_commits": undistilled,
+                "reason": format!(
+                    "REFUSING to sweep: {undistilled} commit(s) are not yet distilled; run the history extractor first"
+                ),
+            }));
+        }
+
+        let sweep = self.storage.history_gc_sweep(&keep, GC_MARK_BATCH)?;
+        Ok(serde_json::json!({
+            "dry_run": false,
+            "mutated": true,
+            "policy": policy_json,
+            "keep_roots": keep.len(),
+            "objects_before": sweep.objects_before,
+            "objects_deleted": sweep.objects_deleted,
+            "objects_after": sweep.objects_after,
         }))
     }
 
@@ -4164,5 +4292,76 @@ mod tests {
         assert!(after["bytes"]["current_total"].as_i64().unwrap() > 0);
         assert!(after["bytes"]["estimated_reclaimable"].as_i64().unwrap() >= 0);
         assert!(after["bytes"]["estimated_post_vacuum"].as_i64().unwrap() >= 0);
+    }
+
+    #[test]
+    fn test_gc_sweep_reclaims_and_preserves_current_state() {
+        let repo = test_repo();
+        // Churn: overwrite /a 20 times → old versions become orphaned from the
+        // tip, then a final key.
+        for i in 0..20 {
+            repo.set(
+                "main",
+                "/a",
+                &Object::string(&format!("v{i}")),
+                quick_opts("x"),
+            )
+            .unwrap();
+        }
+        repo.set("main", "/keep", &Object::string("final"), quick_opts("k"))
+            .unwrap();
+
+        // Aggressive policy: keep only the current tip. (Extract first so the
+        // safety gate is satisfied.)
+        let policy = RetentionPolicy {
+            keep_recent: 1,
+            checkpoint_every: 0,
+            keep_milestones: false,
+        };
+
+        // Before distilling, a mutating sweep REFUSES (nothing deleted).
+        let refused = repo.gc_sweep(policy, true).unwrap();
+        assert_eq!(refused["refused"], true);
+        assert_eq!(refused["mutated"], false);
+
+        repo.extract_history(1000).unwrap();
+
+        // Dry-run: reports reclaimable churn, mutates nothing.
+        let dry = repo.gc_sweep(policy, false).unwrap();
+        assert_eq!(dry["mutated"], false);
+        assert_eq!(dry["safe"], true);
+        let total_before = dry["would_reclaim"]["total_objects"].as_i64().unwrap();
+        let would = dry["would_reclaim"]["reclaimable_objects"]
+            .as_i64()
+            .unwrap();
+        assert!(would > 0, "20 overwrites should orphan reclaimable objects");
+        assert_eq!(
+            repo.history_store_shape().unwrap()["objects"]
+                .as_i64()
+                .unwrap(),
+            total_before,
+            "dry-run must not delete anything"
+        );
+
+        // Real sweep deletes exactly the reclaimable set.
+        let swept = repo.gc_sweep(policy, true).unwrap();
+        assert_eq!(swept["mutated"], true);
+        assert_eq!(swept["objects_deleted"].as_i64().unwrap(), would);
+        assert!(
+            swept["objects_after"].as_i64().unwrap() < swept["objects_before"].as_i64().unwrap()
+        );
+
+        // The current state is fully materializable after the sweep.
+        assert_eq!(repo.get("main", "/a").unwrap(), Object::string("v19"));
+        assert_eq!(repo.get("main", "/keep").unwrap(), Object::string("final"));
+        // Integrity: nothing reachable from the tip is missing.
+        let head = repo.head("main").unwrap();
+        let tip = repo.get_commit(&head).unwrap().unwrap();
+        assert!(
+            self::Repository::first_missing_reachable(&repo, &tip.state_root)
+                .unwrap()
+                .is_none(),
+            "tip closure must be intact"
+        );
     }
 }
