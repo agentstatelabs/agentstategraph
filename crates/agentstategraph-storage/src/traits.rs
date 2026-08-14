@@ -133,6 +133,31 @@ pub trait ObjectStore: Send + Sync {
     }
 }
 
+/// One row of the commit-history rollup (Plan A t-001): commit activity for a
+/// single (day, namespace, agent, intent category) bucket.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryRollupRow {
+    pub day: String,
+    pub namespace: String,
+    pub agent_id: String,
+    pub intent_category: String,
+    pub commit_count: i64,
+    pub first_ts: String,
+    pub last_ts: String,
+}
+
+/// One milestone on the distilled history timeline (Plan A t-001).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryMilestoneRow {
+    pub commit_id: ObjectId,
+    pub kind: String,
+    pub timestamp: String,
+    pub day: String,
+    pub namespace: String,
+    pub agent_id: String,
+    pub description: String,
+}
+
 /// Commit storage. Commits are also content-addressed but stored
 /// separately from objects for efficient history queries.
 pub trait CommitStore: Send + Sync {
@@ -156,6 +181,40 @@ pub trait CommitStore: Send + Sync {
     /// deleted branch). Used for prefix-based ref resolution and for recovering
     /// orphaned historical commits.
     fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError>;
+
+    // -- Project-history metrics (Plan A t-001) ------------------------------
+    // Derived, rebuildable tables distilled from the commit chain. A backend
+    // that doesn't implement them is simply "no history" — the feature is
+    // purely additive, like `leaf_index_*`.
+
+    /// Fold the next batch of un-processed commits into the `asg_history_*`
+    /// rollup/milestone tables, advancing the stored `commits.rowid` cursor
+    /// atomically. Returns the number of commits processed this call — `0` once
+    /// the extractor has caught up. Idempotent and resumable: the cursor only
+    /// advances inside the same transaction that writes the rows, so a crash
+    /// re-processes the batch rather than double-counting it. Bounded memory:
+    /// at most `batch_size` commits are held at once.
+    fn history_extract_batch(&self, _batch_size: usize) -> Result<usize, StorageError> {
+        Ok(0)
+    }
+
+    /// The last `commits.rowid` folded into the history tables (0 = nothing
+    /// extracted yet).
+    fn history_cursor(&self) -> Result<i64, StorageError> {
+        Ok(0)
+    }
+
+    /// Read the commit-history rollup, ordered by (day, namespace, agent,
+    /// intent category).
+    fn history_rollup(&self) -> Result<Vec<HistoryRollupRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Read the milestone timeline in chronological order, most recent first,
+    /// capped at `limit`.
+    fn history_milestones(&self, _limit: usize) -> Result<Vec<HistoryMilestoneRow>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Named ref management with atomic compare-and-swap.

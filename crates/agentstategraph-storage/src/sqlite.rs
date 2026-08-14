@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use agentstategraph_core::{
-    Commit, Epoch, EpochStatus, Namespace, Object, ObjectId, Session, SessionStatus,
+    Commit, Epoch, EpochStatus, IntentCategory, Namespace, Object, ObjectId, Session, SessionStatus,
 };
 use agentstategraph_reminders::{
     Reminder, ReminderError, ReminderFilter, ReminderStore,
@@ -18,7 +18,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
-    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
+    CommitStore, EpochStore, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
+    SessionStore, StorageError, TaintStore,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -211,6 +212,46 @@ impl SqliteStorage {
             CREATE INDEX IF NOT EXISTS idx_reminders_due_at     ON reminders(due_at);
             CREATE INDEX IF NOT EXISTS idx_reminders_priority   ON reminders(priority);
             CREATE INDEX IF NOT EXISTS idx_reminders_created_by ON reminders(created_by);
+
+            -- Plan A t-001: distilled project-history metrics. Populated
+            -- incrementally by `history_extract_batch` from the commit chain,
+            -- keyed off the monotonic `commits.rowid` cursor stored in
+            -- asg_history_meta. Derived, rebuildable — never authoritative.
+            CREATE TABLE IF NOT EXISTS asg_history_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            -- Commit-history rollup: one row per (day, namespace, agent,
+            -- intent category). Collapses velocity + authorship + intent-mix
+            -- into an indexed table instead of a 512k-row commit scan.
+            CREATE TABLE IF NOT EXISTS asg_history_commit_rollup (
+                day             TEXT NOT NULL,
+                namespace       TEXT NOT NULL,
+                agent_id        TEXT NOT NULL,
+                intent_category TEXT NOT NULL,
+                commit_count    INTEGER NOT NULL DEFAULT 0,
+                first_ts        TEXT NOT NULL,
+                last_ts         TEXT NOT NULL,
+                PRIMARY KEY (day, namespace, agent_id, intent_category)
+            );
+            CREATE INDEX IF NOT EXISTS idx_asg_history_rollup_day
+                ON asg_history_commit_rollup(day);
+            -- Milestone timeline: the human-meaningful spine — every
+            -- `Checkpoint` commit (epoch/session boundaries land here in a
+            -- later task). One row per (commit, kind); insert-or-ignore keeps
+            -- re-extraction idempotent.
+            CREATE TABLE IF NOT EXISTS asg_history_milestone (
+                commit_id   BLOB NOT NULL,
+                kind        TEXT NOT NULL,
+                timestamp   TEXT NOT NULL,
+                day         TEXT NOT NULL,
+                namespace   TEXT NOT NULL,
+                agent_id    TEXT NOT NULL,
+                description TEXT NOT NULL,
+                PRIMARY KEY (commit_id, kind)
+            );
+            CREATE INDEX IF NOT EXISTS idx_asg_history_milestone_ts
+                ON asg_history_milestone(timestamp);
             ",
         )
         .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
@@ -604,6 +645,201 @@ impl CommitStore for SqliteStorage {
             }
         }
         Ok(ids)
+    }
+
+    fn history_extract_batch(&self, batch_size: usize) -> Result<usize, StorageError> {
+        let batch_size = batch_size.max(1) as i64;
+        let conn = self.lock_conn()?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| StorageError::Backend(format!("history tx: {}", e)))?;
+
+        let cursor: i64 = tx
+            .query_row(
+                "SELECT value FROM asg_history_meta WHERE key = 'commit_cursor'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("history cursor read: {}", e)))?
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        // Pull the next batch in rowid order. LEFT JOIN sessions to attribute a
+        // namespace when the commit was made inside a scoped session; commits
+        // with no session fall back to "default".
+        let batch: Vec<(i64, Vec<u8>, String)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT c.rowid, c.data, COALESCE(s.scope_namespace, 'default') \
+                     FROM commits c \
+                     LEFT JOIN sessions s ON c.session_id = s.id \
+                     WHERE c.rowid > ?1 ORDER BY c.rowid LIMIT ?2",
+                )
+                .map_err(|e| StorageError::Backend(format!("history select: {}", e)))?;
+            let rows = stmt
+                .query_map(params![cursor, batch_size], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|e| StorageError::Backend(format!("history query: {}", e)))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| StorageError::Backend(format!("history row: {}", e)))?);
+            }
+            out
+        };
+
+        if batch.is_empty() {
+            return Ok(0);
+        }
+
+        let mut max_rowid = cursor;
+        let mut processed = 0usize;
+        for (rowid, data, namespace) in &batch {
+            max_rowid = (*rowid).max(max_rowid);
+            let commit: Commit = serde_json::from_slice(data)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            let day = commit.timestamp.format("%Y-%m-%d").to_string();
+            let ts = commit.timestamp.to_rfc3339();
+            let agent = &commit.agent_id;
+            let category = format!("{:?}", commit.intent.category);
+
+            tx.execute(
+                "INSERT INTO asg_history_commit_rollup \
+                   (day, namespace, agent_id, intent_category, commit_count, first_ts, last_ts) \
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5) \
+                 ON CONFLICT(day, namespace, agent_id, intent_category) DO UPDATE SET \
+                   commit_count = commit_count + 1, \
+                   first_ts = MIN(first_ts, excluded.first_ts), \
+                   last_ts  = MAX(last_ts,  excluded.last_ts)",
+                params![day, namespace, agent, category, ts],
+            )
+            .map_err(|e| StorageError::Backend(format!("history rollup upsert: {}", e)))?;
+
+            if commit.intent.category == IntentCategory::Checkpoint {
+                tx.execute(
+                    "INSERT OR IGNORE INTO asg_history_milestone \
+                       (commit_id, kind, timestamp, day, namespace, agent_id, description) \
+                     VALUES (?1, 'checkpoint', ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        commit.id.as_bytes().as_slice(),
+                        ts,
+                        day,
+                        namespace,
+                        agent,
+                        commit.intent.description,
+                    ],
+                )
+                .map_err(|e| StorageError::Backend(format!("history milestone: {}", e)))?;
+            }
+            processed += 1;
+        }
+
+        // Advance the cursor in the SAME transaction as the writes: a crash
+        // rolls the whole batch back, so the next run re-folds it rather than
+        // double-counting.
+        tx.execute(
+            "INSERT INTO asg_history_meta (key, value) VALUES ('commit_cursor', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![max_rowid.to_string()],
+        )
+        .map_err(|e| StorageError::Backend(format!("history cursor write: {}", e)))?;
+
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("history commit: {}", e)))?;
+        Ok(processed)
+    }
+
+    fn history_cursor(&self) -> Result<i64, StorageError> {
+        let conn = self.lock_conn()?;
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT value FROM asg_history_meta WHERE key = 'commit_cursor'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("history cursor: {}", e)))?
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(cursor)
+    }
+
+    fn history_rollup(&self) -> Result<Vec<HistoryRollupRow>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT day, namespace, agent_id, intent_category, commit_count, first_ts, last_ts \
+                 FROM asg_history_commit_rollup \
+                 ORDER BY day, namespace, agent_id, intent_category",
+            )
+            .map_err(|e| StorageError::Backend(format!("history rollup read: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(HistoryRollupRow {
+                    day: row.get(0)?,
+                    namespace: row.get(1)?,
+                    agent_id: row.get(2)?,
+                    intent_category: row.get(3)?,
+                    commit_count: row.get(4)?,
+                    first_ts: row.get(5)?,
+                    last_ts: row.get(6)?,
+                })
+            })
+            .map_err(|e| StorageError::Backend(format!("history rollup query: {}", e)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| StorageError::Backend(format!("history rollup row: {}", e)))?);
+        }
+        Ok(out)
+    }
+
+    fn history_milestones(&self, limit: usize) -> Result<Vec<HistoryMilestoneRow>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT commit_id, kind, timestamp, day, namespace, agent_id, description \
+                 FROM asg_history_milestone ORDER BY timestamp DESC LIMIT ?1",
+            )
+            .map_err(|e| StorageError::Backend(format!("history milestones read: {}", e)))?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                let id_bytes: Vec<u8> = row.get(0)?;
+                Ok((
+                    id_bytes,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|e| StorageError::Backend(format!("history milestones query: {}", e)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id_bytes, kind, timestamp, day, namespace, agent_id, description) =
+                r.map_err(|e| StorageError::Backend(format!("history milestone row: {}", e)))?;
+            if id_bytes.len() != 32 {
+                continue;
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&id_bytes);
+            out.push(HistoryMilestoneRow {
+                commit_id: ObjectId::from_bytes(arr),
+                kind,
+                timestamp,
+                day,
+                namespace,
+                agent_id,
+                description,
+            });
+        }
+        Ok(out)
     }
 
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
