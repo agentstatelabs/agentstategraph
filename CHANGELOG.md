@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.9.22] — 2026-08-14
+
 ### Changed
 
 - **Epoch-seal enforcement is now strict by default.** A ref update to
