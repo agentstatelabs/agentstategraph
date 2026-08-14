@@ -182,6 +182,17 @@ pub struct StoreShape {
     pub dbstat_available: bool,
 }
 
+/// Result of a GC reachability mark (Plan B t-001): how many objects are live
+/// (reachable from the given roots) vs. total, and the reclaimable remainder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GcReachability {
+    pub total_objects: i64,
+    pub live_objects: i64,
+    pub reclaimable_objects: i64,
+    /// Root state roots the mark started from.
+    pub roots_walked: usize,
+}
+
 /// Commit storage. Commits are also content-addressed but stored
 /// separately from objects for efficient history queries.
 pub trait CommitStore: Send + Sync {
@@ -264,6 +275,21 @@ pub trait CommitStore: Send + Sync {
     /// unspecified.
     fn history_retained_state_roots(&self) -> Result<Vec<ObjectId>, StorageError> {
         Ok(Vec::new())
+    }
+
+    /// Mark every object reachable from `roots` (state roots) and report live
+    /// vs. total object counts — the GC reclaimable estimate (Plan B t-001).
+    ///
+    /// Walks the Merkle DAG in bounded memory: the mark set is held **on disk**
+    /// (a temp table), and unexpanded nodes are drained in `batch`-sized chunks,
+    /// so a 14.8M-object store never materializes the full closure in RAM.
+    /// Backends without object storage report all-zero.
+    fn history_gc_reachability(
+        &self,
+        _roots: &[ObjectId],
+        _batch: usize,
+    ) -> Result<GcReachability, StorageError> {
+        Ok(GcReachability::default())
     }
 }
 

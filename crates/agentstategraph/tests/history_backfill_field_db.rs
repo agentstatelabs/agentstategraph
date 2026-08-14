@@ -97,3 +97,35 @@ fn backfill_reconciles_against_commit_count() {
         .sum();
     assert_eq!(rollup2, commit_count, "idempotent — no double counting");
 }
+
+/// Plan B t-001: run the reachability marker over a real field DB and report
+/// the reclaimable estimate under "keep current tips + milestones". Validates
+/// bounded memory over 14.8M objects. Same setup/caveats as the backfill test.
+#[test]
+#[ignore = "needs ASG_HISTORY_BACKFILL_DB pointing at a writable copy of a real field DB"]
+fn gc_reachability_on_field_db() {
+    let Ok(path) = std::env::var("ASG_HISTORY_BACKFILL_DB") else {
+        eprintln!("skip: set ASG_HISTORY_BACKFILL_DB to a writable copy of a field DB");
+        return;
+    };
+    let storage = SqliteStorage::open(&path).expect("open field db copy");
+    let repo = Repository::new(Box::new(storage));
+
+    // Populate milestones so retained roots are part of the keep-set.
+    repo.extract_history(5000).expect("extract");
+
+    let t0 = Instant::now();
+    let report = repo.gc_reachability_report().expect("gc reachability");
+    let elapsed = t0.elapsed();
+    println!(
+        "gc mark (tips + milestones) in {:.2?}: {}",
+        elapsed,
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+
+    let total = report["total_objects"].as_i64().unwrap();
+    let live = report["live_objects"].as_i64().unwrap();
+    let reclaimable = report["reclaimable_objects"].as_i64().unwrap();
+    assert_eq!(live + reclaimable, total, "live + reclaimable == total");
+    assert!(live > 0 && live <= total);
+}
