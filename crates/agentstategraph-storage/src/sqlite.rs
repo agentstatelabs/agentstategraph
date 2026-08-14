@@ -239,7 +239,10 @@ impl SqliteStorage {
             -- Milestone timeline: the human-meaningful spine — every
             -- `Checkpoint` commit (epoch/session boundaries land here in a
             -- later task). One row per (commit, kind); insert-or-ignore keeps
-            -- re-extraction idempotent.
+            -- re-extraction idempotent. `state_root` (Plan A t-005) is the
+            -- retention hook: it names the snapshot a milestone preserves, so
+            -- Plan B's GC can keep milestone state reachable while pruning
+            -- everything else.
             CREATE TABLE IF NOT EXISTS asg_history_milestone (
                 commit_id   BLOB NOT NULL,
                 kind        TEXT NOT NULL,
@@ -248,6 +251,7 @@ impl SqliteStorage {
                 namespace   TEXT NOT NULL,
                 agent_id    TEXT NOT NULL,
                 description TEXT NOT NULL,
+                state_root  BLOB,
                 PRIMARY KEY (commit_id, kind)
             );
             CREATE INDEX IF NOT EXISTS idx_asg_history_milestone_ts
@@ -255,6 +259,31 @@ impl SqliteStorage {
             ",
         )
         .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
+
+        // Plan A t-005: migration-safe add of asg_history_milestone.state_root
+        // for DBs that created the milestone table under t-001 (before the
+        // column existed). New rows are populated by the extractor; old rows
+        // keep NULL until the milestone table is rebuilt.
+        let milestone_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(asg_history_milestone)")
+                .map_err(|e| StorageError::Backend(format!("pragma milestone: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| StorageError::Backend(format!("pragma query: {}", e)))?;
+            let mut cols = Vec::new();
+            for r in rows {
+                cols.push(r.map_err(|e| StorageError::Backend(format!("pragma row: {}", e)))?);
+            }
+            cols
+        };
+        if !milestone_cols.iter().any(|c| c == "state_root") {
+            conn.execute(
+                "ALTER TABLE asg_history_milestone ADD COLUMN state_root BLOB",
+                [],
+            )
+            .map_err(|e| StorageError::Backend(format!("add milestone state_root: {}", e)))?;
+        }
 
         // Migration-safe add of commits.epoch_id / commits.session_id.
         // SQLite's ALTER TABLE ADD COLUMN doesn't support IF NOT EXISTS
@@ -723,8 +752,8 @@ impl CommitStore for SqliteStorage {
             if commit.intent.category == IntentCategory::Checkpoint {
                 tx.execute(
                     "INSERT OR IGNORE INTO asg_history_milestone \
-                       (commit_id, kind, timestamp, day, namespace, agent_id, description) \
-                     VALUES (?1, 'checkpoint', ?2, ?3, ?4, ?5, ?6)",
+                       (commit_id, kind, timestamp, day, namespace, agent_id, description, state_root) \
+                     VALUES (?1, 'checkpoint', ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         commit.id.as_bytes().as_slice(),
                         ts,
@@ -732,6 +761,7 @@ impl CommitStore for SqliteStorage {
                         namespace,
                         agent,
                         commit.intent.description,
+                        commit.state_root.as_bytes().as_slice(),
                     ],
                 )
                 .map_err(|e| StorageError::Backend(format!("history milestone: {}", e)))?;
@@ -802,42 +832,85 @@ impl CommitStore for SqliteStorage {
         let conn = self.lock_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT commit_id, kind, timestamp, day, namespace, agent_id, description \
+                "SELECT commit_id, kind, timestamp, day, namespace, agent_id, description, state_root \
                  FROM asg_history_milestone ORDER BY timestamp DESC LIMIT ?1",
             )
             .map_err(|e| StorageError::Backend(format!("history milestones read: {}", e)))?;
         let rows = stmt
             .query_map(params![limit as i64], |row| {
-                let id_bytes: Vec<u8> = row.get(0)?;
                 Ok((
-                    id_bytes,
+                    row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, Option<Vec<u8>>>(7)?,
                 ))
             })
             .map_err(|e| StorageError::Backend(format!("history milestones query: {}", e)))?;
         let mut out = Vec::new();
         for r in rows {
-            let (id_bytes, kind, timestamp, day, namespace, agent_id, description) =
+            let (id_bytes, kind, timestamp, day, namespace, agent_id, description, root_bytes) =
                 r.map_err(|e| StorageError::Backend(format!("history milestone row: {}", e)))?;
-            if id_bytes.len() != 32 {
+            let Some(commit_id) = object_id_from_bytes(&id_bytes) else {
                 continue;
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&id_bytes);
+            };
             out.push(HistoryMilestoneRow {
-                commit_id: ObjectId::from_bytes(arr),
+                commit_id,
                 kind,
                 timestamp,
                 day,
                 namespace,
                 agent_id,
                 description,
+                state_root: root_bytes.as_deref().and_then(object_id_from_bytes),
             });
+        }
+        Ok(out)
+    }
+
+    fn history_is_commit_distilled(&self, id: &ObjectId) -> Result<bool, StorageError> {
+        let conn = self.lock_conn()?;
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT value FROM asg_history_meta WHERE key = 'commit_cursor'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("distilled cursor: {}", e)))?
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let rowid: Option<i64> = conn
+            .query_row(
+                "SELECT rowid FROM commits WHERE id = ?1",
+                params![id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("distilled rowid: {}", e)))?;
+        // Distilled iff the commit exists and its rowid is at/behind the cursor.
+        Ok(matches!(rowid, Some(r) if r <= cursor))
+    }
+
+    fn history_retained_state_roots(&self) -> Result<Vec<ObjectId>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT state_root FROM asg_history_milestone WHERE state_root IS NOT NULL",
+            )
+            .map_err(|e| StorageError::Backend(format!("retained roots read: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|e| StorageError::Backend(format!("retained roots query: {}", e)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let bytes = r.map_err(|e| StorageError::Backend(format!("retained root: {}", e)))?;
+            if let Some(id) = object_id_from_bytes(&bytes) {
+                out.push(id);
+            }
         }
         Ok(out)
     }
@@ -1210,6 +1283,17 @@ impl RefStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(rows > 0)
     }
+}
+
+/// Decode a 32-byte blob into an `ObjectId`, or `None` if the length is wrong
+/// (e.g. a NULL/short `state_root` on a pre-t-005 milestone row).
+fn object_id_from_bytes(bytes: &[u8]) -> Option<ObjectId> {
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(bytes);
+    Some(ObjectId::from_bytes(arr))
 }
 
 fn epoch_status_str(s: &EpochStatus) -> &'static str {

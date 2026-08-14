@@ -146,7 +146,9 @@ pub struct HistoryRollupRow {
     pub last_ts: String,
 }
 
-/// One milestone on the distilled history timeline (Plan A t-001).
+/// One milestone on the distilled history timeline (Plan A t-001). `state_root`
+/// (Plan A t-005) names the snapshot the milestone preserves — the retention
+/// hook Plan B's GC keeps reachable; `None` only for rows written before t-005.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryMilestoneRow {
     pub commit_id: ObjectId,
@@ -156,6 +158,7 @@ pub struct HistoryMilestoneRow {
     pub namespace: String,
     pub agent_id: String,
     pub description: String,
+    pub state_root: Option<ObjectId>,
 }
 
 /// Per-table on-disk size (Plan A t-003), largest first.
@@ -242,6 +245,25 @@ pub trait CommitStore: Send + Sync {
     /// them. Backends that can't return an empty [`StoreShape`].
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
         Ok(StoreShape::default())
+    }
+
+    // -- Retention hooks for GC (Plan A t-005) ------------------------------
+
+    /// Whether `id`'s commit has been folded into the history tables — i.e. its
+    /// position is at or before the extractor cursor. This is the "already
+    /// captured" predicate Plan B's GC checks before pruning a commit's raw
+    /// snapshot: a distilled commit's signal survives in the metric tables.
+    /// Backends without history report `false` (nothing distilled → prune
+    /// nothing on this basis).
+    fn history_is_commit_distilled(&self, _id: &ObjectId) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
+    /// State roots the GC must keep reachable: the snapshots preserved by
+    /// recorded milestones (the human-meaningful spine). Distinct, order
+    /// unspecified.
+    fn history_retained_state_roots(&self) -> Result<Vec<ObjectId>, StorageError> {
+        Ok(Vec::new())
     }
 }
 
