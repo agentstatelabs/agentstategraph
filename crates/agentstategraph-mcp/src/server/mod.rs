@@ -115,6 +115,9 @@ pub(crate) fn tool_calls_from(inputs: Option<Vec<ToolCallInput>>) -> Vec<ToolCal
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct GcParams {}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SetParams {
     /// Branch to commit to (default: "main").
     #[serde(default = "default_ref")]
@@ -1998,6 +2001,16 @@ impl AgentStateGraphServer {
             p.refresh,
             p.store,
         ) {
+            Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "GC dry-run: report what a garbage collection would reclaim (live/reclaimable objects, estimated reclaimable bytes, estimated post-vacuum size) WITHOUT mutating anything. Refuses to recommend a sweep if history isn't fully distilled."
+    )]
+    async fn agentstategraph_gc_dry_run(&self, _params: Parameters<GcParams>) -> String {
+        match self.repo.gc_dry_run() {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }

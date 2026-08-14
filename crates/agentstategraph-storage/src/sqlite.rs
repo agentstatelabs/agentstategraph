@@ -800,6 +800,28 @@ impl CommitStore for SqliteStorage {
         Ok(cursor)
     }
 
+    fn history_undistilled_commit_count(&self) -> Result<i64, StorageError> {
+        let conn = self.lock_conn()?;
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT value FROM asg_history_meta WHERE key = 'commit_cursor'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("undistilled cursor: {}", e)))?
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE rowid > ?1",
+                params![cursor],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("undistilled count: {}", e)))?;
+        Ok(n)
+    }
+
     fn history_rollup(&self) -> Result<Vec<HistoryRollupRow>, StorageError> {
         let conn = self.lock_conn()?;
         let mut stmt = conn

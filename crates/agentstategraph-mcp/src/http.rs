@@ -147,6 +147,7 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
         .route("/stats/{ref_name}", get(stats))
         .route("/intents/{ref_name}", get(intent_tree))
         .route("/history", get(history))
+        .route("/gc/dry-run", get(gc_dry_run))
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::auth_middleware,
@@ -572,6 +573,10 @@ async fn history(
         q.store.unwrap_or(false),
     )?;
     Ok(Json(report))
+}
+
+async fn gc_dry_run(State(repo): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(repo.gc_dry_run()?))
 }
 
 // ─── Branches ───────────────────────────────────────────────

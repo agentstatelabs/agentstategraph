@@ -1962,6 +1962,73 @@ impl Repository {
         self.gc_reachability_from(&roots)
     }
 
+    /// `asg gc --dry-run` (Plan B t-002): report what a GC would reclaim —
+    /// object counts, estimated reclaimable bytes, estimated post-vacuum size —
+    /// WITHOUT mutating anything. The safe default.
+    ///
+    /// Loud about safety: reclaiming objects unreachable from the keep-set
+    /// makes the historical commits behind them unmaterializable, so their
+    /// signal must already be distilled (Plan A). If the extractor is behind
+    /// (`undistilled_commits > 0`), `safe` is false and the report says to run
+    /// the extractor first — it never silently recommends dropping
+    /// not-yet-captured history.
+    pub fn gc_dry_run(&self) -> Result<serde_json::Value, RepoError> {
+        let roots = self.gc_default_roots()?;
+        let reach = self
+            .storage
+            .history_gc_reachability(&roots, GC_MARK_BATCH)?;
+        let shape = self.storage.history_store_shape()?;
+        let undistilled = self.storage.history_undistilled_commit_count()?;
+
+        // Estimate reclaimable bytes as the reclaimable fraction of the objects
+        // table (where ~all the bytes live). Exact bytes need a post-sweep
+        // vacuum; this is the dry-run estimate.
+        let objects_bytes = shape
+            .tables
+            .iter()
+            .find(|t| t.name == "objects")
+            .map(|t| t.bytes)
+            .unwrap_or(shape.total_bytes);
+        let recl_frac = if reach.total_objects > 0 {
+            reach.reclaimable_objects as f64 / reach.total_objects as f64
+        } else {
+            0.0
+        };
+        let est_reclaimable_bytes = (objects_bytes as f64 * recl_frac) as i64;
+        let est_post_vacuum_bytes = (shape.total_bytes - est_reclaimable_bytes).max(0);
+        let safe = undistilled == 0;
+
+        Ok(serde_json::json!({
+            "dry_run": true,
+            "mutates": false,
+            "objects": {
+                "total": reach.total_objects,
+                "live": reach.live_objects,
+                "reclaimable": reach.reclaimable_objects,
+                "reclaimable_pct": recl_frac * 100.0,
+            },
+            "commits": { "total": shape.commits },
+            "bytes": {
+                "current_total": shape.total_bytes,
+                "estimated_reclaimable": est_reclaimable_bytes,
+                "estimated_post_vacuum": est_post_vacuum_bytes,
+                "dbstat_available": shape.dbstat_available,
+            },
+            "roots_walked": reach.roots_walked,
+            "safe": safe,
+            "safety": {
+                "undistilled_commits": undistilled,
+                "reason": if safe {
+                    "all commits distilled — reclaimable objects' signal is captured in the history tables".to_string()
+                } else {
+                    format!(
+                        "REFUSING to recommend a sweep: {undistilled} commit(s) are not yet distilled; run the history extractor first or their signal would be lost when their state is reclaimed"
+                    )
+                },
+            },
+        }))
+    }
+
     pub fn commit_graph(
         &self,
         ref_name: &str,
@@ -4060,5 +4127,42 @@ mod tests {
             "overwriting /a should orphan the v1 leaf from the tip"
         );
         assert!(keep_tip["roots_walked"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn test_gc_dry_run_safety_gate() {
+        let repo = test_repo();
+        repo.set("main", "/a", &Object::string("v1"), quick_opts("a1"))
+            .unwrap();
+        repo.set("main", "/a", &Object::string("v2"), quick_opts("a2"))
+            .unwrap();
+
+        // Before extraction the commits are undistilled → dry-run refuses to
+        // call a sweep safe, but still reports the estimate and never mutates.
+        let before = repo.gc_dry_run().unwrap();
+        assert_eq!(before["dry_run"], true);
+        assert_eq!(before["mutates"], false);
+        assert_eq!(before["safe"], false);
+        assert!(
+            before["safety"]["undistilled_commits"].as_i64().unwrap() > 0,
+            "extractor is behind before extract_history"
+        );
+        let total = before["objects"]["total"].as_i64().unwrap();
+        assert!(total > 0);
+        assert_eq!(
+            before["objects"]["live"].as_i64().unwrap()
+                + before["objects"]["reclaimable"].as_i64().unwrap(),
+            total
+        );
+
+        // Once the extractor is caught up, every commit's signal is captured →
+        // the dry-run reports it as safe.
+        repo.extract_history(100).unwrap();
+        let after = repo.gc_dry_run().unwrap();
+        assert_eq!(after["safe"], true);
+        assert_eq!(after["safety"]["undistilled_commits"].as_i64().unwrap(), 0);
+        assert!(after["bytes"]["current_total"].as_i64().unwrap() > 0);
+        assert!(after["bytes"]["estimated_reclaimable"].as_i64().unwrap() >= 0);
+        assert!(after["bytes"]["estimated_post_vacuum"].as_i64().unwrap() >= 0);
     }
 }

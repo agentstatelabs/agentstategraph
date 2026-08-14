@@ -277,6 +277,15 @@ pub trait CommitStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Count commits not yet folded into the history tables — those with a
+    /// rowid beyond the extractor cursor (Plan B t-002). `0` means the
+    /// extractor is caught up, so every commit's signal is distilled and the GC
+    /// can safely make historical state unmaterializable. Backends without
+    /// history report `0` (they have no distillation gate).
+    fn history_undistilled_commit_count(&self) -> Result<i64, StorageError> {
+        Ok(0)
+    }
+
     /// Mark every object reachable from `roots` (state roots) and report live
     /// vs. total object counts — the GC reclaimable estimate (Plan B t-001).
     ///
