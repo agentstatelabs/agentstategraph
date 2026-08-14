@@ -509,6 +509,10 @@ pub struct HistoryParams {
     /// commits (default: true). Set false for a pure read of the current tables.
     #[serde(default = "default_history_refresh")]
     pub refresh: bool,
+    /// Attach the physical store-shape block (objects/commits/bytes/amplification)
+    /// — the evidence surface for GC retention (default: false).
+    #[serde(default)]
+    pub store: bool,
     /// Restrict every view to one namespace. Omit for the whole store.
     #[serde(default)]
     pub namespace: Option<String>,
@@ -1987,10 +1991,13 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_history(&self, params: Parameters<HistoryParams>) -> String {
         let p = params.0;
-        match self
-            .repo
-            .history_report(p.namespace.as_deref(), &p.by, p.milestones, p.refresh)
-        {
+        match self.repo.history_report(
+            p.namespace.as_deref(),
+            &p.by,
+            p.milestones,
+            p.refresh,
+            p.store,
+        ) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }

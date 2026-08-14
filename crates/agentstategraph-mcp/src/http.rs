@@ -556,6 +556,7 @@ struct HistoryQuery {
     by: Option<String>,
     milestones: Option<usize>,
     refresh: Option<bool>,
+    store: Option<bool>,
     namespace: Option<String>,
 }
 
@@ -568,6 +569,7 @@ async fn history(
         q.by.as_deref().unwrap_or("day"),
         q.milestones.unwrap_or(50),
         q.refresh.unwrap_or(true),
+        q.store.unwrap_or(false),
     )?;
     Ok(Json(report))
 }

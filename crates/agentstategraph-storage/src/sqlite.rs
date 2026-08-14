@@ -19,7 +19,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
     CommitStore, EpochStore, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
-    SessionStore, StorageError, TaintStore,
+    SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -840,6 +840,67 @@ impl CommitStore for SqliteStorage {
             });
         }
         Ok(out)
+    }
+
+    fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
+        let conn = self.lock_conn()?;
+
+        let objects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("count objects: {}", e)))?;
+        let commits: i64 = conn
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("count commits: {}", e)))?;
+
+        let page_count: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("page_count: {}", e)))?;
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("page_size: {}", e)))?;
+        let total_bytes = page_count * page_size;
+
+        // Per-table bytes need the dbstat virtual table, which is only present
+        // when SQLite was built with SQLITE_ENABLE_DBSTAT_VTAB. Probe it and
+        // degrade gracefully to a totals-only report if it's missing.
+        let (tables, dbstat_available) = match conn.prepare(
+            "SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name ORDER BY bytes DESC",
+        ) {
+            Ok(mut stmt) => {
+                let rows = stmt.query_map([], |row| {
+                    Ok(TableBytes {
+                        name: row.get::<_, String>(0)?,
+                        bytes: row.get::<_, i64>(1)?,
+                    })
+                });
+                match rows {
+                    Ok(iter) => {
+                        let mut v = Vec::new();
+                        let mut ok = true;
+                        for r in iter {
+                            match r {
+                                Ok(tb) => v.push(tb),
+                                Err(_) => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok { (v, true) } else { (Vec::new(), false) }
+                    }
+                    Err(_) => (Vec::new(), false),
+                }
+            }
+            Err(_) => (Vec::new(), false),
+        };
+
+        Ok(StoreShape {
+            objects,
+            commits,
+            total_bytes,
+            tables,
+            dbstat_available,
+        })
     }
 
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {

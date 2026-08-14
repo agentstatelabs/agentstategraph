@@ -158,6 +158,27 @@ pub struct HistoryMilestoneRow {
     pub description: String,
 }
 
+/// Per-table on-disk size (Plan A t-003), largest first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableBytes {
+    pub name: String,
+    pub bytes: i64,
+}
+
+/// Physical shape of the store (Plan A t-003) — the evidence surface Plan B's
+/// GC keys its retention thresholds off: how many objects/commits, how many
+/// bytes, and where they live. `tables` is populated from SQLite's `dbstat`
+/// virtual table when the build exposes it; otherwise only `total_bytes`
+/// (page_count × page_size) is available and `dbstat_available` is false.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StoreShape {
+    pub objects: i64,
+    pub commits: i64,
+    pub total_bytes: i64,
+    pub tables: Vec<TableBytes>,
+    pub dbstat_available: bool,
+}
+
 /// Commit storage. Commits are also content-addressed but stored
 /// separately from objects for efficient history queries.
 pub trait CommitStore: Send + Sync {
@@ -214,6 +235,13 @@ pub trait CommitStore: Send + Sync {
     /// capped at `limit`.
     fn history_milestones(&self, _limit: usize) -> Result<Vec<HistoryMilestoneRow>, StorageError> {
         Ok(Vec::new())
+    }
+
+    /// Measure the physical shape of the store (Plan A t-003): object/commit
+    /// counts, total bytes, and per-table bytes when the backend can report
+    /// them. Backends that can't return an empty [`StoreShape`].
+    fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
+        Ok(StoreShape::default())
     }
 }
 

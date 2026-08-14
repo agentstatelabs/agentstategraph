@@ -29,5 +29,5 @@ pub use postgres::PostgresStorage;
 pub use sqlite::SqliteStorage;
 pub use traits::{
     CommitStore, EpochStore, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
-    SessionStore, Storage, StorageError, TaintStore,
+    SessionStore, Storage, StorageError, StoreShape, TableBytes, TaintStore,
 };

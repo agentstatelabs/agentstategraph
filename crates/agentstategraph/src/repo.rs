@@ -1779,13 +1779,15 @@ impl Repository {
     /// latest commits. `namespace`, when given, restricts every view to that
     /// namespace. The rollup is small (bounded by distinct day×ns×agent×category
     /// buckets), so aggregating it in memory is cheap even on a 512k-commit
-    /// store.
+    /// store. When `store` is set, a `store_shape` block (Plan A t-003:
+    /// objects/commits/bytes/amplification) is attached.
     pub fn history_report(
         &self,
         namespace: Option<&str>,
         velocity_by: &str,
         milestone_limit: usize,
         refresh: bool,
+        store: bool,
     ) -> Result<serde_json::Value, RepoError> {
         use std::collections::{BTreeMap, BTreeSet};
 
@@ -1848,7 +1850,7 @@ impl Repository {
             })
             .collect();
 
-        Ok(serde_json::json!({
+        let mut report = serde_json::json!({
             "totals": {
                 "commits": total_commits,
                 "periods": velocity_series.len(),
@@ -1860,6 +1862,38 @@ impl Repository {
             "authorship": rank(authorship, "agent"),
             "namespaces": namespaces.into_iter().collect::<Vec<_>>(),
             "milestones": milestones_arr,
+        });
+        if store {
+            if let Some(obj) = report.as_object_mut() {
+                obj.insert("store_shape".to_string(), self.history_store_shape()?);
+            }
+        }
+        Ok(report)
+    }
+
+    /// Physical store-shape report (Plan A t-003): object/commit counts, total
+    /// bytes, per-table bytes (when the SQLite build exposes `dbstat`), and the
+    /// path-copy amplification (avg objects created per commit) — the evidence
+    /// Plan B's GC uses to set retention thresholds.
+    pub fn history_store_shape(&self) -> Result<serde_json::Value, RepoError> {
+        let s = self.storage.history_store_shape()?;
+        let amplification = if s.commits > 0 {
+            s.objects as f64 / s.commits as f64
+        } else {
+            0.0
+        };
+        let tables: Vec<serde_json::Value> = s
+            .tables
+            .iter()
+            .map(|t| serde_json::json!({ "name": t.name, "bytes": t.bytes }))
+            .collect();
+        Ok(serde_json::json!({
+            "objects": s.objects,
+            "commits": s.commits,
+            "total_bytes": s.total_bytes,
+            "path_copy_amplification": { "objects_per_commit": amplification },
+            "dbstat_available": s.dbstat_available,
+            "tables": tables,
         }))
     }
 
@@ -3781,7 +3815,7 @@ mod tests {
 
         // refresh=true runs the extractor first, so the report is current even
         // though we never called extract_history explicitly.
-        let report = repo.history_report(None, "day", 50, true).unwrap();
+        let report = repo.history_report(None, "day", 50, true, false).unwrap();
 
         // Intent mix, looked up by name (init also writes a Checkpoint, so we
         // assert our own categories rather than a leaderboard position).
@@ -3814,7 +3848,7 @@ mod tests {
 
         // refresh=false is a pure read — no extraction; week rollup collapses
         // the single day into one ISO-week bucket.
-        let again = repo.history_report(None, "week", 50, false).unwrap();
+        let again = repo.history_report(None, "week", 50, false, false).unwrap();
         assert_eq!(again["velocity"]["by"], "week");
         assert_eq!(again["velocity"]["series"].as_array().unwrap().len(), 1);
         let again_auth = again["authorship"].as_array().unwrap();
@@ -3823,5 +3857,44 @@ mod tests {
                 .iter()
                 .any(|e| e["agent"] == "alice" && e["commits"] == 3)
         );
+
+        // store=false omits the block; store=true attaches it.
+        assert!(report.get("store_shape").is_none());
+        let with_store = repo.history_report(None, "day", 50, false, true).unwrap();
+        assert!(with_store["store_shape"].is_object());
+    }
+
+    #[test]
+    fn test_history_store_shape() {
+        let repo = test_repo();
+        for i in 0..5 {
+            repo.set(
+                "main",
+                &format!("/k{i}"),
+                &Object::string("v"),
+                CommitOptions::new("alice", IntentCategory::Refine, "r"),
+            )
+            .unwrap();
+        }
+
+        let shape = repo.history_store_shape().unwrap();
+        // Counts are positive and bytes reflect a non-empty DB.
+        assert!(shape["commits"].as_i64().unwrap() >= 5);
+        assert!(shape["objects"].as_i64().unwrap() > 0);
+        assert!(shape["total_bytes"].as_i64().unwrap() > 0);
+        // Path-copy amplification = objects / commits > 0.
+        assert!(
+            shape["path_copy_amplification"]["objects_per_commit"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+        // Per-table breakdown is present only when the build exposes dbstat;
+        // either way `tables` is an array and the flag matches its emptiness
+        // expectation.
+        assert!(shape["tables"].is_array());
+        if shape["dbstat_available"].as_bool().unwrap() {
+            assert!(!shape["tables"].as_array().unwrap().is_empty());
+        }
     }
 }

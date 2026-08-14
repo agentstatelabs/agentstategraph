@@ -676,6 +676,10 @@ fn repository_call(
                     .get("refresh")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true),
+                request
+                    .get("store")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             )
             .map_err(err_string),
         "spec.create" => Ok(serde_json::json!({
