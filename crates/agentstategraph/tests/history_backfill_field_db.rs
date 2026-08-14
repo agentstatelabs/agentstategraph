@@ -129,3 +129,46 @@ fn gc_reachability_on_field_db() {
     assert_eq!(live + reclaimable, total, "live + reclaimable == total");
     assert!(live > 0 && live <= total);
 }
+
+/// Plan B t-004: sweep a real field DB under a lean retention policy, then
+/// VACUUM, and measure the file shrink end-to-end. Ignored (needs a writable
+/// copy). Run:
+///   ASG_HISTORY_BACKFILL_DB=/path/to/copy.db \
+///     cargo test -p agentstategraph --features sqlite \
+///     --test history_backfill_field_db gc_sweep_vacuum_on_field_db -- --ignored --nocapture
+#[test]
+#[ignore = "needs ASG_HISTORY_BACKFILL_DB pointing at a writable copy of a real field DB"]
+fn gc_sweep_vacuum_on_field_db() {
+    let Ok(path) = std::env::var("ASG_HISTORY_BACKFILL_DB") else {
+        eprintln!("skip: set ASG_HISTORY_BACKFILL_DB to a writable copy of a field DB");
+        return;
+    };
+    let storage = SqliteStorage::open(&path).expect("open field db copy");
+    let repo = Repository::new(Box::new(storage));
+
+    // Distill first (so the sweep's safety gate passes).
+    repo.extract_history(5000).expect("extract");
+
+    // Lean policy: keep only recent + sparse checkpoints (+ tips, sealed,
+    // milestones always).
+    let policy = agentstategraph::RetentionPolicy {
+        keep_recent: 200,
+        checkpoint_every: 1000,
+        keep_milestones: true,
+    };
+
+    let t0 = Instant::now();
+    let report = repo.gc_sweep(policy, true, true).expect("sweep+vacuum");
+    println!(
+        "sweep+vacuum in {:.2?}: {}",
+        t0.elapsed(),
+        serde_json::to_string_pretty(&report).unwrap()
+    );
+
+    assert_eq!(report["mutated"], true);
+    let before = report["objects_before"].as_i64().unwrap();
+    let after = report["objects_after"].as_i64().unwrap();
+    assert!(after < before, "sweep should delete objects");
+    let vac = &report["vacuum"];
+    assert!(vac["bytes_after"].as_i64().unwrap() <= vac["bytes_before"].as_i64().unwrap());
+}

@@ -193,6 +193,15 @@ pub struct GcReachability {
     pub roots_walked: usize,
 }
 
+/// Result of a `VACUUM` (Plan B t-004): on-disk bytes before/after and the
+/// space returned to the OS.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VacuumStats {
+    pub bytes_before: i64,
+    pub bytes_after: i64,
+    pub bytes_reclaimed: i64,
+}
+
 /// Result of a GC sweep (Plan B t-003): how many objects were deleted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GcSweep {
@@ -329,6 +338,14 @@ pub trait CommitStore: Send + Sync {
     /// retention policy (Plan B t-003) to pick keep-recent + checkpoint-every.
     fn commit_state_roots_recent_first(&self) -> Result<Vec<ObjectId>, StorageError> {
         Ok(Vec::new())
+    }
+
+    /// Compact the store, returning freed pages to the OS (Plan B t-004). A full
+    /// `VACUUM` — the sweep frees pages to the freelist, but the file only
+    /// shrinks after this. Reports bytes before/after. Backends without a file
+    /// report zeros.
+    fn history_vacuum(&self) -> Result<VacuumStats, StorageError> {
+        Ok(VacuumStats::default())
     }
 }
 

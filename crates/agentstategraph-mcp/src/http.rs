@@ -149,6 +149,7 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
         .route("/history", get(history))
         .route("/gc/dry-run", get(gc_dry_run))
         .route("/gc/sweep", post(gc_sweep))
+        .route("/gc/vacuum", post(gc_vacuum))
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::auth_middleware,
@@ -587,6 +588,8 @@ struct SweepRequest {
     keep_milestones: Option<bool>,
     /// Must be explicitly true to delete; omitted/false previews (dry-run).
     mutate: Option<bool>,
+    /// Run VACUUM after a mutating sweep to shrink the file (default false).
+    vacuum: Option<bool>,
 }
 
 async fn gc_sweep(
@@ -599,7 +602,15 @@ async fn gc_sweep(
         checkpoint_every: req.checkpoint_every.unwrap_or(default.checkpoint_every),
         keep_milestones: req.keep_milestones.unwrap_or(default.keep_milestones),
     };
-    Ok(Json(repo.gc_sweep(policy, req.mutate.unwrap_or(false))?))
+    Ok(Json(repo.gc_sweep(
+        policy,
+        req.mutate.unwrap_or(false),
+        req.vacuum.unwrap_or(false),
+    )?))
+}
+
+async fn gc_vacuum(State(repo): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    Ok(Json(repo.gc_vacuum()?))
 }
 
 // ─── Branches ───────────────────────────────────────────────

@@ -2105,10 +2105,23 @@ impl Repository {
     /// from the policy's keep-set — but only after the Plan A safety gate:
     /// if any commit is not yet distilled it refuses (returns `refused:true`,
     /// no mutation), so pruning can't lose not-yet-captured history.
+    /// Compact the store, returning freed pages to the OS (Plan B t-004). Run
+    /// after a sweep — the sweep frees pages to the freelist, but the file only
+    /// shrinks after a `VACUUM`. Returns bytes before/after/reclaimed.
+    pub fn gc_vacuum(&self) -> Result<serde_json::Value, RepoError> {
+        let v = self.storage.history_vacuum()?;
+        Ok(serde_json::json!({
+            "bytes_before": v.bytes_before,
+            "bytes_after": v.bytes_after,
+            "bytes_reclaimed": v.bytes_reclaimed,
+        }))
+    }
+
     pub fn gc_sweep(
         &self,
         policy: RetentionPolicy,
         mutate: bool,
+        vacuum: bool,
     ) -> Result<serde_json::Value, RepoError> {
         let keep = self.gc_keep_roots(policy)?;
         let undistilled = self.storage.history_undistilled_commit_count()?;
@@ -2146,7 +2159,7 @@ impl Repository {
         }
 
         let sweep = self.storage.history_gc_sweep(&keep, GC_MARK_BATCH)?;
-        Ok(serde_json::json!({
+        let mut report = serde_json::json!({
             "dry_run": false,
             "mutated": true,
             "policy": policy_json,
@@ -2154,7 +2167,22 @@ impl Repository {
             "objects_before": sweep.objects_before,
             "objects_deleted": sweep.objects_deleted,
             "objects_after": sweep.objects_after,
-        }))
+        });
+        // Only a VACUUM returns the freed pages to the OS (shrinks the file).
+        if vacuum {
+            let v = self.storage.history_vacuum()?;
+            if let Some(obj) = report.as_object_mut() {
+                obj.insert(
+                    "vacuum".to_string(),
+                    serde_json::json!({
+                        "bytes_before": v.bytes_before,
+                        "bytes_after": v.bytes_after,
+                        "bytes_reclaimed": v.bytes_reclaimed,
+                    }),
+                );
+            }
+        }
+        Ok(report)
     }
 
     pub fn commit_graph(
@@ -4320,14 +4348,14 @@ mod tests {
         };
 
         // Before distilling, a mutating sweep REFUSES (nothing deleted).
-        let refused = repo.gc_sweep(policy, true).unwrap();
+        let refused = repo.gc_sweep(policy, true, false).unwrap();
         assert_eq!(refused["refused"], true);
         assert_eq!(refused["mutated"], false);
 
         repo.extract_history(1000).unwrap();
 
         // Dry-run: reports reclaimable churn, mutates nothing.
-        let dry = repo.gc_sweep(policy, false).unwrap();
+        let dry = repo.gc_sweep(policy, false, false).unwrap();
         assert_eq!(dry["mutated"], false);
         assert_eq!(dry["safe"], true);
         let total_before = dry["would_reclaim"]["total_objects"].as_i64().unwrap();
@@ -4344,9 +4372,14 @@ mod tests {
         );
 
         // Real sweep deletes exactly the reclaimable set.
-        let swept = repo.gc_sweep(policy, true).unwrap();
+        let swept = repo.gc_sweep(policy, true, true).unwrap();
         assert_eq!(swept["mutated"], true);
         assert_eq!(swept["objects_deleted"].as_i64().unwrap(), would);
+        // vacuum ran and never grew the file.
+        let vac = &swept["vacuum"];
+        assert!(vac.is_object());
+        assert!(vac["bytes_after"].as_i64().unwrap() <= vac["bytes_before"].as_i64().unwrap());
+        assert!(vac["bytes_reclaimed"].as_i64().unwrap() >= 0);
         assert!(
             swept["objects_after"].as_i64().unwrap() < swept["objects_before"].as_i64().unwrap()
         );
