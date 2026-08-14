@@ -1846,6 +1846,7 @@ impl Repository {
                     "namespace": m.namespace,
                     "agent": m.agent_id,
                     "description": m.description,
+                    "state_root": m.state_root.as_ref().map(|r| r.short()),
                 })
             })
             .collect();
@@ -1895,6 +1896,21 @@ impl Repository {
             "dbstat_available": s.dbstat_available,
             "tables": tables,
         }))
+    }
+
+    /// Retention hook for Plan B's GC (Plan A t-005): whether `id`'s commit has
+    /// been folded into the history tables. GC checks this before pruning a
+    /// commit's raw snapshot — a distilled commit's signal already survives in
+    /// the metric tables, so the snapshot is safe to reclaim.
+    pub fn history_is_distilled(&self, id: &ObjectId) -> Result<bool, RepoError> {
+        Ok(self.storage.history_is_commit_distilled(id)?)
+    }
+
+    /// State roots the GC must keep reachable (Plan A t-005): the snapshots
+    /// preserved by recorded milestones — the human-meaningful spine that
+    /// survives pruning.
+    pub fn history_retained_state_roots(&self) -> Result<Vec<ObjectId>, RepoError> {
+        Ok(self.storage.history_retained_state_roots()?)
     }
 
     pub fn commit_graph(
@@ -3896,5 +3912,58 @@ mod tests {
         if shape["dbstat_available"].as_bool().unwrap() {
             assert!(!shape["tables"].as_array().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn test_history_retention_hooks() {
+        let repo = test_repo();
+        // A Checkpoint (milestone) and a couple of plain edits.
+        let cp = repo
+            .set(
+                "main",
+                "/a",
+                &Object::string("1"),
+                CommitOptions::new("alice", IntentCategory::Checkpoint, "ship"),
+            )
+            .unwrap();
+        let refine = repo
+            .set(
+                "main",
+                "/b",
+                &Object::string("2"),
+                CommitOptions::new("alice", IntentCategory::Refine, "tweak"),
+            )
+            .unwrap();
+
+        // Before extraction nothing is distilled and nothing is retained.
+        assert!(!repo.history_is_distilled(&refine).unwrap());
+        assert!(repo.history_retained_state_roots().unwrap().is_empty());
+
+        repo.extract_history(100).unwrap();
+
+        // Every folded commit is now "distilled" — GC's prune predicate.
+        assert!(repo.history_is_distilled(&cp).unwrap());
+        assert!(repo.history_is_distilled(&refine).unwrap());
+        // A commit that doesn't exist is not distilled.
+        assert!(!repo.history_is_distilled(&ObjectId::hash(b"nope")).unwrap());
+
+        // The Checkpoint's state_root is retained (GC must keep it reachable),
+        // and it matches the commit's actual state_root.
+        let roots = repo.history_retained_state_roots().unwrap();
+        let cp_commit = repo.get_commit(&cp).unwrap().unwrap();
+        assert!(
+            roots.contains(&cp_commit.state_root),
+            "milestone state_root must be retained for GC"
+        );
+
+        // And it surfaces on the milestone timeline in the report.
+        let report = repo.history_report(None, "day", 50, false, false).unwrap();
+        let ship = report["milestones"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["description"] == "ship")
+            .unwrap();
+        assert_eq!(ship["state_root"], cp_commit.state_root.short());
     }
 }
