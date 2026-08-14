@@ -161,6 +161,11 @@ pub struct Repository {
 /// small enough to keep peak memory bounded on a 512k-commit store.
 const DEFAULT_HISTORY_BATCH: usize = 5000;
 
+/// Frontier batch size for the GC reachability mark (Plan B t-001) — how many
+/// unexpanded nodes are drained per transaction. Bounds peak memory to roughly
+/// this many object blobs regardless of store size.
+const GC_MARK_BATCH: usize = 10_000;
+
 /// Map a `YYYY-MM-DD` day to its ISO-week key `YYYY-Www`, or `None` if the day
 /// doesn't parse. Used to roll daily velocity up to weekly.
 fn iso_week_key(day: &str) -> Option<String> {
@@ -1911,6 +1916,50 @@ impl Repository {
     /// survives pruning.
     pub fn history_retained_state_roots(&self) -> Result<Vec<ObjectId>, RepoError> {
         Ok(self.storage.history_retained_state_roots()?)
+    }
+
+    /// The default GC keep-set (Plan B t-001): the `state_root` of every live
+    /// ref tip across all namespaces, plus the retained milestone snapshots.
+    /// This is what "kept alive" means for the baseline reclaimable estimate —
+    /// current state + the human-meaningful spine. (A retention policy that
+    /// prunes historical commits, Plan B t-003, feeds a reduced root set.)
+    pub fn gc_default_roots(&self) -> Result<Vec<ObjectId>, RepoError> {
+        let mut set = std::collections::BTreeSet::new();
+        for ns in self.storage.list_namespaces()? {
+            for (_name, target) in self.storage.list_refs(&ns, "")? {
+                if let Some(commit) = self.storage.get_commit(&target)? {
+                    set.insert(commit.state_root);
+                }
+            }
+        }
+        set.extend(self.history_retained_state_roots()?);
+        Ok(set.into_iter().collect())
+    }
+
+    /// GC reachability report over an explicit set of root state roots
+    /// (Plan B t-001): marks the live object closure in bounded memory and
+    /// returns live/total/reclaimable as JSON.
+    pub fn gc_reachability_from(&self, roots: &[ObjectId]) -> Result<serde_json::Value, RepoError> {
+        let r = self.storage.history_gc_reachability(roots, GC_MARK_BATCH)?;
+        let pct = if r.total_objects > 0 {
+            r.reclaimable_objects as f64 / r.total_objects as f64 * 100.0
+        } else {
+            0.0
+        };
+        Ok(serde_json::json!({
+            "total_objects": r.total_objects,
+            "live_objects": r.live_objects,
+            "reclaimable_objects": r.reclaimable_objects,
+            "reclaimable_pct": pct,
+            "roots_walked": r.roots_walked,
+        }))
+    }
+
+    /// GC reachability report over the default keep-set
+    /// ([`Repository::gc_default_roots`]).
+    pub fn gc_reachability_report(&self) -> Result<serde_json::Value, RepoError> {
+        let roots = self.gc_default_roots()?;
+        self.gc_reachability_from(&roots)
     }
 
     pub fn commit_graph(
@@ -3965,5 +4014,51 @@ mod tests {
             .find(|m| m["description"] == "ship")
             .unwrap();
         assert_eq!(ship["state_root"], cp_commit.state_root.short());
+    }
+
+    #[test]
+    fn test_gc_reachability_marks_live_objects() {
+        let repo = test_repo();
+        // Overwrite /a (orphans v1's leaf from the tip) then add /b.
+        repo.set("main", "/a", &Object::string("v1"), quick_opts("a1"))
+            .unwrap();
+        repo.set("main", "/a", &Object::string("v2"), quick_opts("a2"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("w"), quick_opts("b1"))
+            .unwrap();
+
+        // Keep everything ever committed vs. keep only the current tip.
+        let all_roots: Vec<ObjectId> = repo
+            .log("main", 1000)
+            .unwrap()
+            .iter()
+            .map(|c| c.state_root)
+            .collect();
+        let keep_all = repo.gc_reachability_from(&all_roots).unwrap();
+        let keep_tip = repo.gc_reachability_report().unwrap();
+
+        let total = keep_all["total_objects"].as_i64().unwrap();
+        assert!(total > 0);
+        assert_eq!(keep_tip["total_objects"].as_i64().unwrap(), total);
+
+        // Invariant: live + reclaimable == total, both keep-sets.
+        let inv = |r: &serde_json::Value| {
+            r["live_objects"].as_i64().unwrap() + r["reclaimable_objects"].as_i64().unwrap()
+        };
+        assert_eq!(inv(&keep_all), total);
+        assert_eq!(inv(&keep_tip), total);
+
+        // Keeping all history marks at least as many live objects as keeping
+        // only the tip — and the tip-only set leaves the superseded v1 churn
+        // reclaimable.
+        assert!(
+            keep_all["live_objects"].as_i64().unwrap()
+                >= keep_tip["live_objects"].as_i64().unwrap()
+        );
+        assert!(
+            keep_tip["reclaimable_objects"].as_i64().unwrap() > 0,
+            "overwriting /a should orphan the v1 leaf from the tip"
+        );
+        assert!(keep_tip["roots_walked"].as_u64().unwrap() >= 1);
     }
 }

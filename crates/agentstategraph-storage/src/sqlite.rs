@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use agentstategraph_core::{
-    Commit, Epoch, EpochStatus, IntentCategory, Namespace, Object, ObjectId, Session, SessionStatus,
+    Commit, Epoch, EpochStatus, IntentCategory, Namespace, Node, Object, ObjectId, Session,
+    SessionStatus,
 };
 use agentstategraph_reminders::{
     Reminder, ReminderError, ReminderFilter, ReminderStore,
@@ -18,8 +19,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
-    CommitStore, EpochStore, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
-    SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
+    CommitStore, EpochStore, GcReachability, HistoryMilestoneRow, HistoryRollupRow, ObjectStore,
+    RefStore, SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -915,6 +916,112 @@ impl CommitStore for SqliteStorage {
         Ok(out)
     }
 
+    fn history_gc_reachability(
+        &self,
+        roots: &[ObjectId],
+        batch: usize,
+    ) -> Result<GcReachability, StorageError> {
+        let batch = batch.max(1) as i64;
+        let conn = self.lock_conn()?;
+
+        // The mark set lives on disk (a temp table), not in RAM, so the closure
+        // of a 14.8M-object store never materializes in memory. `expanded`
+        // tracks the BFS frontier: 0 = marked but children not yet followed.
+        conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS gc_mark (id BLOB PRIMARY KEY, expanded INTEGER NOT NULL DEFAULT 0); \
+             CREATE INDEX IF NOT EXISTS gc_mark_expanded ON gc_mark(expanded); \
+             DELETE FROM gc_mark;",
+        )
+        .map_err(|e| StorageError::Backend(format!("gc_mark init: {}", e)))?;
+
+        // Seed roots — but only those that actually exist as objects, so the
+        // mark set stays a subset of `objects` and `live == COUNT(gc_mark)`.
+        for r in roots {
+            conn.execute(
+                "INSERT OR IGNORE INTO gc_mark (id, expanded) \
+                 SELECT id, 0 FROM objects WHERE id = ?1",
+                params![r.as_bytes().as_slice()],
+            )
+            .map_err(|e| StorageError::Backend(format!("gc seed: {}", e)))?;
+        }
+
+        // Drain the frontier in batches, following each node's child ids.
+        loop {
+            let frontier: Vec<Vec<u8>> = {
+                let mut stmt = conn
+                    .prepare("SELECT id FROM gc_mark WHERE expanded = 0 LIMIT ?1")
+                    .map_err(|e| StorageError::Backend(format!("gc frontier: {}", e)))?;
+                let rows = stmt
+                    .query_map(params![batch], |row| row.get::<_, Vec<u8>>(0))
+                    .map_err(|e| StorageError::Backend(format!("gc frontier q: {}", e)))?;
+                let mut v = Vec::new();
+                for r in rows {
+                    v.push(
+                        r.map_err(|e| StorageError::Backend(format!("gc frontier row: {}", e)))?,
+                    );
+                }
+                v
+            };
+            if frontier.is_empty() {
+                break;
+            }
+
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| StorageError::Backend(format!("gc tx: {}", e)))?;
+            {
+                // Cache the hot statements so 14.8M nodes don't re-prepare each.
+                let mut get_stmt = tx
+                    .prepare_cached("SELECT data FROM objects WHERE id = ?1")
+                    .map_err(|e| StorageError::Backend(format!("gc get prep: {}", e)))?;
+                let mut ins_stmt = tx
+                    .prepare_cached("INSERT OR IGNORE INTO gc_mark (id, expanded) VALUES (?1, 0)")
+                    .map_err(|e| StorageError::Backend(format!("gc ins prep: {}", e)))?;
+                let mut upd_stmt = tx
+                    .prepare_cached("UPDATE gc_mark SET expanded = 1 WHERE id = ?1")
+                    .map_err(|e| StorageError::Backend(format!("gc upd prep: {}", e)))?;
+                for id_bytes in &frontier {
+                    let data: Option<Vec<u8>> = get_stmt
+                        .query_row(params![id_bytes.as_slice()], |row| row.get(0))
+                        .optional()
+                        .map_err(|e| StorageError::Backend(format!("gc get object: {}", e)))?;
+                    if let Some(data) = data {
+                        let obj: Object = serde_json::from_slice(&data)
+                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                        for child in child_ids(&obj) {
+                            ins_stmt
+                                .execute(params![child.as_bytes().as_slice()])
+                                .map_err(|e| {
+                                    StorageError::Backend(format!("gc mark child: {}", e))
+                                })?;
+                        }
+                    }
+                    upd_stmt
+                        .execute(params![id_bytes.as_slice()])
+                        .map_err(|e| StorageError::Backend(format!("gc expand: {}", e)))?;
+                }
+            }
+            tx.commit()
+                .map_err(|e| StorageError::Backend(format!("gc tx commit: {}", e)))?;
+        }
+
+        let live: i64 = conn
+            .query_row("SELECT COUNT(*) FROM gc_mark", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("gc live count: {}", e)))?;
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("gc total count: {}", e)))?;
+        conn.execute("DELETE FROM gc_mark", [])
+            .map_err(|e| StorageError::Backend(format!("gc cleanup: {}", e)))?;
+
+        Ok(GcReachability {
+            total_objects: total,
+            live_objects: live,
+            reclaimable_objects: (total - live).max(0),
+            roots_walked: roots.len(),
+        })
+    }
+
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
         let conn = self.lock_conn()?;
 
@@ -1282,6 +1389,16 @@ impl RefStore for SqliteStorage {
             )
             .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(rows > 0)
+    }
+}
+
+/// The child object ids a node references (empty for atoms). The DAG edges the
+/// GC reachability mark follows.
+fn child_ids(obj: &Object) -> Vec<ObjectId> {
+    match obj {
+        Object::Node(Node::Map(entries)) => entries.values().copied().collect(),
+        Object::Node(Node::List(items)) | Object::Node(Node::Set(items)) => items.clone(),
+        Object::Atom(_) => Vec::new(),
     }
 }
 
