@@ -12,7 +12,7 @@ use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Conflict, DiffOp, Intent, IntentCategory, MergeResult,
     Namespace, Object, ObjectId, ObjectResolver, StatePath, ToolCall,
 };
-use agentstategraph_storage::{Storage, StorageError};
+use agentstategraph_storage::{HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError};
 
 use crate::speculation::{SpecComparison, SpecError, SpecHandle, SpeculationManager};
 use crate::tree::{self, TreeError};
@@ -154,6 +154,15 @@ pub struct Repository {
     /// Populated eagerly in `set_active_session`; cleared when session is None.
     /// Avoids a storage round-trip on every ref operation.
     active_session_namespace: std::sync::RwLock<Option<Namespace>>,
+}
+
+/// Outcome of a [`Repository::extract_history`] run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryExtractReport {
+    /// Commits folded into the history tables this run (0 = already current).
+    pub commits_processed: usize,
+    /// The `commits.rowid` cursor after the run.
+    pub cursor: i64,
 }
 
 /// Options for creating a commit.
@@ -1717,6 +1726,38 @@ impl Repository {
 
     /// Get commit graph (DAG) for visualization.
     /// Returns commit nodes with their parents and metadata.
+    /// Bring the distilled project-history tables (`asg_history_*`) up to date
+    /// with the commit chain (Plan A t-001). Folds every commit newer than the
+    /// stored cursor into the rollup/milestone tables in `batch_size` chunks,
+    /// so a 512k-commit store is processed in bounded memory. Incremental: on a
+    /// caught-up store this is a cheap no-op; after new commits it processes
+    /// only those. Returns how many commits were folded and the new cursor.
+    pub fn extract_history(&self, batch_size: usize) -> Result<HistoryExtractReport, RepoError> {
+        let batch_size = batch_size.max(1);
+        let mut total = 0usize;
+        loop {
+            let n = self.storage.history_extract_batch(batch_size)?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        Ok(HistoryExtractReport {
+            commits_processed: total,
+            cursor: self.storage.history_cursor()?,
+        })
+    }
+
+    /// Read the commit-history rollup (see [`Repository::extract_history`]).
+    pub fn history_rollup(&self) -> Result<Vec<HistoryRollupRow>, RepoError> {
+        Ok(self.storage.history_rollup()?)
+    }
+
+    /// Read the milestone timeline, most recent first, capped at `limit`.
+    pub fn history_milestones(&self, limit: usize) -> Result<Vec<HistoryMilestoneRow>, RepoError> {
+        Ok(self.storage.history_milestones(limit)?)
+    }
+
     pub fn commit_graph(
         &self,
         ref_name: &str,
@@ -3525,5 +3566,94 @@ mod tests {
         let commit = repo.get_commit(&commit_id).unwrap().unwrap();
         assert_eq!(commit.agent_id, "agent/bot");
         assert_eq!(commit.authority.principal, "human/alice");
+    }
+
+    fn refine_count(rows: &[HistoryRollupRow], agent: &str) -> Option<i64> {
+        rows.iter()
+            .find(|r| r.agent_id == agent && r.intent_category == "Refine")
+            .map(|r| r.commit_count)
+    }
+
+    #[test]
+    fn test_extract_history_rollup_and_milestones() {
+        let repo = test_repo();
+        let mk = |agent: &str, cat: IntentCategory, path: &str, desc: &str| {
+            let opts = CommitOptions::new(agent, cat, desc);
+            repo.set("main", path, &Object::string("v"), opts).unwrap();
+        };
+        mk("alice", IntentCategory::Refine, "/a", "r1");
+        mk("alice", IntentCategory::Refine, "/b", "r2");
+        mk("bob", IntentCategory::Fix, "/c", "f1");
+        mk("alice", IntentCategory::Checkpoint, "/d", "ship it");
+
+        // batch_size 2 forces the extractor to loop across several batches.
+        let report = repo.extract_history(2).unwrap();
+        assert!(report.commits_processed >= 4, "processed all our commits");
+        assert!(report.cursor > 0);
+
+        let rollup = repo.history_rollup().unwrap();
+        let bucket = |agent: &str, cat: &str| {
+            rollup
+                .iter()
+                .find(|r| r.agent_id == agent && r.intent_category == cat)
+                .map(|r| r.commit_count)
+        };
+        assert_eq!(bucket("alice", "Refine"), Some(2));
+        assert_eq!(bucket("bob", "Fix"), Some(1));
+        assert_eq!(bucket("alice", "Checkpoint"), Some(1));
+        // No sessions → everything attributes to the "default" namespace.
+        assert!(rollup.iter().all(|r| r.namespace == "default"));
+
+        let miles = repo.history_milestones(100).unwrap();
+        assert!(
+            miles
+                .iter()
+                .any(|m| m.description == "ship it" && m.kind == "checkpoint"),
+            "the Checkpoint commit is on the milestone timeline"
+        );
+        // Non-checkpoint commits are not milestones.
+        assert!(miles.iter().all(|m| m.description != "r1"));
+    }
+
+    #[test]
+    fn test_extract_history_incremental_and_idempotent() {
+        let repo = test_repo();
+        repo.set(
+            "main",
+            "/a",
+            &Object::string("1"),
+            CommitOptions::new("alice", IntentCategory::Refine, "r1"),
+        )
+        .unwrap();
+
+        let r1 = repo.extract_history(100).unwrap();
+        assert!(r1.commits_processed >= 1);
+        let before = repo.history_rollup().unwrap();
+        assert_eq!(refine_count(&before, "alice"), Some(1));
+
+        // Re-running with no new commits is a no-op and doesn't double-count.
+        let r2 = repo.extract_history(100).unwrap();
+        assert_eq!(r2.commits_processed, 0);
+        assert_eq!(r2.cursor, r1.cursor);
+        assert_eq!(
+            refine_count(&repo.history_rollup().unwrap(), "alice"),
+            Some(1)
+        );
+
+        // A new commit is folded incrementally — only it is processed.
+        repo.set(
+            "main",
+            "/b",
+            &Object::string("2"),
+            CommitOptions::new("alice", IntentCategory::Refine, "r2"),
+        )
+        .unwrap();
+        let r3 = repo.extract_history(100).unwrap();
+        assert_eq!(r3.commits_processed, 1);
+        assert!(r3.cursor > r1.cursor);
+        assert_eq!(
+            refine_count(&repo.history_rollup().unwrap(), "alice"),
+            Some(2)
+        );
     }
 }
