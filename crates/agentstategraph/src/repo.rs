@@ -156,6 +156,20 @@ pub struct Repository {
     active_session_namespace: std::sync::RwLock<Option<Namespace>>,
 }
 
+/// Default batch size for [`Repository::extract_history`] — how many commits
+/// are folded per transaction. Large enough to amortize the per-batch overhead,
+/// small enough to keep peak memory bounded on a 512k-commit store.
+const DEFAULT_HISTORY_BATCH: usize = 5000;
+
+/// Map a `YYYY-MM-DD` day to its ISO-week key `YYYY-Www`, or `None` if the day
+/// doesn't parse. Used to roll daily velocity up to weekly.
+fn iso_week_key(day: &str) -> Option<String> {
+    use chrono::Datelike;
+    let d = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    let wk = d.iso_week();
+    Some(format!("{}-W{:02}", wk.year(), wk.week()))
+}
+
 /// Outcome of a [`Repository::extract_history`] run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryExtractReport {
@@ -1756,6 +1770,97 @@ impl Repository {
     /// Read the milestone timeline, most recent first, capped at `limit`.
     pub fn history_milestones(&self, limit: usize) -> Result<Vec<HistoryMilestoneRow>, RepoError> {
         Ok(self.storage.history_milestones(limit)?)
+    }
+
+    /// Build the `asg history` report (Plan A t-002) from the distilled
+    /// `asg_history_*` tables: commit velocity (by `day` or `week`), intent
+    /// mix, authorship, and the milestone timeline. When `refresh` is set the
+    /// extractor is brought current first, so the report always reflects the
+    /// latest commits. `namespace`, when given, restricts every view to that
+    /// namespace. The rollup is small (bounded by distinct day×ns×agent×category
+    /// buckets), so aggregating it in memory is cheap even on a 512k-commit
+    /// store.
+    pub fn history_report(
+        &self,
+        namespace: Option<&str>,
+        velocity_by: &str,
+        milestone_limit: usize,
+        refresh: bool,
+    ) -> Result<serde_json::Value, RepoError> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        if refresh {
+            self.extract_history(DEFAULT_HISTORY_BATCH)?;
+        }
+        let by_week = velocity_by.eq_ignore_ascii_case("week");
+        let period_label = if by_week { "week" } else { "day" };
+
+        let mut rollup = self.history_rollup()?;
+        let mut milestones = self.history_milestones(milestone_limit.max(1))?;
+        if let Some(ns) = namespace {
+            rollup.retain(|r| r.namespace == ns);
+            milestones.retain(|m| m.namespace == ns);
+        }
+
+        let mut velocity: BTreeMap<String, i64> = BTreeMap::new();
+        let mut mix: BTreeMap<String, i64> = BTreeMap::new();
+        let mut authorship: BTreeMap<String, i64> = BTreeMap::new();
+        let mut namespaces: BTreeSet<String> = BTreeSet::new();
+        let mut total_commits = 0i64;
+        for r in &rollup {
+            total_commits += r.commit_count;
+            let period = if by_week {
+                iso_week_key(&r.day).unwrap_or_else(|| r.day.clone())
+            } else {
+                r.day.clone()
+            };
+            *velocity.entry(period).or_default() += r.commit_count;
+            *mix.entry(r.intent_category.clone()).or_default() += r.commit_count;
+            *authorship.entry(r.agent_id.clone()).or_default() += r.commit_count;
+            namespaces.insert(r.namespace.clone());
+        }
+
+        // Velocity stays chronological (BTreeMap key order). Mix and authorship
+        // are ranked by volume, ties broken by name for determinism.
+        let velocity_series: Vec<serde_json::Value> = velocity
+            .iter()
+            .map(|(k, v)| serde_json::json!({ "period": k, "commits": v }))
+            .collect();
+        let rank = |m: BTreeMap<String, i64>, key: &str| -> Vec<serde_json::Value> {
+            let mut v: Vec<(String, i64)> = m.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            v.into_iter()
+                .map(|(k, c)| serde_json::json!({ key: k, "commits": c }))
+                .collect()
+        };
+        let milestones_arr: Vec<serde_json::Value> = milestones
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "commit": m.commit_id.short(),
+                    "kind": m.kind,
+                    "timestamp": m.timestamp,
+                    "day": m.day,
+                    "namespace": m.namespace,
+                    "agent": m.agent_id,
+                    "description": m.description,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "totals": {
+                "commits": total_commits,
+                "periods": velocity_series.len(),
+                "agents": authorship.len(),
+                "cursor": self.storage.history_cursor()?,
+            },
+            "velocity": { "by": period_label, "series": velocity_series },
+            "intent_mix": rank(mix, "category"),
+            "authorship": rank(authorship, "agent"),
+            "namespaces": namespaces.into_iter().collect::<Vec<_>>(),
+            "milestones": milestones_arr,
+        }))
     }
 
     pub fn commit_graph(
@@ -3654,6 +3759,69 @@ mod tests {
         assert_eq!(
             refine_count(&repo.history_rollup().unwrap(), "alice"),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn test_history_report_aggregates_views() {
+        let repo = test_repo();
+        let mk = |agent: &str, cat: IntentCategory, path: &str, desc: &str| {
+            repo.set(
+                "main",
+                path,
+                &Object::string("v"),
+                CommitOptions::new(agent, cat, desc),
+            )
+            .unwrap();
+        };
+        mk("alice", IntentCategory::Refine, "/a", "r1");
+        mk("alice", IntentCategory::Refine, "/b", "r2");
+        mk("bob", IntentCategory::Fix, "/c", "f1");
+        mk("alice", IntentCategory::Checkpoint, "/d", "ship it");
+
+        // refresh=true runs the extractor first, so the report is current even
+        // though we never called extract_history explicitly.
+        let report = repo.history_report(None, "day", 50, true).unwrap();
+
+        // Intent mix, looked up by name (init also writes a Checkpoint, so we
+        // assert our own categories rather than a leaderboard position).
+        let mix = report["intent_mix"].as_array().unwrap();
+        let mix_of = |cat: &str| {
+            mix.iter()
+                .find(|e| e["category"] == cat)
+                .and_then(|e| e["commits"].as_i64())
+        };
+        assert_eq!(mix_of("Refine"), Some(2));
+        assert_eq!(mix_of("Fix"), Some(1));
+
+        // Authorship: our three "alice" commits and one "bob".
+        let auth = report["authorship"].as_array().unwrap();
+        let auth_of = |a: &str| {
+            auth.iter()
+                .find(|e| e["agent"] == a)
+                .and_then(|e| e["commits"].as_i64())
+        };
+        assert_eq!(auth_of("alice"), Some(3));
+        assert_eq!(auth_of("bob"), Some(1));
+
+        // Velocity is a single day here; all commits land in one bucket.
+        assert_eq!(report["velocity"]["by"], "day");
+        assert_eq!(report["velocity"]["series"].as_array().unwrap().len(), 1);
+
+        // The Checkpoint shows on the milestone timeline.
+        let miles = report["milestones"].as_array().unwrap();
+        assert!(miles.iter().any(|m| m["description"] == "ship it"));
+
+        // refresh=false is a pure read — no extraction; week rollup collapses
+        // the single day into one ISO-week bucket.
+        let again = repo.history_report(None, "week", 50, false).unwrap();
+        assert_eq!(again["velocity"]["by"], "week");
+        assert_eq!(again["velocity"]["series"].as_array().unwrap().len(), 1);
+        let again_auth = again["authorship"].as_array().unwrap();
+        assert!(
+            again_auth
+                .iter()
+                .any(|e| e["agent"] == "alice" && e["commits"] == 3)
         );
     }
 }

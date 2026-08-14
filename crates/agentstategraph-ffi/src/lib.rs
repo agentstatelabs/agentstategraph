@@ -438,6 +438,7 @@ pub extern "C" fn agentstategraph_repository_capabilities() -> *mut c_char {
             "merge.base", "merge.preview", "merge.checked",
             "explore.list_paths", "explore.get_tree", "explore.search_values",
             "explore.stats", "explore.commit_graph", "explore.intent_tree",
+            "explore.history",
             "spec.create", "spec.set", "spec.delete", "spec.compare", "spec.commit",
             "spec.discard", "spec.list",
             "session.create", "session.get", "session.list", "session.children",
@@ -665,6 +666,17 @@ fn repository_call(
         )),
         "explore.intent_tree" => repo
             .intent_tree(&ref_name(), optional("root_commit_id").as_deref())
+            .map_err(err_string),
+        "explore.history" => repo
+            .history_report(
+                optional("namespace").as_deref(),
+                &optional("by").unwrap_or_else(|| "day".to_string()),
+                request_usize(request, "milestones").unwrap_or(50),
+                request
+                    .get("refresh")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+            )
             .map_err(err_string),
         "spec.create" => Ok(serde_json::json!({
             "handle": repo.speculate(&ref_name(), optional("label")).map_err(err_string)?.id()
