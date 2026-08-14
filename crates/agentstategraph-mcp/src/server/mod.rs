@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use agentstategraph::session::CreateSessionParams;
 use agentstategraph::speculation::SpecHandle;
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, Repository, RetentionPolicy};
 use agentstategraph_core::{DiffOp, IntentCategory, Namespace, Object, QueryFilters, ToolCall};
 use agentstategraph_policy::{
     ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry, PolicyStore,
@@ -116,6 +116,23 @@ pub(crate) fn tool_calls_from(inputs: Option<Vec<ToolCallInput>>) -> Vec<ToolCal
 
 #[derive(Deserialize, JsonSchema)]
 pub struct GcParams {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GcSweepParams {
+    /// Keep the N most-recent commits' state in full (default 100).
+    #[serde(default)]
+    pub keep_recent: Option<usize>,
+    /// Keep every Kth older commit as a sparse checkpoint (default 100; 0
+    /// disables checkpointing).
+    #[serde(default)]
+    pub checkpoint_every: Option<usize>,
+    /// Keep milestone snapshots (default true).
+    #[serde(default)]
+    pub keep_milestones: Option<bool>,
+    /// Must be explicitly true to DELETE. Omitted/false previews (dry-run).
+    #[serde(default)]
+    pub mutate: bool,
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SetParams {
@@ -2011,6 +2028,23 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_gc_dry_run(&self, _params: Parameters<GcParams>) -> String {
         match self.repo.gc_dry_run() {
+            Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "GC sweep under a retention policy (keep_recent / checkpoint_every / keep_milestones). DESTRUCTIVE when mutate=true: DELETES object versions no longer reachable from the kept commits (ref tips, sealed epochs, milestones, and the kept history are always preserved and stay fully materializable). Refuses to mutate unless every commit is distilled. mutate defaults to false (preview)."
+    )]
+    async fn agentstategraph_gc_sweep(&self, params: Parameters<GcSweepParams>) -> String {
+        let p = params.0;
+        let default = RetentionPolicy::default();
+        let policy = RetentionPolicy {
+            keep_recent: p.keep_recent.unwrap_or(default.keep_recent),
+            checkpoint_every: p.checkpoint_every.unwrap_or(default.checkpoint_every),
+            keep_milestones: p.keep_milestones.unwrap_or(default.keep_milestones),
+        };
+        match self.repo.gc_sweep(policy, p.mutate) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }

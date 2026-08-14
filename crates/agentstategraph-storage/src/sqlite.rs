@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
-    CommitStore, EpochStore, GcReachability, HistoryMilestoneRow, HistoryRollupRow, ObjectStore,
-    RefStore, SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
+    CommitStore, EpochStore, GcReachability, GcSweep, HistoryMilestoneRow, HistoryRollupRow,
+    ObjectStore, RefStore, SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -945,86 +945,7 @@ impl CommitStore for SqliteStorage {
     ) -> Result<GcReachability, StorageError> {
         let batch = batch.max(1) as i64;
         let conn = self.lock_conn()?;
-
-        // The mark set lives on disk (a temp table), not in RAM, so the closure
-        // of a 14.8M-object store never materializes in memory. `expanded`
-        // tracks the BFS frontier: 0 = marked but children not yet followed.
-        conn.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS gc_mark (id BLOB PRIMARY KEY, expanded INTEGER NOT NULL DEFAULT 0); \
-             CREATE INDEX IF NOT EXISTS gc_mark_expanded ON gc_mark(expanded); \
-             DELETE FROM gc_mark;",
-        )
-        .map_err(|e| StorageError::Backend(format!("gc_mark init: {}", e)))?;
-
-        // Seed roots — but only those that actually exist as objects, so the
-        // mark set stays a subset of `objects` and `live == COUNT(gc_mark)`.
-        for r in roots {
-            conn.execute(
-                "INSERT OR IGNORE INTO gc_mark (id, expanded) \
-                 SELECT id, 0 FROM objects WHERE id = ?1",
-                params![r.as_bytes().as_slice()],
-            )
-            .map_err(|e| StorageError::Backend(format!("gc seed: {}", e)))?;
-        }
-
-        // Drain the frontier one batch at a time. Each batch does a handful of
-        // set-based statements — a JOIN fetch, then chunked multi-row insert of
-        // children and a chunked IN-clause mark-expanded — instead of a
-        // per-node round-trip, so a 14.8M-object walk is ~60k statements, not
-        // ~30M. Memory stays bounded: only `batch` nodes' data + their children
-        // are held at once.
-        loop {
-            // Fetch the next frontier AND each node's data in one query. LEFT
-            // JOIN so a (should-not-happen) missing object still gets expanded,
-            // never looping forever.
-            let frontier: Vec<(Vec<u8>, Option<Vec<u8>>)> = {
-                let mut stmt = conn
-                    .prepare_cached(
-                        "SELECT m.id, o.data FROM gc_mark m \
-                         LEFT JOIN objects o ON o.id = m.id \
-                         WHERE m.expanded = 0 LIMIT ?1",
-                    )
-                    .map_err(|e| StorageError::Backend(format!("gc frontier: {}", e)))?;
-                let rows = stmt
-                    .query_map(params![batch], |row| {
-                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
-                    })
-                    .map_err(|e| StorageError::Backend(format!("gc frontier q: {}", e)))?;
-                let mut v = Vec::new();
-                for r in rows {
-                    v.push(
-                        r.map_err(|e| StorageError::Backend(format!("gc frontier row: {}", e)))?,
-                    );
-                }
-                v
-            };
-            if frontier.is_empty() {
-                break;
-            }
-
-            // Parse children in Rust (no DB contact), collecting the whole
-            // batch's edges before touching the mark table.
-            let mut children: Vec<Vec<u8>> = Vec::new();
-            let mut expand_ids: Vec<Vec<u8>> = Vec::with_capacity(frontier.len());
-            for (id_bytes, data) in frontier {
-                if let Some(data) = &data {
-                    let obj: Object = serde_json::from_slice(data)
-                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                    for child in child_ids(&obj) {
-                        children.push(child.as_bytes().to_vec());
-                    }
-                }
-                expand_ids.push(id_bytes);
-            }
-
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(|e| StorageError::Backend(format!("gc tx: {}", e)))?;
-            bulk_insert_marks(&tx, &children)?;
-            bulk_mark_expanded(&tx, &expand_ids)?;
-            tx.commit()
-                .map_err(|e| StorageError::Backend(format!("gc tx commit: {}", e)))?;
-        }
+        gc_build_mark(&conn, roots, batch)?;
 
         let live: i64 = conn
             .query_row("SELECT COUNT(*) FROM gc_mark", [], |row| row.get(0))
@@ -1041,6 +962,94 @@ impl CommitStore for SqliteStorage {
             reclaimable_objects: (total - live).max(0),
             roots_walked: roots.len(),
         })
+    }
+
+    fn history_gc_sweep(&self, roots: &[ObjectId], batch: usize) -> Result<GcSweep, StorageError> {
+        let batch = batch.max(1) as i64;
+        let conn = self.lock_conn()?;
+
+        let total_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("gc sweep count: {}", e)))?;
+
+        // Mark the live closure, then materialize the dead set (objects not
+        // reachable from the keep-set) into its own temp table — one anti-join
+        // pass — so the batched DELETE never re-scans the live objects.
+        gc_build_mark(&conn, roots, batch)?;
+        conn.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS gc_dead (id BLOB PRIMARY KEY); \
+             DELETE FROM gc_dead; \
+             INSERT INTO gc_dead (id) \
+               SELECT o.id FROM objects o LEFT JOIN gc_mark m ON o.id = m.id WHERE m.id IS NULL;",
+        )
+        .map_err(|e| StorageError::Backend(format!("gc dead set: {}", e)))?;
+
+        let deleted_target: i64 = conn
+            .query_row("SELECT COUNT(*) FROM gc_dead", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("gc dead count: {}", e)))?;
+
+        // Delete in bounded, resumable batches: each transaction removes a chunk
+        // of dead ids from both `objects` and `gc_dead`. A crash between batches
+        // leaves a consistent DB with fewer dead rows; re-running finishes it.
+        let mut deleted = 0i64;
+        loop {
+            let dead: Vec<Vec<u8>> = {
+                let mut stmt = conn
+                    .prepare_cached("SELECT id FROM gc_dead LIMIT ?1")
+                    .map_err(|e| StorageError::Backend(format!("gc dead sel: {}", e)))?;
+                let rows = stmt
+                    .query_map(params![batch], |row| row.get::<_, Vec<u8>>(0))
+                    .map_err(|e| StorageError::Backend(format!("gc dead q: {}", e)))?;
+                let mut v = Vec::new();
+                for r in rows {
+                    v.push(r.map_err(|e| StorageError::Backend(format!("gc dead row: {}", e)))?);
+                }
+                v
+            };
+            if dead.is_empty() {
+                break;
+            }
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| StorageError::Backend(format!("gc del tx: {}", e)))?;
+            gc_bulk_delete(&tx, "objects", &dead)?;
+            gc_bulk_delete(&tx, "gc_dead", &dead)?;
+            tx.commit()
+                .map_err(|e| StorageError::Backend(format!("gc del commit: {}", e)))?;
+            deleted += dead.len() as i64;
+        }
+
+        conn.execute("DELETE FROM gc_mark", [])
+            .map_err(|e| StorageError::Backend(format!("gc mark cleanup: {}", e)))?;
+
+        let total_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .map_err(|e| StorageError::Backend(format!("gc after count: {}", e)))?;
+
+        Ok(GcSweep {
+            objects_before: total_before,
+            objects_deleted: deleted,
+            objects_after: total_after,
+            deleted_target,
+        })
+    }
+
+    fn commit_state_roots_recent_first(&self) -> Result<Vec<ObjectId>, StorageError> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM commits ORDER BY rowid DESC")
+            .map_err(|e| StorageError::Backend(format!("commit roots read: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(|e| StorageError::Backend(format!("commit roots query: {}", e)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let data = r.map_err(|e| StorageError::Backend(format!("commit roots row: {}", e)))?;
+            let commit: Commit = serde_json::from_slice(&data)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            out.push(commit.state_root);
+        }
+        Ok(out)
     }
 
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
@@ -1416,6 +1425,103 @@ impl RefStore for SqliteStorage {
 /// Max bound parameters per statement — well under SQLite's default
 /// `SQLITE_MAX_VARIABLE_NUMBER` (999) so the GC bulk statements never overflow.
 const GC_SQL_CHUNK: usize = 400;
+
+/// Populate the disk-backed `gc_mark` temp table with every object reachable
+/// from `roots` (Plan B t-001/t-003 marker), in bounded memory. Shared by the
+/// reachability report and the sweep. On return, `gc_mark` holds exactly the
+/// live closure (a subset of `objects`).
+fn gc_build_mark(conn: &Connection, roots: &[ObjectId], batch: i64) -> Result<(), StorageError> {
+    // The mark set lives on disk, not in RAM. `expanded` tracks the BFS
+    // frontier: 0 = marked but children not yet followed.
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS gc_mark (id BLOB PRIMARY KEY, expanded INTEGER NOT NULL DEFAULT 0); \
+         CREATE INDEX IF NOT EXISTS gc_mark_expanded ON gc_mark(expanded); \
+         DELETE FROM gc_mark;",
+    )
+    .map_err(|e| StorageError::Backend(format!("gc_mark init: {}", e)))?;
+
+    // Seed roots — only those that exist as objects, so `gc_mark ⊆ objects`.
+    for r in roots {
+        conn.execute(
+            "INSERT OR IGNORE INTO gc_mark (id, expanded) \
+             SELECT id, 0 FROM objects WHERE id = ?1",
+            params![r.as_bytes().as_slice()],
+        )
+        .map_err(|e| StorageError::Backend(format!("gc seed: {}", e)))?;
+    }
+
+    // Drain the frontier a batch at a time with set-based statements (JOIN
+    // fetch, chunked multi-row insert of children, chunked IN-clause expand).
+    loop {
+        let frontier: Vec<(Vec<u8>, Option<Vec<u8>>)> = {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT m.id, o.data FROM gc_mark m \
+                     LEFT JOIN objects o ON o.id = m.id \
+                     WHERE m.expanded = 0 LIMIT ?1",
+                )
+                .map_err(|e| StorageError::Backend(format!("gc frontier: {}", e)))?;
+            let rows = stmt
+                .query_map(params![batch], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+                })
+                .map_err(|e| StorageError::Backend(format!("gc frontier q: {}", e)))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r.map_err(|e| StorageError::Backend(format!("gc frontier row: {}", e)))?);
+            }
+            v
+        };
+        if frontier.is_empty() {
+            break;
+        }
+        let mut children: Vec<Vec<u8>> = Vec::new();
+        let mut expand_ids: Vec<Vec<u8>> = Vec::with_capacity(frontier.len());
+        for (id_bytes, data) in frontier {
+            if let Some(data) = &data {
+                let obj: Object = serde_json::from_slice(data)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                for child in child_ids(&obj) {
+                    children.push(child.as_bytes().to_vec());
+                }
+            }
+            expand_ids.push(id_bytes);
+        }
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| StorageError::Backend(format!("gc tx: {}", e)))?;
+        bulk_insert_marks(&tx, &children)?;
+        bulk_mark_expanded(&tx, &expand_ids)?;
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("gc tx commit: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Bulk `DELETE FROM <table> WHERE id IN (...)` in [`GC_SQL_CHUNK`] chunks.
+/// `table` is a fixed internal identifier (never user input).
+fn gc_bulk_delete(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    ids: &[Vec<u8>],
+) -> Result<(), StorageError> {
+    for chunk in ids.chunks(GC_SQL_CHUNK) {
+        let mut sql = format!("DELETE FROM {} WHERE id IN (", table);
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+        tx.execute(
+            &sql,
+            rusqlite::params_from_iter(chunk.iter().map(|b| b.as_slice())),
+        )
+        .map_err(|e| StorageError::Backend(format!("gc bulk delete {}: {}", table, e)))?;
+    }
+    Ok(())
+}
 
 /// Bulk `INSERT OR IGNORE` the given ids into `gc_mark` (expanded=0), in chunks
 /// of [`GC_SQL_CHUNK`] via multi-row VALUES — one statement per chunk instead of
