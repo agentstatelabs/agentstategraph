@@ -132,6 +132,9 @@ pub struct GcSweepParams {
     /// Must be explicitly true to DELETE. Omitted/false previews (dry-run).
     #[serde(default)]
     pub mutate: bool,
+    /// Run VACUUM after a mutating sweep to shrink the file (default false).
+    #[serde(default)]
+    pub vacuum: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2044,7 +2047,17 @@ impl AgentStateGraphServer {
             checkpoint_every: p.checkpoint_every.unwrap_or(default.checkpoint_every),
             keep_milestones: p.keep_milestones.unwrap_or(default.keep_milestones),
         };
-        match self.repo.gc_sweep(policy, p.mutate) {
+        match self.repo.gc_sweep(policy, p.mutate, p.vacuum) {
+            Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Compact the store, returning freed pages to the OS (VACUUM). Run after a sweep to actually shrink the file. Reports bytes before/after/reclaimed."
+    )]
+    async fn agentstategraph_gc_vacuum(&self, _params: Parameters<GcParams>) -> String {
+        match self.repo.gc_vacuum() {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }

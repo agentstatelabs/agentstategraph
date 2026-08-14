@@ -21,6 +21,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::traits::{
     CommitStore, EpochStore, GcReachability, GcSweep, HistoryMilestoneRow, HistoryRollupRow,
     ObjectStore, RefStore, SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
+    VacuumStats,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -48,6 +49,12 @@ impl SqliteStorage {
         // Best-effort: a pragma failure leaves the slower-but-correct default.
         // `journal_mode` returns the new mode as a row, so it needs a query
         // rather than `pragma_update` (which rejects result rows).
+        // Enable incremental auto-vacuum BEFORE any table exists so a fresh DB
+        // returns freed pages to the freelist as data is deleted, and
+        // `PRAGMA incremental_vacuum` can hand them back to the OS without a full
+        // rewrite (Plan B t-004). On a pre-existing DB this is a no-op until the
+        // next full `VACUUM` converts it. `auto_vacuum` returns a row, so query.
+        let _ = conn.query_row("PRAGMA auto_vacuum=INCREMENTAL", [], |r| r.get::<_, i64>(0));
         let _ = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0));
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
@@ -1031,6 +1038,31 @@ impl CommitStore for SqliteStorage {
             objects_deleted: deleted,
             objects_after: total_after,
             deleted_target,
+        })
+    }
+
+    fn history_vacuum(&self) -> Result<VacuumStats, StorageError> {
+        let conn = self.lock_conn()?;
+        let db_bytes = |conn: &Connection| -> Result<i64, StorageError> {
+            let pc: i64 = conn
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .map_err(|e| StorageError::Backend(format!("page_count: {}", e)))?;
+            let ps: i64 = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .map_err(|e| StorageError::Backend(format!("page_size: {}", e)))?;
+            Ok(pc * ps)
+        };
+        let bytes_before = db_bytes(&conn)?;
+        // Full VACUUM: rewrites the DB compactly, returning freed pages to the
+        // OS. Also adopts the current `auto_vacuum` mode (INCREMENTAL, set at
+        // open), so subsequent sweeps can reclaim incrementally.
+        conn.execute_batch("VACUUM")
+            .map_err(|e| StorageError::Backend(format!("vacuum: {}", e)))?;
+        let bytes_after = db_bytes(&conn)?;
+        Ok(VacuumStats {
+            bytes_before,
+            bytes_after,
+            bytes_reclaimed: (bytes_before - bytes_after).max(0),
         })
     }
 

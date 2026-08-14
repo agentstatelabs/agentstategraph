@@ -440,7 +440,7 @@ pub extern "C" fn agentstategraph_repository_capabilities() -> *mut c_char {
             "merge.base", "merge.preview", "merge.checked",
             "explore.list_paths", "explore.get_tree", "explore.search_values",
             "explore.stats", "explore.commit_graph", "explore.intent_tree",
-            "explore.history", "gc.dry_run", "gc.sweep",
+            "explore.history", "gc.dry_run", "gc.sweep", "gc.vacuum",
             "spec.create", "spec.set", "spec.delete", "spec.compare", "spec.commit",
             "spec.discard", "spec.list",
             "session.create", "session.get", "session.list", "session.children",
@@ -700,8 +700,13 @@ fn repository_call(
                 .get("mutate")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            repo.gc_sweep(policy, mutate).map_err(err_string)
+            let vacuum = request
+                .get("vacuum")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            repo.gc_sweep(policy, mutate, vacuum).map_err(err_string)
         }
+        "gc.vacuum" => repo.gc_vacuum().map_err(err_string),
         "spec.create" => Ok(serde_json::json!({
             "handle": repo.speculate(&ref_name(), optional("label")).map_err(err_string)?.id()
         })),
