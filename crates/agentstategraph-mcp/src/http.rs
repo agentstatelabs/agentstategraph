@@ -146,6 +146,7 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
         // Stats & meta
         .route("/stats/{ref_name}", get(stats))
         .route("/intents/{ref_name}", get(intent_tree))
+        .route("/history", get(history))
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::auth_middleware,
@@ -548,6 +549,27 @@ async fn commit_graph(
     let depth = q.depth.unwrap_or(50);
     let nodes = repo.commit_graph(&ref_name, depth)?;
     Ok(Json(serde_json::json!(nodes)))
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    by: Option<String>,
+    milestones: Option<usize>,
+    refresh: Option<bool>,
+    namespace: Option<String>,
+}
+
+async fn history(
+    State(repo): State<AppState>,
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let report = repo.history_report(
+        q.namespace.as_deref(),
+        q.by.as_deref().unwrap_or("day"),
+        q.milestones.unwrap_or(50),
+        q.refresh.unwrap_or(true),
+    )?;
+    Ok(Json(report))
 }
 
 // ─── Branches ───────────────────────────────────────────────

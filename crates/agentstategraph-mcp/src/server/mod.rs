@@ -498,6 +498,23 @@ pub struct CommitGraphParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct HistoryParams {
+    /// Roll commit velocity up by "day" (default) or "week".
+    #[serde(default = "default_history_by")]
+    pub by: String,
+    /// Max milestones on the timeline (default: 50).
+    #[serde(default = "default_history_milestones")]
+    pub milestones: usize,
+    /// Re-run the extractor before reporting so the numbers reflect the latest
+    /// commits (default: true). Set false for a pure read of the current tables.
+    #[serde(default = "default_history_refresh")]
+    pub refresh: bool,
+    /// Restrict every view to one namespace. Omit for the whole store.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct IntentTreeParams {
     /// Branch or ref (default: "main").
     #[serde(default = "default_ref")]
@@ -521,6 +538,15 @@ fn default_limit() -> usize {
 }
 fn default_graph_depth() -> usize {
     50
+}
+fn default_history_by() -> String {
+    "day".to_string()
+}
+fn default_history_milestones() -> usize {
+    50
+}
+fn default_history_refresh() -> bool {
+    true
 }
 
 // -- Policy parameter types --
@@ -1952,6 +1978,20 @@ impl AgentStateGraphServer {
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.commit_graph(&p.r#ref, p.depth) {
             Ok(nodes) => serde_json::to_string_pretty(&nodes).unwrap_or_default(),
+            Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Project-history metrics from the distilled history tables: commit velocity (by day or week), intent mix, authorship, and the milestone timeline. Refreshes from the commit chain by default; pass a namespace to scope it."
+    )]
+    async fn agentstategraph_history(&self, params: Parameters<HistoryParams>) -> String {
+        let p = params.0;
+        match self
+            .repo
+            .history_report(p.namespace.as_deref(), &p.by, p.milestones, p.refresh)
+        {
+            Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
             Err(e) => format!("Error: {}", e),
         }
     }
