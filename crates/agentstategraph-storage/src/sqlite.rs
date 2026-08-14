@@ -967,14 +967,28 @@ impl CommitStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("gc seed: {}", e)))?;
         }
 
-        // Drain the frontier in batches, following each node's child ids.
+        // Drain the frontier one batch at a time. Each batch does a handful of
+        // set-based statements — a JOIN fetch, then chunked multi-row insert of
+        // children and a chunked IN-clause mark-expanded — instead of a
+        // per-node round-trip, so a 14.8M-object walk is ~60k statements, not
+        // ~30M. Memory stays bounded: only `batch` nodes' data + their children
+        // are held at once.
         loop {
-            let frontier: Vec<Vec<u8>> = {
+            // Fetch the next frontier AND each node's data in one query. LEFT
+            // JOIN so a (should-not-happen) missing object still gets expanded,
+            // never looping forever.
+            let frontier: Vec<(Vec<u8>, Option<Vec<u8>>)> = {
                 let mut stmt = conn
-                    .prepare("SELECT id FROM gc_mark WHERE expanded = 0 LIMIT ?1")
+                    .prepare_cached(
+                        "SELECT m.id, o.data FROM gc_mark m \
+                         LEFT JOIN objects o ON o.id = m.id \
+                         WHERE m.expanded = 0 LIMIT ?1",
+                    )
                     .map_err(|e| StorageError::Backend(format!("gc frontier: {}", e)))?;
                 let rows = stmt
-                    .query_map(params![batch], |row| row.get::<_, Vec<u8>>(0))
+                    .query_map(params![batch], |row| {
+                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+                    })
                     .map_err(|e| StorageError::Backend(format!("gc frontier q: {}", e)))?;
                 let mut v = Vec::new();
                 for r in rows {
@@ -988,41 +1002,26 @@ impl CommitStore for SqliteStorage {
                 break;
             }
 
+            // Parse children in Rust (no DB contact), collecting the whole
+            // batch's edges before touching the mark table.
+            let mut children: Vec<Vec<u8>> = Vec::new();
+            let mut expand_ids: Vec<Vec<u8>> = Vec::with_capacity(frontier.len());
+            for (id_bytes, data) in frontier {
+                if let Some(data) = &data {
+                    let obj: Object = serde_json::from_slice(data)
+                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                    for child in child_ids(&obj) {
+                        children.push(child.as_bytes().to_vec());
+                    }
+                }
+                expand_ids.push(id_bytes);
+            }
+
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| StorageError::Backend(format!("gc tx: {}", e)))?;
-            {
-                // Cache the hot statements so 14.8M nodes don't re-prepare each.
-                let mut get_stmt = tx
-                    .prepare_cached("SELECT data FROM objects WHERE id = ?1")
-                    .map_err(|e| StorageError::Backend(format!("gc get prep: {}", e)))?;
-                let mut ins_stmt = tx
-                    .prepare_cached("INSERT OR IGNORE INTO gc_mark (id, expanded) VALUES (?1, 0)")
-                    .map_err(|e| StorageError::Backend(format!("gc ins prep: {}", e)))?;
-                let mut upd_stmt = tx
-                    .prepare_cached("UPDATE gc_mark SET expanded = 1 WHERE id = ?1")
-                    .map_err(|e| StorageError::Backend(format!("gc upd prep: {}", e)))?;
-                for id_bytes in &frontier {
-                    let data: Option<Vec<u8>> = get_stmt
-                        .query_row(params![id_bytes.as_slice()], |row| row.get(0))
-                        .optional()
-                        .map_err(|e| StorageError::Backend(format!("gc get object: {}", e)))?;
-                    if let Some(data) = data {
-                        let obj: Object = serde_json::from_slice(&data)
-                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                        for child in child_ids(&obj) {
-                            ins_stmt
-                                .execute(params![child.as_bytes().as_slice()])
-                                .map_err(|e| {
-                                    StorageError::Backend(format!("gc mark child: {}", e))
-                                })?;
-                        }
-                    }
-                    upd_stmt
-                        .execute(params![id_bytes.as_slice()])
-                        .map_err(|e| StorageError::Backend(format!("gc expand: {}", e)))?;
-                }
-            }
+            bulk_insert_marks(&tx, &children)?;
+            bulk_mark_expanded(&tx, &expand_ids)?;
             tx.commit()
                 .map_err(|e| StorageError::Backend(format!("gc tx commit: {}", e)))?;
         }
@@ -1412,6 +1411,52 @@ impl RefStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(rows > 0)
     }
+}
+
+/// Max bound parameters per statement — well under SQLite's default
+/// `SQLITE_MAX_VARIABLE_NUMBER` (999) so the GC bulk statements never overflow.
+const GC_SQL_CHUNK: usize = 400;
+
+/// Bulk `INSERT OR IGNORE` the given ids into `gc_mark` (expanded=0), in chunks
+/// of [`GC_SQL_CHUNK`] via multi-row VALUES — one statement per chunk instead of
+/// one per id.
+fn bulk_insert_marks(tx: &rusqlite::Transaction<'_>, ids: &[Vec<u8>]) -> Result<(), StorageError> {
+    for chunk in ids.chunks(GC_SQL_CHUNK) {
+        let mut sql = String::from("INSERT OR IGNORE INTO gc_mark (id, expanded) VALUES ");
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?, 0)");
+        }
+        tx.execute(
+            &sql,
+            rusqlite::params_from_iter(chunk.iter().map(|b| b.as_slice())),
+        )
+        .map_err(|e| StorageError::Backend(format!("gc bulk insert: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Bulk `UPDATE gc_mark SET expanded = 1` for the given ids, in chunks of
+/// [`GC_SQL_CHUNK`] via an `IN (...)` clause.
+fn bulk_mark_expanded(tx: &rusqlite::Transaction<'_>, ids: &[Vec<u8>]) -> Result<(), StorageError> {
+    for chunk in ids.chunks(GC_SQL_CHUNK) {
+        let mut sql = String::from("UPDATE gc_mark SET expanded = 1 WHERE id IN (");
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+        tx.execute(
+            &sql,
+            rusqlite::params_from_iter(chunk.iter().map(|b| b.as_slice())),
+        )
+        .map_err(|e| StorageError::Backend(format!("gc bulk expand: {}", e)))?;
+    }
+    Ok(())
 }
 
 /// The child object ids a node references (empty for atoms). The DAG edges the
