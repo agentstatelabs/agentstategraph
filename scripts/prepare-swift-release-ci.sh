@@ -53,8 +53,30 @@ run_id=$(github_wait_for_new_workflow_run \
   exit 1
 }
 
-echo ">> waiting for GitHub Actions run $run_id"
-gh run watch "$run_id" --repo "$GITHUB_REPO" --exit-status
+echo ">> waiting for GitHub Actions run $run_id to complete"
+# `gh run watch --exit-status` has been observed to exit 0 while the run is
+# still in_progress (before "Upload prepared payload" runs), so the subsequent
+# `gh run download` fails with "no valid artifacts found to download". Poll the
+# run's terminal status explicitly instead. Cap the wait (~40m) so a hung macOS
+# runner fails the job rather than blocking the pipeline forever.
+run_status=""
+run_conclusion=""
+for _ in $(seq 1 240); do
+  IFS=$'\t' read -r run_status run_conclusion < <(
+    gh run view "$run_id" --repo "$GITHUB_REPO" --json status,conclusion \
+      --jq '"\(.status)\t\(.conclusion)"'
+  )
+  [ "$run_status" = "completed" ] && break
+  sleep 10
+done
+[ "$run_status" = "completed" ] || {
+  echo "error: GitHub run $run_id did not complete within the wait window" >&2
+  exit 1
+}
+[ "$run_conclusion" = "success" ] || {
+  echo "error: GitHub run $run_id concluded '$run_conclusion' (expected success)" >&2
+  exit 1
+}
 
 STAGE=$(mktemp -d -t agentstategraph-swift-release.XXXXXX)
 cleanup() {
