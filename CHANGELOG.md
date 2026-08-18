@@ -7,6 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v0.9.24] — 2026-08-17
+
+Version-alignment release. No functional changes — `main` is identical to
+v0.9.23 apart from the version bump. Cut so ASG moves in step with the rest
+of the suite (asd 0.9.40, ctxone 0.9.38, agentstatecrucible 0.2.6) ahead of
+a coordinated 1.0.0.
+
 ## [v0.9.23] — 2026-08-14
 
 ## [v0.9.22] — 2026-08-14
