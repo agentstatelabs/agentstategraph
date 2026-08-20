@@ -27,6 +27,8 @@ site/.astro
 # Local-only cargo config (e.g. machine-specific PYO3_PYTHON) — never commit machine paths
 .cargo/config.toml
 .asd-state.db
+# SQLite WAL companions — regenerated on every open, never worth committing
+.asd-state.db-*
 # Ignore the entire .asd/ working tree (generated index, caches, and the
 # hook-written conclusions/*.jsonl), but keep the intentionally-tracked
 # conclusions/README.md.
