@@ -56,8 +56,45 @@ must classify the same capability groups.
 6. Bump `reviewed_core_version` only after the review is complete.
 7. Build and smoke-test published artifacts, including the Swift XCFramework,
    before creating the final tag.
+8. **After the release lands, bump the site strings.** Nothing derives them
+   from this repo — see below.
 
-## Current 0.9.21 audit
+## After the release: bump the site strings
+
+`AgentStateGraph-site` hardcodes the version in three places in
+`site/src/pages/index.astro`, plus a SwiftPM pin in two:
+
+| What | Where | When |
+|---|---|---|
+| Hero eyebrow | `index.astro` | Immediately — it is a version claim |
+| Footer line | `index.astro` | Immediately |
+| Terminal animation output | `index.astro` | Immediately |
+| SwiftPM `from: "X.Y.Z"` | `index.astro` + `guides/swift.md` | **Only after the package publishes** |
+
+The SwiftPM pin is a dependency coordinate, not a version claim. Bumping it
+before the release exists hands visitors a snippet that fails, so it moves
+*after* the tag pipeline completes — separately from the other three.
+
+Leave alone: `bindings/capabilities.json` `reviewed_core_version` (bumped
+during the review, step 6), and the `0.9.x` mentions in the epochs, tasks and
+capabilities docs, which are illustrative examples and factual records rather
+than version claims.
+
+The site deploys in two hops (GitLab CI mirrors to GitHub, GitHub Actions
+builds Pages), so confirm the live page rather than the pipeline. This is not
+hypothetical: the site advertised `0.9.21` while the real release was
+`0.9.24` — stale by three patches — because this step had no home here.
+
+## Current audit — 0.9.21, re-affirmed for 1.0.0
+
+`reviewed_core_version` was moved to 1.0.0 on 2026-08-24 by **re-affirmation,
+not a fresh audit**: the diff between v0.9.24 and the 1.0.0 release commit was
+two lines of `.gitignore`, with no changes under `bindings/`, no FFI or header
+changes, and no public API changes — so the classification below still held.
+
+The next release with real surface changes needs the full step 1–6 pass, not
+another re-affirmation.
+
 
 C and Swift now expose the ThreadWeaver-critical advanced surface: namespaces,
 CAS writes, safe merge inspection, state exploration/search, commit queries,
