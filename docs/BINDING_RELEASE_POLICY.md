@@ -57,33 +57,13 @@ must classify the same capability groups.
 7. Build and smoke-test published artifacts, including the Swift XCFramework,
    before creating the final tag.
 8. **After the release lands, bump the site strings.** Nothing derives them
-   from this repo — see below.
+   from this repo — see [RELEASE.md](../RELEASE.md).
 
-## After the release: bump the site strings
+## After the release
 
-`AgentStateGraph-site` hardcodes the version in three places in
-`site/src/pages/index.astro`, plus a SwiftPM pin in two:
-
-| What | Where | When |
-|---|---|---|
-| Hero eyebrow | `index.astro` | Immediately — it is a version claim |
-| Footer line | `index.astro` | Immediately |
-| Terminal animation output | `index.astro` | Immediately |
-| SwiftPM `from: "X.Y.Z"` | `index.astro` + `guides/swift.md` | **Only after the package publishes** |
-
-The SwiftPM pin is a dependency coordinate, not a version claim. Bumping it
-before the release exists hands visitors a snippet that fails, so it moves
-*after* the tag pipeline completes — separately from the other three.
-
-Leave alone: `bindings/capabilities.json` `reviewed_core_version` (bumped
-during the review, step 6), and the `0.9.x` mentions in the epochs, tasks and
-capabilities docs, which are illustrative examples and factual records rather
-than version claims.
-
-The site deploys in two hops (GitLab CI mirrors to GitHub, GitHub Actions
-builds Pages), so confirm the live page rather than the pipeline. This is not
-hypothetical: the site advertised `0.9.21` while the real release was
-`0.9.24` — stale by three patches — because this step had no home here.
+The marketing site carries version strings that nothing derives from this
+repo. That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
+mechanics, not binding policy.
 
 ## Current audit — 0.9.21, re-affirmed for 1.0.0
 
