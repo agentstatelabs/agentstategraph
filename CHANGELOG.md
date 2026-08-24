@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.0.0] — 2026-08-24
+
 ## [v0.9.24] — 2026-08-17
 
 Version-alignment release. No functional changes — `main` is identical to

@@ -1,6 +1,6 @@
 {
   "name": "agentstategraph",
-  "version": "0.9.24",
+  "version": "1.0.0",
   "description": "AI-native versioned state store for intent-based systems",
   "main": "index.js",
   "types": "index.d.ts",
