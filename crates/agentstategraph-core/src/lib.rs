@@ -26,7 +26,7 @@ pub mod session;
 pub use commit::{Commit, CommitBuilder};
 pub use diff::{DiffOp, DiffValue, ObjectResolver};
 pub use epoch::{
-    CrossRefType, CrossReference, Epoch, EpochEntry, EpochError, EpochStatus, Registry,
+    CrossRefType, CrossReference, Epoch, EpochEntry, EpochError, EpochScope, EpochStatus, Registry,
 };
 pub use error::CoreError;
 pub use intent::{

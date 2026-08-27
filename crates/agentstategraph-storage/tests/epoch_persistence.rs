@@ -34,7 +34,13 @@ fn round_trip<S: EpochStore>(store: &S) {
     assert!(e1.seal_summary.is_none());
 
     store
-        .seal_epoch("e1", "wrapped up", Utc::now(), &[])
+        .seal_epoch(
+            "e1",
+            "wrapped up",
+            Utc::now(),
+            &[],
+            &ObjectId::from_bytes([0u8; 32]),
+        )
         .unwrap();
 
     let e1 = store.get_epoch("e1").unwrap().unwrap();
@@ -64,7 +70,13 @@ fn sqlite_epoch_survives_reopen() {
         let storage = SqliteStorage::open(&db_path).unwrap();
         storage.create_epoch(&sample_epoch("survivor")).unwrap();
         storage
-            .seal_epoch("survivor", "locked in", Utc::now(), &[])
+            .seal_epoch(
+                "survivor",
+                "locked in",
+                Utc::now(),
+                &[],
+                &ObjectId::from_bytes([0u8; 32]),
+            )
             .unwrap();
     } // drop the handle — simulates process exit
 
@@ -93,7 +105,15 @@ fn seal_enforcement<S: EpochStore + CommitStore + ObjectStore>(store: &S) {
     store.set_commit_epoch(&commit.id, "locked").unwrap();
 
     // Seal it.
-    store.seal_epoch("locked", "done", Utc::now(), &[]).unwrap();
+    store
+        .seal_epoch(
+            "locked",
+            "done",
+            Utc::now(),
+            &[],
+            &ObjectId::from_bytes([0u8; 32]),
+        )
+        .unwrap();
 
     // A second association attempt must fail with EpochAlreadySealed.
     let second = demo_commit_with_tag(store, "post-seal");
@@ -106,7 +126,13 @@ fn seal_enforcement<S: EpochStore + CommitStore + ObjectStore>(store: &S) {
 
     // Double-sealing is also rejected.
     let err = store
-        .seal_epoch("locked", "again", Utc::now(), &[])
+        .seal_epoch(
+            "locked",
+            "again",
+            Utc::now(),
+            &[],
+            &ObjectId::from_bytes([0u8; 32]),
+        )
         .unwrap_err();
     assert!(matches!(err, StorageError::EpochAlreadySealed { .. }));
 }
@@ -240,4 +266,67 @@ fn _ref_store_used(s: &dyn RefStore, name: &str) -> Option<ObjectId> {
     s.get_ref(&agentstategraph_core::Namespace::default_ns(), name)
         .ok()
         .flatten()
+}
+
+/// A store written before epochs carried a seal hash, a namespace or a scope
+/// must open cleanly, keep its rows, and read back as the historical
+/// behaviour: global, and scoped to everything.
+#[test]
+fn migrates_epochs_missing_seal_hash_namespace_and_scope() {
+    let dir = tempdir_sibling("epoch-scope-migration");
+    let db_path = dir.join("old.db");
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE epochs (
+                id              TEXT PRIMARY KEY,
+                description     TEXT NOT NULL DEFAULT '',
+                status          TEXT NOT NULL DEFAULT 'Active',
+                created_at      TEXT NOT NULL,
+                sealed_at       TEXT,
+                summary         TEXT,
+                root_intents    TEXT NOT NULL DEFAULT '[]',
+                agents          TEXT NOT NULL DEFAULT '[]',
+                tags            TEXT NOT NULL DEFAULT '[]',
+                commit_count    INTEGER NOT NULL DEFAULT 0,
+                sealed_commits  TEXT NOT NULL DEFAULT '[]'
+            );
+            INSERT INTO epochs (id, description, status, created_at)
+                VALUES ('legacy', 'from before scopes', 'Active', '2026-01-01T00:00:00Z');
+            ",
+        )
+        .unwrap();
+    }
+
+    // Opening runs init(), which must add the three columns in place.
+    let storage = SqliteStorage::open(&db_path).unwrap();
+
+    let loaded = storage.get_epoch("legacy").unwrap().expect("row survives");
+    assert_eq!(loaded.description, "from before scopes");
+    assert_eq!(loaded.seal_hash, None);
+    assert_eq!(loaded.namespace, None, "pre-migration epochs are global");
+    assert_eq!(
+        loaded.scope,
+        agentstategraph_core::EpochScope::All,
+        "an unscoped epoch must read back as the historical behaviour"
+    );
+
+    // And the migrated table accepts the new columns.
+    let mut fresh = sample_epoch("scoped");
+    fresh.namespace = Some("ctxone".to_string());
+    fresh.scope = agentstategraph_core::EpochScope::Branch("release".to_string());
+    storage.create_epoch(&fresh).unwrap();
+    let back = storage.get_epoch("scoped").unwrap().unwrap();
+    assert_eq!(back.namespace.as_deref(), Some("ctxone"));
+    assert_eq!(
+        back.scope,
+        agentstategraph_core::EpochScope::Branch("release".to_string())
+    );
+
+    // Re-opening must be idempotent (columns already present).
+    drop(storage);
+    let reopened = SqliteStorage::open(&db_path).unwrap();
+    assert!(reopened.get_epoch("legacy").unwrap().is_some());
 }

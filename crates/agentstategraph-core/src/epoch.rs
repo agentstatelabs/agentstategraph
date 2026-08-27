@@ -9,6 +9,64 @@ use serde::{Deserialize, Serialize};
 use crate::intent::IntentId;
 use crate::object::ObjectId;
 
+/// What an epoch's seal actually covers.
+///
+/// Recorded explicitly rather than inferred from which commit list is
+/// populated: an epoch of 400 commits is a very different claim depending on
+/// whether that means "this plan did 400 things" or "the workspace happened to
+/// contain 400 commits at seal time", and a reader cannot tell those apart
+/// after the fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EpochScope {
+    /// Everything reachable from `main` at seal time. The historical default,
+    /// and what a `.db` written before scopes existed deserializes to.
+    #[default]
+    All,
+    /// Everything reachable from one named ref at seal time.
+    Branch(String),
+    /// Only the commits tagged to this epoch while it was the active epoch —
+    /// i.e. one plan's own work.
+    Plan(String),
+    /// Everything in one workspace (namespace) at seal time.
+    Workspace(String),
+}
+
+impl EpochScope {
+    /// Storage form: a single flat string, so it round-trips through one TEXT
+    /// column without a nested encoding.
+    pub fn as_storage_str(&self) -> String {
+        match self {
+            Self::All => "all".to_string(),
+            Self::Branch(b) => format!("branch:{b}"),
+            Self::Plan(p) => format!("plan:{p}"),
+            Self::Workspace(w) => format!("workspace:{w}"),
+        }
+    }
+
+    /// Parse the storage form. An unknown or malformed value falls back to
+    /// [`EpochScope::All`] — the historical behaviour — so a row written by a
+    /// newer version can never make an older one fail to read its own store.
+    pub fn from_storage_str(s: &str) -> Self {
+        match s.split_once(':') {
+            None => Self::All,
+            Some(("branch", b)) => Self::Branch(b.to_string()),
+            Some(("plan", p)) => Self::Plan(p.to_string()),
+            Some(("workspace", w)) => Self::Workspace(w.to_string()),
+            Some(_) => Self::All,
+        }
+    }
+
+    /// The ref whose reachable set this scope seals, if it is ref-shaped.
+    /// `Plan` returns `None` — it is defined by tagged commits, not a walk.
+    pub fn seal_ref(&self) -> Option<&str> {
+        match self {
+            Self::All | Self::Workspace(_) => Some("main"),
+            Self::Branch(b) => Some(b.as_str()),
+            Self::Plan(_) => None,
+        }
+    }
+}
+
 /// A bounded segment of work within a AgentStateGraph instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Epoch {
@@ -43,6 +101,14 @@ pub struct Epoch {
     /// (security threat model v3+, V8)
     #[serde(default)]
     pub sealed_commits: Vec<ObjectId>,
+    /// What this epoch's seal covers. Defaults to [`EpochScope::All`] so
+    /// epochs written before scopes existed deserialize unchanged.
+    #[serde(default)]
+    pub scope: EpochScope,
+    /// Workspace (namespace) this epoch belongs to. `None` on epochs written
+    /// before the epochs table was namespace-aware, which are global.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// Status of an epoch.
@@ -103,6 +169,12 @@ pub struct EpochEntry {
     pub agents: Vec<String>,
     pub commit_count: usize,
     pub seal_hash: Option<ObjectId>,
+    /// What this epoch covers — see [`EpochScope`].
+    #[serde(default)]
+    pub scope: EpochScope,
+    /// Owning workspace, or `None` for a pre-namespace (global) epoch.
+    #[serde(default)]
+    pub namespace: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -125,9 +197,23 @@ impl Epoch {
             commits: Vec::new(),
             agents: Vec::new(),
             branches: Vec::new(),
+            scope: EpochScope::All,
+            namespace: None,
             tags: Vec::new(),
             sealed_commits: Vec::new(),
         }
+    }
+
+    /// Declare what this epoch covers. Defaults to [`EpochScope::All`].
+    pub fn with_scope(mut self, scope: EpochScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// Attach this epoch to a workspace (namespace).
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = Some(namespace.into());
+        self
     }
 
     /// Seal this epoch, making it immutable.
@@ -163,6 +249,22 @@ impl Epoch {
         Ok(())
     }
 
+    /// Number of commits this epoch covers.
+    ///
+    /// `commits` — the commits actually tagged to this epoch — is the precise
+    /// answer and wins whenever it is populated. It is empty for an epoch that
+    /// was never made active, which is how a checkpoint-style epoch is created:
+    /// seal immediately, tagging nothing. For those, `sealed_commits` (recorded
+    /// at seal time) is the only record of what was covered, and counting
+    /// `commits` alone reports "0 commits" for work that definitely happened.
+    pub fn commit_count(&self) -> usize {
+        if self.commits.is_empty() {
+            self.sealed_commits.len()
+        } else {
+            self.commits.len()
+        }
+    }
+
     /// Convert to a lightweight index entry.
     pub fn to_entry(&self) -> EpochEntry {
         EpochEntry {
@@ -173,8 +275,10 @@ impl Epoch {
             sealed_at: self.sealed_at,
             root_intents: self.root_intents.clone(),
             agents: self.agents.clone(),
-            commit_count: self.commits.len(),
+            commit_count: self.commit_count(),
             seal_hash: self.seal_hash,
+            scope: self.scope.clone(),
+            namespace: self.namespace.clone(),
             tags: self.tags.clone(),
         }
     }

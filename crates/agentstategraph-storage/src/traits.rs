@@ -428,12 +428,16 @@ pub trait EpochStore: Send + Sync {
     /// must remain reachable for seal-violation enforcement (V8).
     /// Subsequent `set_commit_epoch` calls referencing this id must
     /// fail with `EpochAlreadySealed`.
+    /// `seal_hash` is the tamper-evident digest over the sealed set; it is
+    /// persisted, not recomputed on read, so a later walk cannot quietly
+    /// produce a different answer than the one that was sealed.
     fn seal_epoch(
         &self,
         id: &str,
         summary: &str,
         sealed_at: DateTime<Utc>,
         sealed_commits: &[ObjectId],
+        seal_hash: &ObjectId,
     ) -> Result<(), StorageError>;
 
     /// List all epochs, most-recent first.

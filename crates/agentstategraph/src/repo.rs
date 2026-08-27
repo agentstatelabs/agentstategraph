@@ -1560,9 +1560,42 @@ impl Repository {
         description: &str,
         root_intents: Vec<String>,
     ) -> Result<agentstategraph_core::Epoch, RepoError> {
-        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents);
+        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
+            .with_namespace(self.active_namespace()?.as_str());
         self.storage.create_epoch(&epoch)?;
         Ok(epoch)
+    }
+
+    /// Create an epoch that declares what it covers. See [`EpochScope`].
+    pub fn create_epoch_scoped(
+        &self,
+        id: &str,
+        description: &str,
+        root_intents: Vec<String>,
+        scope: agentstategraph_core::EpochScope,
+    ) -> Result<agentstategraph_core::Epoch, RepoError> {
+        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
+            .with_namespace(self.active_namespace()?.as_str())
+            .with_scope(scope);
+        self.storage.create_epoch(&epoch)?;
+        Ok(epoch)
+    }
+
+    /// Does this epoch bind writes in `ns`?
+    ///
+    /// An epoch enforces only inside its own workspace. Before the epochs table
+    /// carried a namespace there was effectively one workspace, so a legacy
+    /// epoch (`namespace: None`) binds the default workspace and nothing else.
+    ///
+    /// This is the fix for seals leaking across workspaces: the store is one
+    /// global table, so an unfiltered check let one workspace's sealed epoch
+    /// reject writes in every other workspace — completing a plan in one
+    /// project could block writes in all of them.
+    fn epoch_binds_namespace(epoch: &agentstategraph_core::Epoch, ns: &Namespace) -> bool {
+        match epoch.namespace.as_deref() {
+            Some(owner) => owner == ns.as_str(),
+            None => ns.as_str() == Namespace::DEFAULT,
+        }
     }
 
     /// Seal an epoch, making it immutable.
@@ -1573,20 +1606,64 @@ impl Repository {
     /// Persisted via the storage backend — survives process restart.
     /// (security threat model v3+, V8)
     pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), RepoError> {
-        // Walk main first — cheap, and we want the sealed_commits set
-        // computed against the current tip.
         let ns = self.active_namespace()?;
-        let sealed_commits = match self.storage.get_ref(&ns, "main")? {
-            Some(head) => self.reachable_commits_from(&head)?,
-            None => Vec::new(),
+        let epoch = self.get_epoch(id)?;
+
+        // What gets sealed depends on what the epoch claims to cover.
+        // A Plan-scoped epoch is defined by the commits tagged to it, not by a
+        // walk, so sealing must not silently widen it to the whole branch.
+        let sealed_commits = match epoch.scope.seal_ref() {
+            Some(ref_name) => match self.storage.get_ref(&ns, ref_name)? {
+                Some(head) => self.reachable_commits_from(&head)?,
+                None => Vec::new(),
+            },
+            None => epoch.commits.clone(),
         };
+
+        let seal_hash = Self::compute_seal_hash(id, &sealed_commits);
         self.storage
-            .seal_epoch(id, summary, chrono::Utc::now(), &sealed_commits)?;
+            .seal_epoch(id, summary, chrono::Utc::now(), &sealed_commits, &seal_hash)?;
         Ok(())
     }
 
-    /// List all epochs (as lightweight index entries).
+    /// Tamper-evident digest over an epoch's sealed set.
+    ///
+    /// Order-independent (the ids are sorted first) so the same set always
+    /// yields the same hash regardless of walk order, and domain-separated by
+    /// the epoch id so two epochs covering identical commits do not collide.
+    /// Persisted at seal time rather than recomputed on read — the point is to
+    /// detect the store changing underneath, which a recomputation cannot do.
+    fn compute_seal_hash(id: &str, sealed_commits: &[ObjectId]) -> ObjectId {
+        let mut ids: Vec<&ObjectId> = sealed_commits.iter().collect();
+        ids.sort_by_key(|o| *o.as_bytes());
+        let mut buf = Vec::with_capacity(32 * ids.len() + id.len() + 16);
+        buf.extend_from_slice(b"asg-epoch-seal-v1\0");
+        buf.extend_from_slice(id.as_bytes());
+        buf.push(0);
+        for oid in ids {
+            buf.extend_from_slice(oid.as_bytes());
+        }
+        ObjectId::hash(&buf)
+    }
+
+    /// List this workspace's epochs (as lightweight index entries).
+    ///
+    /// Scoped to the active namespace, so a workspace's epoch count is its own
+    /// rather than the hub-wide total. Use [`Repository::list_all_epochs`] for
+    /// a cross-workspace view.
     pub fn list_epochs(&self) -> Result<Vec<agentstategraph_core::EpochEntry>, RepoError> {
+        let ns = self.active_namespace()?;
+        let epochs = self.storage.list_epochs()?;
+        Ok(epochs
+            .iter()
+            .filter(|e| Self::epoch_binds_namespace(e, &ns))
+            .map(|e| e.to_entry())
+            .collect())
+    }
+
+    /// List every epoch in the store, across all workspaces. For hub-level
+    /// views that deliberately span workspaces; prefer [`Repository::list_epochs`].
+    pub fn list_all_epochs(&self) -> Result<Vec<agentstategraph_core::EpochEntry>, RepoError> {
         let epochs = self.storage.list_epochs()?;
         Ok(epochs.iter().map(|e| e.to_entry()).collect())
     }
@@ -1615,8 +1692,19 @@ impl Repository {
                 "cannot export an active epoch; seal it first".to_string(),
             ));
         }
+        // Prefer the epoch's own tagged commits — that is the precise set, and
+        // it is rehydrated from the commits table on load. An epoch that was
+        // never made active tags nothing, though, which is exactly how a
+        // checkpoint-style epoch is minted (create + seal in one step). Its
+        // bundle would otherwise ship zero commit records while still claiming
+        // to be self-contained, so fall back to the set recorded at seal time.
+        let commit_ids = if epoch.commits.is_empty() {
+            &epoch.sealed_commits
+        } else {
+            &epoch.commits
+        };
         let mut commits = Vec::new();
-        for cid in &epoch.commits {
+        for cid in commit_ids {
             if let Some(commit) = self.storage.get_commit(cid)? {
                 commits.push(serde_json::to_value(&commit).map_err(|e| {
                     RepoError::InvalidOperation(format!("serialize commit: {}", e))
@@ -2521,11 +2609,16 @@ impl Repository {
             .into_iter()
             .collect();
         let epochs = self.storage.list_epochs()?;
+        let ns = self.active_namespace()?;
         let mut violations = Vec::new();
         for epoch in epochs.iter() {
             if epoch.status != agentstategraph_core::EpochStatus::Sealed
                 && epoch.status != agentstategraph_core::EpochStatus::Archived
             {
+                continue;
+            }
+            // A seal binds only its own workspace — see `epoch_binds_namespace`.
+            if !Self::epoch_binds_namespace(epoch, &ns) {
                 continue;
             }
             let unreachable: Vec<ObjectId> = epoch
@@ -3851,6 +3944,242 @@ mod tests {
         assert_eq!(bundle["epoch"]["id"], "e1");
         assert!(bundle["commits"].is_array());
         assert_eq!(bundle["commits"].as_array().unwrap().len(), 1);
+    }
+
+    /// The checkpoint pattern: create and seal in one step, never made active,
+    /// so NO commit is tagged to the epoch. This is how a per-plan checkpoint is
+    /// minted. Iterating `commits` alone shipped a bundle with zero commit
+    /// records while still advertising itself as self-contained, and reported
+    /// "0 commits" in every listing.
+    #[test]
+    fn test_export_epoch_untagged_falls_back_to_sealed_commits() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/x", &Object::string("hello"), quick_opts("x"))
+            .unwrap();
+
+        // Never set active — nothing is tagged to this epoch.
+        repo.create_epoch("cp1", "checkpoint", vec![]).unwrap();
+        repo.seal_epoch("cp1", "done").unwrap();
+
+        let epoch = repo.get_epoch("cp1").unwrap();
+        assert!(
+            epoch.commits.is_empty(),
+            "precondition: a checkpoint epoch tags no commits"
+        );
+        assert!(
+            !epoch.sealed_commits.is_empty(),
+            "sealing must record the covered set"
+        );
+
+        assert_eq!(epoch.commit_count(), epoch.sealed_commits.len());
+
+        let bundle = repo.export_epoch("cp1").unwrap();
+        let commits = bundle["commits"].as_array().unwrap();
+        assert_eq!(
+            commits.len(),
+            epoch.sealed_commits.len(),
+            "bundle must carry the sealed commit RECORDS, not just their ids"
+        );
+        assert!(
+            commits.iter().all(|c| c.get("state_root").is_some()),
+            "each entry must be a full commit record"
+        );
+    }
+
+    /// The seal hash had a field on `Epoch` but no column, so it was dropped on
+    /// every write and read back as `None` — the API advertised a
+    /// tamper-evident digest that did not exist.
+    #[test]
+    fn test_seal_hash_is_persisted() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/x", &Object::string("hello"), quick_opts("x"))
+            .unwrap();
+        repo.create_epoch("e1", "hashed", vec![]).unwrap();
+        repo.seal_epoch("e1", "done").unwrap();
+
+        let sealed = repo.get_epoch("e1").unwrap();
+        let hash = sealed
+            .seal_hash
+            .expect("seal hash must survive the round trip");
+        assert_eq!(
+            hash,
+            Repository::compute_seal_hash("e1", &sealed.sealed_commits),
+            "persisted hash must match the digest of the sealed set"
+        );
+        assert_eq!(repo.list_epochs().unwrap()[0].seal_hash, Some(hash));
+    }
+
+    /// Domain separation: two epochs over an identical commit set must not
+    /// share a digest, or the hash cannot identify what it sealed.
+    #[test]
+    fn test_seal_hash_is_domain_separated_and_order_independent() {
+        let a = ObjectId::hash(b"a");
+        let b = ObjectId::hash(b"b");
+        assert_eq!(
+            Repository::compute_seal_hash("e1", &[a, b]),
+            Repository::compute_seal_hash("e1", &[b, a]),
+            "walk order must not change the digest"
+        );
+        assert_ne!(
+            Repository::compute_seal_hash("e1", &[a, b]),
+            Repository::compute_seal_hash("e2", &[a, b]),
+            "different epochs over the same set must differ"
+        );
+    }
+
+    /// commit_count was written once at create time, from a list that is empty
+    /// then, and never updated on seal.
+    #[test]
+    fn test_seal_updates_commit_count() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/x", &Object::string("hello"), quick_opts("x"))
+            .unwrap();
+        repo.create_epoch("e1", "counted", vec![]).unwrap();
+        repo.seal_epoch("e1", "done").unwrap();
+
+        let entry = repo.list_epochs().unwrap().into_iter().next().unwrap();
+        assert!(
+            entry.commit_count > 0,
+            "sealed epoch must not report 0 commits"
+        );
+        assert_eq!(
+            entry.commit_count,
+            repo.get_epoch("e1").unwrap().sealed_commits.len()
+        );
+    }
+
+    /// A Plan-scoped epoch is defined by the commits tagged to it. Sealing must
+    /// not widen it to everything reachable from the branch, or "this plan did
+    /// N things" silently becomes "the workspace contains N things".
+    #[test]
+    fn test_plan_scope_seals_only_tagged_commits() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        // Work that predates the epoch and must NOT be swept in.
+        repo.set("main", "/before", &Object::string("old"), quick_opts("a"))
+            .unwrap();
+
+        let epoch = agentstategraph_core::Epoch::new("p1", "plan scope", vec![])
+            .with_scope(agentstategraph_core::EpochScope::Plan("p1".to_string()));
+        repo.storage.create_epoch(&epoch).unwrap();
+        repo.set_active_epoch(Some("p1".to_string())).unwrap();
+        repo.set("main", "/during", &Object::string("new"), quick_opts("b"))
+            .unwrap();
+        repo.set_active_epoch(None).unwrap();
+        repo.seal_epoch("p1", "done").unwrap();
+
+        let sealed = repo.get_epoch("p1").unwrap();
+        assert_eq!(
+            sealed.sealed_commits.len(),
+            1,
+            "plan scope seals only its own tagged commit, got {:?}",
+            sealed.sealed_commits.len()
+        );
+        assert_eq!(
+            sealed.scope,
+            agentstategraph_core::EpochScope::Plan("p1".to_string())
+        );
+    }
+
+    /// Scope and namespace must survive storage, or a reader cannot tell what a
+    /// sealed epoch actually covered.
+    #[test]
+    fn test_scope_and_namespace_round_trip() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        let epoch = agentstategraph_core::Epoch::new("w1", "workspace scope", vec![])
+            .with_scope(agentstategraph_core::EpochScope::Workspace(
+                "ctxone".to_string(),
+            ))
+            .with_namespace("ctxone");
+        repo.storage.create_epoch(&epoch).unwrap();
+
+        let loaded = repo.get_epoch("w1").unwrap();
+        assert_eq!(
+            loaded.scope,
+            agentstategraph_core::EpochScope::Workspace("ctxone".to_string())
+        );
+        assert_eq!(loaded.namespace.as_deref(), Some("ctxone"));
+
+        // This repo is on the default namespace, so a `ctxone` epoch is not
+        // its business — that is the whole point of scoping the listing.
+        assert!(
+            repo.list_epochs().unwrap().is_empty(),
+            "another workspace's epoch must not appear in this one's listing"
+        );
+        let entry = repo
+            .list_all_epochs()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("cross-workspace view still sees it");
+        assert_eq!(entry.namespace.as_deref(), Some("ctxone"));
+    }
+
+    /// The bug this scoping exists to kill: one workspace's sealed epoch used
+    /// to reject ref updates in EVERY workspace, so completing a plan in one
+    /// project could block writes across all of them.
+    #[test]
+    fn test_sealed_epoch_does_not_bind_other_workspaces() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        let base = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+
+        // A sealed epoch owned by a DIFFERENT workspace.
+        let other = agentstategraph_core::Epoch::new("other", "elsewhere", vec![])
+            .with_namespace("some-other-workspace");
+        repo.storage.create_epoch(&other).unwrap();
+        repo.seal_epoch("other", "sealed").unwrap();
+
+        // Rewinding main here would orphan that epoch's commits, but the epoch
+        // belongs to another workspace and must not have a say.
+        assert!(
+            repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
+            "an epoch from another workspace must not veto this one's writes"
+        );
+    }
+
+    /// An epoch that DOES own this workspace still binds it — scoping must not
+    /// disable enforcement altogether.
+    #[test]
+    fn test_sealed_epoch_still_binds_its_own_workspace() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        let base = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+
+        // create_epoch stamps the active namespace.
+        repo.create_epoch("mine", "here", vec![]).unwrap();
+        repo.seal_epoch("mine", "sealed").unwrap();
+
+        assert!(
+            !repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
+            "a rewind that orphans this workspace's own sealed commits must be caught"
+        );
     }
 
     #[test]

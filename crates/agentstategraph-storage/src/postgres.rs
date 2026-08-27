@@ -19,7 +19,7 @@ use tokio_postgres::NoTls;
 pub const DEFAULT_POOL_SIZE: usize = 32;
 
 use agentstategraph_core::{
-    Commit, Epoch, EpochStatus, Namespace, Object, ObjectId, Session, SessionStatus,
+    Commit, Epoch, EpochScope, EpochStatus, Namespace, Object, ObjectId, Session, SessionStatus,
 };
 use chrono::{DateTime, Utc};
 
@@ -848,6 +848,8 @@ fn row_to_epoch(
         commits: Vec::new(),
         agents,
         branches: Vec::new(),
+        scope: EpochScope::All,
+        namespace: None,
         tags,
         sealed_commits,
     })
@@ -958,6 +960,7 @@ impl EpochStore for PostgresStorage {
         summary: &str,
         sealed_at: DateTime<Utc>,
         sealed_commits: &[ObjectId],
+        seal_hash: &ObjectId,
     ) -> Result<(), StorageError> {
         let sc_json = serde_json::to_string(sealed_commits)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;

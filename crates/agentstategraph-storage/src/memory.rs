@@ -346,6 +346,7 @@ impl EpochStore for MemoryStorage {
         summary: &str,
         sealed_at: DateTime<Utc>,
         sealed_commits: &[ObjectId],
+        seal_hash: &ObjectId,
     ) -> Result<(), StorageError> {
         let mut epochs = self
             .epochs
@@ -923,6 +924,8 @@ mod tests {
 
     fn test_epoch(id: &str) -> Epoch {
         Epoch {
+            scope: EpochScope::All,
+            namespace: None,
             id: id.to_string(),
             description: "test epoch".into(),
             root_intents: Vec::new(),
@@ -967,7 +970,13 @@ mod tests {
         store.create_epoch(&test_epoch("e1")).unwrap();
         let cid = ObjectId::hash(b"c1");
         store
-            .seal_epoch("e1", "sealed for testing", Utc::now(), &[cid])
+            .seal_epoch(
+                "e1",
+                "sealed for testing",
+                Utc::now(),
+                &[cid],
+                &ObjectId::from_bytes([0u8; 32]),
+            )
             .unwrap();
 
         let epoch = store.get_epoch("e1").unwrap().unwrap();
@@ -981,11 +990,23 @@ mod tests {
         let store = MemoryStorage::new();
         store.create_epoch(&test_epoch("e1")).unwrap();
         store
-            .seal_epoch("e1", "first seal", Utc::now(), &[])
+            .seal_epoch(
+                "e1",
+                "first seal",
+                Utc::now(),
+                &[],
+                &ObjectId::from_bytes([0u8; 32]),
+            )
             .unwrap();
         assert!(
             store
-                .seal_epoch("e1", "second seal", Utc::now(), &[])
+                .seal_epoch(
+                    "e1",
+                    "second seal",
+                    Utc::now(),
+                    &[],
+                    &ObjectId::from_bytes([0u8; 32])
+                )
                 .is_err(),
             "sealing an already-sealed epoch must fail"
         );
@@ -995,7 +1016,15 @@ mod tests {
     fn test_set_commit_epoch_rejects_sealed() {
         let store = MemoryStorage::new();
         store.create_epoch(&test_epoch("e1")).unwrap();
-        store.seal_epoch("e1", "done", Utc::now(), &[]).unwrap();
+        store
+            .seal_epoch(
+                "e1",
+                "done",
+                Utc::now(),
+                &[],
+                &ObjectId::from_bytes([0u8; 32]),
+            )
+            .unwrap();
 
         let cid = ObjectId::hash(b"late-commit");
         assert!(
