@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use agentstategraph_core::{
-    Commit, Epoch, EpochStatus, IntentCategory, Namespace, Node, Object, ObjectId, Session,
-    SessionStatus,
+    Commit, Epoch, EpochScope, EpochStatus, IntentCategory, Namespace, Node, Object, ObjectId,
+    Session, SessionStatus,
 };
 use agentstategraph_reminders::{
     Reminder, ReminderError, ReminderFilter, ReminderStore,
@@ -118,7 +118,10 @@ impl SqliteStorage {
                 agents          TEXT NOT NULL DEFAULT '[]',
                 tags            TEXT NOT NULL DEFAULT '[]',
                 commit_count    INTEGER NOT NULL DEFAULT 0,
-                sealed_commits  TEXT NOT NULL DEFAULT '[]'
+                sealed_commits  TEXT NOT NULL DEFAULT '[]',
+                seal_hash       BLOB,
+                namespace       TEXT,
+                scope           TEXT NOT NULL DEFAULT 'all'
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
@@ -340,6 +343,33 @@ impl SqliteStorage {
             )
             .map_err(|e| StorageError::Backend(format!("add sealed_commits: {}", e)))?;
         }
+        // Epoch fidelity + scoping. Three columns added together so an upgrade
+        // is one pass over the table rather than three:
+        //   seal_hash — the tamper-evident digest was modelled on `Epoch` but
+        //               had nowhere to live, so it was dropped on every write.
+        //   namespace — the table is global, which is why one workspace's
+        //               sealed epoch could enforce against every other one.
+        //   scope     — what the seal covers; see `EpochScope`.
+        // All are nullable or defaulted, so existing rows stay valid and read
+        // back as the historical behaviour (global, scope = all).
+        for (col, ddl) in [
+            ("seal_hash", "ALTER TABLE epochs ADD COLUMN seal_hash BLOB"),
+            ("namespace", "ALTER TABLE epochs ADD COLUMN namespace TEXT"),
+            (
+                "scope",
+                "ALTER TABLE epochs ADD COLUMN scope TEXT NOT NULL DEFAULT 'all'",
+            ),
+        ] {
+            if !epoch_cols.iter().any(|c| c == col) {
+                conn.execute(ddl, [])
+                    .map_err(|e| StorageError::Backend(format!("add epochs.{}: {}", col, e)))?;
+            }
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_epochs_namespace ON epochs(namespace)",
+            [],
+        )
+        .map_err(|e| StorageError::Backend(format!("idx_epochs_namespace: {}", e)))?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_commits_epoch ON commits(epoch_id)",
             [],
@@ -1652,6 +1682,9 @@ fn row_to_epoch(
     agents: String,
     tags: String,
     sealed_commits: String,
+    seal_hash: Option<Vec<u8>>,
+    namespace: Option<String>,
+    scope: Option<String>,
 ) -> Result<Epoch, StorageError> {
     let root_intents: Vec<String> = serde_json::from_str(&root_intents)
         .map_err(|e| StorageError::Serialization(format!("root_intents: {}", e)))?;
@@ -1670,10 +1703,21 @@ fn row_to_epoch(
         created_at: parse_rfc3339(&created_at)?,
         sealed_at: sealed_at.as_deref().map(parse_rfc3339).transpose()?,
         seal_summary: summary,
-        seal_hash: None,
+        // A 32-byte BLOB or nothing; a short/corrupt value is treated as absent
+        // rather than failing the whole read.
+        seal_hash: seal_hash.and_then(|b| {
+            <[u8; 32]>::try_from(b.as_slice())
+                .ok()
+                .map(ObjectId::from_bytes)
+        }),
         commits: Vec::new(),
         agents,
         branches: Vec::new(),
+        scope: scope
+            .as_deref()
+            .map(EpochScope::from_storage_str)
+            .unwrap_or_default(),
+        namespace,
         tags,
         sealed_commits,
     })
@@ -1693,8 +1737,9 @@ impl EpochStore for SqliteStorage {
         conn.execute(
             "INSERT INTO epochs
              (id, description, status, created_at, sealed_at, summary,
-              root_intents, agents, tags, commit_count, sealed_commits)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              root_intents, agents, tags, commit_count, sealed_commits,
+              namespace, scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 epoch.id,
                 epoch.description,
@@ -1707,6 +1752,8 @@ impl EpochStore for SqliteStorage {
                 tags,
                 epoch.commits.len() as i64,
                 sealed_commits,
+                epoch.namespace,
+                epoch.scope.as_storage_str(),
             ],
         )
         .map_err(|e| StorageError::Backend(format!("create epoch: {}", e)))?;
@@ -1719,6 +1766,7 @@ impl EpochStore for SqliteStorage {
         summary: &str,
         sealed_at: DateTime<Utc>,
         sealed_commits: &[ObjectId],
+        seal_hash: &ObjectId,
     ) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
         let current: Option<String> = conn
@@ -1741,10 +1789,21 @@ impl EpochStore for SqliteStorage {
         let sc_json = serde_json::to_string(sealed_commits)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         conn.execute(
+            // commit_count is set here too: it was written once at create time
+            // from the then-empty commit list and never updated, so a sealed
+            // epoch reported 0 for work it demonstrably covered.
             "UPDATE epochs
-             SET status = 'Sealed', sealed_at = ?1, summary = ?2, sealed_commits = ?3
-             WHERE id = ?4",
-            params![sealed_at.to_rfc3339(), summary, sc_json, id],
+             SET status = 'Sealed', sealed_at = ?1, summary = ?2, sealed_commits = ?3,
+                 seal_hash = ?4, commit_count = ?5
+             WHERE id = ?6",
+            params![
+                sealed_at.to_rfc3339(),
+                summary,
+                sc_json,
+                seal_hash.as_bytes().to_vec(),
+                sealed_commits.len() as i64,
+                id
+            ],
         )
         .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
         Ok(())
@@ -1755,7 +1814,8 @@ impl EpochStore for SqliteStorage {
         let mut stmt = conn
             .prepare(
                 "SELECT id, description, status, created_at, sealed_at, summary,
-                        root_intents, agents, tags, sealed_commits
+                        root_intents, agents, tags, sealed_commits,
+                        seal_hash, namespace, scope
                  FROM epochs ORDER BY created_at DESC",
             )
             .map_err(|e| StorageError::Backend(format!("list epochs prep: {}", e)))?;
@@ -1772,15 +1832,18 @@ impl EpochStore for SqliteStorage {
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
+                    row.get::<_, Option<Vec<u8>>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             })
             .map_err(|e| StorageError::Backend(format!("list epochs query: {}", e)))?;
         let mut out = Vec::new();
         for r in rows {
-            let (id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc) =
+            let (id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc, sh, ns, scp) =
                 r.map_err(|e| StorageError::Backend(format!("list epochs row: {}", e)))?;
             out.push(row_to_epoch(
-                id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc,
+                id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc, sh, ns, scp,
             )?);
         }
         Ok(out)
@@ -1799,11 +1862,15 @@ impl EpochStore for SqliteStorage {
             String,
             String,
             String,
+            Option<Vec<u8>>,
+            Option<String>,
+            Option<String>,
         );
         let row: Option<EpochRow> = conn
             .query_row(
                 "SELECT id, description, status, created_at, sealed_at, summary,
-                        root_intents, agents, tags, sealed_commits
+                        root_intents, agents, tags, sealed_commits,
+                        seal_hash, namespace, scope
                  FROM epochs WHERE id = ?1",
                 params![id],
                 |row| {
@@ -1818,6 +1885,9 @@ impl EpochStore for SqliteStorage {
                         row.get(7)?,
                         row.get(8)?,
                         row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
                     ))
                 },
             )
@@ -1825,9 +1895,23 @@ impl EpochStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("get epoch: {}", e)))?;
         match row {
             None => Ok(None),
-            Some((id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc)) => {
+            Some((
+                id,
+                desc,
+                status,
+                created_at,
+                sealed_at,
+                summary,
+                ri,
+                ag,
+                tg,
+                sc,
+                sh,
+                ns,
+                scp,
+            )) => {
                 let mut epoch = row_to_epoch(
-                    id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc,
+                    id, desc, status, created_at, sealed_at, summary, ri, ag, tg, sc, sh, ns, scp,
                 )?;
                 // Rehydrate commits list from the commits table.
                 let mut stmt = conn

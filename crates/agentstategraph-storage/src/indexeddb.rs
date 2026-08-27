@@ -395,9 +395,10 @@ impl EpochStore for IndexedDbStorage {
         summary: &str,
         sealed_at: DateTime<Utc>,
         sealed_commits: &[ObjectId],
+        seal_hash: &ObjectId,
     ) -> Result<(), StorageError> {
         self.memory
-            .seal_epoch(id, summary, sealed_at, sealed_commits)?;
+            .seal_epoch(id, summary, sealed_at, sealed_commits, seal_hash)?;
         self.queue_epoch_snapshot(id)?;
         Ok(())
     }
@@ -676,7 +677,15 @@ mod tests {
         store.create_epoch(&Epoch::new("e1", "x", vec![])).unwrap();
         store.drain_pending_epochs(); // clear the create snapshot
 
-        store.seal_epoch("e1", "done", Utc::now(), &[]).unwrap();
+        store
+            .seal_epoch(
+                "e1",
+                "done",
+                Utc::now(),
+                &[],
+                &ObjectId::from_bytes([0u8; 32]),
+            )
+            .unwrap();
 
         let pending = store.drain_pending_epochs();
         assert_eq!(pending.len(), 1, "seal must re-snapshot");
