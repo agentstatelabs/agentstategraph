@@ -1560,9 +1560,42 @@ impl Repository {
         description: &str,
         root_intents: Vec<String>,
     ) -> Result<agentstategraph_core::Epoch, RepoError> {
-        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents);
+        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
+            .with_namespace(self.active_namespace()?.as_str());
         self.storage.create_epoch(&epoch)?;
         Ok(epoch)
+    }
+
+    /// Create an epoch that declares what it covers. See [`EpochScope`].
+    pub fn create_epoch_scoped(
+        &self,
+        id: &str,
+        description: &str,
+        root_intents: Vec<String>,
+        scope: agentstategraph_core::EpochScope,
+    ) -> Result<agentstategraph_core::Epoch, RepoError> {
+        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
+            .with_namespace(self.active_namespace()?.as_str())
+            .with_scope(scope);
+        self.storage.create_epoch(&epoch)?;
+        Ok(epoch)
+    }
+
+    /// Does this epoch bind writes in `ns`?
+    ///
+    /// An epoch enforces only inside its own workspace. Before the epochs table
+    /// carried a namespace there was effectively one workspace, so a legacy
+    /// epoch (`namespace: None`) binds the default workspace and nothing else.
+    ///
+    /// This is the fix for seals leaking across workspaces: the store is one
+    /// global table, so an unfiltered check let one workspace's sealed epoch
+    /// reject writes in every other workspace — completing a plan in one
+    /// project could block writes in all of them.
+    fn epoch_binds_namespace(epoch: &agentstategraph_core::Epoch, ns: &Namespace) -> bool {
+        match epoch.namespace.as_deref() {
+            Some(owner) => owner == ns.as_str(),
+            None => ns.as_str() == Namespace::DEFAULT,
+        }
     }
 
     /// Seal an epoch, making it immutable.
@@ -1613,8 +1646,24 @@ impl Repository {
         ObjectId::hash(&buf)
     }
 
-    /// List all epochs (as lightweight index entries).
+    /// List this workspace's epochs (as lightweight index entries).
+    ///
+    /// Scoped to the active namespace, so a workspace's epoch count is its own
+    /// rather than the hub-wide total. Use [`Repository::list_all_epochs`] for
+    /// a cross-workspace view.
     pub fn list_epochs(&self) -> Result<Vec<agentstategraph_core::EpochEntry>, RepoError> {
+        let ns = self.active_namespace()?;
+        let epochs = self.storage.list_epochs()?;
+        Ok(epochs
+            .iter()
+            .filter(|e| Self::epoch_binds_namespace(e, &ns))
+            .map(|e| e.to_entry())
+            .collect())
+    }
+
+    /// List every epoch in the store, across all workspaces. For hub-level
+    /// views that deliberately span workspaces; prefer [`Repository::list_epochs`].
+    pub fn list_all_epochs(&self) -> Result<Vec<agentstategraph_core::EpochEntry>, RepoError> {
         let epochs = self.storage.list_epochs()?;
         Ok(epochs.iter().map(|e| e.to_entry()).collect())
     }
@@ -2560,11 +2609,16 @@ impl Repository {
             .into_iter()
             .collect();
         let epochs = self.storage.list_epochs()?;
+        let ns = self.active_namespace()?;
         let mut violations = Vec::new();
         for epoch in epochs.iter() {
             if epoch.status != agentstategraph_core::EpochStatus::Sealed
                 && epoch.status != agentstategraph_core::EpochStatus::Archived
             {
+                continue;
+            }
+            // A seal binds only its own workspace — see `epoch_binds_namespace`.
+            if !Self::epoch_binds_namespace(epoch, &ns) {
                 continue;
             }
             let unreachable: Vec<ObjectId> = epoch
@@ -4059,8 +4113,73 @@ mod tests {
             agentstategraph_core::EpochScope::Workspace("ctxone".to_string())
         );
         assert_eq!(loaded.namespace.as_deref(), Some("ctxone"));
-        let entry = repo.list_epochs().unwrap().into_iter().next().unwrap();
+
+        // This repo is on the default namespace, so a `ctxone` epoch is not
+        // its business — that is the whole point of scoping the listing.
+        assert!(
+            repo.list_epochs().unwrap().is_empty(),
+            "another workspace's epoch must not appear in this one's listing"
+        );
+        let entry = repo
+            .list_all_epochs()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("cross-workspace view still sees it");
         assert_eq!(entry.namespace.as_deref(), Some("ctxone"));
+    }
+
+    /// The bug this scoping exists to kill: one workspace's sealed epoch used
+    /// to reject ref updates in EVERY workspace, so completing a plan in one
+    /// project could block writes across all of them.
+    #[test]
+    fn test_sealed_epoch_does_not_bind_other_workspaces() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        let base = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+
+        // A sealed epoch owned by a DIFFERENT workspace.
+        let other = agentstategraph_core::Epoch::new("other", "elsewhere", vec![])
+            .with_namespace("some-other-workspace");
+        repo.storage.create_epoch(&other).unwrap();
+        repo.seal_epoch("other", "sealed").unwrap();
+
+        // Rewinding main here would orphan that epoch's commits, but the epoch
+        // belongs to another workspace and must not have a say.
+        assert!(
+            repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
+            "an epoch from another workspace must not veto this one's writes"
+        );
+    }
+
+    /// An epoch that DOES own this workspace still binds it — scoping must not
+    /// disable enforcement altogether.
+    #[test]
+    fn test_sealed_epoch_still_binds_its_own_workspace() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        let base = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+
+        // create_epoch stamps the active namespace.
+        repo.create_epoch("mine", "here", vec![]).unwrap();
+        repo.seal_epoch("mine", "sealed").unwrap();
+
+        assert!(
+            !repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
+            "a rewind that orphans this workspace's own sealed commits must be caught"
+        );
     }
 
     #[test]
