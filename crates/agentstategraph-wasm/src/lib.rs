@@ -1150,6 +1150,32 @@ impl WasmAgentStateGraph {
             .collect();
         Ok(serde_json::to_string(&json).unwrap_or_default())
     }
+
+    /// List epochs across every workspace. Returns JSON.
+    ///
+    /// `list_epochs` returns only the active workspace's epochs. This binding
+    /// cannot select a workspace, so without this it could not reach epochs
+    /// outside the default one at all.
+    pub fn list_all_epochs(&self) -> Result<String, JsValue> {
+        let entries = self
+            .repo
+            .list_all_epochs()
+            .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
+        let json: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "description": e.description,
+                    "status": format!("{:?}", e.status),
+                    "commits": e.commit_count,
+                    "scope": e.scope.as_storage_str(),
+                    "namespace": e.namespace,
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string(&json).unwrap_or_default())
+    }
 }
 
 // ---------------------------------------------------------------------------

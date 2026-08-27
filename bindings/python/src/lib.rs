@@ -487,19 +487,23 @@ impl AgentStateGraph {
             .repo
             .list_epochs()
             .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
-        let json: Vec<serde_json::Value> = entries
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "id": e.id,
-                    "description": e.description,
-                    "status": format!("{:?}", e.status),
-                    "commits": e.commit_count,
-                    "agents": e.agents,
-                    "tags": e.tags,
-                })
-            })
-            .collect();
+        let json: Vec<serde_json::Value> = entries.iter().map(epoch_entry_json).collect();
+        let val =
+            serde_json::to_value(&json).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        json_to_py(py, &val)
+    }
+
+    /// List epochs across every workspace.
+    ///
+    /// `list_epochs` returns only the active workspace's epochs. This binding
+    /// cannot select a workspace, so without this it could not reach epochs
+    /// outside the default one at all.
+    fn list_all_epochs(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let entries = self
+            .repo
+            .list_all_epochs()
+            .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
+        let json: Vec<serde_json::Value> = entries.iter().map(epoch_entry_json).collect();
         let val =
             serde_json::to_value(&json).map_err(|e| PyRuntimeError::new_err(format!("{}", e)))?;
         json_to_py(py, &val)
@@ -2089,4 +2093,19 @@ fn agentstategraph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PolicyStore>()?;
     m.add_function(wrap_pyfunction!(exit_codes, m)?)?;
     Ok(())
+}
+
+/// JSON shape for an epoch index entry, shared by the scoped and
+/// cross-workspace listings so they can never drift apart.
+fn epoch_entry_json(e: &agentstategraph_core::EpochEntry) -> serde_json::Value {
+    serde_json::json!({
+        "id": e.id,
+        "description": e.description,
+        "status": format!("{:?}", e.status),
+        "commits": e.commit_count,
+        "agents": e.agents,
+        "tags": e.tags,
+        "scope": e.scope.as_storage_str(),
+        "namespace": e.namespace,
+    })
 }

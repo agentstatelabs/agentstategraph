@@ -446,6 +446,31 @@ impl AgentStateGraph {
             .collect())
     }
 
+    /// List epochs across every workspace.
+    ///
+    /// `list_epochs` returns only the active workspace's epochs. This binding
+    /// cannot select a workspace, so without this it could not reach epochs
+    /// outside the default one at all.
+    #[napi]
+    pub fn list_all_epochs(&self) -> napi::Result<Vec<serde_json::Value>> {
+        let entries = self.repo.list_all_epochs().map_err(err)?;
+        Ok(entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "description": e.description,
+                    "status": format!("{:?}", e.status),
+                    "commits": e.commit_count,
+                    "agents": e.agents,
+                    "tags": e.tags,
+                    "scope": e.scope.as_storage_str(),
+                    "namespace": e.namespace,
+                })
+            })
+            .collect())
+    }
+
     /// List active sessions (compact form — kept for backwards compat).
     #[napi]
     pub fn sessions(&self, agent_id: Option<String>) -> napi::Result<Vec<serde_json::Value>> {
