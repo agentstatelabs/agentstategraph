@@ -65,7 +65,37 @@ The marketing site carries version strings that nothing derives from this
 repo. That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
 mechanics, not binding policy.
 
-## Current audit — 0.9.21, re-affirmed for 1.0.0
+## Current audit — 1.1.0 (full pass)
+
+The full step 1–6 review for 1.1.0 was completed on 2026-08-27 — a real
+audit, not a re-affirmation, because 1.1.0 carries real surface changes.
+`reviewed_core_version` is bumped in the `release-prep` commit itself: the
+capability check requires it to equal the workspace version, so it cannot
+move ahead of the version bump.
+
+**What changed in Core.** Epochs gained an explicit `EpochScope`
+(`All`/`Branch`/`Plan`/`Workspace`), a persisted `seal_hash`, and a `namespace`.
+`EpochEntry` gained `scope` and `namespace`. `EpochStore::seal_epoch` takes the
+seal hash — a storage-trait change, not a binding surface. `Repository`
+signatures are unchanged; `create_epoch_scoped` and `list_all_epochs` are new.
+
+**The one behavioural change that reaches bindings.** `Repository::list_epochs`
+is now scoped to the active workspace, where it previously returned every epoch
+in the store. That silently degraded the three bindings classifying `epochs` as
+`full` while classifying `namespaces` as `unavailable` — python, typescript and
+wasm — because they cannot select a workspace and so could no longer reach any
+epoch outside the default one.
+
+Rather than demote them to `partial`, each of the three now exposes
+`list_all_epochs`, restoring the cross-workspace view. `epochs` therefore stays
+`full` for them, honestly. rust, c and swift classify `namespaces` as `full` and
+were unaffected; go and dotnet classify `epochs` as `unavailable` and have no
+epoch surface to change.
+
+No new capability group or ABI operation was added, so the manifest's capability
+list and the advanced ABI contract are unchanged at 39 operations.
+
+## Superseded audit — 0.9.21, re-affirmed for 1.0.0
 
 `reviewed_core_version` was moved to 1.0.0 on 2026-08-24 by **re-affirmation,
 not a fresh audit**: the diff between v0.9.24 and the 1.0.0 release commit was
