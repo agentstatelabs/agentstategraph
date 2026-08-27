@@ -163,6 +163,22 @@ impl Epoch {
         Ok(())
     }
 
+    /// Number of commits this epoch covers.
+    ///
+    /// `commits` — the commits actually tagged to this epoch — is the precise
+    /// answer and wins whenever it is populated. It is empty for an epoch that
+    /// was never made active, which is how a checkpoint-style epoch is created:
+    /// seal immediately, tagging nothing. For those, `sealed_commits` (recorded
+    /// at seal time) is the only record of what was covered, and counting
+    /// `commits` alone reports "0 commits" for work that definitely happened.
+    pub fn commit_count(&self) -> usize {
+        if self.commits.is_empty() {
+            self.sealed_commits.len()
+        } else {
+            self.commits.len()
+        }
+    }
+
     /// Convert to a lightweight index entry.
     pub fn to_entry(&self) -> EpochEntry {
         EpochEntry {
@@ -173,7 +189,7 @@ impl Epoch {
             sealed_at: self.sealed_at,
             root_intents: self.root_intents.clone(),
             agents: self.agents.clone(),
-            commit_count: self.commits.len(),
+            commit_count: self.commit_count(),
             seal_hash: self.seal_hash,
             tags: self.tags.clone(),
         }

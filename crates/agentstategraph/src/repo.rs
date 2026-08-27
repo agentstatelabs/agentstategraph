@@ -1615,8 +1615,19 @@ impl Repository {
                 "cannot export an active epoch; seal it first".to_string(),
             ));
         }
+        // Prefer the epoch's own tagged commits — that is the precise set, and
+        // it is rehydrated from the commits table on load. An epoch that was
+        // never made active tags nothing, though, which is exactly how a
+        // checkpoint-style epoch is minted (create + seal in one step). Its
+        // bundle would otherwise ship zero commit records while still claiming
+        // to be self-contained, so fall back to the set recorded at seal time.
+        let commit_ids = if epoch.commits.is_empty() {
+            &epoch.sealed_commits
+        } else {
+            &epoch.commits
+        };
         let mut commits = Vec::new();
-        for cid in &epoch.commits {
+        for cid in commit_ids {
             if let Some(commit) = self.storage.get_commit(cid)? {
                 commits.push(serde_json::to_value(&commit).map_err(|e| {
                     RepoError::InvalidOperation(format!("serialize commit: {}", e))
@@ -3851,6 +3862,49 @@ mod tests {
         assert_eq!(bundle["epoch"]["id"], "e1");
         assert!(bundle["commits"].is_array());
         assert_eq!(bundle["commits"].as_array().unwrap().len(), 1);
+    }
+
+    /// The checkpoint pattern: create and seal in one step, never made active,
+    /// so NO commit is tagged to the epoch. This is how a per-plan checkpoint is
+    /// minted. Iterating `commits` alone shipped a bundle with zero commit
+    /// records while still advertising itself as self-contained, and reported
+    /// "0 commits" in every listing.
+    #[test]
+    fn test_export_epoch_untagged_falls_back_to_sealed_commits() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/x", &Object::string("hello"), quick_opts("x"))
+            .unwrap();
+
+        // Never set active — nothing is tagged to this epoch.
+        repo.create_epoch("cp1", "checkpoint", vec![]).unwrap();
+        repo.seal_epoch("cp1", "done").unwrap();
+
+        let epoch = repo.get_epoch("cp1").unwrap();
+        assert!(
+            epoch.commits.is_empty(),
+            "precondition: a checkpoint epoch tags no commits"
+        );
+        assert!(
+            !epoch.sealed_commits.is_empty(),
+            "sealing must record the covered set"
+        );
+
+        assert_eq!(epoch.commit_count(), epoch.sealed_commits.len());
+
+        let bundle = repo.export_epoch("cp1").unwrap();
+        let commits = bundle["commits"].as_array().unwrap();
+        assert_eq!(
+            commits.len(),
+            epoch.sealed_commits.len(),
+            "bundle must carry the sealed commit RECORDS, not just their ids"
+        );
+        assert!(
+            commits.iter().all(|c| c.get("state_root").is_some()),
+            "each entry must be a full commit record"
+        );
     }
 
     #[test]
