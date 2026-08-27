@@ -9,16 +9,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [v1.0.0] — 2026-08-24
 
-## [v0.9.24] — 2026-08-17
+## [v0.9.24] — 2026-08-18
 
 Version-alignment release. No functional changes — `main` is identical to
 v0.9.23 apart from the version bump. Cut so ASG moves in step with the rest
 of the suite (asd 0.9.40, ctxone 0.9.38, agentstatecrucible 0.2.6) ahead of
 a coordinated 1.0.0.
 
-## [v0.9.23] — 2026-08-14
+## [v0.9.23] — 2026-08-15
 
-## [v0.9.22] — 2026-08-14
+## [v0.9.22] — 2026-08-15
 
 ### Changed
 
@@ -50,7 +50,7 @@ a coordinated 1.0.0.
   DAG (which duplicated `commit_graph`). Until producers set
   `parent_intent`, the result is a flat, honest list. (Plan C t-003)
 
-## [v0.9.21] — 2026-08-05
+## [v0.9.21] — 2026-08-06
 
 ### Added
 
@@ -66,7 +66,7 @@ a coordinated 1.0.0.
 - Swift intent categories `Correction`, `Refinement`, and `Exploration` now
   map to their native Core variants instead of custom categories.
 
-## [v0.9.20] — 2026-08-05
+## [v0.9.20] — 2026-08-06
 
 ## [v0.9.19] — 2026-08-05
 
@@ -143,6 +143,27 @@ a coordinated 1.0.0.
   every published version is available under MIT OR Apache-2.0. See
   [`LICENSING.md`](LICENSING.md).
 
+## [v0.9.10] — 2026-07-28
+
+### Fixed
+- **Merge could write a tree whose objects were missing, and reads hid it.** Adds an integrity gate on merge, and stops masking `ObjectNotFound` as an empty result — a dangling object used to read back as "no data", so corruption was indistinguishable from an empty subtree.
+- napi `--platform` (fixes the `.node` upload) and macos-14 for the Intel build.
+
+### Changed
+- npm publishing is manual-only; there are no npm consumers today.
+
+## [v0.9.8] — 2026-07-28
+
+### Fixed
+- Release builds cross-compile `x86_64-apple-darwin` on macos-14.
+- `ci-guard` skips the Debian `before_script` (it runs on alpine); the wheel tracks the workspace version and publishes with skip-existing.
+
+## [v0.9.7] — 2026-07-28
+
+### Changed
+- **Relicensed to MIT OR Apache-2.0** (from BUSL-1.1), and the workspace crates are now publishable to crates.io.
+- The public GitHub mirror is wired as an automatic `publish-github` job for `main` and release tags, gated on the leak scanner.
+
 ## [v0.9.6] — 2026-07-23
 
 ### Added
@@ -160,7 +181,23 @@ Theme: **merge data-loss fix and ref-spec resolution.**
 - **Ref-spec resolution.** `Repository::resolve_ref` (and therefore `branch --from`, `merge`, `diff`, `read`, …) now accepts a branch name, a full commit hash (with or without the `sg_` prefix), or a unique `sg_`/hex commit-id prefix, including orphaned commits from deleted branches. New `RepoError::CommitNotFound` and `RepoError::AmbiguousCommitPrefix` distinguish the failure modes; `ObjectId::from_hex` / `to_hex` / `normalize_hex_prefix` and `CommitStore::all_commit_ids` support it.
 - **Merge deletion guard and dry-run.** `Repository::merge_checked(source, target, opts, allow_deletions)` refuses to advance the target ref when the merge would remove a top-level entry unless `allow_deletions` is set (`RepoError::MergeWouldDelete`). `Repository::preview_merge` returns a `MergePreview` (added / changed / removed top-level keys and conflicts) without mutating anything.
 
-## [v0.9.2] — 2026-07-13
+## [v0.9.4] — 2026-07-21
+
+### Changed
+- **SQLite opens in WAL mode with `synchronous=NORMAL`**, so readers no longer block on a writer.
+
+### Fixed
+- Added `ci-guard`, so an empty or misconfigured pipeline fails loudly instead of passing silently.
+
+## [v0.9.3] — 2026-07-14
+
+### Fixed
+- `remind_me` routes non-autonomous reminders to `AwaitingPermission` rather than firing them.
+
+### Changed
+- Public-release preparation: a leak-scan publish gate, and the clippy gate narrowed to correctness.
+
+## [v0.9.2] — 2026-05-29
 
 Theme: **first public release.** Repository, license, and documentation prepared for open publication. No functional API changes from 0.9.1.
 
@@ -261,6 +298,37 @@ multi-project and multi-tenant deployments.
 - Full build clean; the pre-existing PyO3 dyld failure on the
   Python bindings is unchanged (unrelated to this release).
 
+## [v0.8.5] — 2026-05-07
+
+### Changed
+- Structural cleanup: parameter bundles, `ServeArgs` extracted, shared fixture helpers.
+
+### Fixed
+- The `migrate` crate enables its sqlite feature for dev-tests, so `cargo test` works without extra flags.
+
+## [v0.8.4] — 2026-05-05
+
+Re-tag of `v0.8.3`; it carries no commits of its own.
+
+## [v0.8.3] — 2026-05-05
+
+### Fixed
+- Restored `set_json_cas`, `head` and `WriteConflict`, which were lost in a merge.
+
+## [v0.8.1] — 2026-05-02
+
+### Changed
+- RFC updated to 0.8.0 stable.
+
+## [v0.8.0] — 2026-05-02
+
+### Added
+- **Pull-based reminders** — a new crate with MCP tools and storage integration, plus durable reminder stores for both SQLite and Postgres.
+- Native `PolicyPropose` / `Ratify` / `Supersede` / `Sign` intent categories.
+
+### Changed
+- Substantial test-coverage work across core, storage, policy, taint, migrate and the MCP server layer.
+
 ## [v0.7.75-beta.3] — 2026-04-24
 
 Theme: **remaining stub closures** flagged in the 0.7.75-beta.2
@@ -352,7 +420,7 @@ consumer from the 0.7.75-beta.1 taint substrate.
   `spec/POST-PRODUCTION-NOTES.md`).
 - All 0.7.75-beta.1 test suites continue to pass unchanged.
 
-## [v0.7.75-beta.1] — 2026-04-21
+## [v0.7.75-beta.1] — 2026-04-23
 
 Theme: **taint / quarantine / watch** — dynamic runtime markers
 that bridge passive observation into enforcement. Every taint is
@@ -517,7 +585,7 @@ toolchain we have locally.
 
 FFI extern count 54 → 56. No MCP tool count change.
 
-## [v0.7.5-beta.1] — 2026-04-18
+## [v0.7.5-beta.1] — 2026-04-21
 
 Theme: **advanced policy — signing + multi-tenant + external
 evaluators.** Biggest single milestone so far: ~14 section commits
