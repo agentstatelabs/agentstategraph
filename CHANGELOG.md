@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.1.0] — 2026-08-27
+
+### Changed
+- **`Repository::list_epochs` is now scoped to the active workspace.** It previously returned every epoch in the store. `list_all_epochs` is the explicit cross-workspace view for hub-level callers. Bindings that cannot select a workspace (python, typescript, wasm) gained `list_all_epochs` so they keep full access.
+- **`EpochStore::seal_epoch` takes the seal hash.** A storage-trait change: any external implementor of that trait must add the parameter. `Repository` signatures are unchanged.
+
+### Added
+- **`EpochScope`** — `All`, `Branch`, `Plan` or `Workspace` — records what an epoch's seal actually covers, instead of leaving it inferred from which commit list happens to be populated. Without it, an epoch of 400 commits is ambiguous between "this plan did 400 things" and "the workspace contained 400 commits", and no reader can tell after the fact. Sealing honours it: a `Plan`-scoped epoch seals its tagged commits; a `Branch`-scoped one walks that ref. Created via `create_epoch_scoped`.
+- **Epochs carry a `namespace`**, and `EpochEntry` exposes `scope` and `namespace`.
+- **`list_all_epochs`** on `Repository` and on the python, typescript and wasm bindings.
+
+### Fixed
+- **A sealed epoch in one workspace rejected ref updates in every workspace.** The epochs table is global and the seal check read it unfiltered, so completing a plan in one project could block writes across all of them. An epoch now binds only its own workspace; a pre-namespace epoch binds the default workspace.
+- **`seal_hash` was never persisted.** The field existed on `Epoch` and was set on seal, but the table had no column for it, so every read returned `None` — the tamper-evident digest the API advertised did not exist. It is now a blake3 digest over the sorted sealed set, domain separated by epoch id, computed at seal and stored.
+- **A sealed epoch reported 0 commits.** `commit_count` was written once at create time from a then-empty list and never updated on seal.
+- **`export_epoch` produced bundles with no commit records** while advertising itself as self-contained: it iterated a list that is empty for a checkpoint-style epoch (created and sealed in one step, never made active). It now falls back to the sealed set, so the bundle carries the records its metadata references.
+
+### Migration
+- One migration adds `seal_hash`, `namespace` and `scope` to the `epochs` table. All are nullable or defaulted, so an existing store opens unchanged and reads back as the historical behaviour: global, scope `All`, no hash.
+
 ## [v1.0.0] — 2026-08-24
 
 ## [v0.9.24] — 2026-08-18
