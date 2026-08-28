@@ -366,6 +366,23 @@ impl EpochStore for MemoryStorage {
         Ok(())
     }
 
+    fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {
+        let mut epochs = self
+            .epochs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let epoch = epochs
+            .iter_mut()
+            .find(|e| e.id == id)
+            .ok_or_else(|| StorageError::Backend(format!("epoch not found: {}", id)))?;
+        // Assign-only: an epoch that already has an owner is left untouched.
+        if epoch.namespace.is_some() {
+            return Ok(false);
+        }
+        epoch.namespace = Some(namespace.to_string());
+        Ok(true)
+    }
+
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
         let epochs = self
             .epochs

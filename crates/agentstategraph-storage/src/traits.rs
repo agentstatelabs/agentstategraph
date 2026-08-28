@@ -440,6 +440,24 @@ pub trait EpochStore: Send + Sync {
         seal_hash: &ObjectId,
     ) -> Result<(), StorageError>;
 
+    /// Assign a workspace to an epoch that does not have one yet.
+    ///
+    /// ASSIGN-ONLY BY DESIGN. Succeeds only when the epoch's namespace is
+    /// currently unset, and returns `false` without modifying anything if it is
+    /// already assigned. This is deliberately not a "move epoch to workspace"
+    /// operation: an epoch binds writes in its own workspace, so a reassign
+    /// would let a caller relabel a sealed epoch into a different workspace and
+    /// change whose writes it guards.
+    ///
+    /// It exists for one job: epochs sealed before the namespace column existed
+    /// have no owner recorded, and read as belonging to the default workspace.
+    /// A caller that knows where they belong — typically from its own id
+    /// convention — can settle it once. Works on sealed and archived epochs,
+    /// which is the whole point: those are exactly the ones that predate the
+    /// column. It does not touch the sealed commit set or the seal hash, so
+    /// what was sealed is unchanged.
+    fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError>;
+
     /// List all epochs, most-recent first.
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError>;
 
