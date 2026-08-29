@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.1.1] — 2026-08-28
+
+### Added
+- **`Repository::assign_epoch_namespace`** — settle ownership on an epoch that has none. v1.1.0 gave epochs a namespace and scoped enforcement and listing to it, but only stamps epochs created from v1.1.0 onward. Epochs sealed before then have no owner recorded, read as belonging to the default workspace, and nothing could amend one — so a store with existing epochs had no migration path.
+
+  **Assign-only by design.** It sets an owner where there is none and reports `false` untouched when one already exists. This is not "move epoch to workspace": an epoch binds writes in its own workspace, so a reassign would let a caller relabel a *sealed* epoch into a different workspace and change whose writes it guards. Once set, an owner is final. The sqlite and postgres backends enforce this in the SQL predicate rather than in application code.
+
+  It works on sealed and archived epochs — precisely the ones that predate the column — and touches only the namespace, leaving the sealed commit set and the seal hash alone, so backfilling ownership cannot invalidate an audit trail. An unknown id is an error rather than a silent `false`, so a typo during a backfill is heard.
+
+  No new capability group or ABI operation: this is a store-maintenance primitive for an embedder that owns the database, not part of the portable native contract. See `docs/BINDING_RELEASE_POLICY.md`.
+
 ## [v1.1.0] — 2026-08-27
 
 ### Changed

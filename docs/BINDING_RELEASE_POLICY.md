@@ -65,7 +65,33 @@ The marketing site carries version strings that nothing derives from this
 repo. That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
 mechanics, not binding policy.
 
-## Current audit — 1.1.0 (full pass)
+## Current audit — 1.1.1 (full pass)
+
+`reviewed_core_version` moved to 1.1.1 on 2026-08-28 after a **full step 1–6
+pass**. 1.1.1 adds one `Repository` method, `assign_epoch_namespace`, which
+settles ownership on an epoch sealed before epochs carried a namespace.
+
+**It is deliberately not an ABI operation, and no binding exposes it.** The
+advanced ABI is a stable native contract dispatched by operation name for C,
+Swift, Go and .NET — it is not a mirror of every Rust method. This one is a
+one-time store-maintenance primitive for an embedder that owns the database and
+knows, from its own epoch-id convention, where legacy epochs belong. A consumer
+reached through the ABI is not re-attributing epochs in a store it does not own.
+The `epochs` capability group is unchanged, so the manifest stays at **39
+operations** and every binding's classification is unaffected.
+
+**Known asymmetry carried over from 1.1.0, recorded here rather than left
+implied.** 1.1.0 scoped `Repository::list_epochs` to the active workspace and
+added `list_all_epochs` for the cross-workspace view. That method reached the
+direct Rust bindings (python, typescript, wasm) but was *not* added to the ABI,
+so **C and Swift have no cross-workspace epoch listing**. They classify
+`namespaces` as `full`, so they can scope a listing to any workspace they name,
+but cannot obtain the unscoped list in one call. This was not flagged in the
+1.1.0 audit and should have been. Closing it means adding an `epoch.list.all`
+operation to the ABI, which is a contract change and belongs in its own review,
+not a patch release.
+
+## Superseded audit — 1.1.0 (full pass)
 
 The full step 1–6 review for 1.1.0 was completed on 2026-08-27 — a real
 audit, not a re-affirmation, because 1.1.0 carries real surface changes.
