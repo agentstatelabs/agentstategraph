@@ -403,6 +403,10 @@ impl EpochStore for IndexedDbStorage {
         Ok(())
     }
 
+    fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {
+        self.memory.assign_epoch_namespace(id, namespace)
+    }
+
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
         self.memory.list_epochs()
     }

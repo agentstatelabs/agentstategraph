@@ -1008,6 +1008,39 @@ impl EpochStore for PostgresStorage {
         })
     }
 
+    fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("pg pool: {}", e)))?;
+            // `namespace IS NULL` makes this assign-only — see the trait docs.
+            let changed = client
+                .execute(
+                    "UPDATE epochs SET namespace = $1
+                     WHERE tenant_id = $2 AND id = $3 AND namespace IS NULL",
+                    &[&namespace, &self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("assign epoch namespace: {}", e)))?;
+            if changed > 0 {
+                return Ok(true);
+            }
+            let row = client
+                .query_opt(
+                    "SELECT 1 FROM epochs WHERE tenant_id = $1 AND id = $2",
+                    &[&self.tenant_id, &id],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("assign epoch lookup: {}", e)))?;
+            match row {
+                Some(_) => Ok(false),
+                None => Err(StorageError::Backend(format!("epoch not found: {}", id))),
+            }
+        })
+    }
+
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
         self.block_on(async {
             let client = self

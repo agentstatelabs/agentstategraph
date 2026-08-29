@@ -1646,6 +1646,33 @@ impl Repository {
         ObjectId::hash(&buf)
     }
 
+    /// Assign a workspace to an epoch that does not have one yet.
+    ///
+    /// Returns `true` if this call set it, `false` if the epoch already had an
+    /// owner, and an error if there is no such epoch.
+    ///
+    /// ASSIGN-ONLY BY DESIGN — this is not "move epoch to workspace". An epoch
+    /// binds writes in its own workspace, so allowing a reassign would let a
+    /// caller relabel a sealed epoch into a different workspace and change
+    /// whose writes it guards. Once set, an owner is final.
+    ///
+    /// The job it exists for: epochs sealed before the namespace column existed
+    /// carry no owner and read as belonging to the default workspace. A caller
+    /// that knows where they belong — typically from its own epoch-id
+    /// convention — can settle it once. Works on sealed and archived epochs,
+    /// which is the point: those are exactly the ones that predate the column.
+    /// The sealed commit set and seal hash are untouched, so what was sealed
+    /// stays sealed.
+    pub fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, RepoError> {
+        // Validate up front: a malformed name would otherwise be written and
+        // then never match any real workspace on read.
+        Namespace::new(namespace)
+            .map_err(|e| RepoError::InvalidOperation(format!("invalid namespace: {e}")))?;
+        self.storage
+            .assign_epoch_namespace(id, namespace)
+            .map_err(RepoError::Storage)
+    }
+
     /// List this workspace's epochs (as lightweight index entries).
     ///
     /// Scoped to the active namespace, so a workspace's epoch count is its own
@@ -4127,6 +4154,159 @@ mod tests {
             .next()
             .expect("cross-workspace view still sees it");
         assert_eq!(entry.namespace.as_deref(), Some("ctxone"));
+    }
+
+    /// The job this exists for: an epoch sealed before the namespace column
+    /// existed carries no owner, so it reads as belonging to the default
+    /// workspace. A caller that knows better can settle it once.
+    #[test]
+    fn test_assign_namespace_to_a_legacy_epoch() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+
+        // A pre-namespace epoch: sealed, and owned by nobody.
+        let legacy = agentstategraph_core::Epoch::new("plan:ctxone:p1", "legacy", vec![]);
+        assert!(legacy.namespace.is_none());
+        repo.storage.create_epoch(&legacy).unwrap();
+        repo.seal_epoch("plan:ctxone:p1", "sealed").unwrap();
+
+        assert!(
+            repo.assign_epoch_namespace("plan:ctxone:p1", "ctxone")
+                .unwrap(),
+            "a sealed epoch with no owner can be assigned one"
+        );
+        assert_eq!(
+            repo.get_epoch("plan:ctxone:p1")
+                .unwrap()
+                .namespace
+                .as_deref(),
+            Some("ctxone")
+        );
+    }
+
+    /// THE security property. An epoch binds writes in its own workspace, so a
+    /// reassign would let a caller relabel a sealed epoch into another
+    /// workspace and change whose writes it guards. Once set, an owner is final.
+    #[test]
+    fn test_assign_namespace_refuses_to_move_an_owned_epoch() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+
+        // create_epoch stamps the active namespace, so this one has an owner.
+        repo.create_epoch("owned", "has an owner", vec![]).unwrap();
+        let before = repo.get_epoch("owned").unwrap().namespace;
+        assert!(before.is_some());
+
+        assert!(
+            !repo
+                .assign_epoch_namespace("owned", "somewhere-else")
+                .unwrap(),
+            "an epoch that already has an owner must report no-change"
+        );
+        assert_eq!(
+            repo.get_epoch("owned").unwrap().namespace,
+            before,
+            "and must be left exactly as it was"
+        );
+    }
+
+    /// Assigning does not disturb what was sealed — the commit set and the
+    /// tamper-evident digest must survive untouched, or backfilling ownership
+    /// would silently invalidate the audit trail.
+    #[test]
+    fn test_assign_namespace_leaves_the_seal_intact() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        let legacy = agentstategraph_core::Epoch::new("plan:ws:p1", "legacy", vec![]);
+        repo.storage.create_epoch(&legacy).unwrap();
+        repo.seal_epoch("plan:ws:p1", "sealed").unwrap();
+
+        let before = repo.get_epoch("plan:ws:p1").unwrap();
+        repo.assign_epoch_namespace("plan:ws:p1", "ws").unwrap();
+        let after = repo.get_epoch("plan:ws:p1").unwrap();
+
+        assert_eq!(
+            after.seal_hash, before.seal_hash,
+            "seal hash must not change"
+        );
+        assert_eq!(
+            after.sealed_commits, before.sealed_commits,
+            "sealed commit set must not change"
+        );
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.sealed_at, before.sealed_at);
+    }
+
+    /// A typo'd id must be reported, not swallowed as a silent `false` — a
+    /// caller backfilling known ids needs to hear about it.
+    #[test]
+    fn test_assign_namespace_errors_on_unknown_epoch() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        assert!(repo.assign_epoch_namespace("nope", "ws").is_err());
+    }
+
+    /// A malformed name would be written and then never match a real workspace
+    /// on read, so it is rejected up front rather than stored.
+    #[test]
+    fn test_assign_namespace_rejects_an_invalid_name() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        let legacy = agentstategraph_core::Epoch::new("e1", "legacy", vec![]);
+        repo.storage.create_epoch(&legacy).unwrap();
+        assert!(matches!(
+            repo.assign_epoch_namespace("e1", "not a valid ns"),
+            Err(RepoError::InvalidOperation(_))
+        ));
+    }
+
+    /// After assignment the epoch binds its new workspace — which is the point
+    /// of the backfill: enforcement and listing follow ownership.
+    #[test]
+    fn test_assigned_epoch_binds_its_new_workspace() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        let base = repo
+            .set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+
+        let legacy = agentstategraph_core::Epoch::new("plan:other:p1", "legacy", vec![]);
+        repo.storage.create_epoch(&legacy).unwrap();
+        repo.seal_epoch("plan:other:p1", "sealed").unwrap();
+
+        // Unowned, it binds the DEFAULT workspace — which this repo is on.
+        assert!(
+            !repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
+            "an unowned epoch binds the default workspace"
+        );
+
+        // Once it belongs to another workspace, it stops binding this one.
+        repo.assign_epoch_namespace("plan:other:p1", "other")
+            .unwrap();
+        assert!(
+            repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
+            "after assignment the epoch guards its own workspace, not this one"
+        );
     }
 
     /// The bug this scoping exists to kill: one workspace's sealed epoch used

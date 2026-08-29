@@ -1809,6 +1809,36 @@ impl EpochStore for SqliteStorage {
         Ok(())
     }
 
+    fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {
+        let conn = self.lock_conn()?;
+        // `namespace IS NULL` in the predicate is what makes this assign-only:
+        // an epoch that already has an owner is left untouched and reports
+        // false, so this can never move an epoch between workspaces.
+        let changed = conn
+            .execute(
+                "UPDATE epochs SET namespace = ?1 WHERE id = ?2 AND namespace IS NULL",
+                params![namespace, id],
+            )
+            .map_err(|e| StorageError::Backend(format!("assign epoch namespace: {}", e)))?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        // Distinguish "already assigned" from "no such epoch" — a caller
+        // backfilling a known id wants to hear about a typo, not a silent false.
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM epochs WHERE id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::Backend(format!("assign epoch lookup: {}", e)))?;
+        if exists {
+            Ok(false)
+        } else {
+            Err(StorageError::Backend(format!("epoch not found: {}", id)))
+        }
+    }
+
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
         let conn = self.lock_conn()?;
         let mut stmt = conn
