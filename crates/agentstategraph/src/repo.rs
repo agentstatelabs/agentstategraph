@@ -1583,18 +1583,30 @@ impl Repository {
 
     /// Does this epoch bind writes in `ns`?
     ///
-    /// An epoch enforces only inside its own workspace. Before the epochs table
-    /// carried a namespace there was effectively one workspace, so a legacy
-    /// epoch (`namespace: None`) binds the default workspace and nothing else.
+    /// An epoch enforces only inside its own workspace. This is the fix for
+    /// seals leaking across workspaces: the store is one global table, so an
+    /// unfiltered check let one workspace's sealed epoch reject writes in every
+    /// other workspace — completing a plan in one project could block writes in
+    /// all of them.
     ///
-    /// This is the fix for seals leaking across workspaces: the store is one
-    /// global table, so an unfiltered check let one workspace's sealed epoch
-    /// reject writes in every other workspace — completing a plan in one
-    /// project could block writes in all of them.
+    /// **An epoch with no recorded owner binds nothing.** v1.1.0 treated it as
+    /// binding the default workspace, reasoning that before namespacing there
+    /// was effectively one workspace. On a real multi-workspace store that is
+    /// wrong, and it bricks the hub: epochs sealed before the column existed
+    /// hold commits from many different workspaces' graphs, none of which are
+    /// reachable from the default workspace's `main`. Each one becomes a
+    /// permanent, unsatisfiable veto on every default-workspace write —
+    /// observed on a real store where 171 such epochs blocked startup outright.
+    ///
+    /// The guard exists to stop a rewind orphaning commits *in the workspace
+    /// that sealed them*. An epoch with no recorded workspace cannot establish
+    /// that relationship, so it has nothing to enforce. Epochs created from
+    /// v1.1.0 onward are stamped at creation, and
+    /// [`Repository::assign_epoch_namespace`] settles older ones deliberately.
     fn epoch_binds_namespace(epoch: &agentstategraph_core::Epoch, ns: &Namespace) -> bool {
         match epoch.namespace.as_deref() {
             Some(owner) => owner == ns.as_str(),
-            None => ns.as_str() == Namespace::DEFAULT,
+            None => false,
         }
     }
 
@@ -4276,10 +4288,10 @@ mod tests {
         ));
     }
 
-    /// After assignment the epoch binds its new workspace — which is the point
-    /// of the backfill: enforcement and listing follow ownership.
+    /// An epoch with no recorded owner binds NOTHING, and assigning ownership
+    /// is what activates enforcement.
     #[test]
-    fn test_assigned_epoch_binds_its_new_workspace() {
+    fn test_orphan_epoch_binds_nothing_until_assigned() {
         let repo = Repository::new(Box::new(
             SqliteStorage::in_memory().expect("in-memory sqlite"),
         ));
@@ -4290,22 +4302,26 @@ mod tests {
         repo.set("main", "/b", &Object::string("2"), quick_opts("b"))
             .unwrap();
 
-        let legacy = agentstategraph_core::Epoch::new("plan:other:p1", "legacy", vec![]);
+        let legacy = agentstategraph_core::Epoch::new("plan:orphan:p1", "legacy", vec![]);
         repo.storage.create_epoch(&legacy).unwrap();
-        repo.seal_epoch("plan:other:p1", "sealed").unwrap();
+        repo.seal_epoch("plan:orphan:p1", "sealed").unwrap();
 
-        // Unowned, it binds the DEFAULT workspace — which this repo is on.
-        assert!(
-            !repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
-            "an unowned epoch binds the default workspace"
-        );
-
-        // Once it belongs to another workspace, it stops binding this one.
-        repo.assign_epoch_namespace("plan:other:p1", "other")
-            .unwrap();
+        // No owner recorded, so it cannot establish that a rewind would orphan
+        // commits in the workspace that sealed them. Treating such an epoch as
+        // binding the default workspace made it an unsatisfiable veto on every
+        // default write — on a real store, 171 of them blocked startup.
         assert!(
             repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
-            "after assignment the epoch guards its own workspace, not this one"
+            "an epoch with no owner must not veto any workspace's writes"
+        );
+
+        // Assigning ownership activates enforcement. This repo is on the
+        // default workspace, so assigning it here makes it bind.
+        repo.assign_epoch_namespace("plan:orphan:p1", Namespace::DEFAULT)
+            .unwrap();
+        assert!(
+            !repo.check_epoch_seal_violations(&base).unwrap().is_empty(),
+            "once owned by this workspace, the seal guards it"
         );
     }
 
