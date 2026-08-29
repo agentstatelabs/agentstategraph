@@ -7,7 +7,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.1.2] — 2026-08-28
+
+### Fixed
+- **An epoch with no recorded owner no longer binds any workspace.** v1.1.0 scoped seal enforcement to an epoch's workspace and treated an epoch with no namespace as binding the *default* workspace, on the reasoning that before namespacing there was effectively one workspace. On a real multi-workspace store that is wrong and it bricks the hub: epochs sealed before the namespace column existed hold commits from many different workspaces' graphs, none of which are reachable from the default workspace's `main`, so each becomes a permanent unsatisfiable veto on every default-workspace write.
+
+  Found by running a downstream migration against a copy of a live 2.1 GB store, where 171 pre-namespace epochs rejected the write recording the schema version and the hub aborted startup outright. Every unit fixture passed with the bug present — they hold one or two well-formed epochs.
+
+  The guard exists to stop a rewind orphaning commits *in the workspace that sealed them*; an epoch with no recorded workspace cannot establish that relationship, so it has nothing to enforce. Epochs created from v1.1.0 onward are stamped at creation, and `assign_epoch_namespace` settles older ones deliberately, so the only epochs affected are ones that were never attributable. On a single-workspace store predating namespaces, pre-upgrade epochs stop enforcing until assigned — a bounded, one-time gap.
+
 ## [v1.1.1] — 2026-08-28
+
+> **Superseded by v1.1.2 — do not use with a store containing pre-namespace
+> epochs.** Scoping introduced in v1.1.0 treated an epoch with no recorded
+> namespace as binding the default workspace. On a multi-workspace store those
+> epochs hold commits from other workspaces' graphs, so each becomes an
+> unsatisfiable veto on every default-workspace write and the hub refuses to
+> start. Fixed in v1.1.2.
 
 ### Added
 - **`Repository::assign_epoch_namespace`** — settle ownership on an epoch that has none. v1.1.0 gave epochs a namespace and scoped enforcement and listing to it, but only stamps epochs created from v1.1.0 onward. Epochs sealed before then have no owner recorded, read as belonging to the default workspace, and nothing could amend one — so a store with existing epochs had no migration path.

@@ -65,7 +65,29 @@ The marketing site carries version strings that nothing derives from this
 repo. That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
 mechanics, not binding policy.
 
-## Current audit — 1.1.1 (full pass)
+## Current audit — 1.1.2 (full pass)
+
+`reviewed_core_version` moved to 1.1.2 on 2026-08-28 after a **full step 1–6
+pass**, not a re-affirmation.
+
+1.1.2 is a **behavioural** fix, not a shape change: `epoch_binds_namespace` no
+longer treats an epoch with no recorded owner as binding the default workspace.
+No signature moves, no method is added or removed, and no binding's surface
+changes. The `epochs` capability group is unchanged, so every binding keeps its
+classification and the manifest stays at **39 operations**.
+
+What a binding consumer observes: an epoch that carries no namespace stops
+vetoing writes and stops appearing in any workspace's listing. That is the
+correction — it previously vetoed the default workspace unsatisfiably — and it
+reaches every binding equally, through `Repository`, without any per-binding
+work.
+
+The asymmetry recorded for 1.1.1 still stands: C and Swift have no
+cross-workspace epoch listing, because `list_all_epochs` was never added to the
+ABI. Closing it means an `epoch.list.all` operation, which is a contract change
+and belongs in its own review.
+
+## Superseded audit — 1.1.1 (full pass)
 
 `reviewed_core_version` moved to 1.1.1 on 2026-08-28 after a **full step 1–6
 pass**. 1.1.1 adds one `Repository` method, `assign_epoch_namespace`, which
