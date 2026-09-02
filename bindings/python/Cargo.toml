@@ -8,6 +8,20 @@ license = "MIT OR Apache-2.0"
 [lib]
 name = "agentstategraph_py"
 crate-type = ["cdylib"]
+# No Rust test harness for this crate.
+#
+# `pyo3/extension-module` deliberately does not link libpython — the symbols
+# come from the host interpreter when the module is imported. A `cargo test`
+# harness has no interpreter, so it aborts at load with
+# "symbol not found in flat namespace '_PyBaseObject_Type'".
+#
+# There is nothing to lose: this crate has no #[test] at all. The bindings are
+# tested from Python, in bindings/python/tests/*.py.
+#
+# Without this, `cargo test --workspace` fails for everyone, which is why CI
+# carries an --exclude for this crate.
+test = false
+doctest = false
 
 [dependencies]
 agentstategraph = { workspace = true, features = ["sqlite"] }

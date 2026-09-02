@@ -1,0 +1,23 @@
+# Copy to `.cargo/config.toml` (gitignored) and adjust the path.
+#
+# Only needed to BUILD THE PYTHON BINDINGS on a machine whose default
+# `python3` is newer than the PyO3 release supports.
+#
+# PyO3 0.24 supports up to Python 3.13. Homebrew's `python3` is 3.14, so an
+# unpinned build fails in pyo3-ffi's build script with:
+#
+#   error: the configured Python interpreter version (3.14) is newer than
+#          PyO3's maximum supported version (3.13)
+#
+# Point PYO3_PYTHON at an interpreter PyO3 supports. On Homebrew:
+#
+#   brew install python@3.13
+#
+# This file is not committed because the path is machine-specific; CI sets
+# PYO3_PYTHON itself (see .gitlab-ci.yml).
+#
+# You do NOT need this to build or test the rest of the workspace — only the
+# `agentstategraph-python` crate consumes it.
+
+[env]
+PYO3_PYTHON = "/opt/homebrew/bin/python3.13"
