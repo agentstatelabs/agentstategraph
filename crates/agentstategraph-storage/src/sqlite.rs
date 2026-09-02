@@ -2903,6 +2903,139 @@ mod tests {
         SqliteStorage::in_memory().unwrap()
     }
 
+    // --- full-DAG commit walk (plan asg-commit-dag-walk t-001) -------------
+    //
+    // `list_commits` follows parents[0] only. These pin the difference, not
+    // just the new behaviour: a later refactor that collapsed the two would
+    // otherwise pass silently.
+
+    fn commit_with(store: &SqliteStorage, label: &str, parents: Vec<ObjectId>) -> Commit {
+        let c = CommitBuilder::new(
+            ObjectId::hash(label.as_bytes()),
+            "agent/test",
+            Authority::simple("test"),
+            Intent::new(IntentCategory::Checkpoint, label),
+        )
+        .parents(parents)
+        .build();
+        store.put_commit(&c).unwrap();
+        c
+    }
+
+    /// A merge: base <- left, base <- right, merge(left, right).
+    /// The first-parent walk sees the left side only.
+    #[test]
+    fn dag_walk_reaches_the_second_parent_and_log_does_not() {
+        let store = test_store();
+        let base = commit_with(&store, "base", vec![]);
+        let left = commit_with(&store, "left", vec![base.id]);
+        let right = commit_with(&store, "right", vec![base.id]);
+        let merge = commit_with(&store, "merge", vec![left.id, right.id]);
+
+        let linear: Vec<ObjectId> = store
+            .list_commits(&merge.id, 100)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            !linear.contains(&right.id),
+            "first-parent walk must NOT reach the second parent — if it does, \
+             the bug this walk exists for is gone and this test is misleading"
+        );
+
+        let walk = store.list_commits_dag(&merge.id, 100).unwrap();
+        let ids: Vec<ObjectId> = walk.commits.iter().map(|c| c.id).collect();
+        for (name, id) in [
+            ("merge", merge.id),
+            ("left", left.id),
+            ("right", right.id),
+            ("base", base.id),
+        ] {
+            assert!(ids.contains(&id), "DAG walk missed {name}");
+        }
+        assert!(!walk.truncated, "walk fit inside the limit");
+    }
+
+    /// `base` is reachable down both sides of the merge; it must appear once.
+    #[test]
+    fn dag_walk_dedups_a_commit_reachable_from_both_sides() {
+        let store = test_store();
+        let base = commit_with(&store, "base", vec![]);
+        let left = commit_with(&store, "left", vec![base.id]);
+        let right = commit_with(&store, "right", vec![base.id]);
+        let merge = commit_with(&store, "merge", vec![left.id, right.id]);
+
+        let walk = store.list_commits_dag(&merge.id, 100).unwrap();
+        let n = walk.commits.iter().filter(|c| c.id == base.id).count();
+        assert_eq!(n, 1, "base reachable from both sides must appear once");
+        assert_eq!(walk.commits.len(), 4, "four distinct commits");
+    }
+
+    /// Truncation has to be distinguishable from completion, or a caller
+    /// cannot tell a small complete history from a large truncated one.
+    #[test]
+    fn dag_walk_reports_truncation_only_when_more_remained() {
+        let store = test_store();
+        let base = commit_with(&store, "base", vec![]);
+        let mid = commit_with(&store, "mid", vec![base.id]);
+        let tip = commit_with(&store, "tip", vec![mid.id]);
+
+        let capped = store.list_commits_dag(&tip.id, 2).unwrap();
+        assert_eq!(capped.commits.len(), 2);
+        assert!(capped.truncated, "stopped with a parent still unexplored");
+
+        let exact = store.list_commits_dag(&tip.id, 3).unwrap();
+        assert_eq!(exact.commits.len(), 3);
+        assert!(
+            !exact.truncated,
+            "a walk that consumed the whole DAG must NOT claim truncation, \
+             even when it used the limit exactly"
+        );
+    }
+
+    /// A pruned parent ends that edge; the rest of the DAG still walks.
+    /// This is the swept-store case, and it must not error.
+    #[test]
+    fn dag_walk_survives_a_pruned_parent() {
+        let store = test_store();
+        let missing = ObjectId::hash(b"swept-away");
+        let real = commit_with(&store, "real", vec![]);
+        // Merge whose first parent was garbage-collected.
+        let tip = commit_with(&store, "tip", vec![missing, real.id]);
+
+        let walk = store.list_commits_dag(&tip.id, 100).unwrap();
+        let ids: Vec<ObjectId> = walk.commits.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&tip.id));
+        assert!(
+            ids.contains(&real.id),
+            "the surviving edge must still be walked past a pruned parent"
+        );
+        assert!(
+            !ids.contains(&missing),
+            "a pruned commit cannot be returned"
+        );
+    }
+
+    #[test]
+    fn dag_walk_on_a_single_commit_is_complete() {
+        let store = test_store();
+        let only = commit_with(&store, "only", vec![]);
+        let walk = store.list_commits_dag(&only.id, 100).unwrap();
+        assert_eq!(walk.commits.len(), 1);
+        assert!(!walk.truncated);
+    }
+
+    #[test]
+    fn dag_walk_from_a_missing_commit_is_empty_not_an_error() {
+        let store = test_store();
+        let walk = store
+            .list_commits_dag(&ObjectId::hash(b"never-existed"), 100)
+            .unwrap();
+        assert!(walk.commits.is_empty());
+        assert!(!walk.truncated);
+    }
+
     #[test]
     fn test_object_roundtrip() {
         let store = test_store();
