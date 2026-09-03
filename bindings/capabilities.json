@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_core_version": "1.1.2",
+  "reviewed_core_version": "1.2.0",
   "advanced_abi_contract_version": 1,
   "capabilities": [
     "repository_base",
@@ -63,58 +63,187 @@
     "rust": {
       "source": "crates/agentstategraph",
       "tier": "reference",
-      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer"],
-      "partial": ["schema_registration"],
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint",
+        "migration",
+        "speculation",
+        "commit_query",
+        "sessions",
+        "epochs",
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer"
+      ],
+      "partial": [
+        "schema_registration"
+      ],
       "unavailable": []
     },
     "c": {
       "source": "crates/agentstategraph-ffi",
       "tier": "native-contract",
-      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer"],
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint",
+        "migration",
+        "speculation",
+        "commit_query",
+        "sessions",
+        "epochs",
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer"
+      ],
       "partial": [],
-      "unavailable": ["schema_registration"]
+      "unavailable": [
+        "schema_registration"
+      ]
     },
     "swift": {
       "source": "bindings/swift",
       "tier": "release-required",
-      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer"],
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint",
+        "migration",
+        "speculation",
+        "commit_query",
+        "sessions",
+        "epochs",
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer"
+      ],
       "partial": [],
-      "unavailable": ["schema_registration"]
+      "unavailable": [
+        "schema_registration"
+      ]
     },
     "python": {
       "source": "bindings/python",
       "tier": "tracked",
-      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs"],
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint",
+        "migration",
+        "speculation",
+        "commit_query",
+        "sessions",
+        "epochs"
+      ],
       "partial": [],
-      "unavailable": ["namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+      "unavailable": [
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer",
+        "schema_registration"
+      ]
     },
     "typescript": {
       "source": "bindings/typescript",
       "tier": "tracked",
-      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "commit_query", "sessions", "epochs"],
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint",
+        "migration",
+        "speculation",
+        "commit_query",
+        "sessions",
+        "epochs"
+      ],
       "partial": [],
-      "unavailable": ["namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+      "unavailable": [
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer",
+        "schema_registration"
+      ]
     },
     "wasm": {
       "source": "crates/agentstategraph-wasm",
       "tier": "tracked",
-      "full": ["repository_base", "tasks", "policy", "taint", "migration", "speculation", "sessions", "epochs"],
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint",
+        "migration",
+        "speculation",
+        "sessions",
+        "epochs"
+      ],
       "partial": [],
-      "unavailable": ["commit_query", "namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+      "unavailable": [
+        "commit_query",
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer",
+        "schema_registration"
+      ]
     },
     "go": {
       "source": "bindings/go",
       "tier": "tracked",
-      "full": ["repository_base", "tasks", "policy", "taint", "migration"],
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint",
+        "migration"
+      ],
       "partial": [],
-      "unavailable": ["speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+      "unavailable": [
+        "speculation",
+        "commit_query",
+        "sessions",
+        "epochs",
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer",
+        "schema_registration"
+      ]
     },
     "dotnet": {
       "source": "bindings/dotnet",
       "tier": "tracked",
-      "full": ["repository_base", "tasks", "policy", "taint"],
-      "partial": ["migration"],
-      "unavailable": ["speculation", "commit_query", "sessions", "epochs", "namespaces", "cas_writes", "merge_safety", "explorer", "schema_registration"]
+      "full": [
+        "repository_base",
+        "tasks",
+        "policy",
+        "taint"
+      ],
+      "partial": [
+        "migration"
+      ],
+      "unavailable": [
+        "speculation",
+        "commit_query",
+        "sessions",
+        "epochs",
+        "namespaces",
+        "cas_writes",
+        "merge_safety",
+        "explorer",
+        "schema_registration"
+      ]
     }
   }
 }
