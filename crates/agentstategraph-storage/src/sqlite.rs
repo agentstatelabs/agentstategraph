@@ -19,9 +19,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
-    CommitStore, EpochStore, GcReachability, GcSweep, HistoryMilestoneRow, HistoryRollupRow,
-    ObjectStore, RefStore, SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
-    VacuumStats,
+    CommitStore, EpochStore, GcReachability, GcSweep, HISTORY_NAMESPACE_UNKNOWN,
+    HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore, SessionStore, StorageError,
+    StoreShape, TableBytes, TaintStore, VacuumStats,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -733,25 +733,41 @@ impl CommitStore for SqliteStorage {
             .unwrap_or(0);
 
         // Pull the next batch in rowid order. LEFT JOIN sessions to attribute a
-        // namespace when the commit was made inside a scoped session; commits
-        // with no session fall back to "default".
+        // namespace when the commit was made inside a scoped session.
+        //
+        // A commit with no session is attributed to `HISTORY_NAMESPACE_UNKNOWN`
+        // rather than to "default". The old fallback asserted a namespace it had
+        // not established: on a store where nothing writes sessions, EVERY commit
+        // was filed under "default" — measured on the AgentStateDeveloper store,
+        // all 39,446 of them, though ~35,000 belong to a different namespace
+        // entirely. Callers filtering by namespace silently got everything or
+        // nothing, and "default" is a real namespace name, so there was no way to
+        // tell a genuine attribution from a fallback.
+        //
+        // This does not make attribution correct, only honest. A commit carries
+        // no namespace — namespace lives on refs, so deriving it properly means a
+        // reachability walk or a new column on `commits`. Until then an
+        // unattributable commit says so.
         let batch: Vec<(i64, Vec<u8>, String)> = {
             let mut stmt = tx
                 .prepare(
-                    "SELECT c.rowid, c.data, COALESCE(s.scope_namespace, 'default') \
+                    "SELECT c.rowid, c.data, COALESCE(s.scope_namespace, ?3) \
                      FROM commits c \
                      LEFT JOIN sessions s ON c.session_id = s.id \
                      WHERE c.rowid > ?1 ORDER BY c.rowid LIMIT ?2",
                 )
                 .map_err(|e| StorageError::Backend(format!("history select: {}", e)))?;
             let rows = stmt
-                .query_map(params![cursor, batch_size], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
+                .query_map(
+                    params![cursor, batch_size, HISTORY_NAMESPACE_UNKNOWN],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
                 .map_err(|e| StorageError::Backend(format!("history query: {}", e)))?;
             let mut out = Vec::new();
             for r in rows {
@@ -3034,6 +3050,39 @@ mod tests {
             .unwrap();
         assert!(walk.commits.is_empty());
         assert!(!walk.truncated);
+    }
+
+    // --- history namespace attribution (plan asg-commit-dag-walk t-010) ----
+
+    /// A commit with no session must NOT be filed under "default", which is a
+    /// real namespace name and so indistinguishable from a real attribution.
+    ///
+    /// This is the case that matters: on the AgentStateDeveloper store nothing
+    /// writes sessions, so the old fallback filed all 39,446 commits under
+    /// "default" while ~35,000 of them belonged elsewhere.
+    #[test]
+    fn unattributable_commits_are_not_filed_under_default() {
+        let store = test_store();
+        let c = CommitBuilder::new(
+            ObjectId::hash(b"state"),
+            "agent/test",
+            Authority::simple("test"),
+            Intent::new(IntentCategory::Checkpoint, "no session"),
+        )
+        .build();
+        store.put_commit(&c).unwrap();
+
+        assert!(store.history_extract_batch(100).unwrap() > 0);
+        let rows = store.history_rollup().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].namespace, HISTORY_NAMESPACE_UNKNOWN,
+            "a commit with no session must say so, not claim 'default'"
+        );
+        assert_ne!(
+            rows[0].namespace, "default",
+            "the old fallback asserted a namespace it had not established"
+        );
     }
 
     #[test]

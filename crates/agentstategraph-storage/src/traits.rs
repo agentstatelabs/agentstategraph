@@ -213,6 +213,20 @@ pub struct GcSweep {
     pub deleted_target: i64,
 }
 
+/// Namespace recorded for a distilled commit whose namespace could not be
+/// established.
+///
+/// The history extractor attributes a commit through its session's
+/// `scope_namespace`. A commit made outside a scoped session has no such row,
+/// and the extractor used to fall back to `"default"` — which is itself a real
+/// namespace name, so a fallback was indistinguishable from a genuine
+/// attribution. On a store where nothing writes sessions that silently filed
+/// every commit under `"default"`.
+///
+/// Sentinel rather than NULL because `asg_history_commit_rollup.namespace` is
+/// `NOT NULL` and part of the primary key.
+pub const HISTORY_NAMESPACE_UNKNOWN: &str = "unattributed";
+
 /// Outcome of a full-DAG commit walk ([`CommitStore::list_commits_dag`]).
 // No `Eq`: `Commit` is only `PartialEq`.
 #[derive(Debug, Clone, Default, PartialEq)]
