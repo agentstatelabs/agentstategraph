@@ -3033,6 +3033,19 @@ mod tests {
             CommitOptions::new("agent/test", IntentCategory::Merge, "merge feature"),
         )
         .unwrap();
+
+        // Precondition: this must really be a two-parent merge. If the merge
+        // ever fast-forwards instead, every test below would pass for the
+        // wrong reason — `log` and `log_dag` agree on a linear chain.
+        let head = repo.resolve_ref("main").unwrap();
+        let merge_commit = repo.get_commit(&head).unwrap().unwrap();
+        assert_eq!(
+            merge_commit.parents.len(),
+            2,
+            "fixture must produce a real merge, got {} parent(s)",
+            merge_commit.parents.len()
+        );
+
         (repo, side)
     }
 
@@ -3169,6 +3182,89 @@ mod tests {
             ids.contains(&side),
             "paged query inherited the first-parent blind spot"
         );
+    }
+
+    /// The case the whole DAG-walk plan exists for, and the honest limit of
+    /// the fix: a commit no ref reaches is STILL not returned by `log_dag`.
+    ///
+    /// Walking every parent edge closes the merge-second-parent gap. It does
+    /// not, and cannot, close the unreachability gap — nothing links an
+    /// abandoned commit to the ref head. On the asd store that is 1,628
+    /// commits: `log` reached 4,268, a full DAG walk reaches no more, and the
+    /// store holds 5,896. Anything reporting "what would a prune take?" has
+    /// to compare the walk against the store's own total, which is why the
+    /// asd metrics endpoint reports `scanned` alongside `distilled`.
+    #[test]
+    fn log_dag_does_not_reach_commits_no_ref_points_at() {
+        let repo = test_repo();
+        repo.set("main", "/a", &Object::int(1), quick_opts("on main"))
+            .unwrap();
+        repo.branch("abandoned", "main").unwrap();
+        let orphan = repo
+            .set(
+                "abandoned",
+                "/b",
+                &Object::int(2),
+                quick_opts("abandoned work"),
+            )
+            .unwrap();
+
+        // Reachable while the branch exists.
+        let before: Vec<ObjectId> = repo
+            .log_dag("abandoned", 100)
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            before.contains(&orphan),
+            "precondition: reachable via its own ref"
+        );
+
+        repo.delete_branch("abandoned").unwrap();
+
+        let from_head: Vec<ObjectId> = repo
+            .log_dag("main", 100)
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            !from_head.contains(&orphan),
+            "a DAG walk from main cannot reach an abandoned commit — if this \
+             ever passes, the walk is following something other than parents"
+        );
+
+        // But it is still IN the store. This is the gap a prune estimate needs.
+        assert!(
+            repo.storage.get_commit(&orphan).unwrap().is_some(),
+            "the abandoned commit is still stored, merely unreachable"
+        );
+        let all = repo.storage.all_commit_ids().unwrap();
+        assert!(all.contains(&orphan), "all_commit_ids must still see it");
+        assert!(
+            all.len() > from_head.len(),
+            "store total ({}) must exceed what the head reaches ({}) — this \
+             difference is exactly what a prune would reclaim",
+            all.len(),
+            from_head.len()
+        );
+    }
+
+    /// A merge commit reachable down both sides must appear once, at the
+    /// Repository level too — dedup is in the storage default, but a future
+    /// backend override could lose it.
+    #[test]
+    fn log_dag_dedups_at_the_repository_level() {
+        let (repo, _) = repo_with_a_merge();
+        let walk = repo.log_dag("main", 100).unwrap();
+        let mut ids: Vec<ObjectId> = walk.commits.iter().map(|c| c.id).collect();
+        let total = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(total, ids.len(), "log_dag returned a commit twice");
     }
 
     #[test]
