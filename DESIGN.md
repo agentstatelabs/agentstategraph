@@ -303,3 +303,37 @@ The provenance the commit schema promises is provenance the store
 actually captures: no field is defined-but-dead without a deliberate
 decision, `intent_tree`'s doc matches its behavior, and the
 epoch-seal safety guard Plan B depends on is live.
+
+---
+
+## First-parent surfaces — which are deliberate, which are accidents
+
+`Repository::log` follows `parents[0]`. That is a legitimate thing to offer —
+git's own `log --first-parent` exists — but until `list_commits_dag` landed it
+was the *only* walk available, so several surfaces inherited it without ever
+choosing it. This records which is which, measured rather than assumed.
+
+**Measurement.** A fixture with a three-commit side branch merged into `main`:
+`log` returns **4** commits, `log_dag` returns **7**. All three side-branch
+commits are invisible to `log`. On the real asd store the same gap is 4,268
+reachable by `log` versus 5,896 in the store.
+
+Note what is *not* missed: a merge commit is itself on the first-parent line,
+so its `parents` — including the merged-in tip — are still visible to anything
+that dereferences them. What disappears is the branch's **interior**.
+
+| surface | uses | verdict |
+|---|---|---|
+| `extract_history` / the `asg_history_*` rollup | `FROM commits ORDER BY rowid` — no walk at all | **Correct by design.** Sees every commit including unreachable ones. This is why asd's rollup counted 5,896 while `log` reached 4,268. |
+| `log` | `parents[0]` | **Deliberate.** Documented, and left alone on purpose — widening it would change output for every existing caller. |
+| `intent_tree` | `log` for the population, then threads by `parent_intent` | **Mostly deliberate.** Its doc is explicit that it is not a lineage walk. But its *population* is still first-parent, so intents recorded on a merged-in branch never appear. |
+| `detect_timestamp_anomalies` | `log(ref, 100_000)` | **Accident, and the one that matters.** A security surface (threat model V4). It compares each commit against its parents, so `merge` vs the merged-in tip *is* checked — but pairs wholly inside a merged-in branch are never examined, because those commits never appear as the outer `commit`. Clock-rewind evidence on a side branch is invisible. |
+| `blame` | `log(ref, 1000)`, then `parents.first()` internally | **Accident.** A change made on a side branch is attributed to the merge commit rather than to the commit that made it. |
+| `commit_graph` | `log(ref, depth)` | **Accident, and self-contradictory.** It emits nodes carrying a `parents` array, so with a merge in range it produces edges pointing at nodes absent from its own node set — 4 nodes describing a 7-node graph. |
+| `stats` | `log(ref, 10000)` | **Accident.** Undercounts by whatever the branches hold. |
+| MCP `GET /log` | `Repository::log` | **Deliberate**, in that it mirrors `log`. Worth a `?dag=1` option rather than a change of meaning. |
+
+Fixing the four accidents is deliberately **not** bundled with the walk that
+makes fixing them possible: `blame` and `detect_timestamp_anomalies` change
+security- and attribution-relevant output, and that is a decision to take
+explicitly rather than as a side effect of a storage change.
