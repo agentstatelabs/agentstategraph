@@ -7,7 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-## [v1.2.0] — 2026-09-03
+## [v1.2.0] — 2026-09-02
 
 ### Added
 - **`CommitStore::list_commits_dag` and `Repository::log_dag` — a walk over every parent edge.** `list_commits` follows `parents[0]`, a first-parent line, so on any store with merges it silently under-reports; on the AgentStateDeveloper store it reached 4,268 of 5,896 commits. The new walk is breadth-first over all parents, deduplicated by id, and returns `CommitWalk { commits, truncated }` — `truncated` being the difference between "that is all of them" and "there are more", which the commit list alone cannot express. A parent absent from the store ends that edge and the walk continues, since a pruned commit is expected in a swept store rather than an error.
