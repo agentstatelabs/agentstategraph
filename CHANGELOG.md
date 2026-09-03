@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.0] — 2026-09-03
+
+### Added
+- **`CommitStore::list_commits_dag` and `Repository::log_dag` — a walk over every parent edge.** `list_commits` follows `parents[0]`, a first-parent line, so on any store with merges it silently under-reports; on the AgentStateDeveloper store it reached 4,268 of 5,896 commits. The new walk is breadth-first over all parents, deduplicated by id, and returns `CommitWalk { commits, truncated }` — `truncated` being the difference between "that is all of them" and "there are more", which the commit list alone cannot express. A parent absent from the store ends that edge and the walk continues, since a pruned commit is expected in a swept store rather than an error.
+
+  Implemented as a **default trait method** over `get_commit`, so all four backends gain it unchanged; a backend able to do it in one query may override. `list_commits` is deliberately untouched — a first-parent line is a defensible thing to want, and widening it in place would change output for every existing caller.
+
+  Note the limit, which is documented rather than glossed: this closes the merge-second-parent gap, not unreachability. A commit no ref points at is still not returned, because nothing links it to the head.
+
+### Fixed
+- **`query_commits_paged` was wrong twice over.** It called `log`, so a paged query never saw a merged-in side; and it scanned a hard-coded `10000` before filtering, so a caller asking for offset 12000 received an empty page indistinguishable from "no more commits". It now walks the DAG, and the bound follows the page (`COMMIT_QUERY_SCAN_FLOOR.max(offset + limit)`, exposed as `commit_query_scan`). Filtering remains in-memory, so N raw commits still do not guarantee N filtered ones — that limit is now stated at the constant instead of implied by a literal in the body.
+
+### Changed
+- **`cargo test --workspace` works on a developer machine again.** The Python bindings crate built a Rust test harness that could never run — `pyo3/extension-module` does not link libpython, so it aborted at load — and the crate has no `#[test]` at all. Marked `test = false`. Separately, `.cargo/config.toml.example` and a CONTRIBUTING section now document the `PYO3_PYTHON` pin needed to build the bindings against a Python newer than PyO3 supports; that file is gitignored and was previously referenced only in a CI comment.
+
+### Documentation
+- **DESIGN.md records which surfaces are first-parent by design and which by accident**, measured rather than assumed. `extract_history` reads the commits table directly and is unaffected. `detect_timestamp_anomalies` (a threat-model V4 surface), `blame`, `commit_graph` and `stats` inherited the first-parent line without choosing it; fixing them is filed separately, because two of them change security- and attribution-relevant output.
+
+
 ## [v1.1.2] — 2026-08-28
 
 ### Fixed
