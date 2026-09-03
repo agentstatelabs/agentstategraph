@@ -7,6 +7,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.1] — 2026-09-03
+
+### Fixed
+- **`detect_timestamp_anomalies` could not see clock-rewind evidence inside a merged-in branch.** It is a threat-model V4 surface and it walked `log`, i.e. first parents. A merge commit is itself on that line, so merge-vs-merged-tip was checked — but commits *interior* to a merged branch never appeared as the outer commit, so an agent backdating several commits before merging left no flag. It now walks the full DAG, and the `100_000` cap is **removed rather than raised**: this returns a plain `Vec`, so a truncated scan is indistinguishable from a clean one, and on a tamper check "I stopped looking" reported as "nothing found" is the failure mode worth paying to avoid.
+- **`blame` attributed a change made on a merged-in branch to the merge commit.** Two faults, and the second is the one that mattered. Walking the DAG alone would have introduced a different bug — the loop returns the first match in walk order, and a DAG walk is ordered by distance from the head rather than by time — so the walk is re-sorted by timestamp. Even then it still named the merge, because the comparison looked only at `parents.first()`: at a merge the value exists while the first parent lacks it, which read as "added here". A commit is now blamed only when **no** parent already held that value, which makes a merge transparent.
+- **`commit_graph` emitted edges pointing at nodes absent from its own node set** — measured, 4 nodes describing a 7-node graph — because it walked first parents while each node carries its full `parents` array.
+- **`stats` undercounted** by whatever the merged-in branches held.
+
+### Changed
+- **The history rollup no longer files unattributable commits under `"default"`.** The extractor derives a namespace from the commit's session, and a commit made outside a scoped session has none. The old fallback named `"default"`, which is itself a real namespace — so a fallback could not be told apart from a genuine attribution. On a store where nothing writes sessions that filed **every** commit under `"default"`; measured on the AgentStateDeveloper store, all 39,446 of them, though ~35,000 belong elsewhere. They now read `unattributed` (`HISTORY_NAMESPACE_UNKNOWN`, exported from `agentstategraph-storage`).
+
+  This makes attribution honest, not correct: a commit carries no namespace — namespace lives on refs — so deriving it properly still needs a reachability walk or a new column. Note the visible consequence, and that rows distilled before this release keep their old `"default"` value: clear `asg_history_meta.commit_cursor` and re-extract to normalise.
+
+
 ## [v1.2.0] — 2026-09-02
 
 ### Added
