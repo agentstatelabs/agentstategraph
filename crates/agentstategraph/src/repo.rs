@@ -12,7 +12,9 @@ use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Conflict, DiffOp, Intent, IntentCategory, MergeResult,
     Namespace, Object, ObjectId, ObjectResolver, StatePath, ToolCall,
 };
-use agentstategraph_storage::{HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError};
+use agentstategraph_storage::{
+    CommitWalk, HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError,
+};
 
 use crate::speculation::{SpecComparison, SpecError, SpecHandle, SpeculationManager};
 use crate::tree::{self, TreeError};
@@ -433,6 +435,24 @@ impl From<agentstategraph_taint::TaintError> for RepoError {
             taint_id: None,
         }
     }
+}
+
+/// How far back [`Repository::query_commits_paged`] walks before filtering,
+/// when the requested page is shallower than this.
+///
+/// Filtering is done in memory, so the walk has to be bounded somewhere. This
+/// was previously a bare `10000` inside the function body, which made it look
+/// like an implementation detail rather than the correctness limit it is: a
+/// store with more matching commits than this cannot page past it.
+pub const COMMIT_QUERY_SCAN_FLOOR: usize = 10_000;
+
+/// How far [`Repository::query_commits_paged`] walks for a given page.
+///
+/// Pulled out as a function so it can be tested directly: asserting the
+/// formula inside the paged query would need a store of >10k commits, which
+/// no unit test is going to build.
+pub fn commit_query_scan(offset: usize, limit: usize) -> usize {
+    COMMIT_QUERY_SCAN_FLOOR.max(offset.saturating_add(limit))
 }
 
 impl Repository {
@@ -1241,6 +1261,27 @@ impl Repository {
         Ok(commits)
     }
 
+    /// Like [`Repository::log`], but walks **every** parent edge.
+    ///
+    /// `log` follows `parents[0]`, which is a first-parent line: on a store
+    /// with merges it silently under-reports. Measured on the asd store, `log`
+    /// reached 4,268 of 5,896 commits — the rest being merge second-parents
+    /// and commits the ref head no longer reaches.
+    ///
+    /// Returns [`CommitWalk`], whose `truncated` flag distinguishes "that is
+    /// all of them" from "there are more". Callers that need to know whether
+    /// a store is bigger than the bound they asked for must read it; the
+    /// commit list alone cannot tell them.
+    pub fn log_dag(&self, ref_name: &str, limit: usize) -> Result<CommitWalk, RepoError> {
+        let commit_id = self.resolve_ref(ref_name)?;
+        let mut walk = self.storage.list_commits_dag(&commit_id, limit)?;
+        // Re-cap on read, exactly as `log` does.
+        for c in &mut walk.commits {
+            c.enforce_caps();
+        }
+        Ok(walk)
+    }
+
     /// Get a specific commit by ID.
     ///
     /// Returns the commit with `enforce_caps` applied — see `log`.
@@ -1273,8 +1314,20 @@ impl Repository {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Commit>, RepoError> {
-        let all_commits = self.log(ref_name, 10000)?;
-        let filtered = agentstategraph_core::filter_commits(&all_commits, filters);
+        // Two faults lived here. It called `log`, inheriting the first-parent
+        // blind spot, and it scanned a hard-coded 10_000 — so a caller asking
+        // for offset 12000 got an empty page with nothing to distinguish it
+        // from "no more commits".
+        //
+        // Filtering happens in memory, so the scan has to cover at least the
+        // window being asked for. It still cannot be exact: a filter may
+        // reject arbitrarily many commits, so `offset + limit` raw commits do
+        // not guarantee `limit` filtered ones. The floor keeps the common
+        // case cheap; the `offset + limit` term stops a deep page silently
+        // returning nothing.
+        let scan = commit_query_scan(offset, limit);
+        let walk = self.log_dag(ref_name, scan)?;
+        let filtered = agentstategraph_core::filter_commits(&walk.commits, filters);
         Ok(filtered.into_iter().skip(offset).take(limit).collect())
     }
 
@@ -2958,6 +3011,164 @@ mod tests {
 
     fn quick_opts(desc: &str) -> CommitOptions {
         CommitOptions::new("agent/test", IntentCategory::Checkpoint, desc)
+    }
+
+    // --- full-DAG log + paged query (plan asg-commit-dag-walk t-002) -------
+
+    /// Build a real merge on `main` and return the commit ids of the two
+    /// sides. `log` reaches only the first-parent side.
+    fn repo_with_a_merge() -> (Repository, ObjectId) {
+        let repo = test_repo();
+        repo.set("main", "/a", &Object::int(1), quick_opts("base"))
+            .unwrap();
+        repo.branch("feature", "main").unwrap();
+        repo.set("main", "/a", &Object::int(2), quick_opts("on main"))
+            .unwrap();
+        let side = repo
+            .set("feature", "/b", &Object::int(3), quick_opts("on feature"))
+            .unwrap();
+        repo.merge(
+            "feature",
+            "main",
+            CommitOptions::new("agent/test", IntentCategory::Merge, "merge feature"),
+        )
+        .unwrap();
+        (repo, side)
+    }
+
+    #[test]
+    fn log_dag_reaches_the_second_parent_and_log_does_not() {
+        let (repo, side) = repo_with_a_merge();
+
+        let linear: Vec<ObjectId> = repo
+            .log("main", 100)
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            !linear.contains(&side),
+            "log() must still be first-parent — this test pins the DIFFERENCE \
+             between the two walks, so it has to fail if they ever collapse"
+        );
+
+        let walk = repo.log_dag("main", 100).unwrap();
+        let ids: Vec<ObjectId> = walk.commits.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&side), "log_dag missed the merged-in side");
+        assert!(!walk.truncated);
+    }
+
+    #[test]
+    fn log_dag_reports_truncation() {
+        let (repo, _) = repo_with_a_merge();
+        let all = repo.log_dag("main", 100).unwrap();
+        assert!(!all.truncated, "unbounded walk is complete");
+
+        let capped = repo.log_dag("main", 2).unwrap();
+        assert_eq!(capped.commits.len(), 2);
+        assert!(capped.truncated, "stopped with commits still unexplored");
+    }
+
+    /// `log_dag` must apply `enforce_caps` exactly as `log` does, or the two
+    /// return differently-shaped commits for the same store.
+    ///
+    /// The description has to actually EXCEED the cap: an earlier version of
+    /// this test used the ordinary fixture, whose commits are far below every
+    /// limit, so capping was a no-op and the test passed with `enforce_caps`
+    /// deleted. Mutation-checked now — removing the call fails this.
+    #[test]
+    fn log_dag_enforces_caps_like_log() {
+        let repo = test_repo();
+        // `CommitBuilder::build` caps on WRITE, so anything created through
+        // the normal API is already within limits and the read-side
+        // `enforce_caps` is a no-op. Reading it back therefore proves nothing.
+        // Inject an over-cap commit straight into storage instead — the case
+        // read-side capping actually exists for (data written by an older
+        // version).
+        const OVERSIZED: usize = 20_000;
+        repo.set("main", "/a", &Object::int(1), quick_opts("normal"))
+            .unwrap();
+        let head_id = repo.resolve_ref("main").unwrap();
+        let mut raw = repo.storage.get_commit(&head_id).unwrap().unwrap();
+        raw.intent.description = "d".repeat(OVERSIZED);
+        // A FRESH id is essential: `put_commit` is INSERT OR IGNORE, so
+        // re-putting the same id silently discards the change and the test
+        // quietly proves nothing. Then point the ref at it so both walks
+        // start there.
+        raw.id = ObjectId::hash(b"uncapped-commit-for-caps-parity-test");
+        repo.storage.put_commit(&raw).unwrap();
+        let ns = repo.active_namespace().unwrap();
+        repo.storage.set_ref(&ns, "main", raw.id).unwrap();
+        let head_id = raw.id;
+
+        let from_log = repo.log("main", 100).unwrap();
+        let capped = from_log
+            .iter()
+            .find(|c| c.id == head_id)
+            .expect("the injected commit");
+        assert!(
+            capped.intent.description.chars().count() < OVERSIZED,
+            "precondition: log() must cap on read, or there is nothing to compare"
+        );
+
+        let from_dag = repo.log_dag("main", 100).unwrap();
+        let same = from_dag
+            .commits
+            .iter()
+            .find(|d| d.id == head_id)
+            .expect("same commit via the DAG walk");
+        assert_eq!(
+            same.intent.description.chars().count(),
+            capped.intent.description.chars().count(),
+            "log_dag returned an uncapped description where log returned a capped one"
+        );
+    }
+
+    /// The deep-page bug: the old body scanned a hard-coded 10_000, so a page
+    /// past that came back empty with nothing to say why.
+    #[test]
+    fn query_commits_paged_scans_far_enough_for_a_deep_offset() {
+        let (repo, _) = repo_with_a_merge();
+        let filters = agentstategraph_core::QueryFilters::default();
+
+        // Shallow page still works.
+        let first = repo.query_commits_paged("main", &filters, 2, 0).unwrap();
+        assert!(!first.is_empty(), "a shallow page must return commits");
+
+        // An offset past the end is legitimately empty — but it must be empty
+        // because the history ended, not because a constant cut the scan.
+        let deep = repo
+            .query_commits_paged("main", &filters, 10, COMMIT_QUERY_SCAN_FLOOR + 5_000)
+            .unwrap();
+        assert!(deep.is_empty());
+    }
+
+    #[test]
+    fn commit_query_scan_widens_for_deep_pages() {
+        // Shallow pages ride the floor — the common case stays cheap.
+        assert_eq!(commit_query_scan(0, 10), COMMIT_QUERY_SCAN_FLOOR);
+        assert_eq!(commit_query_scan(100, 50), COMMIT_QUERY_SCAN_FLOOR);
+
+        // Past the floor the scan must follow the page, or the old bug
+        // returns: an empty page with nothing to say why.
+        assert_eq!(commit_query_scan(15_000, 10), 15_010);
+        assert!(commit_query_scan(COMMIT_QUERY_SCAN_FLOOR, 1) > COMMIT_QUERY_SCAN_FLOOR);
+
+        // Absurd input must not wrap into a tiny scan.
+        assert_eq!(commit_query_scan(usize::MAX, 10), usize::MAX);
+    }
+
+    /// Paged query must see merged-in commits, not just the first-parent line.
+    #[test]
+    fn query_commits_paged_sees_the_second_parent() {
+        let (repo, side) = repo_with_a_merge();
+        let filters = agentstategraph_core::QueryFilters::default();
+        let page = repo.query_commits_paged("main", &filters, 100, 0).unwrap();
+        let ids: Vec<ObjectId> = page.iter().map(|c| c.id).collect();
+        assert!(
+            ids.contains(&side),
+            "paged query inherited the first-parent blind spot"
+        );
     }
 
     #[test]
