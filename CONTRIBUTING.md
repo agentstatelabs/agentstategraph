@@ -24,6 +24,27 @@ that's the mirror model working — not a rejection.
 3. **Run tests**: `cargo test`
 4. **Run an example**: `cargo run --example getting_started -p agentstategraph`
 
+### Building the Python bindings (optional)
+
+`cargo test` and `cargo build` need nothing extra. Building the
+`agentstategraph-python` crate does, if your default `python3` is newer than
+the PyO3 release supports — PyO3 0.24 tops out at Python 3.13, and Homebrew's
+`python3` is already 3.14, which fails in pyo3-ffi's build script with:
+
+```
+error: the configured Python interpreter version (3.14) is newer than
+       PyO3's maximum supported version (3.13)
+```
+
+Copy `.cargo/config.toml.example` to `.cargo/config.toml` and point
+`PYO3_PYTHON` at a supported interpreter (`brew install python@3.13`). That
+file is gitignored because the path is machine-specific; CI sets the variable
+itself.
+
+The bindings are tested from Python (`bindings/python/tests/*.py`), not from
+Rust — that crate builds no Rust test harness, because `pyo3/extension-module`
+does not link libpython and such a harness aborts on load.
+
 ## Project Structure
 
 ```
