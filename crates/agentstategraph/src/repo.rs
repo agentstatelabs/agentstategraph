@@ -1344,38 +1344,63 @@ impl Repository {
         ref_name: &str,
         path: &str,
     ) -> Result<agentstategraph_core::BlameEntry, RepoError> {
-        let commits = self.log(ref_name, 1000)?;
+        // DAG walk for the population, then re-sorted by time.
+        //
+        // `log` missed changes made on a merged-in branch, attributing them to
+        // the merge commit instead of the commit that made them. But swapping
+        // in `log_dag` alone would have been a different bug: this loop returns
+        // the FIRST match in walk order, and a DAG walk is ordered by distance
+        // from the head, not by time — so blame could return a commit that is
+        // nearer in hops yet older. Sorting restores the property the old
+        // first-parent order gave for free.
+        //
+        // Timestamps are self-reported, and `detect_timestamp_anomalies` exists
+        // because they can be rewound. Blame is a question about time, so it has
+        // to trust them; a store failing that check should not be trusted here
+        // either.
+        let mut commits = self.log_dag(ref_name, 1000)?.commits;
+        commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         let state_path = StatePath::parse(path)
             .map_err(|e| RepoError::Tree(tree::TreeError::PathNotFound(e.to_string())))?;
 
-        // Walk commits and find the first one where the value at this path differs from its parent
+        // The most recent commit that INTRODUCED this value — meaning no parent
+        // of it already had that same value.
+        //
+        // Comparing against `parents.first()` alone was the other half of the
+        // first-parent bug, and switching the walk above would not have fixed
+        // it. At a merge the value exists but the first parent (the target
+        // branch) lacks it, so the old `(Some, None)` arm read that as "added
+        // here" and blamed the merge rather than the commit on the branch that
+        // actually set it. Checking EVERY parent makes a merge transparent: the
+        // side it came from already holds the value, so the merge did not
+        // introduce it.
         for commit in &commits {
-            if commit.parents.is_empty() {
-                // Initial commit — this is where everything was "set"
-                if tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path).is_ok() {
-                    return self.blame_entry_for(path, commit);
-                }
-            } else if let Some(parent_id) = commit.parents.first()
-                && let Some(mut parent) = self.storage.get_commit(parent_id)?
-            {
-                // Re-cap on read — see `Commit::enforce_caps`.
-                parent.enforce_caps();
-                let current_val =
-                    tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path);
-                let parent_val =
-                    tree::tree_get(self.storage.as_ref(), &parent.state_root, &state_path);
+            let Ok(curr) = tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path)
+            else {
+                continue; // path absent here; cannot be where it was introduced
+            };
 
-                // If the value is different (or didn't exist in parent), this commit is the blame target
-                match (current_val.ok(), parent_val.ok()) {
-                    (Some(curr), Some(prev)) if curr != prev => {
-                        return self.blame_entry_for(path, commit);
+            if commit.parents.is_empty() {
+                // Initial commit — this is where everything was "set".
+                return self.blame_entry_for(path, commit);
+            }
+
+            let mut introduced_here = true;
+            for parent_id in &commit.parents {
+                if let Some(mut parent) = self.storage.get_commit(parent_id)? {
+                    // Re-cap on read — see `Commit::enforce_caps`.
+                    parent.enforce_caps();
+                    if let Ok(prev) =
+                        tree::tree_get(self.storage.as_ref(), &parent.state_root, &state_path)
+                        && prev == curr
+                    {
+                        introduced_here = false;
+                        break;
                     }
-                    (Some(_), None) => {
-                        // Value was added in this commit
-                        return self.blame_entry_for(path, commit);
-                    }
-                    _ => continue,
                 }
+            }
+            if introduced_here {
+                return self.blame_entry_for(path, commit);
             }
         }
 
@@ -1434,9 +1459,24 @@ impl Repository {
         &self,
         ref_name: &str,
     ) -> Result<Vec<(ObjectId, String)>, RepoError> {
-        let commits = self.log(ref_name, 100_000)?;
+        // Walk the whole DAG, uncapped, and both choices are deliberate.
+        //
+        // `log` follows first parents, so a (child, parent) pair wholly INSIDE
+        // a merged-in branch was never examined — those commits never appear as
+        // the outer `commit`. Merge-vs-merged-tip was checked, which is why the
+        // gap is easy to miss: an agent that backdated several commits on a
+        // branch before merging left no flag at all.
+        //
+        // The cap is gone rather than raised. This returns a plain Vec, so a
+        // truncated scan is indistinguishable from a clean one — and on a
+        // tamper check, "I stopped looking" reported as "nothing found" is the
+        // one failure mode worth spending time to avoid. The walk is bounded by
+        // the store either way; `usize::MAX` only removes the arbitrary 100_000
+        // that used to sit here, which the DAG walk would reach sooner than the
+        // first-parent line did.
+        let walk = self.log_dag(ref_name, usize::MAX)?;
         let mut findings = Vec::new();
-        for commit in &commits {
+        for commit in &walk.commits {
             for parent_id in &commit.parents {
                 if let Some(mut parent) = self.storage.get_commit(parent_id)? {
                     parent.enforce_caps();
@@ -1908,7 +1948,9 @@ impl Repository {
 
     /// Get summary statistics for a ref.
     pub fn stats(&self, ref_name: &str) -> Result<serde_json::Value, RepoError> {
-        let commits = self.log(ref_name, 10000)?;
+        // Counted the first-parent line only, so every figure here undercounted
+        // by whatever the merged-in branches held.
+        let commits = self.log_dag(ref_name, 10000)?.commits;
         let branches = self.list_branches(None)?;
         let paths = self.list_paths(ref_name, "/", Some(100))?;
         let epochs = self.list_epochs()?;
@@ -2370,7 +2412,12 @@ impl Repository {
         ref_name: &str,
         depth: usize,
     ) -> Result<Vec<serde_json::Value>, RepoError> {
-        let commits = self.log(ref_name, depth)?;
+        // Each node carries its `parents`, so a first-parent walk emitted edges
+        // pointing at nodes absent from its own node set — measured, 4 nodes
+        // describing a 7-node graph. A renderer then either drops those edges
+        // or invents placeholder nodes. `depth` is caller-supplied, so the
+        // bound stays explicit.
+        let commits = self.log_dag(ref_name, depth)?.commits;
         let nodes: Vec<serde_json::Value> = commits
             .iter()
             .map(|c| {
@@ -3265,6 +3312,137 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(total, ids.len(), "log_dag returned a commit twice");
+    }
+
+    /// The security gap t-004 found: clock-rewind evidence INSIDE a merged-in
+    /// branch was invisible, because `log` never yielded those commits as the
+    /// outer `commit`. Merge-vs-merged-tip was always checked, so a test that
+    /// only backdates the branch tip passes either way and proves nothing.
+    ///
+    /// Injection is fiddly for two reasons, both learned the hard way:
+    /// `CommitBuilder::build` stamps `Utc::now()`, so a backdated commit cannot
+    /// be created through the normal API; and `put_commit` is INSERT OR IGNORE,
+    /// so re-putting under an existing id silently discards the write.
+    #[test]
+    fn timestamp_anomalies_are_found_inside_a_merged_branch() {
+        let repo = test_repo();
+        repo.set("main", "/a", &Object::int(1), quick_opts("base"))
+            .unwrap();
+        repo.branch("feature", "main").unwrap();
+        let s1 = repo
+            .set("feature", "/b", &Object::int(1), quick_opts("side 1"))
+            .unwrap();
+        let s2 = repo
+            .set("feature", "/b", &Object::int(2), quick_opts("side 2"))
+            .unwrap();
+
+        // Backdate s2 so it precedes its own parent s1 — a rewind wholly inside
+        // the branch. Fresh id, and the branch ref repointed at it.
+        let mut rewound = repo.storage.get_commit(&s2).unwrap().unwrap();
+        rewound.timestamp =
+            repo.storage.get_commit(&s1).unwrap().unwrap().timestamp - chrono::Duration::hours(6);
+        rewound.id = ObjectId::hash(b"backdated-interior-commit");
+        repo.storage.put_commit(&rewound).unwrap();
+        let ns = repo.active_namespace().unwrap();
+        repo.storage.set_ref(&ns, "feature", rewound.id).unwrap();
+
+        repo.set("main", "/a", &Object::int(2), quick_opts("main moves"))
+            .unwrap();
+        repo.merge(
+            "feature",
+            "main",
+            CommitOptions::new("agent/test", IntentCategory::Merge, "merge feature"),
+        )
+        .unwrap();
+
+        // Precondition: the first-parent walk cannot see the rewound commit,
+        // so this test is exercising the gap rather than something incidental.
+        let linear: Vec<ObjectId> = repo
+            .log("main", 1000)
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            !linear.contains(&rewound.id),
+            "precondition: log() must not reach the branch interior"
+        );
+
+        let found = repo.detect_timestamp_anomalies("main").unwrap();
+        assert!(
+            found.iter().any(|(id, _)| *id == rewound.id),
+            "the rewound commit inside the merged branch was not flagged; got {found:?}"
+        );
+    }
+
+    /// A graph whose edges name nodes it does not contain is not a graph.
+    #[test]
+    fn commit_graph_contains_every_node_its_edges_name() {
+        let (repo, side) = repo_with_a_merge();
+        let nodes = repo.commit_graph("main", 100).unwrap();
+        let ids: std::collections::HashSet<String> = nodes
+            .iter()
+            .map(|n| n["full_id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            ids.contains(&side.to_string()),
+            "the merged-in side is missing from the node set"
+        );
+        for n in &nodes {
+            for p in n["parents"].as_array().unwrap() {
+                let short = p.as_str().unwrap();
+                assert!(
+                    ids.iter().any(|id| id.starts_with(short)),
+                    "edge points at {short}, which is not in the node set"
+                );
+            }
+        }
+    }
+
+    /// `blame` must name the commit that made the change, not the merge that
+    /// brought it in — and must still prefer the most RECENT change, which is
+    /// why the DAG walk is re-sorted by time.
+    #[test]
+    fn blame_attributes_a_change_made_on_a_merged_branch() {
+        let repo = test_repo();
+        repo.set("main", "/a", &Object::int(1), quick_opts("base"))
+            .unwrap();
+        repo.branch("feature", "main").unwrap();
+        let changer = repo
+            .set(
+                "feature",
+                "/target",
+                &Object::int(42),
+                quick_opts("set on branch"),
+            )
+            .unwrap();
+        repo.set("main", "/other", &Object::int(9), quick_opts("main moves"))
+            .unwrap();
+        repo.merge(
+            "feature",
+            "main",
+            CommitOptions::new("agent/test", IntentCategory::Merge, "merge feature"),
+        )
+        .unwrap();
+
+        let entry = repo.blame("main", "/target").unwrap();
+        assert_eq!(
+            entry.commit_id,
+            changer.short(),
+            "blame named the merge commit rather than the commit that set the value"
+        );
+    }
+
+    #[test]
+    fn stats_counts_merged_in_commits() {
+        let (repo, _) = repo_with_a_merge();
+        let linear = repo.log("main", 1000).unwrap().len();
+        let stats = repo.stats("main").unwrap();
+        let counted = stats["commit_count"].as_u64().unwrap() as usize;
+        assert!(
+            counted > linear,
+            "stats counted {counted}, no more than the first-parent line's {linear}"
+        );
     }
 
     #[test]
@@ -4860,8 +5038,21 @@ mod tests {
         assert_eq!(bucket("alice", "Refine"), Some(2));
         assert_eq!(bucket("bob", "Fix"), Some(1));
         assert_eq!(bucket("alice", "Checkpoint"), Some(1));
-        // No sessions → everything attributes to the "default" namespace.
-        assert!(rollup.iter().all(|r| r.namespace == "default"));
+        // No sessions → nothing can be attributed, and the rollup now SAYS so
+        // rather than claiming "default".
+        //
+        // This assertion used to read `== "default"`, which encoded the old
+        // fallback as intended behaviour. It was deliberate but wrong in effect:
+        // "default" is itself a real namespace, so a fallback was
+        // indistinguishable from a genuine attribution. On a store where nothing
+        // writes sessions that filed every commit under "default" — measured on
+        // the AgentStateDeveloper store, all 39,446, though ~35,000 belong to
+        // another namespace.
+        assert!(
+            rollup
+                .iter()
+                .all(|r| r.namespace == agentstategraph_storage::HISTORY_NAMESPACE_UNKNOWN)
+        );
 
         let miles = repo.history_milestones(100).unwrap();
         assert!(
