@@ -28,7 +28,7 @@ conditions.
 
 - **Through v0.3.5-beta.1** — MIT OR Apache-2.0.
 - **v0.3.5-beta.2 through v0.9.6** — Business Source License 1.1 (BUSL-1.1),
-  with a four-year automatic conversion to Apache-2.0.
+  with an 18-month automatic conversion to Apache-2.0.
 - **From the relicensing commit onward** — MIT OR Apache-2.0, returning the
   project to a fully permissive license. This grant also applies to the
   prior BUSL-licensed releases, so every published version is available under
