@@ -146,9 +146,20 @@ pub struct HistoryRollupRow {
     pub last_ts: String,
 }
 
-/// One milestone on the distilled history timeline (Plan A t-001). `state_root`
-/// (Plan A t-005) names the snapshot the milestone preserves — the retention
-/// hook Plan B's GC keeps reachable; `None` only for rows written before t-005.
+/// One milestone on the distilled history timeline (Plan A t-001).
+///
+/// `state_root` (Plan A t-005) names the snapshot the milestone preserves — the
+/// retention hook Plan B's GC keeps reachable. It is `None` for a milestone that
+/// pins nothing, which is the default: a checkpoint pins its snapshot only when
+/// its intent carries `TAG_PIN_STATE`. (Rows written before t-005 are also
+/// `None`, for the older reason that the column did not exist.) An unpinned
+/// milestone is still a full timeline entry; it just names no snapshot, so a
+/// sweep may reclaim the objects behind it.
+///
+/// `git_sha` is the external revision the commit corresponds to, lifted from the
+/// intent's `TAG_GIT_REVISION` tag. It is what keeps an unpinned milestone
+/// actionable: the snapshot is gone, but the revision that produced it is
+/// recorded, so derived state can be rebuilt from source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryMilestoneRow {
     pub commit_id: ObjectId,
@@ -159,6 +170,7 @@ pub struct HistoryMilestoneRow {
     pub agent_id: String,
     pub description: String,
     pub state_root: Option<ObjectId>,
+    pub git_sha: Option<String>,
 }
 
 /// Per-table on-disk size (Plan A t-003), largest first.
