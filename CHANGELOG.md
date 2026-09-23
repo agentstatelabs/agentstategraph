@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.2] — 2026-09-23
+
+### Changed
+- **A `Checkpoint` no longer pins its `state_root` unless it asks to.** Distillation was doing two opposing things at once: `asg_history_commit_rollup` *replaced* raw state so a sweep could reclaim it, while `asg_history_milestone` recorded that state's root — and `history_retained_state_roots()` feeds those straight into the GC keep-set. For a checkpoint, distilling was therefore what created the retention, and the dry-run could report "safe, signal captured" while the keep-set it fed covered nearly the whole store.
+
+  That is harmless when checkpoints are rare and deliberate — `agentstatedeveloper-mcp` sizes the milestone table at "~95" rows — but a consumer that checkpoints on every routine run pins one full state tree per run. Measured on a field store: 1,072,131 commits and 5,709,266 objects, where 1,503 milestones held ~5.3M objects reachable. A GC dry-run could reclaim 3.4%; walking from the live ref tips alone showed the working set was 196,611 objects, so 96.6% was otherwise dead and unreclaimable.
+
+  Pinning is now opt-in via `TAG_PIN_STATE`. An untagged checkpoint still earns a full milestone row — timeline, description, facets, `history_report` — it simply names no snapshot, so a sweep may reclaim the objects behind it. Tag a checkpoint only when the snapshot itself must stay materializable: a release, a ratified baseline, a human-named marker.
+
+  **This changes the default for every consumer**, including checkpoints a consumer does not emit itself, such as the engine's own "Initialize empty state". Ref tips and sealed-epoch commits are untouched, so current state and the epoch-seal invariant are unaffected. Existing milestone rows keep whatever they were distilled with; the extractor cursor will not revisit them.
+
+### Added
+- **`TAG_GIT_REVISION` and a `git_sha` column on `asg_history_milestone`.** This is what keeps an unpinned milestone actionable: the snapshot is reclaimable, but the revision it was derived from is recorded, so derived state can be rebuilt from source rather than restored. A commit tagged `git:<sha>` has the value lifted onto its milestone row and surfaced in `history_report`. Prefer the full hash — an abbreviation can stop resolving uniquely, and this value has to outlive the snapshot it replaces.
+
+  Added migration-safely, mirroring the Plan A t-005 `state_root` pattern; rows distilled before it keep `NULL`.
+
+  Both constants are exported from `agentstategraph-core` so producers and the extractor share one vocabulary instead of a string literal in each repository.
+
+
 ## [v1.2.1] — 2026-09-03
 
 ### Fixed
