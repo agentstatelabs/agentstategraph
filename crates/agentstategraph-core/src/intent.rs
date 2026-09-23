@@ -24,6 +24,36 @@ pub type SessionId = String;
 pub type Principal = String;
 
 // ---------------------------------------------------------------------------
+// Well-known intent tags
+// ---------------------------------------------------------------------------
+
+/// Opts a [`IntentCategory::Checkpoint`] commit into pinning its `state_root`
+/// on the distilled milestone row, which keeps that snapshot reachable through
+/// a GC sweep.
+///
+/// Pinning is **opt-in**. A checkpoint without this tag still earns a milestone
+/// row — the timeline entry, its description and its [`TAG_GIT_REVISION`]
+/// provenance all survive — but it names no snapshot, so a sweep is free to
+/// reclaim the objects behind it. That default is what keeps machine-generated
+/// checkpoints (a re-index, a sidecar hydrate) from pinning a full state tree
+/// apiece; without it a store accumulates one retained snapshot per routine run
+/// and almost nothing is ever reclaimable.
+///
+/// Tag a checkpoint with this only when the snapshot itself must stay
+/// materializable — a release, a ratified baseline, a human-named marker.
+pub const TAG_PIN_STATE: &str = "asg:pin-state";
+
+/// Prefix for the external VCS revision a commit corresponds to, e.g.
+/// `git:1a2b3c...`. The distilled milestone row lifts the value into its
+/// `git_sha` column.
+///
+/// This is what makes an unpinned milestone useful: the snapshot is gone, but
+/// the revision that produced it is recorded, so derived state can be rebuilt
+/// from source at that revision. Prefer the full hash — an abbreviation can
+/// stop being unique as a repository grows.
+pub const TAG_GIT_REVISION: &str = "git:";
+
+// ---------------------------------------------------------------------------
 // Intent
 // ---------------------------------------------------------------------------
 

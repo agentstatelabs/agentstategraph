@@ -2098,6 +2098,7 @@ impl Repository {
                     "agent": m.agent_id,
                     "description": m.description,
                     "state_root": m.state_root.as_ref().map(|r| r.short()),
+                    "git_sha": m.git_sha,
                 })
             })
             .collect();
@@ -3047,6 +3048,7 @@ impl<'a> ObjectResolver for StorageResolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentstategraph_core::{TAG_GIT_REVISION, TAG_PIN_STATE};
     use agentstategraph_storage::SqliteStorage;
 
     fn test_repo() -> Repository {
@@ -5212,13 +5214,15 @@ mod tests {
     #[test]
     fn test_history_retention_hooks() {
         let repo = test_repo();
-        // A Checkpoint (milestone) and a couple of plain edits.
+        // A Checkpoint that opts into pinning its snapshot, plus a couple of
+        // plain edits. Pinning is opt-in: see `test_checkpoint_pins_state_only_when_tagged`.
         let cp = repo
             .set(
                 "main",
                 "/a",
                 &Object::string("1"),
-                CommitOptions::new("alice", IntentCategory::Checkpoint, "ship"),
+                CommitOptions::new("alice", IntentCategory::Checkpoint, "ship")
+                    .with_tags(vec![TAG_PIN_STATE.to_string()]),
             )
             .unwrap();
         let refine = repo
@@ -5260,6 +5264,85 @@ mod tests {
             .find(|m| m["description"] == "ship")
             .unwrap();
         assert_eq!(ship["state_root"], cp_commit.state_root.short());
+    }
+
+    /// Pinning a snapshot is opt-in. A routine checkpoint — a re-index, a
+    /// sidecar hydrate — still earns its place on the milestone timeline, but
+    /// it must not pin a state tree: doing that on every run is what grows a
+    /// store into millions of objects with nothing reclaimable. What it carries
+    /// instead is the revision it came from, so the state can be rebuilt.
+    #[test]
+    fn test_checkpoint_pins_state_only_when_tagged() {
+        let repo = test_repo();
+
+        let routine = repo
+            .set(
+                "main",
+                "/a",
+                &Object::string("1"),
+                CommitOptions::new("asd", IntentCategory::Checkpoint, "asd index: 9 symbols")
+                    .with_tags(vec![format!("{TAG_GIT_REVISION}c0ffee1234567890")]),
+            )
+            .unwrap();
+        let pinned = repo
+            .set(
+                "main",
+                "/b",
+                &Object::string("2"),
+                CommitOptions::new("alice", IntentCategory::Checkpoint, "v1.0 release")
+                    .with_tags(vec![TAG_PIN_STATE.to_string()]),
+            )
+            .unwrap();
+        repo.extract_history(100).unwrap();
+
+        let routine_commit = repo.get_commit(&routine).unwrap().unwrap();
+        let pinned_commit = repo.get_commit(&pinned).unwrap().unwrap();
+
+        // Only the tagged checkpoint is a GC root.
+        let roots = repo.history_retained_state_roots().unwrap();
+        assert!(
+            roots.contains(&pinned_commit.state_root),
+            "a checkpoint tagged {TAG_PIN_STATE} must pin its snapshot"
+        );
+        assert!(
+            !roots.contains(&routine_commit.state_root),
+            "an untagged checkpoint must not pin a snapshot — that is the \
+             retention leak this default exists to prevent"
+        );
+
+        // Both are still distilled, and both still appear on the timeline: the
+        // routine one is a real milestone, it just names no snapshot.
+        assert!(repo.history_is_distilled(&routine).unwrap());
+        assert!(repo.history_is_distilled(&pinned).unwrap());
+        let milestones = repo.history_milestones(50).unwrap();
+        let routine_row = milestones
+            .iter()
+            .find(|m| m.commit_id == routine)
+            .expect("routine checkpoint still earns a milestone row");
+        let pinned_row = milestones
+            .iter()
+            .find(|m| m.commit_id == pinned)
+            .expect("pinned checkpoint is on the timeline");
+        assert!(routine_row.state_root.is_none());
+        assert_eq!(pinned_row.state_root, Some(pinned_commit.state_root));
+
+        // The unpinned milestone records how to rebuild what it dropped.
+        assert_eq!(routine_row.git_sha.as_deref(), Some("c0ffee1234567890"));
+        assert!(
+            pinned_row.git_sha.is_none(),
+            "no git tag was supplied for the pinned checkpoint"
+        );
+
+        // And the revision surfaces on the report the UI reads.
+        let report = repo.history_report(None, "day", 50, false, false).unwrap();
+        let routine_json = report["milestones"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["description"] == "asd index: 9 symbols")
+            .unwrap();
+        assert_eq!(routine_json["git_sha"], "c0ffee1234567890");
+        assert!(routine_json["state_root"].is_null());
     }
 
     #[test]

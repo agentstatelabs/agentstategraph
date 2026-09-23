@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use agentstategraph_core::{
     Commit, Epoch, EpochScope, EpochStatus, IntentCategory, Namespace, Node, Object, ObjectId,
-    Session, SessionStatus,
+    Session, SessionStatus, TAG_GIT_REVISION, TAG_PIN_STATE,
 };
 use agentstategraph_reminders::{
     Reminder, ReminderError, ReminderFilter, ReminderStore,
@@ -253,7 +253,11 @@ impl SqliteStorage {
             -- re-extraction idempotent. `state_root` (Plan A t-005) is the
             -- retention hook: it names the snapshot a milestone preserves, so
             -- Plan B's GC can keep milestone state reachable while pruning
-            -- everything else.
+            -- everything else. It is written only when the intent opts in with
+            -- `TAG_PIN_STATE`, because pinning every checkpoint retains one full
+            -- state tree per routine re-index and leaves nothing reclaimable.
+            -- `git_sha` (from `TAG_GIT_REVISION`) records the revision behind an
+            -- unpinned milestone so derived state can be rebuilt from source.
             CREATE TABLE IF NOT EXISTS asg_history_milestone (
                 commit_id   BLOB NOT NULL,
                 kind        TEXT NOT NULL,
@@ -263,6 +267,7 @@ impl SqliteStorage {
                 agent_id    TEXT NOT NULL,
                 description TEXT NOT NULL,
                 state_root  BLOB,
+                git_sha     TEXT,
                 PRIMARY KEY (commit_id, kind)
             );
             CREATE INDEX IF NOT EXISTS idx_asg_history_milestone_ts
@@ -294,6 +299,17 @@ impl SqliteStorage {
                 [],
             )
             .map_err(|e| StorageError::Backend(format!("add milestone state_root: {}", e)))?;
+        }
+        // Migration-safe add of asg_history_milestone.git_sha for DBs whose
+        // milestone table predates it. Old rows keep NULL — their commits were
+        // distilled before the revision was recorded, and re-extraction will not
+        // revisit them because the cursor has already passed.
+        if !milestone_cols.iter().any(|c| c == "git_sha") {
+            conn.execute(
+                "ALTER TABLE asg_history_milestone ADD COLUMN git_sha TEXT",
+                [],
+            )
+            .map_err(|e| StorageError::Backend(format!("add milestone git_sha: {}", e)))?;
         }
 
         // Migration-safe add of commits.epoch_id / commits.session_id.
@@ -804,10 +820,31 @@ impl CommitStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("history rollup upsert: {}", e)))?;
 
             if commit.intent.category == IntentCategory::Checkpoint {
+                // Pinning is opt-in. A checkpoint keeps its snapshot reachable
+                // through a sweep only when it asks to; otherwise the milestone
+                // records the moment but names no state, and GC may reclaim the
+                // objects behind it. Pinning unconditionally retains a full
+                // state tree per checkpoint, and a routine re-index emits one
+                // every run — which is how a store reaches millions of objects
+                // with almost nothing reclaimable.
+                let pinned_root = commit
+                    .intent
+                    .tags
+                    .iter()
+                    .any(|t| t == TAG_PIN_STATE)
+                    .then(|| commit.state_root.as_bytes().to_vec());
+                // The revision this state was derived from, so an unpinned
+                // milestone still says how to rebuild it.
+                let git_sha = commit
+                    .intent
+                    .tags
+                    .iter()
+                    .find_map(|t| t.strip_prefix(TAG_GIT_REVISION))
+                    .filter(|sha| !sha.is_empty());
                 tx.execute(
                     "INSERT OR IGNORE INTO asg_history_milestone \
-                       (commit_id, kind, timestamp, day, namespace, agent_id, description, state_root) \
-                     VALUES (?1, 'checkpoint', ?2, ?3, ?4, ?5, ?6, ?7)",
+                       (commit_id, kind, timestamp, day, namespace, agent_id, description, state_root, git_sha) \
+                     VALUES (?1, 'checkpoint', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         commit.id.as_bytes().as_slice(),
                         ts,
@@ -815,7 +852,8 @@ impl CommitStore for SqliteStorage {
                         namespace,
                         agent,
                         commit.intent.description,
-                        commit.state_root.as_bytes().as_slice(),
+                        pinned_root,
+                        git_sha,
                     ],
                 )
                 .map_err(|e| StorageError::Backend(format!("history milestone: {}", e)))?;
@@ -908,7 +946,7 @@ impl CommitStore for SqliteStorage {
         let conn = self.lock_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT commit_id, kind, timestamp, day, namespace, agent_id, description, state_root \
+                "SELECT commit_id, kind, timestamp, day, namespace, agent_id, description, state_root, git_sha \
                  FROM asg_history_milestone ORDER BY timestamp DESC LIMIT ?1",
             )
             .map_err(|e| StorageError::Backend(format!("history milestones read: {}", e)))?;
@@ -923,13 +961,23 @@ impl CommitStore for SqliteStorage {
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<Vec<u8>>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })
             .map_err(|e| StorageError::Backend(format!("history milestones query: {}", e)))?;
         let mut out = Vec::new();
         for r in rows {
-            let (id_bytes, kind, timestamp, day, namespace, agent_id, description, root_bytes) =
-                r.map_err(|e| StorageError::Backend(format!("history milestone row: {}", e)))?;
+            let (
+                id_bytes,
+                kind,
+                timestamp,
+                day,
+                namespace,
+                agent_id,
+                description,
+                root_bytes,
+                git_sha,
+            ) = r.map_err(|e| StorageError::Backend(format!("history milestone row: {}", e)))?;
             let Some(commit_id) = object_id_from_bytes(&id_bytes) else {
                 continue;
             };
@@ -942,6 +990,7 @@ impl CommitStore for SqliteStorage {
                 agent_id,
                 description,
                 state_root: root_bytes.as_deref().and_then(object_id_from_bytes),
+                git_sha,
             });
         }
         Ok(out)
