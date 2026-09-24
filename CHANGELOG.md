@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.3] — 2026-09-23
+
 ### Fixed
 - **A mutating GC sweep could delete objects another connection had just written.** `gc_sweep` computed its keep-set, then `history_gc_sweep` marked the live closure and deleted in separately committed batches — with nothing excluding other writers anywhere in between. `lock_conn()` serializes one process, not a store shared by several. Two interleavings lost data: a commit landing after the keep-set was computed had objects reachable only from a ref tip the mark never saw, so they were swept; and a commit landing during the delete loop could re-reference, by content address, an object already queued as dead, whose `INSERT OR IGNORE` then found it still present just before the next batch removed it. Either way a live ref was left with dangling references.
 
