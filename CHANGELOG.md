@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.4] — 2026-09-24
+
 ### Fixed
 - **The merge base was O(n³) in the length of the shared history, which made `merge`, `preview_merge` and `merge_base` unusable on a long-lived store.** `find_common_ancestor` recomputed generation depth from scratch for every common ancestor, and each recomputation re-read every commit from storage on every pass of a fixed-point loop. On a CTX store a plan branch with 1,304 common ancestors never finished: a dry-run and a real merge were each abandoned after five minutes and were still consuming CPU hours later. Because every commit read holds the SQLite storage connection lock, the stalled merge starved every other request to the store — reads and health checks included.
 
