@@ -2590,115 +2590,47 @@ impl Repository {
         if a == b {
             return Ok(*a);
         }
-        let ancestors_a = self.ancestor_set(a)?;
-
-        // Collect every ancestor of `b` that is also an ancestor of `a`.
-        let mut common = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = vec![*b];
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            if ancestors_a.contains(&id) {
-                common.push(id);
-            }
-            if let Some(commit) = self.storage.get_commit(&id)? {
-                for p in &commit.parents {
-                    if !seen.contains(p) {
-                        stack.push(*p);
-                    }
-                }
-            }
-        }
-
-        // Pick the deepest common ancestor (largest generation = closest to the
-        // heads). Deterministic tie-break by id bytes keeps merges reproducible.
-        let mut best: Option<(u64, ObjectId)> = None;
-        for id in common {
-            let depth = self.commit_depth(&id)?;
-            let candidate = (depth, id);
-            let better = match &best {
-                None => true,
-                Some(cur) => candidate.0 > cur.0 || (candidate.0 == cur.0 && candidate.1 > cur.1),
-            };
-            if better {
-                best = Some(candidate);
-            }
-        }
-        best.map(|(_, id)| id).ok_or_else(|| {
+        // Linear in the two histories: every commit is read from storage once,
+        // and generation depth is computed for all of them in one pass. This
+        // used to recompute depth from scratch for each common ancestor,
+        // re-reading every commit on every pass of a fixed-point loop — O(n³)
+        // reads. A CTX branch with 1,304 common ancestors never finished, and
+        // because each read holds the storage connection lock it starved every
+        // other request to the store.
+        let parents = self.load_ancestry(&[*a, *b])?;
+        deepest_common_ancestor(&parents, a, b).ok_or_else(|| {
             // Disjoint histories share no ancestor — refuse rather than
             // silently merging against an empty/arbitrary base.
             RepoError::RefNotFound("no common ancestor between refs".to_string())
         })
     }
 
-    /// Collect every ancestor of `id` (including `id` itself), following all
-    /// parents of every commit.
-    fn ancestor_set(
+    /// The parents of every commit reachable from `roots`, following every
+    /// parent, with each commit read from storage exactly once.
+    ///
+    /// A parent whose commit is absent from the store — pruned, or never
+    /// fetched — is included with no parents of its own, so it counts as a
+    /// root at generation 0.
+    fn load_ancestry(
         &self,
-        id: &ObjectId,
-    ) -> Result<std::collections::HashSet<ObjectId>, RepoError> {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = vec![*id];
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
+        roots: &[ObjectId],
+    ) -> Result<std::collections::HashMap<ObjectId, Vec<ObjectId>>, RepoError> {
+        let mut parents: std::collections::HashMap<ObjectId, Vec<ObjectId>> =
+            std::collections::HashMap::new();
+        let mut stack: Vec<ObjectId> = roots.to_vec();
+        while let Some(id) = stack.pop() {
+            if parents.contains_key(&id) {
                 continue;
             }
-            if let Some(commit) = self.storage.get_commit(&cur)? {
-                for p in &commit.parents {
-                    if !seen.contains(p) {
-                        stack.push(*p);
-                    }
-                }
-            }
+            let ps = self
+                .storage
+                .get_commit(&id)?
+                .map(|c| c.parents)
+                .unwrap_or_default();
+            stack.extend(ps.iter().filter(|p| !parents.contains_key(*p)));
+            parents.insert(id, ps);
         }
-        Ok(seen)
-    }
-
-    /// Generation depth of a commit: the number of commits on the longest path
-    /// from `id` back to a root commit (a commit with no parents). Memoized per
-    /// call is unnecessary for the small histories we merge; a plain recursive
-    /// walk with a visited guard is sufficient and avoids unbounded recursion
-    /// via an explicit stack.
-    fn commit_depth(&self, id: &ObjectId) -> Result<u64, RepoError> {
-        // Iterative longest-path via post-order over the ancestor DAG.
-        let mut depth: std::collections::HashMap<ObjectId, u64> = std::collections::HashMap::new();
-        // Process in an order where all parents precede a node: repeatedly
-        // resolve nodes whose parents are all known.
-        let ancestors = self.ancestor_set(id)?;
-        let mut pending: Vec<ObjectId> = ancestors.iter().copied().collect();
-        // Bounded number of passes (== number of nodes) guarantees termination
-        // on a DAG.
-        for _ in 0..=ancestors.len() {
-            let mut progressed = false;
-            pending.retain(|node| {
-                if depth.contains_key(node) {
-                    return false;
-                }
-                let parents = match self.storage.get_commit(node) {
-                    Ok(Some(commit)) => commit.parents.clone(),
-                    _ => Vec::new(),
-                };
-                if parents.iter().all(|p| depth.contains_key(p)) {
-                    let d = parents
-                        .iter()
-                        .filter_map(|p| depth.get(p))
-                        .map(|d| d + 1)
-                        .max()
-                        .unwrap_or(0);
-                    depth.insert(*node, d);
-                    progressed = true;
-                    false
-                } else {
-                    true
-                }
-            });
-            if pending.is_empty() || !progressed {
-                break;
-            }
-        }
-        Ok(depth.get(id).copied().unwrap_or(0))
+        Ok(parents)
     }
 
     /// Walk the state tree from `root`, returning the id of the first object
@@ -3096,6 +3028,90 @@ impl<'a> ObjectResolver for StorageResolver<'a> {
     fn resolve(&self, id: &ObjectId) -> Option<Object> {
         self.storage.get_object(id).ok().flatten()
     }
+}
+
+/// Among the common ancestors of `a` and `b` in `parents`, the one with the
+/// greatest generation — closest to the two heads — with ties broken by the
+/// larger commit id so the choice is reproducible. `None` for disjoint
+/// histories.
+///
+/// The winner is always a *best* common ancestor (one that is not an ancestor
+/// of another common ancestor): an ancestor of a commit has a strictly smaller
+/// generation than that commit.
+fn deepest_common_ancestor(
+    parents: &std::collections::HashMap<ObjectId, Vec<ObjectId>>,
+    a: &ObjectId,
+    b: &ObjectId,
+) -> Option<ObjectId> {
+    let of_a = reachable_in(parents, a);
+    let of_b = reachable_in(parents, b);
+    let generation = generations(parents);
+    of_a.intersection(&of_b)
+        .map(|id| (generation.get(id).copied().unwrap_or(0), *id))
+        .max()
+        .map(|(_, id)| id)
+}
+
+/// Every commit reachable from `start` in `parents`, including `start`.
+fn reachable_in(
+    parents: &std::collections::HashMap<ObjectId, Vec<ObjectId>>,
+    start: &ObjectId,
+) -> std::collections::HashSet<ObjectId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![*start];
+    while let Some(id) = stack.pop() {
+        if seen.insert(id)
+            && let Some(ps) = parents.get(&id)
+        {
+            stack.extend(ps.iter().filter(|p| !seen.contains(*p)));
+        }
+    }
+    seen
+}
+
+/// The generation of every commit in `parents`: the length of the longest
+/// path back to a root. One iterative post-order pass, so it is linear and
+/// cannot overflow the stack on a long history.
+///
+/// Commit ids hash their parents, so a genuine cycle cannot exist; an edge back
+/// into a commit still being expanded is ignored all the same, so a corrupt
+/// store cannot make this loop forever.
+fn generations(
+    parents: &std::collections::HashMap<ObjectId, Vec<ObjectId>>,
+) -> std::collections::HashMap<ObjectId, u64> {
+    let mut generation: std::collections::HashMap<ObjectId, u64> =
+        std::collections::HashMap::with_capacity(parents.len());
+    let mut expanding: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
+    for &root in parents.keys() {
+        if generation.contains_key(&root) {
+            continue;
+        }
+        let mut stack = vec![(root, false)];
+        while let Some((id, children_done)) = stack.pop() {
+            if generation.contains_key(&id) {
+                continue;
+            }
+            let ps = parents.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+            if children_done {
+                let g = ps
+                    .iter()
+                    .filter_map(|p| generation.get(p))
+                    .map(|g| g + 1)
+                    .max()
+                    .unwrap_or(0);
+                generation.insert(id, g);
+                expanding.remove(&id);
+            } else if expanding.insert(id) {
+                stack.push((id, true));
+                for p in ps {
+                    if !generation.contains_key(p) && !expanding.contains(p) {
+                        stack.push((*p, false));
+                    }
+                }
+            }
+        }
+    }
+    generation
 }
 
 #[cfg(test)]
@@ -5317,6 +5333,157 @@ mod tests {
             .find(|m| m["description"] == "ship")
             .unwrap();
         assert_eq!(ship["state_root"], cp_commit.state_root.short());
+    }
+
+    /// The merge base must cost time linear in the two histories. It used to
+    /// recompute generation depth from scratch for every common ancestor, and
+    /// each recomputation re-read every commit on every pass of a fixed-point
+    /// loop — O(n³) storage reads. A CTX branch with 1,304 common ancestors
+    /// never finished, and since every read holds the storage connection lock
+    /// it starved every other request to the store. At 1,500 shared commits the
+    /// old code was still running when killed after 120 seconds.
+    ///
+    /// 3,000 commits of shared history, then a short branch on each side,
+    /// written straight to storage so the test stays fast. The bound is loose
+    /// on purpose — the fix takes tens of milliseconds — and exists only to
+    /// fail loudly if the old behaviour returns.
+    #[test]
+    fn test_merge_base_is_linear_on_a_long_shared_history() {
+        let repo = test_repo();
+        let state = repo
+            .get_commit(&repo.resolve_ref("main").unwrap())
+            .unwrap()
+            .unwrap()
+            .state_root;
+        let commit = |parent: ObjectId, what: &str| {
+            let c = CommitBuilder::new(
+                state,
+                "agent/test",
+                Authority::simple("agent/test"),
+                Intent::new(IntentCategory::Refine, what),
+            )
+            .parent(parent)
+            .build();
+            repo.storage.put_commit(&c).unwrap();
+            c.id
+        };
+
+        let mut tip = repo.resolve_ref("main").unwrap();
+        for i in 0..3_000 {
+            tip = commit(tip, &format!("shared {i}"));
+        }
+        let branch_point = tip;
+        let (mut feature, mut main) = (branch_point, branch_point);
+        for i in 0..3 {
+            feature = commit(feature, &format!("feature {i}"));
+            main = commit(main, &format!("main {i}"));
+        }
+
+        let started = std::time::Instant::now();
+        let base = repo.find_common_ancestor(&feature, &main).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(base, branch_point);
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "merge base over 3,000 shared commits took {elapsed:?}; it must be linear"
+        );
+    }
+
+    /// The linear merge base must choose exactly what the old definition did:
+    /// among all common ancestors, the greatest generation (longest path back
+    /// to a root), ties to the larger id. Checked against a deliberately naive
+    /// reference over random DAGs with merge commits — which produce
+    /// criss-cross histories with several best common ancestors — plus the odd
+    /// extra root (disjoint histories) and dangling parent (a pruned commit).
+    #[test]
+    fn test_merge_base_matches_the_naive_definition_on_random_dags() {
+        use std::collections::{HashMap, HashSet};
+
+        fn naive_ancestors(
+            parents: &HashMap<ObjectId, Vec<ObjectId>>,
+            id: ObjectId,
+            out: &mut HashSet<ObjectId>,
+        ) {
+            if out.insert(id) {
+                for p in parents.get(&id).into_iter().flatten() {
+                    naive_ancestors(parents, *p, out);
+                }
+            }
+        }
+        // The definition, verbatim: one more than the deepest parent, 0 for a
+        // root. Memoized only so merge-heavy graphs stay fast to check.
+        fn naive_generation(
+            parents: &HashMap<ObjectId, Vec<ObjectId>>,
+            id: ObjectId,
+            memo: &mut HashMap<ObjectId, u64>,
+        ) -> u64 {
+            if let Some(g) = memo.get(&id) {
+                return *g;
+            }
+            let g = parents
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .map(|p| naive_generation(parents, *p, memo) + 1)
+                .max()
+                .unwrap_or(0);
+            memo.insert(id, g);
+            g
+        }
+
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound.max(1)
+        };
+        let node = |i: u64| ObjectId::hash(&i.to_le_bytes());
+
+        let mut compared = 0;
+        for _graph in 0..60 {
+            let n = 4 + next(28);
+            let mut parents: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+            parents.insert(node(0), vec![]);
+            for i in 1..n {
+                let ps = match next(20) {
+                    0 => vec![],                // another root
+                    1 => vec![node(1_000 + i)], // dangling parent
+                    2..=6 => {
+                        let (x, y) = (next(i), next(i));
+                        if x == y {
+                            vec![node(x)]
+                        } else {
+                            vec![node(x), node(y)]
+                        } // merge
+                    }
+                    _ => vec![node(next(i))],
+                };
+                parents.insert(node(i), ps);
+            }
+            for a in 0..n {
+                for b in 0..n {
+                    let (a, b) = (node(a), node(b));
+                    let (mut of_a, mut of_b) = (HashSet::new(), HashSet::new());
+                    naive_ancestors(&parents, a, &mut of_a);
+                    naive_ancestors(&parents, b, &mut of_b);
+                    let mut memo = HashMap::new();
+                    let expected = of_a
+                        .intersection(&of_b)
+                        .map(|id| (naive_generation(&parents, *id, &mut memo), *id))
+                        .max()
+                        .map(|(_, id)| id);
+                    assert_eq!(
+                        deepest_common_ancestor(&parents, &a, &b),
+                        expected,
+                        "merge base disagrees with the definition"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 5_000, "only {compared} pairs compared");
     }
 
     /// A unique on-disk path for tests that need two connections to one store;

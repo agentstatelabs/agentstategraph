@@ -7,6 +7,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **The merge base was O(n³) in the length of the shared history, which made `merge`, `preview_merge` and `merge_base` unusable on a long-lived store.** `find_common_ancestor` recomputed generation depth from scratch for every common ancestor, and each recomputation re-read every commit from storage on every pass of a fixed-point loop. On a CTX store a plan branch with 1,304 common ancestors never finished: a dry-run and a real merge were each abandoned after five minutes and were still consuming CPU hours later. Because every commit read holds the SQLite storage connection lock, the stalled merge starved every other request to the store — reads and health checks included.
+
+  Each commit is now read once and every generation is computed in a single iterative post-order pass, so the merge base is linear in the two histories. Measured: 1,500 shared commits went from still running after 120 seconds to 59 ms; the CTX branch pair that hung resolves in 65 ms, merge preview included. The choice itself is unchanged — the common ancestor with the greatest generation, ties to the larger commit id — and a new test checks that against a naive reference over random DAGs with merge commits, criss-cross histories, extra roots and dangling parents. `tests/merge_base_field_db.rs` reruns the measurement against a copy of a real store.
+
 ## [v1.2.3] — 2026-09-23
 
 ### Fixed
