@@ -415,16 +415,56 @@ pub trait CommitStore: Send + Sync {
     }
 
     /// Sweep: mark the closure of `roots` and DELETE every object outside it
-    /// (Plan B t-003). Transactional and resumable — deletes in bounded batches,
-    /// so a crash mid-sweep leaves a consistent DB and re-running finishes it.
-    /// Destructive; callers gate it (dry-run default, safety predicate).
-    /// Backends without object storage report an empty sweep.
+    /// (Plan B t-003). Destructive; callers gate it (dry-run default, safety
+    /// predicate). Backends without object storage report an empty sweep.
+    ///
+    /// Must exclude other writers from the mark to the last delete, or a commit
+    /// landing mid-sweep loses its objects. The SQLite backend runs the whole
+    /// sweep as one write transaction — deletes are still issued in bounded
+    /// chunks, but a crash rolls the sweep back rather than leaving it half done
+    /// — and joins the caller's transaction when
+    /// [`history_gc_lock_writers`](Self::history_gc_lock_writers) is already
+    /// held. It also keeps every current ref tip whatever `roots` says, since a
+    /// caller's roots can predate a commit made on another connection.
     fn history_gc_sweep(
         &self,
         _roots: &[ObjectId],
         _batch: usize,
     ) -> Result<GcSweep, StorageError> {
         Ok(GcSweep::default())
+    }
+
+    /// Take the store's write lock for a GC sweep, held until
+    /// [`history_gc_unlock_writers`](Self::history_gc_unlock_writers).
+    ///
+    /// A sweep is only correct if nothing commits between the moment its
+    /// keep-set is computed and its last delete, so the caller takes this
+    /// *before* computing the keep-set. Other writers wait (up to the backend's
+    /// busy timeout) and then fail rather than interleave; readers are
+    /// unaffected. While it is held, the caller must have exclusive use of this
+    /// store handle — every statement issued through it joins the transaction.
+    /// Backends with a single writer, or no object storage, need do nothing.
+    fn history_gc_lock_writers(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Release the lock taken by
+    /// [`history_gc_lock_writers`](Self::history_gc_lock_writers), committing
+    /// the work done under it or rolling it back. A no-op when nothing is held.
+    fn history_gc_unlock_writers(&self, _commit: bool) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Stop pinning snapshots whose checkpoint never asked to be pinned.
+    ///
+    /// Clears `state_root` on every milestone row whose commit's intent lacks
+    /// `TAG_PIN_STATE`. The extractor has only honoured that tag since
+    /// v1.2.2; rows distilled before it pinned every checkpoint, and the cursor
+    /// will not revisit them. This is the explicit, one-time way to bring them
+    /// in line. It unpins; it deletes nothing — the objects stay until a sweep.
+    /// Returns the number of rows unpinned.
+    fn history_unpin_legacy_milestones(&self) -> Result<usize, StorageError> {
+        Ok(0)
     }
 
     /// Every commit's `state_root`, newest first (insertion order), for the GC

@@ -1069,70 +1069,89 @@ impl CommitStore for SqliteStorage {
     fn history_gc_sweep(&self, roots: &[ObjectId], batch: usize) -> Result<GcSweep, StorageError> {
         let batch = batch.max(1) as i64;
         let conn = self.lock_conn()?;
-
-        let total_before: i64 = conn
-            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
-            .map_err(|e| StorageError::Backend(format!("gc sweep count: {}", e)))?;
-
-        // Mark the live closure, then materialize the dead set (objects not
-        // reachable from the keep-set) into its own temp table — one anti-join
-        // pass — so the batched DELETE never re-scans the live objects.
-        gc_build_mark(&conn, roots, batch)?;
-        conn.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS gc_dead (id BLOB PRIMARY KEY); \
-             DELETE FROM gc_dead; \
-             INSERT INTO gc_dead (id) \
-               SELECT o.id FROM objects o LEFT JOIN gc_mark m ON o.id = m.id WHERE m.id IS NULL;",
-        )
-        .map_err(|e| StorageError::Backend(format!("gc dead set: {}", e)))?;
-
-        let deleted_target: i64 = conn
-            .query_row("SELECT COUNT(*) FROM gc_dead", [], |row| row.get(0))
-            .map_err(|e| StorageError::Backend(format!("gc dead count: {}", e)))?;
-
-        // Delete in bounded, resumable batches: each transaction removes a chunk
-        // of dead ids from both `objects` and `gc_dead`. A crash between batches
-        // leaves a consistent DB with fewer dead rows; re-running finishes it.
-        let mut deleted = 0i64;
-        loop {
-            let dead: Vec<Vec<u8>> = {
-                let mut stmt = conn
-                    .prepare_cached("SELECT id FROM gc_dead LIMIT ?1")
-                    .map_err(|e| StorageError::Backend(format!("gc dead sel: {}", e)))?;
-                let rows = stmt
-                    .query_map(params![batch], |row| row.get::<_, Vec<u8>>(0))
-                    .map_err(|e| StorageError::Backend(format!("gc dead q: {}", e)))?;
-                let mut v = Vec::new();
-                for r in rows {
-                    v.push(r.map_err(|e| StorageError::Backend(format!("gc dead row: {}", e)))?);
-                }
-                v
-            };
-            if dead.is_empty() {
-                break;
-            }
-            let tx = conn
-                .unchecked_transaction()
-                .map_err(|e| StorageError::Backend(format!("gc del tx: {}", e)))?;
-            gc_bulk_delete(&tx, "objects", &dead)?;
-            gc_bulk_delete(&tx, "gc_dead", &dead)?;
-            tx.commit()
-                .map_err(|e| StorageError::Backend(format!("gc del commit: {}", e)))?;
-            deleted += dead.len() as i64;
+        // Exclude every other writer from the mark to the last delete. Without
+        // it a commit from another connection can land mid-sweep and lose its
+        // objects: reachable only from a ref tip the mark never saw, or
+        // re-referenced (content addressing) after being queued as dead.
+        // Readers are unaffected under WAL. A caller already holding the lock —
+        // `Repository::gc_sweep` takes it before computing its keep-set — is
+        // joined rather than locked twice.
+        let own_lock = conn.is_autocommit();
+        if own_lock {
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| StorageError::Backend(format!("gc sweep lock: {}", e)))?;
         }
+        let result = gc_sweep_locked(&conn, roots, batch);
+        if own_lock {
+            match &result {
+                Ok(_) => conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| StorageError::Backend(format!("gc sweep commit: {}", e)))?,
+                // Keep the original error; a failed rollback here changes nothing
+                // the caller can act on.
+                Err(_) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
+            }
+        }
+        result
+    }
 
-        conn.execute("DELETE FROM gc_mark", [])
-            .map_err(|e| StorageError::Backend(format!("gc mark cleanup: {}", e)))?;
+    fn history_gc_lock_writers(&self) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| StorageError::Backend(format!("gc lock writers: {}", e)))
+    }
 
-        let total_after: i64 = conn
-            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
-            .map_err(|e| StorageError::Backend(format!("gc after count: {}", e)))?;
+    fn history_gc_unlock_writers(&self, commit: bool) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        if conn.is_autocommit() {
+            // Nothing held — already released, or never taken.
+            return Ok(());
+        }
+        let end = if commit { "COMMIT" } else { "ROLLBACK" };
+        conn.execute_batch(end)
+            .map_err(|e| StorageError::Backend(format!("gc unlock writers ({end}): {}", e)))
+    }
 
-        Ok(GcSweep {
-            objects_before: total_before,
-            objects_deleted: deleted,
-            objects_after: total_after,
-            deleted_target,
+    fn history_unpin_legacy_milestones(&self) -> Result<usize, StorageError> {
+        let conn = self.lock_conn()?;
+        let unrequested: Vec<Vec<u8>> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT m.commit_id, c.data FROM asg_history_milestone m \
+                     JOIN commits c ON c.id = m.commit_id \
+                     WHERE m.state_root IS NOT NULL",
+                )
+                .map_err(|e| StorageError::Backend(format!("unpin read: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|e| StorageError::Backend(format!("unpin query: {}", e)))?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (id, data) =
+                    r.map_err(|e| StorageError::Backend(format!("unpin row: {}", e)))?;
+                let commit: Commit = serde_json::from_slice(&data)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                if !commit.intent.tags.iter().any(|t| t == TAG_PIN_STATE) {
+                    out.push(id);
+                }
+            }
+            out
+        };
+        gc_in_tx(&conn, "unpin milestones", |c| {
+            let mut updated = 0usize;
+            for id in &unrequested {
+                updated += c
+                    .execute(
+                        "UPDATE asg_history_milestone SET state_root = NULL WHERE commit_id = ?1",
+                        params![id.as_slice()],
+                    )
+                    .map_err(|e| StorageError::Backend(format!("unpin update: {}", e)))?;
+            }
+            Ok(updated)
         })
     }
 
@@ -1614,24 +1633,136 @@ fn gc_build_mark(conn: &Connection, roots: &[ObjectId], batch: i64) -> Result<()
             }
             expand_ids.push(id_bytes);
         }
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| StorageError::Backend(format!("gc tx: {}", e)))?;
-        bulk_insert_marks(&tx, &children)?;
-        bulk_mark_expanded(&tx, &expand_ids)?;
-        tx.commit()
-            .map_err(|e| StorageError::Backend(format!("gc tx commit: {}", e)))?;
+        gc_in_tx(conn, "gc mark", |c| {
+            bulk_insert_marks(c, &children)?;
+            bulk_mark_expanded(c, &expand_ids)
+        })?;
     }
     Ok(())
 }
 
+/// Run `f` as its own transaction, or inline when the connection is already
+/// inside one.
+///
+/// A mutating sweep holds the write lock (`BEGIN IMMEDIATE`) from its keep-set
+/// through its final delete. The batched helpers it shares with the read-only
+/// reachability walk must join that transaction — SQLite rejects a nested
+/// `BEGIN` — while the walk, which runs in autocommit mode, still gets a
+/// transaction per batch as before.
+fn gc_in_tx<T>(
+    conn: &Connection,
+    what: &str,
+    f: impl FnOnce(&Connection) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    if !conn.is_autocommit() {
+        return f(conn);
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| StorageError::Backend(format!("{what} tx: {e}")))?;
+    let out = f(&tx)?;
+    tx.commit()
+        .map_err(|e| StorageError::Backend(format!("{what} commit: {e}")))?;
+    Ok(out)
+}
+
+/// The state root of every ref tip, across every namespace, read on `conn` as
+/// of now.
+///
+/// A sweep adds these to whatever keep-set its caller computed, under the write
+/// lock. The caller's roots can predate a commit made on another connection;
+/// these cannot. Live state is therefore never swept, whatever the caller did.
+fn gc_live_tip_roots(conn: &Connection) -> Result<Vec<ObjectId>, StorageError> {
+    let mut stmt = conn
+        .prepare("SELECT c.data FROM refs r JOIN commits c ON c.id = r.target")
+        .map_err(|e| StorageError::Backend(format!("gc tips read: {}", e)))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|e| StorageError::Backend(format!("gc tips query: {}", e)))?;
+    let mut out = Vec::new();
+    for r in rows {
+        let data = r.map_err(|e| StorageError::Backend(format!("gc tip row: {}", e)))?;
+        let commit: Commit = serde_json::from_slice(&data)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        out.push(commit.state_root);
+    }
+    Ok(out)
+}
+
+/// The body of a sweep. The caller holds the write lock, so nothing can commit
+/// between the mark and the last delete.
+fn gc_sweep_locked(
+    conn: &Connection,
+    roots: &[ObjectId],
+    batch: i64,
+) -> Result<GcSweep, StorageError> {
+    let total_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+        .map_err(|e| StorageError::Backend(format!("gc sweep count: {}", e)))?;
+
+    let mut roots = roots.to_vec();
+    roots.extend(gc_live_tip_roots(conn)?);
+
+    // Mark the live closure, then materialize the dead set (objects not
+    // reachable from the keep-set) into its own temp table — one anti-join
+    // pass — so the batched DELETE never re-scans the live objects.
+    gc_build_mark(conn, &roots, batch)?;
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS gc_dead (id BLOB PRIMARY KEY); \
+         DELETE FROM gc_dead; \
+         INSERT INTO gc_dead (id) \
+           SELECT o.id FROM objects o LEFT JOIN gc_mark m ON o.id = m.id WHERE m.id IS NULL;",
+    )
+    .map_err(|e| StorageError::Backend(format!("gc dead set: {}", e)))?;
+
+    let deleted_target: i64 = conn
+        .query_row("SELECT COUNT(*) FROM gc_dead", [], |row| row.get(0))
+        .map_err(|e| StorageError::Backend(format!("gc dead count: {}", e)))?;
+
+    // Delete in bounded chunks so no single statement grows with the store.
+    // They all belong to the caller's transaction: a crash rolls the whole
+    // sweep back rather than leaving it half done.
+    let mut deleted = 0i64;
+    loop {
+        let dead: Vec<Vec<u8>> = {
+            let mut stmt = conn
+                .prepare_cached("SELECT id FROM gc_dead LIMIT ?1")
+                .map_err(|e| StorageError::Backend(format!("gc dead sel: {}", e)))?;
+            let rows = stmt
+                .query_map(params![batch], |row| row.get::<_, Vec<u8>>(0))
+                .map_err(|e| StorageError::Backend(format!("gc dead q: {}", e)))?;
+            let mut v = Vec::new();
+            for r in rows {
+                v.push(r.map_err(|e| StorageError::Backend(format!("gc dead row: {}", e)))?);
+            }
+            v
+        };
+        if dead.is_empty() {
+            break;
+        }
+        gc_bulk_delete(conn, "objects", &dead)?;
+        gc_bulk_delete(conn, "gc_dead", &dead)?;
+        deleted += dead.len() as i64;
+    }
+
+    conn.execute("DELETE FROM gc_mark", [])
+        .map_err(|e| StorageError::Backend(format!("gc mark cleanup: {}", e)))?;
+
+    let total_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+        .map_err(|e| StorageError::Backend(format!("gc after count: {}", e)))?;
+
+    Ok(GcSweep {
+        objects_before: total_before,
+        objects_deleted: deleted,
+        objects_after: total_after,
+        deleted_target,
+    })
+}
+
 /// Bulk `DELETE FROM <table> WHERE id IN (...)` in [`GC_SQL_CHUNK`] chunks.
 /// `table` is a fixed internal identifier (never user input).
-fn gc_bulk_delete(
-    tx: &rusqlite::Transaction<'_>,
-    table: &str,
-    ids: &[Vec<u8>],
-) -> Result<(), StorageError> {
+fn gc_bulk_delete(tx: &Connection, table: &str, ids: &[Vec<u8>]) -> Result<(), StorageError> {
     for chunk in ids.chunks(GC_SQL_CHUNK) {
         let mut sql = format!("DELETE FROM {} WHERE id IN (", table);
         for i in 0..chunk.len() {
@@ -1653,7 +1784,7 @@ fn gc_bulk_delete(
 /// Bulk `INSERT OR IGNORE` the given ids into `gc_mark` (expanded=0), in chunks
 /// of [`GC_SQL_CHUNK`] via multi-row VALUES — one statement per chunk instead of
 /// one per id.
-fn bulk_insert_marks(tx: &rusqlite::Transaction<'_>, ids: &[Vec<u8>]) -> Result<(), StorageError> {
+fn bulk_insert_marks(tx: &Connection, ids: &[Vec<u8>]) -> Result<(), StorageError> {
     for chunk in ids.chunks(GC_SQL_CHUNK) {
         let mut sql = String::from("INSERT OR IGNORE INTO gc_mark (id, expanded) VALUES ");
         for i in 0..chunk.len() {
@@ -1673,7 +1804,7 @@ fn bulk_insert_marks(tx: &rusqlite::Transaction<'_>, ids: &[Vec<u8>]) -> Result<
 
 /// Bulk `UPDATE gc_mark SET expanded = 1` for the given ids, in chunks of
 /// [`GC_SQL_CHUNK`] via an `IN (...)` clause.
-fn bulk_mark_expanded(tx: &rusqlite::Transaction<'_>, ids: &[Vec<u8>]) -> Result<(), StorageError> {
+fn bulk_mark_expanded(tx: &Connection, ids: &[Vec<u8>]) -> Result<(), StorageError> {
     for chunk in ids.chunks(GC_SQL_CHUNK) {
         let mut sql = String::from("UPDATE gc_mark SET expanded = 1 WHERE id IN (");
         for i in 0..chunk.len() {
@@ -3617,5 +3748,118 @@ mod tests {
             let got = store.get(&r.id).unwrap().unwrap();
             assert_eq!(got.priority, p, "priority roundtrip failed for {p:?}");
         }
+    }
+
+    // --- GC write lock and legacy unpin -------------------------------------
+
+    /// A unique on-disk path; the lock test needs a second, independent
+    /// connection, which an in-memory database cannot give it.
+    fn temp_db_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("asg-{tag}-{}-{nanos}.db", std::process::id()))
+    }
+
+    fn remove_db(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    /// While a sweep holds the GC write lock no other connection can begin a
+    /// write — that exclusion is the whole fix — yet readers still work, and
+    /// the lock is gone once released.
+    #[test]
+    fn gc_write_lock_excludes_other_writers_but_not_readers() {
+        let path = temp_db_path("gc-lock");
+        let store = SqliteStorage::open(&path).unwrap();
+        store.put_object(&Object::string("seed")).unwrap();
+
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.busy_timeout(std::time::Duration::ZERO).unwrap();
+
+        store.history_gc_lock_writers().unwrap();
+        match other.execute_batch("BEGIN IMMEDIATE") {
+            Err(rusqlite::Error::SqliteFailure(e, _)) => {
+                assert_eq!(e.code, rusqlite::ErrorCode::DatabaseBusy)
+            }
+            other => panic!("a second writer got in while the GC lock was held: {other:?}"),
+        }
+        let objects: i64 = other
+            .query_row("SELECT COUNT(*) FROM objects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(objects, 1, "readers are not blocked");
+
+        store.history_gc_unlock_writers(true).unwrap();
+        other
+            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
+            .expect("released lock admits writers again");
+        // Releasing when nothing is held is a no-op, not an error.
+        store.history_gc_unlock_writers(true).unwrap();
+
+        drop(other);
+        drop(store);
+        remove_db(&path);
+    }
+
+    /// Rows distilled before opt-in pinning pinned every checkpoint. The unpin
+    /// op must clear exactly those — checkpoints that never asked to be pinned —
+    /// leave a deliberately pinned one alone, and keep both on the timeline.
+    #[test]
+    fn unpin_legacy_milestones_clears_only_unrequested_pins() {
+        let store = test_store();
+        let routine = CommitBuilder::new(
+            ObjectId::hash(b"routine-state"),
+            "asd",
+            Authority::simple("asd"),
+            Intent::new(IntentCategory::Checkpoint, "asd index: 9 symbols"),
+        )
+        .build();
+        let release = CommitBuilder::new(
+            ObjectId::hash(b"release-state"),
+            "alice",
+            Authority::simple("alice"),
+            Intent::new(IntentCategory::Checkpoint, "v1.0 release")
+                .with_tags(vec![TAG_PIN_STATE.to_string()]),
+        )
+        .build();
+        store.put_commit(&routine).unwrap();
+        store.put_commit(&release).unwrap();
+        store.history_extract_batch(100).unwrap();
+
+        // What a pre-1.2.2 extractor wrote for the routine checkpoint.
+        {
+            let conn = store.lock_conn().unwrap();
+            conn.execute(
+                "UPDATE asg_history_milestone SET state_root = ?1 WHERE commit_id = ?2",
+                params![
+                    routine.state_root.as_bytes().as_slice(),
+                    routine.id.as_bytes().as_slice()
+                ],
+            )
+            .unwrap();
+        }
+        let before = store.history_retained_state_roots().unwrap();
+        assert!(before.contains(&routine.state_root));
+        assert!(before.contains(&release.state_root));
+
+        assert_eq!(store.history_unpin_legacy_milestones().unwrap(), 1);
+        assert_eq!(
+            store.history_retained_state_roots().unwrap(),
+            vec![release.state_root],
+            "only the requested pin survives"
+        );
+        assert_eq!(
+            store.history_unpin_legacy_milestones().unwrap(),
+            0,
+            "one-time: nothing left to unpin"
+        );
+        assert_eq!(
+            store.history_milestones(10).unwrap().len(),
+            2,
+            "unpinning drops the snapshot hook, not the milestone"
+        );
     }
 }

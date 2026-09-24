@@ -201,6 +201,39 @@ impl Default for RetentionPolicy {
     }
 }
 
+/// The store's GC write lock, held by a mutating sweep from its keep-set to its
+/// last delete (see `CommitStore::history_gc_lock_writers`).
+///
+/// Rolls back on drop unless explicitly released, so an early `?` return or a
+/// panic can never leave every other writer locked out of the store.
+struct GcWriterLock<'a> {
+    storage: &'a (dyn Storage + Send + Sync),
+    released: bool,
+}
+
+impl<'a> GcWriterLock<'a> {
+    fn acquire(storage: &'a (dyn Storage + Send + Sync)) -> Result<Self, RepoError> {
+        storage.history_gc_lock_writers()?;
+        Ok(Self {
+            storage,
+            released: false,
+        })
+    }
+
+    fn release(mut self, commit: bool) -> Result<(), RepoError> {
+        self.released = true;
+        Ok(self.storage.history_gc_unlock_writers(commit)?)
+    }
+}
+
+impl Drop for GcWriterLock<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self.storage.history_gc_unlock_writers(false);
+        }
+    }
+}
+
 /// Outcome of a [`Repository::extract_history`] run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryExtractReport {
@@ -2165,6 +2198,17 @@ impl Repository {
         Ok(self.storage.history_retained_state_roots()?)
     }
 
+    /// Stop pinning the snapshots of milestones whose checkpoint never asked to
+    /// be pinned — every row distilled before v1.2.2, when the extractor pinned
+    /// all checkpoints. Returns how many rows were unpinned.
+    ///
+    /// Run once on a store that predates opt-in pinning; after it a sweep can
+    /// reclaim those snapshots. It deletes nothing itself. Checkpoints tagged
+    /// `TAG_PIN_STATE` keep their pin.
+    pub fn history_unpin_legacy_milestones(&self) -> Result<usize, RepoError> {
+        Ok(self.storage.history_unpin_legacy_milestones()?)
+    }
+
     /// The default GC keep-set (Plan B t-001): the `state_root` of every live
     /// ref tip across all namespaces, plus the retained milestone snapshots.
     /// This is what "kept alive" means for the baseline reclaimable estimate —
@@ -2346,9 +2390,6 @@ impl Repository {
         mutate: bool,
         vacuum: bool,
     ) -> Result<serde_json::Value, RepoError> {
-        let keep = self.gc_keep_roots(policy)?;
-        let undistilled = self.storage.history_undistilled_commit_count()?;
-        let safe = undistilled == 0;
         let policy_json = serde_json::json!({
             "keep_recent": policy.keep_recent,
             "checkpoint_every": policy.checkpoint_every,
@@ -2356,6 +2397,8 @@ impl Repository {
         });
 
         if !mutate {
+            let keep = self.gc_keep_roots(policy)?;
+            let undistilled = self.storage.history_undistilled_commit_count()?;
             let would = self.gc_reachability_from(&keep)?;
             return Ok(serde_json::json!({
                 "dry_run": true,
@@ -2363,12 +2406,20 @@ impl Repository {
                 "policy": policy_json,
                 "keep_roots": keep.len(),
                 "would_reclaim": would,
-                "safe": safe,
+                "safe": undistilled == 0,
                 "undistilled_commits": undistilled,
             }));
         }
 
-        if !safe {
+        // Lock out other writers BEFORE computing the keep-set, and hold the
+        // lock through the last delete. Otherwise a commit made on another
+        // connection in between — a git hook re-indexing, a server — is absent
+        // from the keep-set and its objects are deleted out from under it.
+        let lock = GcWriterLock::acquire(self.storage.as_ref())?;
+        let keep = self.gc_keep_roots(policy)?;
+        let undistilled = self.storage.history_undistilled_commit_count()?;
+        if undistilled > 0 {
+            lock.release(false)?;
             return Ok(serde_json::json!({
                 "dry_run": false,
                 "mutated": false,
@@ -2380,8 +2431,9 @@ impl Repository {
                 ),
             }));
         }
-
         let sweep = self.storage.history_gc_sweep(&keep, GC_MARK_BATCH)?;
+        lock.release(true)?;
+
         let mut report = serde_json::json!({
             "dry_run": false,
             "mutated": true,
@@ -2391,7 +2443,8 @@ impl Repository {
             "objects_deleted": sweep.objects_deleted,
             "objects_after": sweep.objects_after,
         });
-        // Only a VACUUM returns the freed pages to the OS (shrinks the file).
+        // Only a VACUUM returns the freed pages to the OS (shrinks the file). It
+        // cannot run inside a transaction, so it follows the released lock.
         if vacuum {
             let v = self.storage.history_vacuum()?;
             if let Some(obj) = report.as_object_mut() {
@@ -5264,6 +5317,141 @@ mod tests {
             .find(|m| m["description"] == "ship")
             .unwrap();
         assert_eq!(ship["state_root"], cp_commit.state_root.short());
+    }
+
+    /// A unique on-disk path for tests that need two connections to one store;
+    /// an in-memory database is private to the connection that opened it.
+    fn temp_db_path(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("asg-{tag}-{}-{nanos}.db", std::process::id()))
+    }
+
+    fn remove_db(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    /// The race: a sweep computes its keep-set, another connection commits, and
+    /// the sweep then deletes that commit's objects — they are reachable only
+    /// from a ref tip the keep-set never saw. In the field the other connection
+    /// is a git hook running `asd index`, `asd-serve`, or an MCP server, and the
+    /// window is the whole mark phase (minutes on a large store). The result is
+    /// a ref whose state tree has dangling references.
+    ///
+    /// Driven deterministically at the storage boundary rather than by racing
+    /// threads: the keep-set is computed, the second connection commits, and
+    /// only then does the sweep run, exactly as the interleaving would have it.
+    #[test]
+    fn test_gc_sweep_keeps_state_committed_after_the_keep_set_was_computed() {
+        let path = temp_db_path("gc-race");
+        let a = Repository::new(Box::new(SqliteStorage::open(&path).unwrap()));
+        a.init().unwrap();
+        // History, so the sweep has something to reclaim.
+        for i in 0..5 {
+            a.set(
+                "main",
+                "/a",
+                &Object::string(format!("v{i}")),
+                quick_opts("edit"),
+            )
+            .unwrap();
+        }
+        a.extract_history(100).unwrap();
+        let keep = a
+            .gc_keep_roots(RetentionPolicy {
+                keep_recent: 1,
+                checkpoint_every: 0,
+                keep_milestones: false,
+            })
+            .unwrap();
+
+        // Another process commits new state after that keep-set was computed.
+        let b = Repository::new(Box::new(SqliteStorage::open(&path).unwrap()));
+        let late = b
+            .set(
+                "main",
+                "/late",
+                &Object::string("written mid-sweep"),
+                quick_opts("late write"),
+            )
+            .unwrap();
+
+        a.storage.history_gc_sweep(&keep, GC_MARK_BATCH).unwrap();
+
+        let missing = b.first_missing_object(&late).unwrap();
+        remove_db(&path);
+        assert_eq!(
+            missing, None,
+            "the sweep deleted state reachable from the live ref tip — a commit \
+             that landed after the keep-set was computed must survive"
+        );
+    }
+
+    /// A mutating sweep must hand the write lock back on every path — having
+    /// refused, and having swept and vacuumed — or every other writer to the
+    /// store waits out its busy timeout and then fails.
+    #[test]
+    fn test_gc_sweep_releases_the_writer_lock_on_every_path() {
+        let path = temp_db_path("gc-release");
+        let a = Repository::new(Box::new(SqliteStorage::open(&path).unwrap()));
+        a.init().unwrap();
+        for i in 0..3 {
+            a.set(
+                "main",
+                "/a",
+                &Object::string(format!("v{i}")),
+                quick_opts("edit"),
+            )
+            .unwrap();
+        }
+        let b = Repository::new(Box::new(SqliteStorage::open(&path).unwrap()));
+
+        // Refused: nothing is distilled yet.
+        let refused = a.gc_sweep(RetentionPolicy::default(), true, false).unwrap();
+        assert_eq!(refused["refused"], true, "{refused}");
+        b.set(
+            "main",
+            "/b",
+            &Object::string("after refusal"),
+            quick_opts("b1"),
+        )
+        .expect("the refused sweep released the lock");
+
+        // Swept, then vacuumed — VACUUM runs after the lock is released.
+        a.extract_history(100).unwrap();
+        let swept = a
+            .gc_sweep(
+                RetentionPolicy {
+                    keep_recent: 1,
+                    checkpoint_every: 0,
+                    keep_milestones: false,
+                },
+                true,
+                true,
+            )
+            .unwrap();
+        assert_eq!(swept["mutated"], true, "{swept}");
+        assert!(swept["objects_deleted"].as_i64().unwrap() > 0, "{swept}");
+        assert!(swept.get("vacuum").is_some(), "{swept}");
+        let late = b
+            .set(
+                "main",
+                "/c",
+                &Object::string("after sweep"),
+                quick_opts("b2"),
+            )
+            .expect("the completed sweep released the lock");
+
+        // And nothing live was lost along the way.
+        let missing = b.first_missing_object(&late).unwrap();
+        let kept = b.get_json("main", "/b").unwrap();
+        remove_db(&path);
+        assert_eq!(missing, None);
+        assert_eq!(kept, serde_json::json!("after refusal"));
     }
 
     /// Pinning a snapshot is opt-in. A routine checkpoint — a re-index, a

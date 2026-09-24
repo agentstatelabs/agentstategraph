@@ -7,6 +7,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **A mutating GC sweep could delete objects another connection had just written.** `gc_sweep` computed its keep-set, then `history_gc_sweep` marked the live closure and deleted in separately committed batches — with nothing excluding other writers anywhere in between. `lock_conn()` serializes one process, not a store shared by several. Two interleavings lost data: a commit landing after the keep-set was computed had objects reachable only from a ref tip the mark never saw, so they were swept; and a commit landing during the delete loop could re-reference, by content address, an object already queued as dead, whose `INSERT OR IGNORE` then found it still present just before the next batch removed it. Either way a live ref was left with dangling references.
+
+  That is not hypothetical for the stores this runs on: AgentStateDeveloper re-indexes from git hooks, and `asd-serve` and MCP servers write the same file, while a mark on a 5.7M-object store takes about three minutes. The first interleaving is now reproduced deterministically by `test_gc_sweep_keeps_state_committed_after_the_keep_set_was_computed`, which failed against v1.2.2 with a missing object under the live `main` tip. It affects every surface that can sweep: `Repository::gc_sweep`, the MCP `/gc/sweep` route, and the FFI `gc.sweep` operation.
+
+  `Repository::gc_sweep` now takes the store's write lock (`BEGIN IMMEDIATE` on SQLite) *before* computing its keep-set and holds it through the last delete, so the keep-set and the delete see the same store and no writer can interleave. Readers are unaffected under WAL. Other writers wait out the busy timeout and then fail rather than corrupt the sweep — a sweep is a maintenance operation, and a failed write is recoverable where a lost object is not. The lock is held by an RAII guard that rolls back on drop, so an early return or a panic cannot leave the store locked. As defence in depth, `history_gc_sweep` also adds every current ref tip to whatever roots it is given, read under the lock.
+
+  Note the trade: the sweep is now one write transaction. Deletes are still issued in bounded chunks, but it is no longer resumable batch by batch — a crash rolls the whole sweep back — and the WAL grows with the sweep until it commits. Run `gc_vacuum` afterwards, which reclaims it along with the freed pages.
+
+### Added
+- **`CommitStore::history_gc_lock_writers` / `history_gc_unlock_writers`**, the lock above. Default no-ops, so backends with a single writer or no object storage are unaffected.
+- **`Repository::history_unpin_legacy_milestones`** (and `CommitStore::history_unpin_legacy_milestones`). v1.2.2 made checkpoint pinning opt-in, but only for rows distilled from then on — the extractor cursor does not revisit older ones, which still pin every checkpoint. On a store that predates v1.2.2 that leaves a sweep able to reclaim almost nothing: measured, 3.4% of a 7.9 GB store. This clears `state_root` on each milestone row whose commit lacks `TAG_PIN_STATE`, leaves deliberately pinned rows alone, and keeps every row on the timeline. It is explicit and one-time by design rather than an automatic migration, so retention never changes merely because a store was opened under a new version. It deletes nothing; a subsequent sweep does.
+
 ## [v1.2.2] — 2026-09-23
 
 ### Changed
