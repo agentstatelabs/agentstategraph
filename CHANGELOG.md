@@ -19,6 +19,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Added
 - **`SpeculationManager::commit_with_base`**, which also returns the root a speculation forked from. `CommitOptions` is now `Clone`, so a write can rebuild its commit on a new head with the same provenance.
 
+- **Every ref move walked the whole commit DAG, even on a store with no epochs.** `check_epoch_seal_violations` computed the set of commits reachable from the new target before looking at whether any sealed epoch existed to check against. On an AgentStateDeveloper store with ~1.07M commits and no epochs at all, that made every single write take about three seconds — which is also what made the lost-update race above so easy to hit. The sealed epochs that bind the namespace are now listed first and the walk is skipped when there are none. Stores with sealed epochs are checked exactly as before.
+
 ## [v1.2.4] — 2026-09-24
 
 ### Fixed

@@ -2809,23 +2809,32 @@ impl Repository {
         &self,
         new_ref_target: &ObjectId,
     ) -> Result<Vec<EpochViolation>, RepoError> {
+        let ns = self.active_namespace()?;
+        let binding: Vec<_> = self
+            .storage
+            .list_epochs()?
+            .into_iter()
+            .filter(|epoch| {
+                (epoch.status == agentstategraph_core::EpochStatus::Sealed
+                    || epoch.status == agentstategraph_core::EpochStatus::Archived)
+                    // A seal binds only its own workspace — see `epoch_binds_namespace`.
+                    && Self::epoch_binds_namespace(epoch, &ns)
+            })
+            .collect();
+        // Nothing sealed here, so nothing a ref move could orphan. Checked
+        // before the reachability walk, which visits the whole commit DAG:
+        // on a ~1M-commit store with no epochs at all that walk made every
+        // write take ~3s — and a 3s read-modify-write window is what let
+        // concurrent writers lose each other's commits.
+        if binding.is_empty() {
+            return Ok(Vec::new());
+        }
         let reachable: std::collections::HashSet<ObjectId> = self
             .reachable_commits_from(new_ref_target)?
             .into_iter()
             .collect();
-        let epochs = self.storage.list_epochs()?;
-        let ns = self.active_namespace()?;
         let mut violations = Vec::new();
-        for epoch in epochs.iter() {
-            if epoch.status != agentstategraph_core::EpochStatus::Sealed
-                && epoch.status != agentstategraph_core::EpochStatus::Archived
-            {
-                continue;
-            }
-            // A seal binds only its own workspace — see `epoch_binds_namespace`.
-            if !Self::epoch_binds_namespace(epoch, &ns) {
-                continue;
-            }
+        for epoch in binding.iter() {
             let unreachable: Vec<ObjectId> = epoch
                 .sealed_commits
                 .iter()
