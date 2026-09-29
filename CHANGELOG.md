@@ -10,6 +10,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Fixed
 - **A three-way merge dropped one side's subtree when both sides created the same new map.** `merge_maps` treated a key absent from the base but added on both sides with different values as a conflict and kept `ours`, even when both values were maps — so two branches that each wrote the first entry under a new `/asd/v1/...` (or `/plans/...`) could not merge without losing everything the other side put there. Both maps are now merged against an empty base, so only a genuinely clashing leaf conflicts. `merge` surfaced this as a conflict error; a caller that accepts the partial merge (as `commit_speculation` now does, below) would have lost the data silently.
 
+- **Concurrent writers lost each other's commits, silently.** Every read-modify-write of a ref — `set`, `set_json`, `delete`, `merge`, `commit_speculation` and the taint intent commits — read the head, built a commit on it, and then moved the ref unconditionally. A commit another writer landed in between was discarded, and that writer had already been told `Ok`. `SqliteStorage` is shared by several processes in practice (AgentStateDeveloper's MCP server, CLI, and git-hook re-indexes all write one file), and one AgentStateDeveloper store lost 1,684 of 12,085 ledger entries this way; four `Repository` instances each writing 20 values now reproduce it (55 of 80 lost before this fix, 0 after — `tests/ref_cas_lost_updates.rs`).
+
+  Every one of those paths now lands its commit by compare-and-swap (`cas_ref`) on the head it built on, and rebuilds on the new head when another writer got there first — a loop bounded at 256 attempts, after which it returns `RepoError::WriteConflict`. Each failed swap means another writer's commit landed, so the store as a whole always progresses. A ref-spec that is not a stored branch (a bare commit hash) has nothing to swap against and keeps the old unconditional move. `set_json_cas` keeps its contract and now also maintains the leaf index, which it previously skipped.
+
+- **`commit_speculation` reverted everything written to the base ref while the speculation was open.** It committed the speculation's root as-is on top of the current head, so any write that landed after `speculate()` — for AgentStateDeveloper, every ledger entry written during an `asd index` pass — was undone. It now three-way merges the speculation onto the current head, using the root it forked from as the base: the speculation still wins any leaf both sides changed, as before, and everything else the head gained is kept. The `/_meta` reserved-path gate now judges what the speculation itself changed rather than its difference from a head other writers may have moved, so a concurrent `Migrate` commit no longer gets a speculation rejected.
+
+### Added
+- **`SpeculationManager::commit_with_base`**, which also returns the root a speculation forked from. `CommitOptions` is now `Clone`, so a write can rebuild its commit on a new head with the same provenance.
+
 ## [v1.2.4] — 2026-09-24
 
 ### Fixed

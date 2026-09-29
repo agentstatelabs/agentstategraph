@@ -270,6 +270,22 @@ impl SpeculationManager {
         Ok((spec.current_root, spec.base_ref))
     }
 
+    /// Like [`SpeculationManager::commit`], but also returns the root the
+    /// speculation forked from: `(current_root, base_root, base_ref)`. A
+    /// caller landing the speculation needs the base to merge onto a head
+    /// that has moved since the fork instead of reverting it.
+    pub fn commit_with_base(
+        &self,
+        handle: SpecHandle,
+    ) -> Result<(ObjectId, ObjectId, String), SpecError> {
+        let mut specs = self
+            .specs
+            .write()
+            .expect("SpeculationManager lock poisoned by earlier panic");
+        let spec = specs.remove(&handle).ok_or(SpecError::NotFound(handle))?;
+        Ok((spec.current_root, spec.base_root, spec.base_ref))
+    }
+
     /// Discard a speculation — all changes are lost.
     /// Since we use structural sharing, this is essentially free.
     pub fn discard(&self, handle: SpecHandle) -> Result<(), SpecError> {
