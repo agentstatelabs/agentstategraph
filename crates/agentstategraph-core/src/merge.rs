@@ -334,8 +334,31 @@ fn merge_maps(
             }
             // Key added by both — check if same value
             (None, Some(o), Some(t)) => {
+                let both_maps = || match (resolver.resolve(o), resolver.resolve(t)) {
+                    (
+                        Some(oo @ Object::Node(Node::Map(_))),
+                        Some(to @ Object::Node(Node::Map(_))),
+                    ) => Some((oo, to)),
+                    _ => None,
+                };
                 if o == t {
                     merged.insert(key.clone(), *o);
+                } else if let Some((oo, to)) = both_maps() {
+                    // Both sides created the same subtree (e.g. two writers
+                    // each making the first `/asd/v1/...` entry). That is not
+                    // a conflict: merge the two maps against an empty base so
+                    // only genuinely clashing leaves conflict. Treating it as
+                    // one kept `ours` and dropped everything `theirs` added.
+                    let merged_child = merge_objects(
+                        resolver,
+                        &child_path,
+                        &Object::empty_map(),
+                        &oo,
+                        &to,
+                        conflicts,
+                        created,
+                    );
+                    merged.insert(key.clone(), merged_child.id());
                 } else {
                     // Both added same key with different values — conflict
                     conflicts.push(Conflict {
@@ -516,6 +539,66 @@ mod tests {
         fn resolve(&self, id: &ObjectId) -> Option<Object> {
             self.objects.get(id).cloned()
         }
+    }
+
+    /// Resolve a merged tree (persisting `created` first) to plain JSON.
+    fn to_json(r: &mut TestResolver, obj: &Object, created: &[Object]) -> serde_json::Value {
+        for c in created {
+            r.store(c);
+        }
+        fn walk(r: &TestResolver, obj: &Object) -> serde_json::Value {
+            match obj {
+                Object::Node(Node::Map(m)) => serde_json::Value::Object(
+                    m.iter()
+                        .map(|(k, id)| (k.clone(), walk(r, &r.resolve(id).unwrap())))
+                        .collect(),
+                ),
+                Object::Atom(crate::object::Atom::Int(i)) => serde_json::json!(i),
+                Object::Atom(crate::object::Atom::String(s)) => serde_json::json!(s),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        walk(r, obj)
+    }
+
+    #[test]
+    fn subtree_created_on_both_sides_is_unioned_not_conflicted() {
+        // Two writers each create the first entry under the same new subtree.
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({"meta": 1}));
+        let ours =
+            r.store_json(&serde_json::json!({"meta": 1, "asd": {"v1": {"index": {"q": "s"}}}}));
+        let theirs =
+            r.store_json(&serde_json::json!({"meta": 1, "asd": {"v1": {"ledger": {"s": "e"}}}}));
+
+        let (result, created) = three_way_merge_collect(&r, &base, &ours, &theirs);
+        let MergeResult::Success(merged) = result else {
+            panic!("expected a clean merge, got {result:?}");
+        };
+        assert_eq!(
+            to_json(&mut r, &merged, &created),
+            serde_json::json!({"meta": 1, "asd": {"v1": {"index": {"q": "s"}, "ledger": {"s": "e"}}}})
+        );
+    }
+
+    #[test]
+    fn subtree_created_on_both_sides_still_conflicts_on_a_clashing_leaf() {
+        let mut r = TestResolver::new();
+        let base = r.store_json(&serde_json::json!({}));
+        let ours = r.store_json(&serde_json::json!({"cfg": {"mode": "a", "x": 1}}));
+        let theirs = r.store_json(&serde_json::json!({"cfg": {"mode": "b", "y": 2}}));
+
+        let (result, created) = three_way_merge_collect(&r, &base, &ours, &theirs);
+        let MergeResult::Conflicts { partial, conflicts } = result else {
+            panic!("expected a conflict on /cfg/mode, got {result:?}");
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path, "/cfg/mode");
+        // Non-clashing keys from both sides survive; the clash defaults to ours.
+        assert_eq!(
+            to_json(&mut r, &partial, &created),
+            serde_json::json!({"cfg": {"mode": "a", "x": 1, "y": 2}})
+        );
     }
 
     #[test]
