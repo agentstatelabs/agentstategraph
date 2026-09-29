@@ -163,6 +163,12 @@ pub struct Repository {
 /// small enough to keep peak memory bounded on a 512k-commit store.
 const DEFAULT_HISTORY_BATCH: usize = 5000;
 
+/// How many times a ref write rebuilds on a moved head before giving up with
+/// `RepoError::WriteConflict`. Each failed compare-and-swap means another
+/// writer's commit landed, so the store as a whole always makes progress; the
+/// bound only stops one writer starving forever under sustained contention.
+const MAX_REF_CAS_ATTEMPTS: usize = 256;
+
 /// Frontier batch size for the GC reachability mark (Plan B t-001) — how many
 /// unexpanded nodes are drained per transaction. Bounds peak memory to roughly
 /// this many object blobs regardless of store size.
@@ -244,6 +250,10 @@ pub struct HistoryExtractReport {
 }
 
 /// Options for creating a commit.
+///
+/// `Clone` so a write that loses a compare-and-swap race can rebuild its
+/// commit on the new head with the same provenance.
+#[derive(Clone)]
 pub struct CommitOptions {
     pub agent_id: String,
     pub authority: Authority,
@@ -715,25 +725,30 @@ impl Repository {
         if !is_taint_lifecycle_intent(&options.intent.category) {
             self.pre_commit_taint_check(&[path], &options)?;
         }
-        let commit_id = self.resolve_ref(ref_name)?;
-        let commit = self
-            .storage
-            .get_commit(&commit_id)?
-            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
-
         let state_path =
             StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
-        let new_root = tree::tree_set(
-            self.storage.as_ref(),
-            &commit.state_root,
-            &state_path,
-            value,
-        )?;
 
-        let new_commit = self.create_commit(new_root, vec![commit_id], options)?;
-        self.guarded_set_ref(ref_name, new_commit.id)?;
-
-        Ok(new_commit.id)
+        // Read-modify-write on the ref, so it must be a compare-and-swap: an
+        // unconditional ref move built on a head another writer has since
+        // advanced silently discards that writer's commit. See `advance_ref`.
+        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+            let (commit_id, is_branch) = self.head_for_write(ref_name)?;
+            let commit = self
+                .storage
+                .get_commit(&commit_id)?
+                .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+            let new_root = tree::tree_set(
+                self.storage.as_ref(),
+                &commit.state_root,
+                &state_path,
+                value,
+            )?;
+            let new_commit = self.create_commit(new_root, vec![commit_id], options.clone())?;
+            if self.move_ref(ref_name, commit_id, is_branch, new_commit.id)? {
+                return Ok(new_commit.id);
+            }
+        }
+        Err(RepoError::WriteConflict)
     }
 
     /// Set a value from JSON, creating a new commit.
@@ -813,14 +828,7 @@ impl Repository {
 
         let new_commit = self.create_commit(new_root, vec![expected_head], options)?;
 
-        // Epoch-seal check (same guard that guarded_set_ref runs).
-        self.enforce_epoch_seals(ref_name, &new_commit.id)?;
-
-        let ns = self.active_namespace()?;
-        match self
-            .storage
-            .cas_ref(&ns, ref_name, expected_head, new_commit.id)?
-        {
+        match self.advance_ref(ref_name, expected_head, new_commit.id)? {
             false => Err(RepoError::WriteConflict),
             true => {
                 if !is_lifecycle {
@@ -842,20 +850,23 @@ impl Repository {
         if !is_taint_lifecycle_intent(&options.intent.category) {
             self.pre_commit_taint_check(&[path], &options)?;
         }
-        let commit_id = self.resolve_ref(ref_name)?;
-        let commit = self
-            .storage
-            .get_commit(&commit_id)?
-            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
-
         let state_path =
             StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
-        let new_root = tree::tree_delete(self.storage.as_ref(), &commit.state_root, &state_path)?;
 
-        let new_commit = self.create_commit(new_root, vec![commit_id], options)?;
-        self.guarded_set_ref(ref_name, new_commit.id)?;
-
-        Ok(new_commit.id)
+        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+            let (commit_id, is_branch) = self.head_for_write(ref_name)?;
+            let commit = self
+                .storage
+                .get_commit(&commit_id)?
+                .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+            let new_root =
+                tree::tree_delete(self.storage.as_ref(), &commit.state_root, &state_path)?;
+            let new_commit = self.create_commit(new_root, vec![commit_id], options.clone())?;
+            if self.move_ref(ref_name, commit_id, is_branch, new_commit.id)? {
+                return Ok(new_commit.id);
+            }
+        }
+        Err(RepoError::WriteConflict)
     }
 
     // -----------------------------------------------------------------------
@@ -920,6 +931,28 @@ impl Repository {
         options: CommitOptions,
         allow_deletions: bool,
     ) -> Result<ObjectId, RepoError> {
+        // The merge is computed against the target's head at the time, so
+        // landing it is a compare-and-swap on that head; if another writer
+        // moved the target meanwhile, recompute against the new head rather
+        // than overwrite what it wrote.
+        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+            if let Some(id) = self.try_merge_checked(source, target, &options, allow_deletions)? {
+                return Ok(id);
+            }
+        }
+        Err(RepoError::WriteConflict)
+    }
+
+    /// One attempt of [`Repository::merge_checked`]. `Ok(None)` means the
+    /// target ref moved while the merge was being computed.
+    fn try_merge_checked(
+        &self,
+        source: &str,
+        target: &str,
+        options: &CommitOptions,
+        allow_deletions: bool,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        let (_, target_is_branch) = self.head_for_write(target)?;
         let comp = self.compute_merge(source, target)?;
 
         if !allow_deletions {
@@ -957,10 +990,11 @@ impl Repository {
                 let commit = self.create_commit(
                     merged_root,
                     vec![comp.target_commit_id, comp.source_commit_id],
-                    options,
+                    options.clone(),
                 )?;
-                self.guarded_set_ref(target, commit.id)?;
-                Ok(commit.id)
+                Ok(self
+                    .move_ref(target, comp.target_commit_id, target_is_branch, commit.id)?
+                    .then_some(commit.id))
             }
             MergeResult::FastForward(ff_id) => {
                 // Find the commit that has this state root
@@ -970,8 +1004,9 @@ impl Repository {
                 } else {
                     comp.target_commit_id
                 };
-                self.guarded_set_ref(target, ff_commit)?;
-                Ok(ff_commit)
+                Ok(self
+                    .move_ref(target, comp.target_commit_id, target_is_branch, ff_commit)?
+                    .then_some(ff_commit))
             }
             MergeResult::Conflicts { conflicts, .. } => Err(RepoError::MergeConflicts(conflicts)),
         }
@@ -1241,29 +1276,74 @@ impl Repository {
         handle: SpecHandle,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
-        let (state_root, base_ref) = self.specs.commit(handle).map_err(RepoError::Speculation)?;
+        let (spec_root, base_root, base_ref) = self
+            .specs
+            .commit_with_base(handle)
+            .map_err(RepoError::Speculation)?;
+        let resolver = StorageResolver {
+            storage: self.storage.as_ref(),
+        };
 
-        let parent_id = self.resolve_ref(&base_ref)?;
-
-        // Gate /_meta/* writes on the commit's intent category.
+        // Gate /_meta/* writes on the commit's intent category. Judge what the
+        // speculation itself changed (base → spec), not its difference from a
+        // head that other writers may have moved since.
         if options.intent.category != IntentCategory::Migrate {
-            let parent_commit = self
-                .storage
-                .get_commit(&parent_id)?
-                .ok_or_else(|| RepoError::RefNotFound(base_ref.clone()))?;
-            let resolver = StorageResolver {
-                storage: self.storage.as_ref(),
-            };
-            let diff =
-                agentstategraph_core::diff::diff(&resolver, &parent_commit.state_root, &state_root);
+            let diff = agentstategraph_core::diff::diff(&resolver, &base_root, &spec_root);
             if let Some(path) = reserved_path_in_diff(&diff) {
                 return Err(RepoError::ReservedPath(path));
             }
         }
 
-        let commit = self.create_commit(state_root, vec![parent_id], options)?;
-        self.guarded_set_ref(&base_ref, commit.id)?;
-        Ok(commit.id)
+        // The speculation forked at `base_root`. Committing its root as-is
+        // would revert every write that landed on the base ref since the fork
+        // (the ledger entries `asd index` was silently discarding). Instead,
+        // three-way merge it onto the current head: the speculation wins any
+        // leaf both sides changed — what it always did — and everything else
+        // the head gained is kept. Landed by compare-and-swap, so a write that
+        // races the merge itself is not lost either.
+        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+            let (parent_id, is_branch) = self.head_for_write(&base_ref)?;
+            let parent_root = self
+                .storage
+                .get_commit(&parent_id)?
+                .ok_or_else(|| RepoError::RefNotFound(base_ref.clone()))?
+                .state_root;
+            let new_root = if parent_root == base_root {
+                spec_root
+            } else {
+                // ours = speculation, so conflicts resolve to it.
+                let (result, created) = agentstategraph_core::merge::three_way_merge_collect(
+                    &resolver,
+                    &base_root,
+                    &spec_root,
+                    &parent_root,
+                );
+                match result {
+                    MergeResult::FastForward(id) => id,
+                    MergeResult::Success(merged)
+                    | MergeResult::Conflicts {
+                        partial: merged, ..
+                    } => {
+                        let merged_root = merged.id();
+                        let mut to_store = created;
+                        to_store.push(merged);
+                        self.storage.batch_put_objects(&to_store)?;
+                        if let Some(missing) = self.first_missing_reachable(&merged_root)? {
+                            return Err(RepoError::IntegrityViolation {
+                                root: merged_root,
+                                missing,
+                            });
+                        }
+                        merged_root
+                    }
+                }
+            };
+            let commit = self.create_commit(new_root, vec![parent_id], options.clone())?;
+            if self.move_ref(&base_ref, parent_id, is_branch, commit.id)? {
+                return Ok(commit.id);
+            }
+        }
+        Err(RepoError::WriteConflict)
     }
 
     /// Discard a speculation — all changes lost. Instant.
@@ -2729,23 +2809,32 @@ impl Repository {
         &self,
         new_ref_target: &ObjectId,
     ) -> Result<Vec<EpochViolation>, RepoError> {
+        let ns = self.active_namespace()?;
+        let binding: Vec<_> = self
+            .storage
+            .list_epochs()?
+            .into_iter()
+            .filter(|epoch| {
+                (epoch.status == agentstategraph_core::EpochStatus::Sealed
+                    || epoch.status == agentstategraph_core::EpochStatus::Archived)
+                    // A seal binds only its own workspace — see `epoch_binds_namespace`.
+                    && Self::epoch_binds_namespace(epoch, &ns)
+            })
+            .collect();
+        // Nothing sealed here, so nothing a ref move could orphan. Checked
+        // before the reachability walk, which visits the whole commit DAG:
+        // on a ~1M-commit store with no epochs at all that walk made every
+        // write take ~3s — and a 3s read-modify-write window is what let
+        // concurrent writers lose each other's commits.
+        if binding.is_empty() {
+            return Ok(Vec::new());
+        }
         let reachable: std::collections::HashSet<ObjectId> = self
             .reachable_commits_from(new_ref_target)?
             .into_iter()
             .collect();
-        let epochs = self.storage.list_epochs()?;
-        let ns = self.active_namespace()?;
         let mut violations = Vec::new();
-        for epoch in epochs.iter() {
-            if epoch.status != agentstategraph_core::EpochStatus::Sealed
-                && epoch.status != agentstategraph_core::EpochStatus::Archived
-            {
-                continue;
-            }
-            // A seal binds only its own workspace — see `epoch_binds_namespace`.
-            if !Self::epoch_binds_namespace(epoch, &ns) {
-                continue;
-            }
+        for epoch in binding.iter() {
             let unreachable: Vec<ObjectId> = epoch
                 .sealed_commits
                 .iter()
@@ -2819,26 +2908,93 @@ impl Repository {
             .and_then(|cid| self.storage.get_commit(&cid).ok().flatten())
             .map(|c| c.state_root);
         self.storage.set_ref(&ns, ref_name, new_target)?;
-        // Incremental leaf-index maintenance (plan t-006). Best-effort: index
-        // upkeep must never fail a write, and it only runs for a set that has
-        // already been backfilled — otherwise the first search will build it
-        // from the current state anyway.
+        self.update_leaf_index(&ns, ref_name, old_root.as_ref(), &new_target);
+        Ok(())
+    }
+
+    /// Compare-and-swap counterpart of `guarded_set_ref`: move `ref_name`
+    /// from `expected` to `new_target` only if no other writer moved it
+    /// first. Returns `Ok(false)` when it had moved; the caller must rebuild
+    /// on the new head rather than retry the same commit.
+    ///
+    /// Every read-modify-write of a ref goes through here. An unconditional
+    /// move built on a stale head discards every commit that landed since —
+    /// silently, because each of those writers already got `Ok`. That lost
+    /// ~14% of one AgentStateDeveloper store's ledger under a handful of
+    /// concurrent writer processes.
+    fn advance_ref(
+        &self,
+        ref_name: &str,
+        expected: ObjectId,
+        new_target: ObjectId,
+    ) -> Result<bool, RepoError> {
+        let ns = self.active_namespace()?;
+        self.enforce_epoch_seals(ref_name, &new_target)?;
+        let old_root = self
+            .storage
+            .get_commit(&expected)
+            .ok()
+            .flatten()
+            .map(|c| c.state_root);
+        if !self.storage.cas_ref(&ns, ref_name, expected, new_target)? {
+            return Ok(false);
+        }
+        self.update_leaf_index(&ns, ref_name, old_root.as_ref(), &new_target);
+        Ok(true)
+    }
+
+    /// The commit a write to `ref_name` should build on, and whether
+    /// `ref_name` is a stored branch. A ref-spec that resolves without being
+    /// a branch (a commit hash) has nothing to compare-and-swap against, so
+    /// `move_ref` keeps the historical unconditional move for it.
+    fn head_for_write(&self, ref_name: &str) -> Result<(ObjectId, bool), RepoError> {
+        let ns = self.active_namespace()?;
+        match self.storage.get_ref(&ns, ref_name)? {
+            Some(id) => Ok((id, true)),
+            None => Ok((self.resolve_ref(ref_name)?, false)),
+        }
+    }
+
+    /// Land a commit built on `expected` (from `head_for_write`). `Ok(false)`
+    /// means another writer won the race and the caller must rebuild.
+    fn move_ref(
+        &self,
+        ref_name: &str,
+        expected: ObjectId,
+        is_branch: bool,
+        new_target: ObjectId,
+    ) -> Result<bool, RepoError> {
+        if is_branch {
+            self.advance_ref(ref_name, expected, new_target)
+        } else {
+            self.guarded_set_ref(ref_name, new_target)?;
+            Ok(true)
+        }
+    }
+
+    /// Incremental leaf-index maintenance (plan t-006). Best-effort: index
+    /// upkeep must never fail a write, and it only runs for a set that has
+    /// already been backfilled — otherwise the first search will build it
+    /// from the current state anyway.
+    fn update_leaf_index(
+        &self,
+        ns: &Namespace,
+        ref_name: &str,
+        old_root: Option<&ObjectId>,
+        new_target: &ObjectId,
+    ) {
         if self
             .storage
             .leaf_index_is_built(ns.as_str(), ref_name)
             .unwrap_or(false)
-            && let Ok(Some(new_commit)) = self.storage.get_commit(&new_target)
-            && let Ok((removed, added)) = tree::tree_diff_leaves(
-                self.storage.as_ref(),
-                old_root.as_ref(),
-                &new_commit.state_root,
-            )
+            && let Ok(Some(new_commit)) = self.storage.get_commit(new_target)
+            && let Ok((removed, added)) =
+                tree::tree_diff_leaves(self.storage.as_ref(), old_root, &new_commit.state_root)
         {
             let _ = self
                 .storage
                 .leaf_index_apply(ns.as_str(), ref_name, &removed, &added);
         }
-        Ok(())
     }
 
     /// Low-level: move a ref to a specific commit id, subject to epoch-seal
@@ -2968,18 +3124,22 @@ impl Repository {
         agent_id: &str,
         reasoning: Option<String>,
     ) -> Result<ObjectId, RepoError> {
-        let parent_id = self.resolve_ref(ref_name)?;
-        let parent = self
-            .storage
-            .get_commit(&parent_id)?
-            .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
         let mut options = CommitOptions::new(agent_id, category, description);
         if let Some(r) = reasoning {
             options = options.with_reasoning(r);
         }
-        let commit = self.create_commit(parent.state_root, vec![parent_id], options)?;
-        self.guarded_set_ref(ref_name, commit.id)?;
-        Ok(commit.id)
+        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+            let (parent_id, is_branch) = self.head_for_write(ref_name)?;
+            let parent = self
+                .storage
+                .get_commit(&parent_id)?
+                .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+            let commit = self.create_commit(parent.state_root, vec![parent_id], options.clone())?;
+            if self.move_ref(ref_name, parent_id, is_branch, commit.id)? {
+                return Ok(commit.id);
+            }
+        }
+        Err(RepoError::WriteConflict)
     }
 }
 
