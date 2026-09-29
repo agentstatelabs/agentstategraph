@@ -290,3 +290,27 @@ ci-guard:
           fi
         done
       fi
+
+# site-version: move agentstategraph in agentstatelabs.com/releases.json to this
+# tag, which is what agentstategraph.dev and agentstatelabs.com show as the
+# current version. Delayed like the downstream installers so the site does not
+# advertise a release before GitHub has built it. Gated on SITE_RELEASES_TOKEN
+# so it no-ops until that is configured.
+site-version:
+  stage: .post
+  image: debian:bookworm-slim
+  before_script: []
+  cache: {}
+  needs:
+    - job: publish-github
+      artifacts: false
+  rules:
+    - if: '$CI_COMMIT_TAG && $SITE_RELEASES_TOKEN'
+      when: delayed
+      start_in: 10 minutes
+  variables:
+    SITE_PROJECT: site/agentstatelabs-site
+    SITE_PRODUCT: agentstategraph
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates python3
+    - ./scripts/publish-site-version.sh
