@@ -140,9 +140,24 @@ changelog:
 
 ```sh
 scripts/release.sh X.Y.Z
+# audit every binding, then set reviewed_core_version to X.Y.Z by hand
+python3 scripts/check-binding-capabilities.py
 git commit -am "release-prep: vX.Y.Z"
 git push origin main
 ```
+
+**The binding review goes in the `release-prep` commit itself.** The
+`binding-contract` job fails any pipeline where `reviewed_core_version` in
+[`bindings/capabilities.json`](bindings/capabilities.json) differs from the
+workspace version, and `release.sh` deliberately leaves that field alone: it
+exists to force a human audit of all eight bindings against
+[docs/BINDING_RELEASE_POLICY.md](docs/BINDING_RELEASE_POLICY.md), so the bump is
+never automated. After `release.sh` and before committing, do the audit, update
+the manifest, run the check, and record the audit's conclusions in the commit
+body. The release jobs (`prepare-swift-release`, `create-release-tag`) run only
+when `main`'s HEAD title matches `^release-prep: v`, so a review pushed as a
+follow-up commit passes every check and tags nothing. That is how v1.2.2
+stalled; see *If a release tagged nothing* below.
 
 That preparation commit passes the normal GitLab pipeline and is mirrored to
 GitHub without a release tag. GitLab then dispatches the protected GitHub
@@ -170,6 +185,31 @@ never the release source of truth.
 The **tag** is the deploy trigger: a `version-guard` job fails the pipeline if
 any version disagrees with the tag before anything publishes, then the release
 artifacts build and the mirror publishes `main` and the tag to GitHub.
+
+**If a release tagged nothing.** The symptom is a `release-prep: vX.Y.Z`
+pipeline that failed `binding-contract`, so its release jobs were skipped, and
+no `vX.Y.Z` tag on origin (`git ls-remote --tags origin vX.Y.Z`). Retrying that
+pipeline cannot fix it — it re-runs the same commit, whose manifest is still
+stale — and a fix pushed under any other title gets a pipeline with no release
+jobs at all. What recovers it is a new `release-prep: vX.Y.Z` commit at the head
+of `main`:
+
+- If the review is not on `main` yet, make it that commit: update
+  `bindings/capabilities.json`, commit it titled `release-prep: vX.Y.Z` with the
+  audit in the body, and push.
+- If the review already landed under another title, push an empty commit:
+  ```sh
+  git commit --allow-empty -m "release-prep: vX.Y.Z"
+  git push origin main
+  ```
+
+The version comes from `Cargo.toml`, not the title, and `create-release-tag`
+does nothing if the tag already exists, so the re-run is safe. It tags `main`'s
+HEAD, though, so anything merged since the original prep commit ships in
+`vX.Y.Z` too — check before you push. Do not tag by hand, and do not amend and
+force-push the prep commit. v1.2.2 is the worked example: `d352a8a` failed
+`binding-contract`, the review landed as `102b91c` (green, no tag), and the
+empty `f98e312` released it.
 
 ## Licensing of contributions
 
