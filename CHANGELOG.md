@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.5] — 2026-09-29
+
 ### Fixed
 - **A three-way merge dropped one side's subtree when both sides created the same new map.** `merge_maps` treated a key absent from the base but added on both sides with different values as a conflict and kept `ours`, even when both values were maps — so two branches that each wrote the first entry under a new `/asd/v1/...` (or `/plans/...`) could not merge without losing everything the other side put there. Both maps are now merged against an empty base, so only a genuinely clashing leaf conflicts. `merge` surfaced this as a conflict error; a caller that accepts the partial merge (as `commit_speculation` now does, below) would have lost the data silently.
 
