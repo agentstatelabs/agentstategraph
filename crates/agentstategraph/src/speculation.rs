@@ -60,8 +60,10 @@ struct Speculation {
     base_root: ObjectId,
     /// Current state root (updated as changes are made).
     current_root: ObjectId,
-    /// Local overlay: objects created within this speculation.
-    /// These are written to the main store only on commit.
+    /// Local overlay consulted on reads. Nothing populates it today:
+    /// `set` writes a speculation's objects straight into the main store,
+    /// where nothing references them until commit — which is why
+    /// `Repository` pins an open speculation's roots for GC.
     overlay: HashMap<ObjectId, Object>,
 }
 
