@@ -2968,51 +2968,42 @@ impl ReminderStore for SqliteStorage {
         let conn = self
             .lock_conn()
             .map_err(|e| ReminderError::Store(e.to_string()))?;
-        let commands_json = serde_json::to_string(&reminder.commands)
-            .map_err(|e| ReminderError::Store(format!("commands: {e}")))?;
-        let refs_json = serde_json::to_string(&reminder.refs)
-            .map_err(|e| ReminderError::Store(format!("refs: {e}")))?;
-        let schedule_json = reminder
-            .schedule
-            .as_ref()
-            .map(|s| serde_json::to_string(s))
-            .transpose()
-            .map_err(|e| ReminderError::Store(format!("schedule: {e}")))?;
-        let executions_json = serde_json::to_string(&reminder.executions)
-            .map_err(|e| ReminderError::Store(format!("executions: {e}")))?;
-        let tags_json = serde_json::to_string(&reminder.tags)
-            .map_err(|e| ReminderError::Store(format!("tags: {e}")))?;
-        let n = conn
-            .execute(
-                "UPDATE reminders SET
-                    title = ?2, instructions = ?3, commands = ?4, refs = ?5,
-                    priority = ?6, due_at = ?7, schedule = ?8, autonomous = ?9,
-                    created_by = ?10, created_at = ?11, status = ?12,
-                    snoozed_until = ?13, executions = ?14, tags = ?15
-                 WHERE id = ?1",
-                params![
-                    reminder.id,
-                    reminder.title,
-                    reminder.instructions,
-                    commands_json,
-                    refs_json,
-                    priority_to_i64(reminder.priority),
-                    reminder.due_at.to_rfc3339(),
-                    schedule_json,
-                    if reminder.autonomous { 1_i64 } else { 0_i64 },
-                    reminder.created_by,
-                    reminder.created_at.to_rfc3339(),
-                    reminder_status_to_str(reminder.status),
-                    reminder.snoozed_until.map(|t| t.to_rfc3339()),
-                    executions_json,
-                    tags_json,
-                ],
+        update_reminder_on(&conn, reminder)
+    }
+
+    fn update_if_unchanged(
+        &self,
+        expected: &Reminder,
+        new: &Reminder,
+    ) -> Result<bool, ReminderError> {
+        let mut conn = self
+            .lock_conn()
+            .map_err(|e| ReminderError::Store(e.to_string()))?;
+        // Compare and write under one write transaction, so another
+        // connection (process) cannot change the row in between.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| ReminderError::Store(format!("begin reminder update: {e}")))?;
+        let current = tx
+            .query_row(
+                "SELECT * FROM reminders WHERE id = ?1",
+                params![expected.id],
+                row_to_reminder,
             )
-            .map_err(|e| ReminderError::Store(format!("update reminder: {e}")))?;
-        if n == 0 {
-            return Err(ReminderError::NotFound(reminder.id.clone()));
+            .optional()
+            .map_err(|e| ReminderError::Store(format!("get reminder: {e}")))?;
+        match current {
+            None => Err(ReminderError::NotFound(expected.id.clone())),
+            Some(current) if !agentstategraph_reminders::same_reminder(&current, expected) => {
+                Ok(false) // dropped transaction rolls back; nothing written
+            }
+            Some(_) => {
+                update_reminder_on(&tx, new)?;
+                tx.commit()
+                    .map_err(|e| ReminderError::Store(format!("commit reminder update: {e}")))?;
+                Ok(true)
+            }
         }
-        Ok(())
     }
 
     fn delete(&self, id: &str) -> Result<bool, ReminderError> {
@@ -3088,6 +3079,55 @@ impl ReminderStore for SqliteStorage {
         }
         Ok(out)
     }
+}
+
+/// The full-record `UPDATE` shared by `update` and `update_if_unchanged`.
+fn update_reminder_on(conn: &Connection, reminder: &Reminder) -> Result<(), ReminderError> {
+    let commands_json = serde_json::to_string(&reminder.commands)
+        .map_err(|e| ReminderError::Store(format!("commands: {e}")))?;
+    let refs_json = serde_json::to_string(&reminder.refs)
+        .map_err(|e| ReminderError::Store(format!("refs: {e}")))?;
+    let schedule_json = reminder
+        .schedule
+        .as_ref()
+        .map(|s| serde_json::to_string(s))
+        .transpose()
+        .map_err(|e| ReminderError::Store(format!("schedule: {e}")))?;
+    let executions_json = serde_json::to_string(&reminder.executions)
+        .map_err(|e| ReminderError::Store(format!("executions: {e}")))?;
+    let tags_json = serde_json::to_string(&reminder.tags)
+        .map_err(|e| ReminderError::Store(format!("tags: {e}")))?;
+    let n = conn
+        .execute(
+            "UPDATE reminders SET
+                    title = ?2, instructions = ?3, commands = ?4, refs = ?5,
+                    priority = ?6, due_at = ?7, schedule = ?8, autonomous = ?9,
+                    created_by = ?10, created_at = ?11, status = ?12,
+                    snoozed_until = ?13, executions = ?14, tags = ?15
+                 WHERE id = ?1",
+            params![
+                reminder.id,
+                reminder.title,
+                reminder.instructions,
+                commands_json,
+                refs_json,
+                priority_to_i64(reminder.priority),
+                reminder.due_at.to_rfc3339(),
+                schedule_json,
+                if reminder.autonomous { 1_i64 } else { 0_i64 },
+                reminder.created_by,
+                reminder.created_at.to_rfc3339(),
+                reminder_status_to_str(reminder.status),
+                reminder.snoozed_until.map(|t| t.to_rfc3339()),
+                executions_json,
+                tags_json,
+            ],
+        )
+        .map_err(|e| ReminderError::Store(format!("update reminder: {e}")))?;
+    if n == 0 {
+        return Err(ReminderError::NotFound(reminder.id.clone()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

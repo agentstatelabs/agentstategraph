@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **Concurrent updates to the same task, policy, or reminder silently reverted one another.** Every task transition (`start`, `complete`, `abandon`, `assign`, `unassign`, `set_priority`, `set_blockers`), every policy write (`propose`, `ratify`, `set_signature`), and every reminder lifecycle method read the whole record, changed a field or two, and wrote the whole record back. v1.2.5 made the *ref move* a compare-and-swap, but the *value* written was still the earlier read — so a `complete_task` racing an `assign_task` kept only one of them while both returned `Ok`. Measured before this fix: 40 of 40 tasks lost an update; 29–30 of 30 policies lost either the ratification or the signature; two concurrent `supersede`s both claimed the same version. Each write now snapshots the head (or, for reminders, the stored row), reads, applies its change, and lands only if nothing moved in between, re-reading and re-applying otherwise — which also re-validates the transition against fresh state. A write that keeps losing gives up with a write-conflict error rather than overwriting. `remind_me` no longer writes back a promotion over a reminder that was cancelled or snoozed after it was listed. Tests: `concurrent_complete_and_assign_both_survive`, `concurrent_ratify_and_sign_both_survive`, `concurrent_supersedes_each_get_their_own_version`, and `a_write_between_read_and_write_is_not_reverted` (deterministic interleaving) all fail against v1.2.5.
+- **Committing a speculation could publish a ref whose tree was missing objects.** With nothing moved since the fork, `commit_speculation` landed the speculation's root unchecked; if a GC sweep had removed objects it wrote, the ref pointed at a broken tree. It now verifies every object the speculation added (cost proportional to the change, not the store) and fails with `IntegrityViolation` instead.
+
+### Added
+- **`Repository::commit_speculation_cas(handle, expected_head, options)`** — commit a speculation as-is only if the ref is still at `expected_head` and the speculation forked from it; otherwise `WriteConflict`. The multi-path counterpart of `set_json_cas`, for read-modify-writes whose result spans several paths (policy `supersede` uses it). `commit_speculation` merges onto a moved head with the speculation winning conflicting leaves, which reverts a concurrent change to anything the caller read and wrote back.
+- **`ReminderStore::update_if_unchanged(expected, new)`** and `same_reminder`. The SQLite and in-memory stores implement it atomically; the default falls back to a non-atomic get-compare-update for other implementors.
+
 ## [v1.2.5] — 2026-09-29
 
 ### Fixed

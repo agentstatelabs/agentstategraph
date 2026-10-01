@@ -1309,6 +1309,17 @@ impl Repository {
                 .ok_or_else(|| RepoError::RefNotFound(base_ref.clone()))?
                 .state_root;
             let new_root = if parent_root == base_root {
+                // Nothing moved since the fork: land the speculation's root
+                // as-is — but only if every object it wrote still exists. A
+                // GC sweep between `speculate` and here (open speculations
+                // are not GC roots in other processes) used to publish a ref
+                // whose tree was missing objects.
+                if let Some(missing) = self.first_missing_new(&base_root, &spec_root)? {
+                    return Err(RepoError::IntegrityViolation {
+                        root: spec_root,
+                        missing,
+                    });
+                }
                 spec_root
             } else {
                 // ours = speculation, so conflicts resolve to it.
@@ -1344,6 +1355,60 @@ impl Repository {
             }
         }
         Err(RepoError::WriteConflict)
+    }
+
+    /// Commit a speculation **as-is**, and only if `expected_head` is still
+    /// the head of the speculation's base ref and the speculation forked from
+    /// that head's state. Otherwise returns `RepoError::WriteConflict` and the
+    /// caller re-reads, re-speculates and retries — the speculation is
+    /// consumed either way.
+    ///
+    /// The speculation counterpart of [`Repository::set_json_cas`]. Use it when
+    /// the speculation's content was computed from values read at
+    /// `expected_head` (a read-modify-write across several paths):
+    /// [`Repository::commit_speculation`] merges onto whatever head is current
+    /// with the speculation winning conflicting leaves, which silently reverts
+    /// a concurrent change to anything the caller read and wrote back.
+    pub fn commit_speculation_cas(
+        &self,
+        handle: SpecHandle,
+        expected_head: ObjectId,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        let (spec_root, base_root, base_ref) = self
+            .specs
+            .commit_with_base(handle)
+            .map_err(RepoError::Speculation)?;
+        let expected_root = self
+            .storage
+            .get_commit(&expected_head)?
+            .ok_or_else(|| RepoError::CommitNotFound(expected_head.short()))?
+            .state_root;
+        if base_root != expected_root {
+            // Forked from a different state than the caller read from.
+            return Err(RepoError::WriteConflict);
+        }
+        if options.intent.category != IntentCategory::Migrate {
+            let resolver = StorageResolver {
+                storage: self.storage.as_ref(),
+            };
+            let diff = agentstategraph_core::diff::diff(&resolver, &base_root, &spec_root);
+            if let Some(path) = reserved_path_in_diff(&diff) {
+                return Err(RepoError::ReservedPath(path));
+            }
+        }
+        if let Some(missing) = self.first_missing_new(&base_root, &spec_root)? {
+            return Err(RepoError::IntegrityViolation {
+                root: spec_root,
+                missing,
+            });
+        }
+        let commit = self.create_commit(spec_root, vec![expected_head], options)?;
+        if self.advance_ref(&base_ref, expected_head, commit.id)? {
+            Ok(commit.id)
+        } else {
+            Err(RepoError::WriteConflict)
+        }
     }
 
     /// Discard a speculation — all changes lost. Instant.
@@ -2719,6 +2784,48 @@ impl Repository {
     /// and cycles (content-addressing makes true cycles impossible, but the
     /// guard is cheap) are each visited once. Used as the pre-ref-advance
     /// integrity gate for merges.
+    /// Like [`Self::first_missing_reachable`], but only checks what `new_root`
+    /// adds over `base_root`: a subtree whose id is unchanged from the base is
+    /// committed state and is skipped. Cost tracks the size of the change, not
+    /// the store — cheap enough to gate every speculation commit.
+    fn first_missing_new(
+        &self,
+        base_root: &ObjectId,
+        new_root: &ObjectId,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        use agentstategraph_core::Node;
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![(*new_root, Some(*base_root))];
+        while let Some((id, base)) = stack.pop() {
+            if Some(id) == base || !seen.insert(id) {
+                continue;
+            }
+            let Some(obj) = self.storage.get_object(&id)? else {
+                return Ok(Some(id));
+            };
+            let Object::Node(node) = obj else { continue };
+            match node {
+                Node::Map(entries) => {
+                    let base_entries = match base
+                        .map(|b| self.storage.get_object(&b))
+                        .transpose()?
+                        .flatten()
+                    {
+                        Some(Object::Node(Node::Map(m))) => m,
+                        _ => Default::default(),
+                    };
+                    for (k, child) in entries {
+                        stack.push((child, base_entries.get(&k).copied()));
+                    }
+                }
+                Node::List(items) | Node::Set(items) => {
+                    stack.extend(items.into_iter().map(|c| (c, None)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn first_missing_reachable(&self, root: &ObjectId) -> Result<Option<ObjectId>, RepoError> {
         use agentstategraph_core::Node;
         let mut seen = std::collections::HashSet::new();
@@ -3164,6 +3271,14 @@ impl agentstategraph_reminders::ReminderStore for Repository {
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
         self.storage.update(reminder)
+    }
+
+    fn update_if_unchanged(
+        &self,
+        expected: &agentstategraph_reminders::Reminder,
+        new: &agentstategraph_reminders::Reminder,
+    ) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        self.storage.update_if_unchanged(expected, new)
     }
 
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {

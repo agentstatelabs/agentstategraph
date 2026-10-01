@@ -501,30 +501,38 @@ impl TaskStore {
         plan: &str,
         id: &TaskId,
     ) -> Result<Task, TaskStoreError> {
-        let mut task = self.get_task(ref_name, plan, id)?;
-        check_transition(task.status, Transition::Start)?;
+        self.update_task(
+            ref_name,
+            plan,
+            id,
+            format!("Start {}/{}", plan, id),
+            |task| {
+                check_transition(task.status, Transition::Start)?;
 
-        let BlockerCheck { missing, pending } =
-            self.classify_blockers(ref_name, plan, &task.blocked_by)?;
-        if !missing.is_empty() {
-            return Err(TaskStoreError::BlockerNotFound { blockers: missing });
-        }
-        if !pending.is_empty() {
-            return Err(TaskStoreError::Blocked { blockers: pending });
-        }
+                let BlockerCheck { missing, pending } =
+                    self.classify_blockers(ref_name, plan, &task.blocked_by)?;
+                if !missing.is_empty() {
+                    return Err(TaskStoreError::BlockerNotFound { blockers: missing });
+                }
+                if !pending.is_empty() {
+                    return Err(TaskStoreError::Blocked { blockers: pending });
+                }
 
-        task.status = TaskStatus::InProgress;
-        task.started_at = Some(Utc::now());
-        task.started_by = Some(self.agent_id.clone());
-
-        self.write_task(ref_name, plan, &task, format!("Start {}/{}", plan, id))?;
-        Ok(task)
+                task.status = TaskStatus::InProgress;
+                task.started_at = Some(Utc::now());
+                task.started_by = Some(self.agent_id.clone());
+                Ok(())
+            },
+        )
     }
 
     /// Transition `in_progress → done`. Requires a `Proof` — it's stored
-    /// but NOT verified here (use `verify_plan` for that). If this is the
-    /// last open task in the plan, the plan's `_meta` is also promoted to
-    /// `Completed` in the same commit.
+    /// but NOT verified here (use `verify_plan` for that).
+    ///
+    /// A terminal task transition does NOT auto-promote the plan to
+    /// `Completed`. Closing a plan is an explicit, summary-gated action
+    /// (`close_plan`) so implementations own their close workflow and can
+    /// require a summary — the plan-level analog of a task's `proof`.
     pub fn complete_task(
         &self,
         ref_name: &str,
@@ -532,56 +540,25 @@ impl TaskStore {
         id: &TaskId,
         proof: Proof,
     ) -> Result<Task, TaskStoreError> {
-        let mut task = self.get_task(ref_name, plan, id)?;
-        check_transition(task.status, Transition::Complete)?;
-
-        task.status = TaskStatus::Done;
-        task.proof = Some(proof);
-        task.completed_at = Some(Utc::now());
-        task.completed_by = Some(self.agent_id.clone());
-
-        self.commit_terminal_transition(
+        self.update_task(
             ref_name,
             plan,
-            &task,
+            id,
             format!("Complete {}/{}", plan, id),
-        )?;
-        Ok(task)
-    }
-
-    /// Shared back-end for `complete_task` and `abandon_task` — writes
-    /// the task in its new terminal state.
-    ///
-    /// A terminal task transition NO LONGER auto-promotes the plan to
-    /// `Completed`. Closing a plan is an explicit, summary-gated action
-    /// (`close_plan`) so implementations own their close workflow and can
-    /// require a summary — the plan-level analog of a task's `proof`.
-    /// The engine no longer imposes the "plan is Completed iff every task
-    /// is terminal" invariant; a plan with all tasks terminal simply stays
-    /// `Active` until it is explicitly closed.
-    fn commit_terminal_transition(
-        &self,
-        ref_name: &str,
-        plan: &str,
-        task: &Task,
-        desc: String,
-    ) -> Result<(), TaskStoreError> {
-        debug_assert!(task.status.is_terminal());
-
-        let task_path = paths::task(&self.prefix, plan, &task.id);
-        let task_value = serde_json::to_value(task)?;
-        self.repo
-            .set_json(ref_name, &task_path, &task_value, self.commit_opts(desc))?;
-
-        Ok(())
+            |task| {
+                check_transition(task.status, Transition::Complete)?;
+                task.status = TaskStatus::Done;
+                task.proof = Some(proof.clone());
+                task.completed_at = Some(Utc::now());
+                task.completed_by = Some(self.agent_id.clone());
+                Ok(())
+            },
+        )
     }
 
     /// Transition to `abandoned`. Legal from both `pending` and
-    /// `in_progress`. Reason is required. If this is the last open
-    /// task in the plan, the plan's `_meta` is also promoted to
-    /// `Completed` in the same commit — mirroring `complete_task` so
-    /// the invariant "plan is `Completed` iff every task is terminal"
-    /// always holds.
+    /// `in_progress`. Reason is required. Like `complete_task`, it does not
+    /// touch the plan's status.
     pub fn abandon_task(
         &self,
         ref_name: &str,
@@ -592,16 +569,19 @@ impl TaskStore {
         if reason.trim().is_empty() {
             return Err(TaskStoreError::ReasonRequired);
         }
-
-        let mut task = self.get_task(ref_name, plan, id)?;
-        check_transition(task.status, Transition::Abandon)?;
-
-        task.status = TaskStatus::Abandoned;
-        task.abandoned_at = Some(Utc::now());
-        task.abandoned_reason = Some(reason.to_string());
-
-        self.commit_terminal_transition(ref_name, plan, &task, format!("Abandon {}/{}", plan, id))?;
-        Ok(task)
+        self.update_task(
+            ref_name,
+            plan,
+            id,
+            format!("Abandon {}/{}", plan, id),
+            |task| {
+                check_transition(task.status, Transition::Abandon)?;
+                task.status = TaskStatus::Abandoned;
+                task.abandoned_at = Some(Utc::now());
+                task.abandoned_reason = Some(reason.to_string());
+                Ok(())
+            },
+        )
     }
 
     pub fn set_priority(
@@ -611,15 +591,11 @@ impl TaskStore {
         id: &TaskId,
         priority: Priority,
     ) -> Result<Task, TaskStoreError> {
-        let mut task = self.get_task(ref_name, plan, id)?;
-        task.priority = priority;
-        self.write_task(
-            ref_name,
-            plan,
-            &task,
-            format!("Set priority {:?} on {}/{}", priority, plan, id),
-        )?;
-        Ok(task)
+        let desc = format!("Set priority {:?} on {}/{}", priority, plan, id);
+        self.update_task(ref_name, plan, id, desc, |task| {
+            task.priority = priority;
+            Ok(())
+        })
     }
 
     pub fn set_blockers(
@@ -630,18 +606,14 @@ impl TaskStore {
         blockers: Vec<TaskId>,
     ) -> Result<Task, TaskStoreError> {
         validate_blocker_ids(&blockers)?;
-        for blocker in &blockers {
-            self.get_task(ref_name, plan, blocker)?;
-        }
-        let mut task = self.get_task(ref_name, plan, id)?;
-        task.blocked_by = blockers;
-        self.write_task(
-            ref_name,
-            plan,
-            &task,
-            format!("Update blockers on {}/{}", plan, id),
-        )?;
-        Ok(task)
+        let desc = format!("Update blockers on {}/{}", plan, id);
+        self.update_task(ref_name, plan, id, desc, |task| {
+            for blocker in &blockers {
+                self.get_task(ref_name, plan, blocker)?;
+            }
+            task.blocked_by = blockers.clone();
+            Ok(())
+        })
     }
 
     /// Set `assigned_to` on a task.
@@ -652,15 +624,11 @@ impl TaskStore {
         id: &TaskId,
         agent: &str,
     ) -> Result<Task, TaskStoreError> {
-        let mut task = self.get_task(ref_name, plan, id)?;
-        task.assigned_to = Some(agent.to_string());
-        self.write_task(
-            ref_name,
-            plan,
-            &task,
-            format!("Assign {}/{} to {}", plan, id, agent),
-        )?;
-        Ok(task)
+        let desc = format!("Assign {}/{} to {}", plan, id, agent);
+        self.update_task(ref_name, plan, id, desc, |task| {
+            task.assigned_to = Some(agent.to_string());
+            Ok(())
+        })
     }
 
     /// Clear `assigned_to` on a task.
@@ -670,10 +638,16 @@ impl TaskStore {
         plan: &str,
         id: &TaskId,
     ) -> Result<Task, TaskStoreError> {
-        let mut task = self.get_task(ref_name, plan, id)?;
-        task.assigned_to = None;
-        self.write_task(ref_name, plan, &task, format!("Unassign {}/{}", plan, id))?;
-        Ok(task)
+        self.update_task(
+            ref_name,
+            plan,
+            id,
+            format!("Unassign {}/{}", plan, id),
+            |task| {
+                task.assigned_to = None;
+                Ok(())
+            },
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -847,18 +821,47 @@ impl TaskStore {
         Ok(BlockerCheck { missing, pending })
     }
 
-    fn write_task(
+    /// Read-modify-write one task without losing a concurrent update.
+    ///
+    /// Every transition reads the whole task, changes a field or two, and
+    /// writes the whole task back. Landing that with a plain `set_json` moved
+    /// the ref safely but wrote the value read earlier, so a concurrent update
+    /// to the same task was reverted while both calls returned Ok (a
+    /// complete racing an assign lost one or the other every time). Snapshot
+    /// the head before reading, apply `change` to what was read, and land it
+    /// with `set_json_cas` against that head; if anything moved the ref in
+    /// between, re-read and re-apply — which also re-validates the transition
+    /// against the fresh task.
+    fn update_task<F>(
         &self,
         ref_name: &str,
         plan: &str,
-        task: &Task,
+        id: &TaskId,
         description: String,
-    ) -> Result<(), TaskStoreError> {
-        let path = paths::task(&self.prefix, plan, &task.id);
-        let value = serde_json::to_value(task)?;
-        self.repo
-            .set_json(ref_name, &path, &value, self.commit_opts(description))?;
-        Ok(())
+        mut change: F,
+    ) -> Result<Task, TaskStoreError>
+    where
+        F: FnMut(&mut Task) -> Result<(), TaskStoreError>,
+    {
+        for _ in 0..Self::MAX_CAS_RETRIES {
+            let head = self.repo.head(ref_name)?;
+            let mut task = self.get_task(ref_name, plan, id)?;
+            change(&mut task)?;
+            let path = paths::task(&self.prefix, plan, &task.id);
+            let value = serde_json::to_value(&task)?;
+            match self.repo.set_json_cas(
+                ref_name,
+                head,
+                &path,
+                &value,
+                self.commit_opts(description.clone()),
+            ) {
+                Ok(_) => return Ok(task),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(TaskStoreError::WriteConflict)
     }
 
     fn commit_opts(&self, description: impl Into<String>) -> CommitOptions {

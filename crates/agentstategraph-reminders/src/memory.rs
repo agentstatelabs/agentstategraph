@@ -57,6 +57,25 @@ impl ReminderStore for MemoryReminderStore {
         }
     }
 
+    fn update_if_unchanged(
+        &self,
+        expected: &Reminder,
+        new: &Reminder,
+    ) -> Result<bool, ReminderError> {
+        let mut map = self
+            .reminders
+            .write()
+            .expect("MemoryReminderStore lock poisoned");
+        match map.get(&expected.id) {
+            Some(current) if crate::store::same_reminder(current, expected) => {
+                map.insert(new.id.clone(), new.clone());
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+            None => Err(ReminderError::NotFound(expected.id.clone())),
+        }
+    }
+
     fn delete(&self, id: &str) -> Result<bool, ReminderError> {
         Ok(self
             .reminders
