@@ -50,8 +50,8 @@ explicit review of all eight binding surfaces. See
 requires; bump the field only after doing it, and **in the `release-prep`
 commit itself**. The release jobs run only when `main`'s HEAD title matches
 `^release-prep: v`, so a review pushed as a follow-up commit passes CI and tags
-nothing — which is how v1.2.2 stalled. To recover, see *If a release tagged
-nothing* in [CONTRIBUTING.md](CONTRIBUTING.md).
+nothing — which is how v1.2.0 and v1.2.2 stalled. To recover, see *If a
+release tagged nothing* in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **Do not hand-edit `Package.swift` or `bindings/swift/release.json`.**
 `prepare-swift-release` stages the xcframework and pushes a checksum-pinned
