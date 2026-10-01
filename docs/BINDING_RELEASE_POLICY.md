@@ -67,7 +67,80 @@ The marketing site carries version strings that nothing derives from this
 repo. That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
 mechanics, not binding policy.
 
-## Current audit — 1.1.2 (full pass)
+## Current audit — 1.2.5 (retrospective)
+
+`reviewed_core_version` moved to 1.2.5 on 2026-09-29 in the release-prep commit
+`446ae43`, but that commit recorded **no audit conclusions**. What follows is a
+retrospective check of `v1.2.4..v1.2.5`, done on 2026-09-30 after the release
+shipped — not the review the gate exists to force. The next release needs a
+real one, recorded in its release-prep commit.
+
+1.2.5 is three **behavioural** fixes in Core: every ref write now lands by
+compare-and-swap and rebuilds on a head another writer moved;
+`commit_speculation` three-way merges onto the current head instead of
+reverting writes made after the fork; and a merge keeps a subtree both sides
+created instead of dropping one. Nothing under `crates/agentstategraph-ffi`,
+`crates/agentstategraph-wasm`, `crates/agentstategraph-mcp` or `bindings/`
+changed apart from version strings and the generated Swift release manifest.
+No advanced ABI operation is added, removed, or re-signatured:
+`advanced_abi_contract_version` stays 1, at **39 operations**.
+
+What a binding consumer observes, through `Repository` and without per-binding
+work:
+
+- `speculation.commit`, and the direct bindings' `commit_speculation`, keep
+  writes that landed on the base ref after the fork. Conflicting leaves still
+  resolve to the speculation, so there is no new conflict error.
+- Any write can now fail with `write conflict: ref moved before CAS could land`
+  once 256 swap attempts have lost; before, only `set_json_cas` could. Every
+  binding surfaces repository errors as message strings (a JSON error from C,
+  `RuntimeError` in Python, an `Error` reason in TypeScript, a thrown string in
+  WASM), so this is a new message, not a new error type.
+
+The one new public method, `SpeculationManager::commit_with_base`, is Rust-only:
+bindings reach speculation through `Repository`, never `SpeculationManager`, and
+Rust already classifies `speculation` as `full`. **No capability changes
+status in any binding.**
+
+The asymmetry recorded for 1.1.1 still stands: there is still no
+`epoch.list.all` operation, so C and Swift have no cross-workspace epoch
+listing.
+
+## Superseded audits — 1.2.0 to 1.2.4
+
+Each was recorded in the commit that moved `reviewed_core_version`; none changed
+a capability's status or the 39-operation ABI.
+
+- **1.2.4** (2026-09-24, `4a362ac`). The merge base became linear; the change
+  is internal to it. `merge.base`, `merge.preview` and `merge.checked` keep
+  their request and response shapes and return the same results, and the only
+  lines changed under the FFI, MCP, WASM or bindings trees since 1.2.3 were
+  version strings.
+- **1.2.3** (2026-09-23, `0405e0c`). The sweep fix changes how `gc.sweep`
+  executes — it holds the write lock from keep-set to last delete — not its
+  shape. `history_gc_lock_writers`, `history_gc_unlock_writers` and
+  `history_unpin_legacy_milestones` are Rust-only; nothing in the FFI, WASM,
+  MCP server or any binding calls them.
+- **1.2.2** (2026-09-23, `102b91c`). The FFI does dispatch the changed surface
+  (`explore.history`, `gc.dry_run`, `gc.sweep`, `gc.vacuum`), but opt-in
+  checkpoint pinning alters what a sweep reclaims, not what a binding can
+  reach, and `explore.history`'s new per-milestone `git_sha` is additive. This
+  review landed after the prep commit instead of in it, so the release needed
+  an empty `release-prep` commit to tag (see [RELEASE.md](../RELEASE.md)).
+- **1.2.1** (2026-09-03, `e8d8dae`). Fixes to four accidental first-parent
+  surfaces and to namespace attribution, all in existing methods. The ones
+  reachable over the ABI (`explore.commit_graph`, `explore.stats`) improve for
+  every binding with no binding change.
+- **1.2.0** (2026-09-03, `9e2eb56`). `log_dag` is new and Rust-only, which looks
+  like it should demote `commit_query` to `partial` for C, Swift, Python and
+  TypeScript. It does not: their commit queries already reach
+  `query_commits_paged` (over the ABI, `query.commits` dispatches to
+  `repo.query_commits`), the very function this release moved to the DAG walk,
+  so they gained full-DAG results without a binding change. `log_dag` is a
+  convenience that gates no data. This review also landed after its prep
+  commit, and v1.2.0 was tagged by the empty re-trigger `da5382a`.
+
+## Superseded audit — 1.1.2 (full pass)
 
 `reviewed_core_version` moved to 1.1.2 on 2026-08-28 after a **full step 1–6
 pass**, not a re-affirmation.
