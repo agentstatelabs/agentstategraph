@@ -156,8 +156,8 @@ never automated. After `release.sh` and before committing, do the audit, update
 the manifest, run the check, and record the audit's conclusions in the commit
 body. The release jobs (`prepare-swift-release`, `create-release-tag`) run only
 when `main`'s HEAD title matches `^release-prep: v`, so a review pushed as a
-follow-up commit passes every check and tags nothing. That is how v1.2.2
-stalled; see *If a release tagged nothing* below.
+follow-up commit passes every check and tags nothing. That is how v1.2.0 and
+v1.2.2 stalled; see *If a release tagged nothing* below.
 
 That preparation commit passes the normal GitLab pipeline and is mirrored to
 GitHub without a release tag. GitLab then dispatches the protected GitHub
@@ -207,9 +207,14 @@ The version comes from `Cargo.toml`, not the title, and `create-release-tag`
 does nothing if the tag already exists, so the re-run is safe. It tags `main`'s
 HEAD, though, so anything merged since the original prep commit ships in
 `vX.Y.Z` too — check before you push. Do not tag by hand, and do not amend and
-force-push the prep commit. v1.2.2 is the worked example: `d352a8a` failed
-`binding-contract`, the review landed as `102b91c` (green, no tag), and the
-empty `f98e312` released it.
+force-push the prep commit. This has happened twice, and both were recovered
+with an empty commit:
+
+- **v1.2.0:** `5426526` failed `binding-contract`; the review and a formatting
+  fix landed as `9e2eb56` and `0df6152` (green, no tag); the empty `da5382a`
+  released it.
+- **v1.2.2:** `d352a8a` failed `binding-contract`; the review landed as
+  `102b91c` (green, no tag); the empty `f98e312` released it.
 
 ## Licensing of contributions
 
