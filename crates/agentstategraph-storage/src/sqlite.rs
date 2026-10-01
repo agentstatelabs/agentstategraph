@@ -29,6 +29,14 @@ use crate::traits::{
 /// Creates the database file and tables automatically on first use.
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
+    /// The database file, so a GC sweep can take its write lock on a
+    /// connection of its own. `None` for an in-memory store.
+    path: Option<std::path::PathBuf>,
+    /// The connection holding a GC sweep's write lock, while one is held.
+    /// Separate from `conn` so other threads' writes wait for the lock (and
+    /// fail loudly on timeout) instead of running inside the sweep's
+    /// transaction, where a rollback would discard them after they returned Ok.
+    gc_conn: Mutex<Option<Connection>>,
 }
 
 impl SqliteStorage {
@@ -44,7 +52,8 @@ impl SqliteStorage {
     /// loss can drop only the last few not-yet-checkpointed commits (never
     /// corruption), and this store is rebuildable from its source transcripts.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let conn = Connection::open(path)
+        let path = path.as_ref().to_path_buf();
+        let conn = Connection::open(&path)
             .map_err(|e| StorageError::Backend(format!("sqlite open: {}", e)))?;
         // Best-effort: a pragma failure leaves the slower-but-correct default.
         // `journal_mode` returns the new mode as a row, so it needs a query
@@ -60,6 +69,8 @@ impl SqliteStorage {
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let storage = Self {
             conn: Mutex::new(conn),
+            path: Some(path),
+            gc_conn: Mutex::new(None),
         };
         storage.init_tables()?;
         Ok(storage)
@@ -71,6 +82,8 @@ impl SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("sqlite open: {}", e)))?;
         let storage = Self {
             conn: Mutex::new(conn),
+            path: None,
+            gc_conn: Mutex::new(None),
         };
         storage.init_tables()?;
         Ok(storage)
@@ -212,6 +225,13 @@ impl SqliteStorage {
                 namespace TEXT NOT NULL,
                 ref       TEXT NOT NULL,
                 PRIMARY KEY (namespace, ref)
+            );
+            -- Roots of uncommitted work (open speculations) that a GC sweep
+            -- must keep, from any process sharing this file. See gc_pin_root.
+            CREATE TABLE IF NOT EXISTS gc_pending_roots (
+                key        TEXT PRIMARY KEY,
+                root       BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_epochs_status ON epochs(status);
             CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
@@ -1068,6 +1088,17 @@ impl CommitStore for SqliteStorage {
 
     fn history_gc_sweep(&self, roots: &[ObjectId], batch: usize) -> Result<GcSweep, StorageError> {
         let batch = batch.max(1) as i64;
+        // Under `history_gc_lock_writers` the sweep runs on the connection that
+        // holds the lock.
+        {
+            let gc = self
+                .gc_conn
+                .lock()
+                .map_err(|e| StorageError::Backend(e.to_string()))?;
+            if let Some(gc_conn) = gc.as_ref() {
+                return gc_sweep_locked(gc_conn, roots, batch);
+            }
+        }
         let conn = self.lock_conn()?;
         // Exclude every other writer from the mark to the last delete. Without
         // it a commit from another connection can land mid-sweep and lose its
@@ -1097,13 +1128,77 @@ impl CommitStore for SqliteStorage {
         result
     }
 
-    fn history_gc_lock_writers(&self) -> Result<(), StorageError> {
+    fn gc_pin_root(&self, key: &str, root: &ObjectId) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO gc_pending_roots (key, root, updated_at) VALUES (?1, ?2, ?3)",
+            params![
+                key,
+                root.as_bytes().as_slice(),
+                chrono::Utc::now().timestamp()
+            ],
+        )
+        .map_err(|e| StorageError::Backend(format!("gc pin root: {}", e)))?;
+        Ok(())
+    }
+
+    fn gc_unpin_root(&self, key: &str) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        conn.execute("DELETE FROM gc_pending_roots WHERE key = ?1", params![key])
+            .map_err(|e| StorageError::Backend(format!("gc unpin root: {}", e)))?;
+        Ok(())
+    }
+
+    fn gc_pinned_roots(&self, max_age: std::time::Duration) -> Result<Vec<ObjectId>, StorageError> {
+        let conn = self.lock_conn()?;
+        gc_pending_roots(&conn, max_age)
+    }
+
+    fn history_gc_lock_writers(&self) -> Result<(), StorageError> {
+        let Some(path) = self.path.as_ref() else {
+            // In-memory: there is no second connection to take. Only the
+            // owning process can reach the store, and sweeping one that other
+            // threads are writing is not supported.
+            let conn = self.lock_conn()?;
+            return conn
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| StorageError::Backend(format!("gc lock writers: {}", e)));
+        };
+        let mut gc = self
+            .gc_conn
+            .lock()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if gc.is_some() {
+            return Err(StorageError::Backend(
+                "gc lock writers: a sweep already holds the lock".into(),
+            ));
+        }
+        let conn = Connection::open(path)
+            .map_err(|e| StorageError::Backend(format!("gc lock connection: {}", e)))?;
+        // Wait out an in-flight writer rather than failing the sweep at once.
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(30));
         conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| StorageError::Backend(format!("gc lock writers: {}", e)))
+            .map_err(|e| StorageError::Backend(format!("gc lock writers: {}", e)))?;
+        *gc = Some(conn);
+        Ok(())
     }
 
     fn history_gc_unlock_writers(&self, commit: bool) -> Result<(), StorageError> {
+        let held = self
+            .gc_conn
+            .lock()
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .take();
+        if let Some(conn) = held {
+            // Dropping the connection rolls back anything uncommitted, so a
+            // failed COMMIT cannot leave the lock (or a transaction) behind.
+            if commit {
+                conn.execute_batch("COMMIT").map_err(|e| {
+                    StorageError::Backend(format!("gc unlock writers (COMMIT): {}", e))
+                })?;
+            }
+            return Ok(());
+        }
         let conn = self.lock_conn()?;
         if conn.is_autocommit() {
             // Nothing held — already released, or never taken.
@@ -1689,6 +1784,30 @@ fn gc_live_tip_roots(conn: &Connection) -> Result<Vec<ObjectId>, StorageError> {
     Ok(out)
 }
 
+/// How long an open speculation's pin protects its objects without being
+/// refreshed. Longer than any real speculation; a pin this old belongs to a
+/// process that exited without committing or discarding.
+const GC_PIN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+fn gc_pending_roots(
+    conn: &Connection,
+    max_age: std::time::Duration,
+) -> Result<Vec<ObjectId>, StorageError> {
+    let cutoff = chrono::Utc::now().timestamp() - max_age.as_secs() as i64;
+    let mut stmt = conn
+        .prepare("SELECT root FROM gc_pending_roots WHERE updated_at >= ?1")
+        .map_err(|e| StorageError::Backend(format!("gc pinned roots: {}", e)))?;
+    let rows = stmt
+        .query_map(params![cutoff], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|e| StorageError::Backend(format!("gc pinned roots: {}", e)))?;
+    let mut out = Vec::new();
+    for bytes in rows {
+        let bytes = bytes.map_err(|e| StorageError::Backend(format!("gc pinned roots: {}", e)))?;
+        out.extend(object_id_from_bytes(&bytes));
+    }
+    Ok(out)
+}
+
 /// The body of a sweep. The caller holds the write lock, so nothing can commit
 /// between the mark and the last delete.
 fn gc_sweep_locked(
@@ -1702,6 +1821,9 @@ fn gc_sweep_locked(
 
     let mut roots = roots.to_vec();
     roots.extend(gc_live_tip_roots(conn)?);
+    // Re-read under the lock, like the live tips: an open speculation in any
+    // process pins the objects it has written but not yet committed.
+    roots.extend(gc_pending_roots(conn, GC_PIN_MAX_AGE)?);
 
     // Mark the live closure, then materialize the dead set (objects not
     // reachable from the keep-set) into its own temp table — one anti-join
@@ -2968,51 +3090,42 @@ impl ReminderStore for SqliteStorage {
         let conn = self
             .lock_conn()
             .map_err(|e| ReminderError::Store(e.to_string()))?;
-        let commands_json = serde_json::to_string(&reminder.commands)
-            .map_err(|e| ReminderError::Store(format!("commands: {e}")))?;
-        let refs_json = serde_json::to_string(&reminder.refs)
-            .map_err(|e| ReminderError::Store(format!("refs: {e}")))?;
-        let schedule_json = reminder
-            .schedule
-            .as_ref()
-            .map(|s| serde_json::to_string(s))
-            .transpose()
-            .map_err(|e| ReminderError::Store(format!("schedule: {e}")))?;
-        let executions_json = serde_json::to_string(&reminder.executions)
-            .map_err(|e| ReminderError::Store(format!("executions: {e}")))?;
-        let tags_json = serde_json::to_string(&reminder.tags)
-            .map_err(|e| ReminderError::Store(format!("tags: {e}")))?;
-        let n = conn
-            .execute(
-                "UPDATE reminders SET
-                    title = ?2, instructions = ?3, commands = ?4, refs = ?5,
-                    priority = ?6, due_at = ?7, schedule = ?8, autonomous = ?9,
-                    created_by = ?10, created_at = ?11, status = ?12,
-                    snoozed_until = ?13, executions = ?14, tags = ?15
-                 WHERE id = ?1",
-                params![
-                    reminder.id,
-                    reminder.title,
-                    reminder.instructions,
-                    commands_json,
-                    refs_json,
-                    priority_to_i64(reminder.priority),
-                    reminder.due_at.to_rfc3339(),
-                    schedule_json,
-                    if reminder.autonomous { 1_i64 } else { 0_i64 },
-                    reminder.created_by,
-                    reminder.created_at.to_rfc3339(),
-                    reminder_status_to_str(reminder.status),
-                    reminder.snoozed_until.map(|t| t.to_rfc3339()),
-                    executions_json,
-                    tags_json,
-                ],
+        update_reminder_on(&conn, reminder)
+    }
+
+    fn update_if_unchanged(
+        &self,
+        expected: &Reminder,
+        new: &Reminder,
+    ) -> Result<bool, ReminderError> {
+        let mut conn = self
+            .lock_conn()
+            .map_err(|e| ReminderError::Store(e.to_string()))?;
+        // Compare and write under one write transaction, so another
+        // connection (process) cannot change the row in between.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| ReminderError::Store(format!("begin reminder update: {e}")))?;
+        let current = tx
+            .query_row(
+                "SELECT * FROM reminders WHERE id = ?1",
+                params![expected.id],
+                row_to_reminder,
             )
-            .map_err(|e| ReminderError::Store(format!("update reminder: {e}")))?;
-        if n == 0 {
-            return Err(ReminderError::NotFound(reminder.id.clone()));
+            .optional()
+            .map_err(|e| ReminderError::Store(format!("get reminder: {e}")))?;
+        match current {
+            None => Err(ReminderError::NotFound(expected.id.clone())),
+            Some(current) if !agentstategraph_reminders::same_reminder(&current, expected) => {
+                Ok(false) // dropped transaction rolls back; nothing written
+            }
+            Some(_) => {
+                update_reminder_on(&tx, new)?;
+                tx.commit()
+                    .map_err(|e| ReminderError::Store(format!("commit reminder update: {e}")))?;
+                Ok(true)
+            }
         }
-        Ok(())
     }
 
     fn delete(&self, id: &str) -> Result<bool, ReminderError> {
@@ -3088,6 +3201,55 @@ impl ReminderStore for SqliteStorage {
         }
         Ok(out)
     }
+}
+
+/// The full-record `UPDATE` shared by `update` and `update_if_unchanged`.
+fn update_reminder_on(conn: &Connection, reminder: &Reminder) -> Result<(), ReminderError> {
+    let commands_json = serde_json::to_string(&reminder.commands)
+        .map_err(|e| ReminderError::Store(format!("commands: {e}")))?;
+    let refs_json = serde_json::to_string(&reminder.refs)
+        .map_err(|e| ReminderError::Store(format!("refs: {e}")))?;
+    let schedule_json = reminder
+        .schedule
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| ReminderError::Store(format!("schedule: {e}")))?;
+    let executions_json = serde_json::to_string(&reminder.executions)
+        .map_err(|e| ReminderError::Store(format!("executions: {e}")))?;
+    let tags_json = serde_json::to_string(&reminder.tags)
+        .map_err(|e| ReminderError::Store(format!("tags: {e}")))?;
+    let n = conn
+        .execute(
+            "UPDATE reminders SET
+                    title = ?2, instructions = ?3, commands = ?4, refs = ?5,
+                    priority = ?6, due_at = ?7, schedule = ?8, autonomous = ?9,
+                    created_by = ?10, created_at = ?11, status = ?12,
+                    snoozed_until = ?13, executions = ?14, tags = ?15
+                 WHERE id = ?1",
+            params![
+                reminder.id,
+                reminder.title,
+                reminder.instructions,
+                commands_json,
+                refs_json,
+                priority_to_i64(reminder.priority),
+                reminder.due_at.to_rfc3339(),
+                schedule_json,
+                if reminder.autonomous { 1_i64 } else { 0_i64 },
+                reminder.created_by,
+                reminder.created_at.to_rfc3339(),
+                reminder_status_to_str(reminder.status),
+                reminder.snoozed_until.map(|t| t.to_rfc3339()),
+                executions_json,
+                tags_json,
+            ],
+        )
+        .map_err(|e| ReminderError::Store(format!("update reminder: {e}")))?;
+    if n == 0 {
+        return Err(ReminderError::NotFound(reminder.id.clone()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

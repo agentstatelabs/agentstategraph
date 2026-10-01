@@ -133,6 +133,10 @@ pub struct EpochViolation {
 pub struct Repository {
     storage: Arc<dyn Storage + Send + Sync>,
     specs: SpeculationManager,
+    /// Unique per `Repository` value. Open speculations pin their roots in the
+    /// store under keys built from it, so a GC sweep in any process keeps
+    /// their not-yet-committed objects (see `pin_speculation`).
+    instance: String,
     watch_mgr: crate::watch::WatchManager,
     /// Configured namespace for this repository instance. The active session's
     /// `scope_namespace` takes priority when resolving the effective namespace
@@ -173,6 +177,10 @@ const MAX_REF_CAS_ATTEMPTS: usize = 256;
 /// unexpanded nodes are drained per transaction. Bounds peak memory to roughly
 /// this many object blobs regardless of store size.
 const GC_MARK_BATCH: usize = 10_000;
+
+/// How long an open speculation's GC pin stays honoured without a refresh.
+/// Matches the storage layer's own re-read of pins under the sweep lock.
+const GC_PIN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Map a `YYYY-MM-DD` day to its ISO-week key `YYYY-Www`, or `None` if the day
 /// doesn't parse. Used to roll daily velocity up to weekly.
@@ -520,6 +528,7 @@ impl Repository {
         Self {
             storage: Arc::from(storage),
             specs: SpeculationManager::new(),
+            instance: uuid::Uuid::new_v4().simple().to_string(),
             watch_mgr: crate::watch::WatchManager::new(),
             namespace: Namespace::default_ns(),
             active_session_namespace: std::sync::RwLock::new(None),
@@ -553,6 +562,7 @@ impl Repository {
         Self {
             storage: Arc::clone(&self.storage),
             specs: crate::speculation::SpeculationManager::new(),
+            instance: uuid::Uuid::new_v4().simple().to_string(),
             watch_mgr: crate::watch::WatchManager::new(),
             namespace: ns,
             active_epoch: std::sync::RwLock::new(epoch),
@@ -1118,12 +1128,16 @@ impl Repository {
         let resolver = StorageResolver {
             storage: self.storage.as_ref(),
         };
-        let (result, created) = agentstategraph_core::merge::three_way_merge_collect(
+        let (result, created) = agentstategraph_core::merge::try_three_way_merge_collect(
             &resolver,
             &base_commit.state_root,
             &target_commit.state_root,
             &source_commit.state_root,
-        );
+        )
+        .map_err(|missing| RepoError::IntegrityViolation {
+            root: base_commit.state_root,
+            missing,
+        })?;
 
         Ok(MergeComputation {
             source_commit_id,
@@ -1207,9 +1221,15 @@ impl Repository {
             .get_commit(&commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(from_ref.to_string()))?;
 
-        self.specs
+        let handle = self
+            .specs
             .create(from_ref, commit.state_root, label)
-            .map_err(RepoError::Speculation)
+            .map_err(RepoError::Speculation)?;
+        if let Err(e) = self.pin_speculation(handle, Some(&commit.state_root)) {
+            let _ = self.discard_speculation(handle);
+            return Err(e);
+        }
+        Ok(handle)
     }
 
     /// Get a value from a speculation's state.
@@ -1228,7 +1248,8 @@ impl Repository {
     ) -> Result<(), RepoError> {
         self.specs
             .set(handle, self.storage.as_ref(), path, value)
-            .map_err(RepoError::Speculation)
+            .map_err(RepoError::Speculation)?;
+        self.pin_speculation(handle, None)
     }
 
     /// Set a value from JSON in a speculation's state. Convenience wrapper
@@ -1252,7 +1273,8 @@ impl Repository {
     pub fn spec_delete(&self, handle: SpecHandle, path: &str) -> Result<(), RepoError> {
         self.specs
             .delete(handle, self.storage.as_ref(), path)
-            .map_err(RepoError::Speculation)
+            .map_err(RepoError::Speculation)?;
+        self.pin_speculation(handle, None)
     }
 
     /// Compare multiple speculations side-by-side.
@@ -1272,6 +1294,16 @@ impl Repository {
     /// with `RepoError::ReservedPath`. This keeps the meta namespace
     /// enforced for speculation writes the same as for direct writes.
     pub fn commit_speculation(
+        &self,
+        handle: SpecHandle,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        let result = self.commit_speculation_inner(handle, options);
+        self.unpin_speculation(handle);
+        result
+    }
+
+    fn commit_speculation_inner(
         &self,
         handle: SpecHandle,
         options: CommitOptions,
@@ -1309,15 +1341,30 @@ impl Repository {
                 .ok_or_else(|| RepoError::RefNotFound(base_ref.clone()))?
                 .state_root;
             let new_root = if parent_root == base_root {
+                // Nothing moved since the fork: land the speculation's root
+                // as-is — but only if every object it wrote still exists. A
+                // GC sweep between `speculate` and here (open speculations
+                // are not GC roots in other processes) used to publish a ref
+                // whose tree was missing objects.
+                if let Some(missing) = self.first_missing_new(&base_root, &spec_root)? {
+                    return Err(RepoError::IntegrityViolation {
+                        root: spec_root,
+                        missing,
+                    });
+                }
                 spec_root
             } else {
                 // ours = speculation, so conflicts resolve to it.
-                let (result, created) = agentstategraph_core::merge::three_way_merge_collect(
+                let (result, created) = agentstategraph_core::merge::try_three_way_merge_collect(
                     &resolver,
                     &base_root,
                     &spec_root,
                     &parent_root,
-                );
+                )
+                .map_err(|missing| RepoError::IntegrityViolation {
+                    root: spec_root,
+                    missing,
+                })?;
                 match result {
                     MergeResult::FastForward(id) => id,
                     MergeResult::Success(merged)
@@ -1346,9 +1393,114 @@ impl Repository {
         Err(RepoError::WriteConflict)
     }
 
+    /// Commit a speculation **as-is**, and only if `expected_head` is still
+    /// the head of the speculation's base ref and the speculation forked from
+    /// that head's state. Otherwise returns `RepoError::WriteConflict` and the
+    /// caller re-reads, re-speculates and retries — the speculation is
+    /// consumed either way.
+    ///
+    /// The speculation counterpart of [`Repository::set_json_cas`]. Use it when
+    /// the speculation's content was computed from values read at
+    /// `expected_head` (a read-modify-write across several paths):
+    /// [`Repository::commit_speculation`] merges onto whatever head is current
+    /// with the speculation winning conflicting leaves, which silently reverts
+    /// a concurrent change to anything the caller read and wrote back.
+    pub fn commit_speculation_cas(
+        &self,
+        handle: SpecHandle,
+        expected_head: ObjectId,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        let result = self.commit_speculation_cas_inner(handle, expected_head, options);
+        self.unpin_speculation(handle);
+        result
+    }
+
+    fn commit_speculation_cas_inner(
+        &self,
+        handle: SpecHandle,
+        expected_head: ObjectId,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        let (spec_root, base_root, base_ref) = self
+            .specs
+            .commit_with_base(handle)
+            .map_err(RepoError::Speculation)?;
+        let expected_root = self
+            .storage
+            .get_commit(&expected_head)?
+            .ok_or_else(|| RepoError::CommitNotFound(expected_head.short()))?
+            .state_root;
+        if base_root != expected_root {
+            // Forked from a different state than the caller read from.
+            return Err(RepoError::WriteConflict);
+        }
+        if options.intent.category != IntentCategory::Migrate {
+            let resolver = StorageResolver {
+                storage: self.storage.as_ref(),
+            };
+            let diff = agentstategraph_core::diff::diff(&resolver, &base_root, &spec_root);
+            if let Some(path) = reserved_path_in_diff(&diff) {
+                return Err(RepoError::ReservedPath(path));
+            }
+        }
+        if let Some(missing) = self.first_missing_new(&base_root, &spec_root)? {
+            return Err(RepoError::IntegrityViolation {
+                root: spec_root,
+                missing,
+            });
+        }
+        let commit = self.create_commit(spec_root, vec![expected_head], options)?;
+        if self.advance_ref(&base_ref, expected_head, commit.id)? {
+            Ok(commit.id)
+        } else {
+            Err(RepoError::WriteConflict)
+        }
+    }
+
     /// Discard a speculation — all changes lost. Instant.
     pub fn discard_speculation(&self, handle: SpecHandle) -> Result<(), RepoError> {
+        self.unpin_speculation(handle);
         self.specs.discard(handle).map_err(RepoError::Speculation)
+    }
+
+    /// Record an open speculation's roots as GC roots. A speculation writes its
+    /// objects to the store as it goes, but nothing references them until it
+    /// commits, so without a pin a sweep — in this process or another sharing
+    /// the store — deleted them, and the commit then either published a broken
+    /// tree or (merging onto a moved head) silently dropped the speculation's
+    /// writes. `base` is pinned once, at fork; the working root on every change.
+    fn pin_speculation(
+        &self,
+        handle: SpecHandle,
+        base: Option<&ObjectId>,
+    ) -> Result<(), RepoError> {
+        if let Some(base) = base {
+            self.storage
+                .gc_pin_root(&self.speculation_pin_key(handle, "base"), base)?;
+        }
+        let current = self
+            .specs
+            .current_root(handle)
+            .map_err(RepoError::Speculation)?;
+        self.storage
+            .gc_pin_root(&self.speculation_pin_key(handle, "cur"), &current)?;
+        Ok(())
+    }
+
+    /// Best-effort: a pin left behind (a crash, a failed delete) only keeps its
+    /// objects until it expires.
+    fn unpin_speculation(&self, handle: SpecHandle) {
+        let _ = self
+            .storage
+            .gc_unpin_root(&self.speculation_pin_key(handle, "base"));
+        let _ = self
+            .storage
+            .gc_unpin_root(&self.speculation_pin_key(handle, "cur"));
+    }
+
+    fn speculation_pin_key(&self, handle: SpecHandle, which: &str) -> String {
+        format!("spec:{}:{}:{}", self.instance, handle, which)
     }
 
     /// List all active speculations.
@@ -2416,15 +2568,49 @@ impl Repository {
                 }
             }
         }
-        // Sealed-epoch commits must stay materializable (epoch-seal invariant).
-        for entry in self.list_epochs()? {
-            let epoch = self.get_epoch(&entry.id)?;
+        // Sealed-epoch commits must stay materializable (epoch-seal invariant)
+        // — every namespace's, since the sweep covers the whole store. Listing
+        // only this repository's namespace let a sweep run from one workspace
+        // delete another's sealed history.
+        for epoch in self.storage.list_epochs()? {
+            if epoch.status != agentstategraph_core::EpochStatus::Sealed
+                && epoch.status != agentstategraph_core::EpochStatus::Archived
+            {
+                continue;
+            }
             for cid in &epoch.sealed_commits {
                 if let Some(c) = self.storage.get_commit(cid)? {
                     set.insert(c.state_root);
                 }
             }
         }
+        // Each branch's fork point from its namespace's `main` — the merge base
+        // a later merge needs. Once swept, `merge` could not read the base and
+        // (before it learned to fail) moved the target to the source, orphaning
+        // the target's own work.
+        for ns in self.storage.list_namespaces()? {
+            let refs = self.storage.list_refs(&ns, "")?;
+            let Some(main) = refs
+                .iter()
+                .find(|(name, _)| name == "main")
+                .map(|(_, t)| *t)
+            else {
+                continue;
+            };
+            for (name, head) in &refs {
+                if name == "main" {
+                    continue;
+                }
+                // Disjoint histories have no fork point to keep.
+                if let Ok(base) = self.find_common_ancestor(head, &main)
+                    && let Some(c) = self.storage.get_commit(&base)?
+                {
+                    set.insert(c.state_root);
+                }
+            }
+        }
+        // Open speculations' not-yet-committed trees, in any process.
+        set.extend(self.storage.gc_pinned_roots(GC_PIN_MAX_AGE)?);
         // The human-meaningful spine.
         if policy.keep_milestones {
             set.extend(self.history_retained_state_roots()?);
@@ -2719,6 +2905,48 @@ impl Repository {
     /// and cycles (content-addressing makes true cycles impossible, but the
     /// guard is cheap) are each visited once. Used as the pre-ref-advance
     /// integrity gate for merges.
+    /// Like [`Self::first_missing_reachable`], but only checks what `new_root`
+    /// adds over `base_root`: a subtree whose id is unchanged from the base is
+    /// committed state and is skipped. Cost tracks the size of the change, not
+    /// the store — cheap enough to gate every speculation commit.
+    fn first_missing_new(
+        &self,
+        base_root: &ObjectId,
+        new_root: &ObjectId,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        use agentstategraph_core::Node;
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![(*new_root, Some(*base_root))];
+        while let Some((id, base)) = stack.pop() {
+            if Some(id) == base || !seen.insert(id) {
+                continue;
+            }
+            let Some(obj) = self.storage.get_object(&id)? else {
+                return Ok(Some(id));
+            };
+            let Object::Node(node) = obj else { continue };
+            match node {
+                Node::Map(entries) => {
+                    let base_entries = match base
+                        .map(|b| self.storage.get_object(&b))
+                        .transpose()?
+                        .flatten()
+                    {
+                        Some(Object::Node(Node::Map(m))) => m,
+                        _ => Default::default(),
+                    };
+                    for (k, child) in entries {
+                        stack.push((child, base_entries.get(&k).copied()));
+                    }
+                }
+                Node::List(items) | Node::Set(items) => {
+                    stack.extend(items.into_iter().map(|c| (c, None)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn first_missing_reachable(&self, root: &ObjectId) -> Result<Option<ObjectId>, RepoError> {
         use agentstategraph_core::Node;
         let mut seen = std::collections::HashSet::new();
@@ -3166,6 +3394,14 @@ impl agentstategraph_reminders::ReminderStore for Repository {
         self.storage.update(reminder)
     }
 
+    fn update_if_unchanged(
+        &self,
+        expected: &agentstategraph_reminders::Reminder,
+        new: &agentstategraph_reminders::Reminder,
+    ) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        self.storage.update_if_unchanged(expected, new)
+    }
+
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
         self.storage.delete(id)
     }
@@ -3289,6 +3525,47 @@ mod tests {
 
     fn quick_opts(desc: &str) -> CommitOptions {
         CommitOptions::new("agent/test", IntentCategory::Checkpoint, desc)
+    }
+
+    /// A sweep's write lock used to be a transaction on the one shared
+    /// connection, so another thread's write made while it was held ran inside
+    /// it — and the sweep's refusal or error path rolled it back after it had
+    /// returned Ok. Now the lock lives on its own connection: a concurrent
+    /// write waits and, if the sweep outlasts the busy timeout, fails loudly.
+    /// Either way, nothing that returned Ok may disappear.
+    #[test]
+    fn write_during_a_gc_lock_is_never_acknowledged_then_rolled_back() {
+        let path = std::env::temp_dir().join(format!(
+            "asg-gclock-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = Repository::new(Box::new(SqliteStorage::open(&path).unwrap()));
+        repo.init().unwrap();
+        let before = repo.head("main").unwrap();
+
+        repo.storage.history_gc_lock_writers().unwrap(); // a sweep starts
+        let during = repo.set_json(
+            "main",
+            "/during",
+            &serde_json::json!("written"),
+            quick_opts("w"),
+        );
+        repo.storage.history_gc_unlock_writers(false).unwrap(); // sweep refuses
+
+        match during {
+            Ok(acked) => assert_eq!(
+                repo.head("main").unwrap(),
+                acked,
+                "a write that returned Ok was rolled back by the sweep"
+            ),
+            Err(_) => assert_eq!(repo.head("main").unwrap(), before),
+        }
+        // And the store is writable again once the sweep is done.
+        repo.set_json("main", "/after", &serde_json::json!(1), quick_opts("a"))
+            .unwrap();
     }
 
     // --- full-DAG log + paged query (plan asg-commit-dag-walk t-002) -------

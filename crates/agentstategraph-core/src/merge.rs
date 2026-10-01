@@ -106,6 +106,9 @@ pub fn three_way_merge(
 /// dangle with `ObjectNotFound` on readback.
 ///
 /// The vec is empty for fast-forward results (no new objects are created).
+///
+/// An object it cannot resolve is treated as absent (see
+/// [`try_three_way_merge_collect`] for a caller that lands the result).
 pub fn three_way_merge_collect(
     resolver: &dyn ObjectResolver,
     base: &ObjectId,
@@ -159,6 +162,48 @@ pub fn three_way_merge_collect(
         }
     };
     (result, created)
+}
+
+/// Like [`three_way_merge_collect`], but an object the merge needs and cannot
+/// resolve is an error carrying its id, never a guess.
+///
+/// `three_way_merge_collect` answers an unresolvable base or side with a
+/// fast-forward to the other side, and an unresolvable child with "keep ours".
+/// For a caller that lands the result that is silent data loss: a merge whose
+/// base a GC sweep had removed moved the target ref to the source, orphaning
+/// everything the target did since the fork, and returned `Ok`. A resolver
+/// that maps read errors to `None` hits the same path on a transient error.
+pub fn try_three_way_merge_collect(
+    resolver: &dyn ObjectResolver,
+    base: &ObjectId,
+    ours: &ObjectId,
+    theirs: &ObjectId,
+) -> Result<(MergeResult, Vec<Object>), ObjectId> {
+    let tracking = TrackingResolver {
+        inner: resolver,
+        missing: std::cell::Cell::new(None),
+    };
+    let out = three_way_merge_collect(&tracking, base, ours, theirs);
+    match tracking.missing.get() {
+        Some(id) => Err(id),
+        None => Ok(out),
+    }
+}
+
+/// Records the first id its inner resolver could not resolve.
+struct TrackingResolver<'a> {
+    inner: &'a dyn ObjectResolver,
+    missing: std::cell::Cell<Option<ObjectId>>,
+}
+
+impl ObjectResolver for TrackingResolver<'_> {
+    fn resolve(&self, id: &ObjectId) -> Option<Object> {
+        let found = self.inner.resolve(id);
+        if found.is_none() && self.missing.get().is_none() {
+            self.missing.set(Some(*id));
+        }
+        found
+    }
 }
 
 /// Core recursive merge logic.
@@ -598,6 +643,26 @@ mod tests {
         assert_eq!(
             to_json(&mut r, &partial, &created),
             serde_json::json!({"cfg": {"mode": "a", "x": 1, "y": 2}})
+        );
+    }
+
+    #[test]
+    fn unresolvable_base_is_an_error_not_a_fast_forward() {
+        let mut r = TestResolver::new();
+        let ours = r.store_json(&serde_json::json!({"a": 1, "mine": 1}));
+        let theirs = r.store_json(&serde_json::json!({"a": 1, "theirs": 1}));
+        // A base the resolver cannot produce (swept, or a read error).
+        let base = TestResolver::new().store_json(&serde_json::json!({"a": 1}));
+
+        // The lenient merge guesses "fast-forward to theirs", which drops ours.
+        assert!(matches!(
+            three_way_merge_collect(&r, &base, &ours, &theirs).0,
+            MergeResult::FastForward(id) if id == theirs
+        ));
+        // The checked merge refuses and names what is missing.
+        assert_eq!(
+            try_three_way_merge_collect(&r, &base, &ours, &theirs).unwrap_err(),
+            base
         );
     }
 

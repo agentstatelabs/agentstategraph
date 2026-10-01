@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CommitOptions, RepoError, Repository};
 use agentstategraph_core::IntentCategory;
 use chrono::Utc;
 
@@ -18,6 +18,10 @@ use crate::paths;
 use crate::selector::Situation;
 use crate::types::{ChangeProposal, Decision, ExternalEvaluatorRef, Policy, PolicySignature};
 use crate::verifier::SignatureVerifier;
+
+/// How many times a read-modify-write rebuilds on a moved head before
+/// giving up with a write conflict (matches the task store).
+const MAX_CAS_RETRIES: u32 = 32;
 
 /// Handle bound to a `Repository` + path prefix. Mirrors the
 /// `agentstategraph-tasks` `TaskStore` pattern.
@@ -114,10 +118,6 @@ impl PolicyStore {
     /// agent_id`, `proposed_at = now`, `ratified_by = None`.
     pub fn propose(&self, ref_name: &str, mut policy: Policy) -> Result<String, PolicyError> {
         let normalized = paths::normalize(&policy.path)?;
-        if self.exists(ref_name, &normalized)? {
-            return Err(PolicyError::AlreadyExists(normalized));
-        }
-
         policy.path = normalized.clone();
         policy.version = 1;
         policy.proposed_by = self.agent_id.clone();
@@ -132,16 +132,30 @@ impl PolicyStore {
 
         let path = paths::active(&self.prefix, &normalized);
         let value = serde_json::to_value(&policy)?;
-        self.repo.set_json(
-            ref_name,
-            &path,
-            &value,
-            self.commit_opts(
-                IntentCategory::PolicyPropose,
-                format!("Propose policy {}", policy.handle()),
-            ),
-        )?;
-        Ok(policy.handle())
+        // Existence check and write must see the same head, or two
+        // concurrent proposals at one path both pass the check and the second
+        // silently replaces the first.
+        for _ in 0..MAX_CAS_RETRIES {
+            let head = self.repo.head(ref_name)?;
+            if self.exists(ref_name, &normalized)? {
+                return Err(PolicyError::AlreadyExists(normalized));
+            }
+            match self.repo.set_json_cas(
+                ref_name,
+                head,
+                &path,
+                &value,
+                self.commit_opts(
+                    IntentCategory::PolicyPropose,
+                    format!("Propose policy {}", policy.handle()),
+                ),
+            ) {
+                Ok(_) => return Ok(policy.handle()),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(RepoError::WriteConflict.into())
     }
 
     /// Ratify an unratified proposal at `path`. Fails if the policy
@@ -158,30 +172,22 @@ impl PolicyStore {
             return Err(PolicyError::Invalid("ratifier required".into()));
         }
         let normalized = paths::normalize(path)?;
-        let mut policy = self.load_active(ref_name, &normalized)?;
-        if policy.is_ratified() {
-            return Err(PolicyError::AlreadyRatified(policy.handle()));
-        }
-        policy.ratified_by = Some(ratifier.to_string());
-        policy.ratified_at = Some(Utc::now());
-        policy.ratification_reasoning = if reasoning.is_empty() {
-            None
-        } else {
-            Some(reasoning.to_string())
-        };
-
-        let active_path = paths::active(&self.prefix, &normalized);
-        let value = serde_json::to_value(&policy)?;
-        self.repo.set_json(
-            ref_name,
-            &active_path,
-            &value,
-            self.commit_opts(
+        self.update_active(ref_name, &normalized, |policy| {
+            if policy.is_ratified() {
+                return Err(PolicyError::AlreadyRatified(policy.handle()));
+            }
+            policy.ratified_by = Some(ratifier.to_string());
+            policy.ratified_at = Some(Utc::now());
+            policy.ratification_reasoning = if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning.to_string())
+            };
+            Ok((
                 IntentCategory::PolicyRatify,
                 format!("Ratify policy {} by {}", policy.handle(), ratifier),
-            ),
-        )?;
-        Ok(())
+            ))
+        })
     }
 
     /// Replace the active policy at `path` with `new_policy`. The old
@@ -200,35 +206,50 @@ impl PolicyStore {
         mut new_policy: Policy,
     ) -> Result<String, PolicyError> {
         let normalized = paths::normalize(path)?;
-        let old = self.load_active(ref_name, &normalized)?;
-
-        new_policy.path = normalized.clone();
-        new_policy.version = old.version + 1;
-        new_policy.proposed_by = self.agent_id.clone();
-        new_policy.proposed_at = Utc::now();
-        new_policy.supersedes = Some(old.handle());
         if new_policy.active_from.timestamp() == 0 {
             new_policy.active_from = Utc::now();
         }
-
-        let history_path = paths::historical(&self.prefix, &normalized, old.version);
         let active_path = paths::active(&self.prefix, &normalized);
-        let old_value = serde_json::to_value(&old)?;
-        let new_value = serde_json::to_value(&new_policy)?;
 
-        let handle = self
-            .repo
-            .speculate(ref_name, Some(format!("Supersede {}", normalized)))?;
-        self.repo.spec_set_json(handle, &history_path, &old_value)?;
-        self.repo.spec_set_json(handle, &active_path, &new_value)?;
-        self.repo.commit_speculation(
-            handle,
-            self.commit_opts(
-                IntentCategory::PolicySupersede,
-                format!("Supersede {} → {}", old.handle(), new_policy.handle()),
-            ),
-        )?;
-        Ok(new_policy.handle())
+        // A supersede writes two paths from one read (the old version moves to
+        // history, the new one takes the active slot), so it lands as a
+        // speculation — committed only if nothing moved since the read. A
+        // plain `commit_speculation` would merge with the speculation winning,
+        // silently reverting a concurrent ratify or signature on the old
+        // version, and two concurrent supersedes would both claim `old + 1`.
+        for _ in 0..MAX_CAS_RETRIES {
+            let head = self.repo.head(ref_name)?;
+            let old = self.load_active(ref_name, &normalized)?;
+
+            new_policy.path = normalized.clone();
+            new_policy.version = old.version + 1;
+            new_policy.proposed_by = self.agent_id.clone();
+            new_policy.proposed_at = Utc::now();
+            new_policy.supersedes = Some(old.handle());
+
+            let history_path = paths::historical(&self.prefix, &normalized, old.version);
+            let old_value = serde_json::to_value(&old)?;
+            let new_value = serde_json::to_value(&new_policy)?;
+
+            let handle = self
+                .repo
+                .speculate(ref_name, Some(format!("Supersede {}", normalized)))?;
+            self.repo.spec_set_json(handle, &history_path, &old_value)?;
+            self.repo.spec_set_json(handle, &active_path, &new_value)?;
+            match self.repo.commit_speculation_cas(
+                handle,
+                head,
+                self.commit_opts(
+                    IntentCategory::PolicySupersede,
+                    format!("Supersede {} → {}", old.handle(), new_policy.handle()),
+                ),
+            ) {
+                Ok(_) => return Ok(new_policy.handle()),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(RepoError::WriteConflict.into())
     }
 
     /// Attach (or replace) a signature on the active policy at `path`.
@@ -250,20 +271,13 @@ impl PolicyStore {
         signature: PolicySignature,
     ) -> Result<(), PolicyError> {
         let normalized = paths::normalize(path)?;
-        let mut policy = self.load_active(ref_name, &normalized)?;
-        policy.signature = Some(signature);
-        let active_path = paths::active(&self.prefix, &normalized);
-        let value = serde_json::to_value(&policy)?;
-        self.repo.set_json(
-            ref_name,
-            &active_path,
-            &value,
-            self.commit_opts(
+        self.update_active(ref_name, &normalized, |policy| {
+            policy.signature = Some(signature.clone());
+            Ok((
                 IntentCategory::PolicySign,
                 format!("Sign policy {}", policy.handle()),
-            ),
-        )?;
-        Ok(())
+            ))
+        })
     }
 
     // -----------------------------------------------------------------
@@ -659,6 +673,42 @@ impl PolicyStore {
             Err(PolicyError::NotFound(_)) => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    /// Read-modify-write the active policy at `normalized` without losing a
+    /// concurrent update: snapshot the head, read, apply `change` (which
+    /// returns the commit's intent and description), and land it with
+    /// `set_json_cas` against that head, re-reading on conflict. A plain
+    /// `set_json` wrote back the value read earlier, so a concurrent ratify
+    /// and sign reverted one another while both returned Ok.
+    fn update_active<F>(
+        &self,
+        ref_name: &str,
+        normalized: &str,
+        mut change: F,
+    ) -> Result<(), PolicyError>
+    where
+        F: FnMut(&mut Policy) -> Result<(IntentCategory, String), PolicyError>,
+    {
+        let active_path = paths::active(&self.prefix, normalized);
+        for _ in 0..MAX_CAS_RETRIES {
+            let head = self.repo.head(ref_name)?;
+            let mut policy = self.load_active(ref_name, normalized)?;
+            let (category, description) = change(&mut policy)?;
+            let value = serde_json::to_value(&policy)?;
+            match self.repo.set_json_cas(
+                ref_name,
+                head,
+                &active_path,
+                &value,
+                self.commit_opts(category, description),
+            ) {
+                Ok(_) => return Ok(()),
+                Err(RepoError::WriteConflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(RepoError::WriteConflict.into())
     }
 
     fn load_active(&self, ref_name: &str, normalized: &str) -> Result<Policy, PolicyError> {

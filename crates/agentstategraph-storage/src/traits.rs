@@ -441,9 +441,10 @@ pub trait CommitStore: Send + Sync {
     /// keep-set is computed and its last delete, so the caller takes this
     /// *before* computing the keep-set. Other writers wait (up to the backend's
     /// busy timeout) and then fail rather than interleave; readers are
-    /// unaffected. While it is held, the caller must have exclusive use of this
-    /// store handle — every statement issued through it joins the transaction.
-    /// Backends with a single writer, or no object storage, need do nothing.
+    /// unaffected — including other threads using this same handle, which must
+    /// not join the sweep's transaction (a rolled-back sweep would discard
+    /// their already-acknowledged writes). Backends with a single writer, or
+    /// no object storage, need do nothing.
     fn history_gc_lock_writers(&self) -> Result<(), StorageError> {
         Ok(())
     }
@@ -453,6 +454,30 @@ pub trait CommitStore: Send + Sync {
     /// the work done under it or rolling it back. A no-op when nothing is held.
     fn history_gc_unlock_writers(&self, _commit: bool) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    /// Record `root` under `key` as reachable-but-uncommitted (an open
+    /// speculation's base or working tree), so a GC sweep — in this process or
+    /// any other sharing the store — keeps every object it references.
+    /// Replaces any earlier root for `key` and refreshes its age.
+    fn gc_pin_root(&self, _key: &str, _root: &ObjectId) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Remove the pin recorded by [`gc_pin_root`](Self::gc_pin_root). A no-op
+    /// when absent.
+    fn gc_unpin_root(&self, _key: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Every pinned root refreshed within `max_age`. Older pins belong to a
+    /// process that died with a speculation open, and stop protecting their
+    /// objects once they expire.
+    fn gc_pinned_roots(
+        &self,
+        _max_age: std::time::Duration,
+    ) -> Result<Vec<ObjectId>, StorageError> {
+        Ok(Vec::new())
     }
 
     /// Stop pinning snapshots whose checkpoint never asked to be pinned.

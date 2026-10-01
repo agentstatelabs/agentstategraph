@@ -28,7 +28,7 @@ pub mod types;
 pub use error::ReminderError;
 pub use manager::ReminderManager;
 pub use memory::MemoryReminderStore;
-pub use store::ReminderStore;
+pub use store::{ReminderStore, same_reminder};
 pub use types::{
     CreateReminder, ExecutionRecord, ExecutionResult, Priority, RefKind, Reminder, ReminderFilter,
     ReminderRef, ReminderStatus, Schedule,
