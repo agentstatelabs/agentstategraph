@@ -22,8 +22,9 @@
 # to force a human audit of every binding — so a person bumps it, after the
 # audit, in the same release-prep commit as this version bump. The release jobs
 # run only when main's HEAD title matches ^release-prep: v, so a review pushed
-# as a follow-up commit passes CI and tags nothing (v1.2.2). CONTRIBUTING.md
-# documents the audit and how to recover a release that tagged nothing.
+# as a follow-up commit passes CI and tags nothing (v1.2.0, v1.2.2).
+# CONTRIBUTING.md documents the audit and how to recover a release that tagged
+# nothing.
 #
 # Usage:  scripts/release.sh 0.9.17
 # Then:   audit the bindings, set reviewed_core_version to 0.9.17 by hand,
