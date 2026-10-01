@@ -17,8 +17,17 @@
 # the exact bytes in GitLab, generates the checksum-pinned root Package.swift,
 # then creates the final release commit and tag.
 #
+# Deliberately NOT propagated: bindings/capabilities.json reviewed_core_version.
+# The binding-contract gate requires it to equal the new version, and it exists
+# to force a human audit of every binding — so a person bumps it, after the
+# audit, in the same release-prep commit as this version bump. The release jobs
+# run only when main's HEAD title matches ^release-prep: v, so a review pushed
+# as a follow-up commit passes CI and tags nothing (v1.2.2). CONTRIBUTING.md
+# documents the audit and how to recover a release that tagged nothing.
+#
 # Usage:  scripts/release.sh 0.9.17
-# Then:   git commit -am "release-prep: v0.9.17" && git push origin main
+# Then:   audit the bindings, set reviewed_core_version to 0.9.17 by hand,
+#         git commit -am "release-prep: v0.9.17" && git push origin main
 set -euo pipefail
 
 [ $# -eq 1 ] || { echo "usage: $0 <X.Y.Z>"; exit 2; }
@@ -64,8 +73,19 @@ echo "Changed files:"
 git --no-pager diff --stat
 echo
 echo "Next steps:"
-echo "  git commit -am 'release-prep: v$NEW'"
-echo "  git push origin main"
+echo "  1. Audit every binding against v$NEW (docs/BINDING_RELEASE_POLICY.md), then"
+echo "     set \"reviewed_core_version\": \"$NEW\" in bindings/capabilities.json by hand."
+echo "     This script never bumps it: the gate exists to force that review."
+echo "  2. python3 scripts/check-binding-capabilities.py"
+echo "  3. git commit -am 'release-prep: v$NEW'"
+echo "     The review goes in THIS commit, with the audit's conclusions in its body."
+echo "     The release jobs run only when main's HEAD title matches ^release-prep: v,"
+echo "     so a review pushed as a follow-up commit passes CI but tags nothing."
+echo "  4. git push origin main"
 echo
 echo "GitLab will mirror the preparation commit, dispatch the GitHub macOS build,"
 echo "stage the exact artifact, generate Package.swift, and create/push v$NEW."
+echo
+echo "If no v$NEW tag appears (binding-contract failed, or the review landed"
+echo "separately), push a new 'release-prep: v$NEW' commit — empty if the review"
+echo "is already on main. See \"If a release tagged nothing\" in CONTRIBUTING.md."

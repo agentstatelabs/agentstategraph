@@ -53,7 +53,9 @@ must classify the same capability groups.
 4. Update each binding's status and tests. An explicit `unavailable` entry is
    acceptable for a tracked binding; an unreviewed omission is not.
 5. Run the Rust workspace tests and each language binding suite.
-6. Bump `reviewed_core_version` only after the review is complete.
+6. Bump `reviewed_core_version` only after the review is complete, and in the
+   `release-prep` commit itself — a follow-up commit tags nothing (see
+   [RELEASE.md](../RELEASE.md)).
 7. Build and smoke-test published artifacts, including the Swift XCFramework,
    before creating the final tag.
 8. **After the release lands, bump the site strings.** Nothing derives them

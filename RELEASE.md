@@ -28,9 +28,11 @@ The script bumps only — it does not commit, tag or push. It updates the
 workspace version and internal path deps in `Cargo.toml`, the TypeScript
 binding's `package.json`, refreshes `Cargo.lock`, and stamps the changelog.
 
-Review the diff, then:
+Before committing, do the binding review and set `reviewed_core_version` in
+`bindings/capabilities.json` by hand (see below). Review the diff, then:
 
 ```sh
+python3 scripts/check-binding-capabilities.py
 git commit -am 'release-prep: v1.0.0'
 git push origin main
 ```
@@ -45,7 +47,11 @@ xcframework, generates `Package.swift`, and pushes the tag.
 matches the new workspace version. That gate is deliberate — it forces an
 explicit review of all eight binding surfaces. See
 [BINDING_RELEASE_POLICY.md](docs/BINDING_RELEASE_POLICY.md) for what the review
-requires; bump the field only after doing it.
+requires; bump the field only after doing it, and **in the `release-prep`
+commit itself**. The release jobs run only when `main`'s HEAD title matches
+`^release-prep: v`, so a review pushed as a follow-up commit passes CI and tags
+nothing — which is how v1.2.2 stalled. To recover, see *If a release tagged
+nothing* in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **Do not hand-edit `Package.swift` or `bindings/swift/release.json`.**
 `prepare-swift-release` stages the xcframework and pushes a checksum-pinned
