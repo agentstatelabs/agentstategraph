@@ -100,6 +100,12 @@ pub enum Atom {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
+    /// An integer above `i64::MAX` — a u64 id or hash. Every integer that
+    /// fits `i64` is `Int`, so each number has one representation (and one
+    /// object id); build integers with [`Object::uint`] or
+    /// [`Object::from_json_number`] rather than this variant directly.
+    /// Last, so the serialized form of every other variant is unchanged.
+    UInt(u64),
 }
 
 /// A container value in the state tree.
@@ -156,6 +162,28 @@ impl Object {
         Object::Atom(Atom::Float(v))
     }
 
+    /// An unsigned integer: `Int` when it fits `i64`, `UInt` above.
+    pub fn uint(v: u64) -> Self {
+        match i64::try_from(v) {
+            Ok(i) => Object::Atom(Atom::Int(i)),
+            Err(_) => Object::Atom(Atom::UInt(v)),
+        }
+    }
+
+    /// The atom for a JSON number, exactly: `Int` when it fits `i64`,
+    /// `UInt` above `i64::MAX`, `Float` otherwise. Falling back to `f64` for
+    /// every integer that missed `i64` stored u64 ids and hashes as different
+    /// numbers.
+    pub fn from_json_number(n: &serde_json::Number) -> Self {
+        if let Some(i) = n.as_i64() {
+            Object::int(i)
+        } else if let Some(u) = n.as_u64() {
+            Object::uint(u)
+        } else {
+            Object::float(n.as_f64().unwrap_or(f64::NAN))
+        }
+    }
+
     pub fn string(v: impl Into<String>) -> Self {
         Object::Atom(Atom::String(v.into()))
     }
@@ -186,6 +214,35 @@ impl Object {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn integers_have_one_representation() {
+        assert_eq!(Object::uint(5), Object::int(5));
+        assert_eq!(Object::uint(i64::MAX as u64), Object::int(i64::MAX));
+        assert_eq!(Object::uint(u64::MAX), Object::Atom(Atom::UInt(u64::MAX)));
+        let n = |v: serde_json::Value| match v {
+            serde_json::Value::Number(n) => Object::from_json_number(&n),
+            _ => unreachable!(),
+        };
+        assert_eq!(n(serde_json::json!(5u64)), Object::int(5));
+        assert_eq!(n(serde_json::json!(u64::MAX)), Object::uint(u64::MAX));
+        assert_eq!(n(serde_json::json!(-3)), Object::int(-3));
+        assert_eq!(n(serde_json::json!(0.5)), Object::float(0.5));
+    }
+
+    #[test]
+    fn existing_atoms_serialize_unchanged() {
+        // Object ids hash the serialized form: adding UInt must not move them.
+        assert_eq!(
+            String::from_utf8(Object::int(42).canonical_bytes()).unwrap(),
+            r#"{"kind":"Atom","type":"Int","value":42}"#
+        );
+        assert_eq!(
+            String::from_utf8(Object::uint(u64::MAX).canonical_bytes()).unwrap(),
+            r#"{"kind":"Atom","type":"UInt","value":18446744073709551615}"#
+        );
+    }
+
     use super::*;
 
     #[test]

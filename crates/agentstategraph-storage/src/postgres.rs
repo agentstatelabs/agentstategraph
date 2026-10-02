@@ -250,6 +250,26 @@ impl PostgresStorage {
     ) -> Result<T, StorageError> {
         tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
     }
+
+    async fn require_namespace(
+        &self,
+        client: &deadpool_postgres::Client,
+        namespace: &Namespace,
+    ) -> Result<(), StorageError> {
+        let row = client
+            .query_opt(
+                "SELECT 1 FROM namespaces WHERE tenant_id = $1 AND name = $2",
+                &[&self.tenant_id, &namespace.as_str()],
+            )
+            .await
+            .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+        match row {
+            Some(_) => Ok(()),
+            None => Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            )),
+        }
+    }
 }
 
 // ─── ObjectStore ────────────────────────────────────────────
@@ -667,6 +687,68 @@ impl RefStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("cas ref: {}", e)))?;
 
+            Ok(rows > 0)
+        })
+    }
+
+    fn create_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<bool, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            self.require_namespace(&client, namespace).await?;
+            let rows = client
+                .execute(
+                    "INSERT INTO refs (tenant_id, namespace, name, target)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT DO NOTHING",
+                    &[
+                        &self.tenant_id,
+                        &namespace.as_str(),
+                        &name,
+                        &target.as_bytes().as_slice(),
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("create ref: {}", e)))?;
+            Ok(rows > 0)
+        })
+    }
+
+    fn cas_delete_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+    ) -> Result<bool, StorageError> {
+        self.block_on(async {
+            let client = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            self.require_namespace(&client, namespace).await?;
+            let rows = client
+                .execute(
+                    "DELETE FROM refs
+                     WHERE tenant_id = $1 AND namespace = $2
+                       AND name = $3 AND target = $4",
+                    &[
+                        &self.tenant_id,
+                        &namespace.as_str(),
+                        &name,
+                        &expected.as_bytes().as_slice(),
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("cas delete ref: {}", e)))?;
             Ok(rows > 0)
         })
     }

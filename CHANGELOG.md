@@ -7,6 +7,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **Two processes initializing one store could each create `main`, and the later one discarded everything written on the earlier.** `init()` checked for `main` and then set it unconditionally, so an initializer that lost the race replaced `main` — and every commit another process had already made on it, all of which had returned `Ok`. `main` is now created only if absent (`RefStore::create_ref`), so every initializer ends up on the same `main`. Reproduced with eight connections initializing one SQLite store at once: writes were lost on every run before, none after.
+- **Concurrent `branch()` calls creating one name all succeeded, and all but the last were silently repointed.** Branch creation checked and then set; it now creates only if absent, so exactly one creator gets `Ok` and the rest get `BranchAlreadyExists`.
+- **`delete_branch("main")` stranded the namespace.** With `main` gone, the next `init()` created an empty `main`, after which a GC sweep deleted everything the old one reached. Deleting `main` is now refused (`InvalidOperation`), as CTXone's HTTP API already did. New `delete_branch_if(name, expected_head)` deletes a branch only if it still points where the caller looked, so a commit landing in between is not orphaned for GC to sweep.
+- **Writing a path below an existing value replaced that value.** With `/config/timeout = 30`, a write to `/config/timeout/unit` turned `timeout` into `{"unit": …}` and returned `Ok`; the `30` was gone. A key containing `/` used in a path did the same. Only a `null` may now be replaced by a subtree this way; any other value fails with a type mismatch.
+- **Integers above `i64::MAX` were stored as floats.** A u64 id or hash came back as a different number. They are now stored exactly, as the new `Atom::UInt`; every integer that fits `i64` is still `Int`, so existing objects keep their ids. An older AgentStateGraph reading a `UInt` fails loudly rather than misreading it. The MCP server, the WASM binding and the Python and TypeScript bindings converted numbers by hand with the same fallback, and now use `Object::from_json_number`.
+- **The WASM binding persisted nothing.** The repository and the load/drain bridge each had their own `IndexedDbStorage`, so data loaded at startup never reached the repository and its writes never reached `drainPending*`. They now share one. Two more losses this exposed are fixed with it: the empty `main` that `init()` queues before the page loads no longer overwrites the persisted `main` on the first flush (a loaded ref supersedes a queued write for the same ref), and refs are persisted with their namespace, so another namespace's `main` cannot replace the default one on reload. Default-namespace refs keep their bare names, so existing IndexedDB data loads as before.
+- **Speculation writes stored objects and arrays as strings of their JSON.** MCP `spec_modify` and the WASM, Python and TypeScript `spec_set` converted values by hand; they now store JSON as JSON.
+
+### Added
+- **`RefStore::create_ref` and `RefStore::cas_delete_ref`** — create a ref only if absent, delete one only if it still points to an expected commit. Atomic in the SQLite, Postgres, in-memory and IndexedDB backends; the default implementations check and then act, so other implementations keep compiling.
+- **`Repository::delete_branch_if(name, expected_head)`** and **`Repository::from_shared(Arc<dyn Storage>)`**, for a caller that keeps its own handle to the storage.
+- **`Object::uint` and `Object::from_json_number`**, and `UInt` variants of `Atom`, `DiffValue` and `ConflictValue`.
+- **WASM `drainDeletedRefs()`**, so a deleted branch does not come back on the next load.
+
 ## [v1.2.6] — 2026-10-01
 
 ### Fixed

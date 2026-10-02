@@ -552,6 +552,43 @@ pub trait RefStore: Send + Sync {
         new: ObjectId,
     ) -> Result<bool, StorageError>;
 
+    /// Create a ref only if no ref of that name exists yet. Returns `true` if
+    /// it was created, `false` if one already existed (left untouched).
+    /// Returns `NamespaceNotFound` if the namespace doesn't exist.
+    ///
+    /// The built-in backends do this atomically. This default, kept so other
+    /// implementations still compile, checks and then sets: two callers can
+    /// both see the name free, and the later one wins.
+    fn create_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<bool, StorageError> {
+        if self.get_ref(namespace, name)?.is_some() {
+            return Ok(false);
+        }
+        self.set_ref(namespace, name, target)?;
+        Ok(true)
+    }
+
+    /// Delete a ref only if it still points to `expected`. Returns `true` if
+    /// it was deleted, `false` if it was absent or pointed elsewhere.
+    /// Returns `NamespaceNotFound` if the namespace doesn't exist.
+    ///
+    /// Atomic in the built-in backends; this default checks and then deletes.
+    fn cas_delete_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+    ) -> Result<bool, StorageError> {
+        if self.get_ref(namespace, name)? != Some(expected) {
+            return Ok(false);
+        }
+        self.delete_ref(namespace, name)
+    }
+
     /// List all refs in `namespace` whose name starts with `prefix`.
     /// Returns `NamespaceNotFound` if the namespace doesn't exist.
     fn list_refs(

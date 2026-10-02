@@ -51,6 +51,9 @@ fn py_to_object(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Object> {
         Ok(Object::bool(b))
     } else if let Ok(i) = value.extract::<i64>() {
         Ok(Object::int(i))
+    } else if let Ok(u) = value.extract::<u64>() {
+        // Before f64: an int above i64::MAX must not come back changed.
+        Ok(Object::uint(u))
     } else if let Ok(f) = value.extract::<f64>() {
         Ok(Object::float(f))
     } else if let Ok(s) = value.extract::<String>() {
@@ -342,6 +345,7 @@ impl AgentStateGraph {
                 agentstategraph_core::Atom::Null => serde_json::Value::Null,
                 agentstategraph_core::Atom::Bool(b) => serde_json::json!(b),
                 agentstategraph_core::Atom::Int(i) => serde_json::json!(i),
+                agentstategraph_core::Atom::UInt(u) => serde_json::json!(u),
                 agentstategraph_core::Atom::Float(f) => serde_json::json!(f),
                 agentstategraph_core::Atom::String(s) => serde_json::json!(s),
                 agentstategraph_core::Atom::Bytes(b) => {
@@ -362,9 +366,16 @@ impl AgentStateGraph {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let handle = SpecHandle::from_id(handle_id);
-        let obj = py_to_object(py, value)?;
+        // As JSON: `py_to_object` stores dicts and lists as their text, and
+        // a speculation has no `set_json` to fall back on.
+        let json_str: String = py
+            .import("json")?
+            .call_method1("dumps", (value,))?
+            .extract()?;
+        let json: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| PyRuntimeError::new_err(format!("JSON parse error: {}", e)))?;
         self.repo
-            .spec_set(handle, path, &obj)
+            .spec_set_json(handle, path, &json)
             .map_err(|e| PyRuntimeError::new_err(format!("{}", e)))
     }
 

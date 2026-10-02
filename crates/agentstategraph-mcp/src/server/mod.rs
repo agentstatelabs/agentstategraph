@@ -16,7 +16,7 @@ use serde::Deserialize;
 use agentstategraph::session::CreateSessionParams;
 use agentstategraph::speculation::SpecHandle;
 use agentstategraph::{CommitOptions, Repository, RetentionPolicy};
-use agentstategraph_core::{DiffOp, IntentCategory, Namespace, Object, QueryFilters, ToolCall};
+use agentstategraph_core::{DiffOp, IntentCategory, Namespace, QueryFilters, ToolCall};
 use agentstategraph_policy::{
     ChangeProposal, Decision, ExternalEvaluator, ExternalEvaluatorRegistry, PolicyStore,
     SignatureVerifier,
@@ -1481,11 +1481,12 @@ impl AgentStateGraphServer {
         for op in &p.operations {
             match op.op.as_str() {
                 "set" => {
-                    let value = match &op.value {
-                        Some(v) => json_value_to_object(v),
-                        None => return "Error: 'set' op requires a 'value'".to_string(),
+                    // Store the JSON as JSON. Converting atoms by hand turned
+                    // every object or array into a string of its text.
+                    let Some(value) = &op.value else {
+                        return "Error: 'set' op requires a 'value'".to_string();
                     };
-                    if let Err(e) = self.repo.spec_set(handle, &op.path, &value) {
+                    if let Err(e) = self.repo.spec_set_json(handle, &op.path, value) {
                         return format!("Error: {}", e);
                     }
                 }
@@ -2589,27 +2590,42 @@ fn diff_op_path(op: &DiffOp) -> Option<&str> {
     }
 }
 
-fn json_value_to_object(value: &serde_json::Value) -> Object {
-    match value {
-        serde_json::Value::Null => Object::null(),
-        serde_json::Value::Bool(b) => Object::bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Object::int(i)
-            } else {
-                Object::float(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        serde_json::Value::String(s) => Object::string(s.clone()),
-        _ => Object::string(value.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use agentstategraph::{CommitOptions, RepoError, Repository};
     use agentstategraph_storage::SqliteStorage;
+
+    /// `spec_modify` converted values by hand and stored every object or
+    /// array as a string of its JSON, and integers above i64::MAX as floats.
+    #[tokio::test]
+    async fn spec_modify_stores_json_as_json() {
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        let server = AgentStateGraphServer::new(Arc::clone(&repo));
+        let handle = repo.speculate("main", None).unwrap();
+        let doc = serde_json::json!({"ids": [u64::MAX, 7], "nested": {"ok": true}});
+
+        let out = server
+            .agentstategraph_spec_modify(Parameters(SpecModifyParams {
+                handle_id: handle.id(),
+                operations: vec![SpecOp {
+                    op: "set".into(),
+                    path: "/doc".into(),
+                    value: Some(doc.clone()),
+                }],
+            }))
+            .await;
+        assert!(out.starts_with("Applied"), "{out}");
+        repo.commit_speculation(
+            handle,
+            CommitOptions::new("test", IntentCategory::Refine, "spec"),
+        )
+        .unwrap();
+        assert_eq!(repo.get_json("main", "/doc").unwrap(), doc);
+    }
 
     #[test]
     fn parse_category_migrate_is_custom_not_migrate() {

@@ -53,6 +53,8 @@ pub enum ConflictValue {
     Null,
     Bool(bool),
     Int(i64),
+    /// Above `i64::MAX`; before `Float` so it deserializes back to itself.
+    UInt(u64),
     Float(f64),
     String(String),
     Complex(String),
@@ -65,6 +67,7 @@ impl ConflictValue {
                 crate::object::Atom::Null => ConflictValue::Null,
                 crate::object::Atom::Bool(b) => ConflictValue::Bool(*b),
                 crate::object::Atom::Int(i) => ConflictValue::Int(*i),
+                crate::object::Atom::UInt(u) => ConflictValue::UInt(*u),
                 crate::object::Atom::Float(f) => ConflictValue::Float(*f),
                 crate::object::Atom::String(s) => ConflictValue::String(s.clone()),
                 crate::object::Atom::Bytes(_) => ConflictValue::String("[bytes]".to_string()),
