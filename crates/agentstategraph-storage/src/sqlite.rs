@@ -1571,6 +1571,40 @@ impl RefStore for SqliteStorage {
         Ok(rows > 0)
     }
 
+    fn create_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<bool, StorageError> {
+        let conn = self.lock_conn()?;
+        require_namespace(&conn, namespace)?;
+        let rows = conn
+            .execute(
+                "INSERT OR IGNORE INTO refs (namespace, name, target) VALUES (?1, ?2, ?3)",
+                params![namespace.as_str(), name, target.as_bytes().as_slice()],
+            )
+            .map_err(|e| StorageError::Backend(format!("create ref: {}", e)))?;
+        Ok(rows > 0)
+    }
+
+    fn cas_delete_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+    ) -> Result<bool, StorageError> {
+        let conn = self.lock_conn()?;
+        require_namespace(&conn, namespace)?;
+        let rows = conn
+            .execute(
+                "DELETE FROM refs WHERE namespace = ?1 AND name = ?2 AND target = ?3",
+                params![namespace.as_str(), name, expected.as_bytes().as_slice()],
+            )
+            .map_err(|e| StorageError::Backend(format!("cas delete ref: {}", e)))?;
+        Ok(rows > 0)
+    }
+
     fn list_refs(
         &self,
         namespace: &Namespace,
@@ -1671,6 +1705,23 @@ const GC_SQL_CHUNK: usize = 400;
 /// from `roots` (Plan B t-001/t-003 marker), in bounded memory. Shared by the
 /// reachability report and the sweep. On return, `gc_mark` holds exactly the
 /// live closure (a subset of `objects`).
+fn require_namespace(conn: &Connection, namespace: &Namespace) -> Result<(), StorageError> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM namespaces WHERE name = ?1)",
+            params![namespace.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(|e| StorageError::Backend(format!("check namespace: {}", e)))?;
+    if exists {
+        Ok(())
+    } else {
+        Err(StorageError::NamespaceNotFound(
+            namespace.as_str().to_string(),
+        ))
+    }
+}
+
 fn gc_build_mark(conn: &Connection, roots: &[ObjectId], batch: i64) -> Result<(), StorageError> {
     // The mark set lives on disk, not in RAM. `expanded` tracks the BFS
     // frontier: 0 = marked but children not yet followed.

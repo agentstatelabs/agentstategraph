@@ -80,13 +80,7 @@ fn js_to_object(value: &serde_json::Value) -> Object {
     match value {
         serde_json::Value::Null => Object::null(),
         serde_json::Value::Bool(b) => Object::bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Object::int(i)
-            } else {
-                Object::float(n.as_f64().unwrap_or(0.0))
-            }
-        }
+        serde_json::Value::Number(n) => Object::from_json_number(n),
         serde_json::Value::String(s) => Object::string(s.clone()),
         _ => Object::string(value.to_string()),
     }
@@ -297,6 +291,7 @@ impl AgentStateGraph {
                 agentstategraph_core::Atom::Null => Ok(serde_json::Value::Null),
                 agentstategraph_core::Atom::Bool(b) => Ok(serde_json::json!(b)),
                 agentstategraph_core::Atom::Int(i) => Ok(serde_json::json!(i)),
+                agentstategraph_core::Atom::UInt(u) => Ok(serde_json::json!(u)),
                 agentstategraph_core::Atom::Float(f) => Ok(serde_json::json!(f)),
                 agentstategraph_core::Atom::String(s) => Ok(serde_json::json!(s)),
                 agentstategraph_core::Atom::Bytes(b) => {
@@ -316,8 +311,9 @@ impl AgentStateGraph {
         value: serde_json::Value,
     ) -> napi::Result<()> {
         let handle = SpecHandle::from_id(handle_id as u64);
-        let obj = js_to_object(&value);
-        self.repo.spec_set(handle, &path, &obj).map_err(err)
+        // As JSON: `js_to_object` stores objects and arrays as their text,
+        // and a speculation has no `set_json` to fall back on.
+        self.repo.spec_set_json(handle, &path, &value).map_err(err)
     }
 
     /// Commit a speculation to its base branch.

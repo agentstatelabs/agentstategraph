@@ -99,10 +99,18 @@ impl IndexedDbStorage {
         Ok(())
     }
 
-    /// Load refs from key-value pairs. All refs are loaded into the default namespace.
+    /// Load refs from key-value pairs, as `drain_pending_refs` keyed them: a
+    /// default-namespace ref by its name, any other as
+    /// `<namespace>\u{1f}<name>`. Every ref used to load into the default
+    /// namespace, where another namespace's `main` replaced the real one.
+    ///
+    /// A loaded ref is the persisted truth, so it supersedes a write queued
+    /// for the same ref before the load — `init()` queues a fresh, empty
+    /// `main` when called first, and flushing that after the load replaced
+    /// the persisted `main` on the next save.
     pub fn load_refs(&self, pairs: &[(String, String)]) -> Result<(), StorageError> {
-        let ns = Namespace::default_ns();
-        for (name, hex_id) in pairs {
+        let mut loaded = std::collections::HashSet::new();
+        for (key, hex_id) in pairs {
             let bytes = hex_to_bytes(hex_id)
                 .ok_or_else(|| StorageError::Serialization("invalid hex id".to_string()))?;
             let mut arr = [0u8; 32];
@@ -113,8 +121,18 @@ impl IndexedDbStorage {
             }
             arr.copy_from_slice(&bytes);
             let id = ObjectId::from_bytes(arr);
+            let (ns, name) = parse_ref_key(key);
+            match self.memory.create_namespace(&ns) {
+                Ok(()) | Err(StorageError::NamespaceAlreadyExists(_)) => {}
+                Err(e) => return Err(e),
+            }
             self.memory.set_ref(&ns, name, id)?;
+            loaded.insert(key.as_str());
         }
+        self.pending_refs
+            .write()
+            .unwrap()
+            .retain(|(key, _)| !loaded.contains(key.as_str()));
         Ok(())
     }
 
@@ -321,7 +339,7 @@ impl RefStore for IndexedDbStorage {
         self.pending_refs
             .write()
             .unwrap()
-            .push((name.to_string(), hex_id));
+            .push((ref_key(namespace, name), hex_id));
         Ok(())
     }
 
@@ -338,9 +356,41 @@ impl RefStore for IndexedDbStorage {
             self.pending_refs
                 .write()
                 .unwrap()
-                .push((name.to_string(), hex_id));
+                .push((ref_key(namespace, name), hex_id));
         }
         Ok(result)
+    }
+
+    fn create_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<bool, StorageError> {
+        let created = self.memory.create_ref(namespace, name, target)?;
+        if created {
+            self.pending_refs
+                .write()
+                .unwrap()
+                .push((ref_key(namespace, name), format!("{}", target)));
+        }
+        Ok(created)
+    }
+
+    fn cas_delete_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+    ) -> Result<bool, StorageError> {
+        let deleted = self.memory.cas_delete_ref(namespace, name, expected)?;
+        if deleted {
+            self.deleted_refs
+                .write()
+                .unwrap()
+                .push(ref_key(namespace, name));
+        }
+        Ok(deleted)
     }
 
     fn list_refs(
@@ -354,7 +404,10 @@ impl RefStore for IndexedDbStorage {
     fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError> {
         let result = self.memory.delete_ref(namespace, name)?;
         if result {
-            self.deleted_refs.write().unwrap().push(name.to_string());
+            self.deleted_refs
+                .write()
+                .unwrap()
+                .push(ref_key(namespace, name));
         }
         Ok(result)
     }
@@ -362,6 +415,30 @@ impl RefStore for IndexedDbStorage {
     fn delete_namespace(&self, namespace: &Namespace) -> Result<bool, StorageError> {
         self.memory.delete_namespace(namespace)
     }
+}
+
+/// Separates namespace from ref name in a persisted ref key. Never part of a
+/// namespace name, which is `[A-Za-z0-9_-]`.
+const NAMESPACE_SEPARATOR: char = '\u{1f}';
+
+/// The key a ref is persisted under: its bare name in the default namespace
+/// (so stores written before namespaces load unchanged), otherwise qualified
+/// by its namespace so two namespaces' `main` cannot overwrite each other.
+fn ref_key(namespace: &Namespace, name: &str) -> String {
+    if namespace.as_str() == Namespace::DEFAULT {
+        name.to_string()
+    } else {
+        format!("{}{}{}", namespace.as_str(), NAMESPACE_SEPARATOR, name)
+    }
+}
+
+fn parse_ref_key(key: &str) -> (Namespace, &str) {
+    if let Some((ns, name)) = key.split_once(NAMESPACE_SEPARATOR)
+        && let Ok(ns) = Namespace::new(ns)
+    {
+        return (ns, name);
+    }
+    (Namespace::default_ns(), key)
 }
 
 /// Convert hex string to bytes.
@@ -565,6 +642,54 @@ impl ReminderStore for IndexedDbStorage {
 mod tests {
     use super::*;
     use agentstategraph_core::*;
+
+    /// Refs were persisted under their bare name and all loaded into the
+    /// default namespace, so another namespace's `main` replaced the default
+    /// one on reload.
+    #[test]
+    fn refs_in_two_namespaces_reload_into_their_own() {
+        let store = IndexedDbStorage::new("test-db");
+        let team = Namespace::new("team").unwrap();
+        store.create_namespace(&team).unwrap();
+        let (default_head, team_head) = (ObjectId::hash(b"default"), ObjectId::hash(b"team"));
+        store
+            .set_ref(&Namespace::default_ns(), "main", default_head)
+            .unwrap();
+        store.set_ref(&team, "main", team_head).unwrap();
+
+        let reloaded = IndexedDbStorage::new("test-db");
+        reloaded.load_refs(&store.drain_pending_refs()).unwrap();
+        assert_eq!(
+            reloaded.get_ref(&Namespace::default_ns(), "main").unwrap(),
+            Some(default_head)
+        );
+        assert_eq!(reloaded.get_ref(&team, "main").unwrap(), Some(team_head));
+    }
+
+    /// Loaded refs supersede writes queued before the load, so flushing
+    /// after startup cannot replace them.
+    #[test]
+    fn a_loaded_ref_supersedes_one_queued_before_the_load() {
+        let store = IndexedDbStorage::new("test-db");
+        let ns = Namespace::default_ns();
+        store
+            .set_ref(&ns, "main", ObjectId::hash(b"fresh"))
+            .unwrap();
+        store
+            .set_ref(&ns, "other", ObjectId::hash(b"other"))
+            .unwrap();
+        let persisted = ObjectId::hash(b"persisted");
+        store
+            .load_refs(&[("main".to_string(), format!("{persisted}"))])
+            .unwrap();
+
+        let queued = store.drain_pending_refs();
+        assert_eq!(
+            queued,
+            vec![("other".to_string(), format!("{}", ObjectId::hash(b"other")))]
+        );
+        assert_eq!(store.get_ref(&ns, "main").unwrap(), Some(persisted));
+    }
 
     #[test]
     fn test_basic_operations() {

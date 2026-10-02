@@ -353,6 +353,7 @@ fn search_recursive(
             let value_str = match atom {
                 Atom::String(s) => s.clone(),
                 Atom::Int(i) => i.to_string(),
+                Atom::UInt(u) => u.to_string(),
                 Atom::Float(f) => f.to_string(),
                 Atom::Bool(b) => b.to_string(),
                 _ => return Ok(()),
@@ -450,6 +451,7 @@ fn collect_leaves_recursive(
             let value_str = match atom {
                 Atom::String(s) => s.clone(),
                 Atom::Int(i) => i.to_string(),
+                Atom::UInt(u) => u.to_string(),
                 Atom::Float(f) => f.to_string(),
                 Atom::Bool(b) => b.to_string(),
                 _ => return Ok(()),
@@ -491,6 +493,7 @@ fn atom_value_string(atom: &Atom) -> Option<String> {
     match atom {
         Atom::String(s) => Some(s.clone()),
         Atom::Int(i) => Some(i.to_string()),
+        Atom::UInt(u) => Some(u.to_string()),
         Atom::Float(f) => Some(f.to_string()),
         Atom::Bool(b) => Some(b.to_string()),
         _ => None,
@@ -773,9 +776,11 @@ fn set_recursive(
             new_items[*idx] = child_value_id;
             Ok(Object::list(new_items))
         }
-        (Object::Atom(_), PathComponent::Key(key)) => {
-            // Overwrite atom with a map containing the key
-            // This supports creating nested paths from scratch
+        (Object::Atom(Atom::Null), PathComponent::Key(key)) => {
+            // A null is a placeholder: start the subtree there. Any other
+            // value is data, and writing below it must not replace it — that
+            // turned `/a = 30` plus a write to `/a/b` into `{"b": ...}` with
+            // the 30 gone, and `Ok`.
             let mut entries = BTreeMap::new();
             if is_last {
                 entries.insert(key.clone(), value_id);
@@ -787,11 +792,26 @@ fn set_recursive(
             }
             Ok(Object::map(entries))
         }
+        (Object::Atom(atom), _) => Err(TreeError::TypeMismatch {
+            path: format!("at depth {}", depth),
+            expected: "map or list".to_string(),
+            found: format!("a {} value", atom_kind(atom)),
+        }),
         _ => Err(TreeError::TypeMismatch {
             path: format!("at depth {}", depth),
             expected: "map or list".to_string(),
             found: "incompatible type".to_string(),
         }),
+    }
+}
+
+fn atom_kind(atom: &Atom) -> &'static str {
+    match atom {
+        Atom::Null => "null",
+        Atom::Bool(_) => "boolean",
+        Atom::Int(_) | Atom::UInt(_) | Atom::Float(_) => "number",
+        Atom::String(_) => "string",
+        Atom::Bytes(_) => "bytes",
     }
 }
 
@@ -861,6 +881,7 @@ fn atom_to_json(atom: &Atom) -> serde_json::Value {
         Atom::Null => serde_json::Value::Null,
         Atom::Bool(b) => serde_json::Value::Bool(*b),
         Atom::Int(i) => serde_json::json!(*i),
+        Atom::UInt(u) => serde_json::json!(*u),
         Atom::Float(f) => serde_json::json!(*f),
         Atom::String(s) => serde_json::Value::String(s.clone()),
         Atom::Bytes(b) => {
@@ -875,17 +896,7 @@ fn json_to_object(store: &dyn ObjectStore, value: &serde_json::Value) -> Result<
     match value {
         serde_json::Value::Null => Ok(Object::null()),
         serde_json::Value::Bool(b) => Ok(Object::bool(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(Object::int(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(Object::float(f))
-            } else {
-                Err(TreeError::InvalidJson(
-                    "unsupported number type".to_string(),
-                ))
-            }
-        }
+        serde_json::Value::Number(n) => Ok(Object::from_json_number(n)),
         serde_json::Value::String(s) => Ok(Object::string(s.clone())),
         serde_json::Value::Array(arr) => {
             let mut ids = Vec::new();

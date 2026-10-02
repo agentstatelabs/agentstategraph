@@ -89,21 +89,17 @@ impl WasmAgentStateGraph {
     #[wasm_bindgen(constructor)]
     pub fn new(db_name: Option<String>) -> Result<WasmAgentStateGraph, JsValue> {
         let name = db_name.unwrap_or_else(|| "agentstategraph".to_string());
-        let _storage = std::sync::Arc::new(IndexedDbStorage::new(&name));
-        let repo = Repository::new(Box::new(IndexedDbStorage::new(&name)));
+        // One storage for the repository and for the load/drain bridge. They
+        // were two separate instances, so loads never reached the repository
+        // and its writes never reached the drains: nothing persisted.
+        let storage = std::sync::Arc::new(IndexedDbStorage::new(&name));
+        let repo = Repository::from_shared(storage.clone());
         repo.init()
             .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
 
-        // Re-create with shared storage so we can access pending writes
-        let storage2 = std::sync::Arc::new(IndexedDbStorage::new(&name));
-        let repo2 = Repository::new(Box::new(IndexedDbStorage::new(&name)));
-        repo2
-            .init()
-            .map_err(|e| JsValue::from_str(&format!("{}", e)))?;
-
         Ok(Self {
-            repo: Arc::new(repo2),
-            storage: storage2,
+            repo: Arc::new(repo),
+            storage,
         })
     }
 
@@ -150,6 +146,13 @@ impl WasmAgentStateGraph {
     /// Get pending ref writes.
     pub fn drain_pending_refs(&self) -> String {
         let pending = self.storage.drain_pending_refs();
+        serde_json::to_string(&pending).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Get pending ref deletions (keys to delete from the refs store), so a
+    /// deleted branch does not come back on the next load.
+    pub fn drain_deleted_refs(&self) -> String {
+        let pending = self.storage.drain_deleted_refs();
         serde_json::to_string(&pending).unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -408,6 +411,7 @@ impl WasmAgentStateGraph {
                 agentstategraph_core::Atom::Null => serde_json::Value::Null,
                 agentstategraph_core::Atom::Bool(b) => serde_json::json!(b),
                 agentstategraph_core::Atom::Int(i) => serde_json::json!(i),
+                agentstategraph_core::Atom::UInt(u) => serde_json::json!(u),
                 agentstategraph_core::Atom::Float(f) => serde_json::json!(f),
                 agentstategraph_core::Atom::String(s) => serde_json::json!(s),
                 _ => serde_json::json!(format!("{:?}", obj)),
@@ -422,21 +426,9 @@ impl WasmAgentStateGraph {
         let handle = SpecHandle::from_id(handle_id as u64);
         let value: serde_json::Value = serde_json::from_str(json_value)
             .map_err(|e| JsValue::from_str(&format!("JSON: {}", e)))?;
-        let obj = match &value {
-            serde_json::Value::Null => Object::null(),
-            serde_json::Value::Bool(b) => Object::bool(*b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Object::int(i)
-                } else {
-                    Object::float(n.as_f64().unwrap_or(0.0))
-                }
-            }
-            serde_json::Value::String(s) => Object::string(s.clone()),
-            _ => Object::string(value.to_string()),
-        };
+        // As JSON: a hand conversion stored objects and arrays as strings.
         self.repo
-            .spec_set(handle, path, &obj)
+            .spec_set_json(handle, path, &value)
             .map_err(|e| JsValue::from_str(&format!("{}", e)))
     }
 

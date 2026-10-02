@@ -90,6 +90,17 @@ fn check_secret_read_guard(path: &str, intent: &Intent) -> Result<(), RepoError>
     Ok(())
 }
 
+fn refuse_deleting_main(name: &str) -> Result<(), RepoError> {
+    if name == "main" {
+        return Err(RepoError::InvalidOperation(
+            "refusing to delete 'main': every branch forks from it, and the next \
+             init() would replace it with an empty one"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Walk a diff and return the first path under `/_meta/*` touched, if any.
 /// Used to enforce the meta guard on speculation commits.
 fn reserved_path_in_diff(diff: &[DiffOp]) -> Option<String> {
@@ -515,6 +526,13 @@ impl Repository {
     /// value (`0`/`false`/`warn`/`off`) at construction time, or programmatically
     /// via [`Repository::with_epoch_seal_strict`]`(false)`.
     pub fn new(storage: Box<dyn Storage + Send + Sync>) -> Self {
+        Self::from_shared(Arc::from(storage))
+    }
+
+    /// Like [`Repository::new`], over storage the caller keeps a handle to —
+    /// for a backend with state of its own to drive, such as the queue of
+    /// writes the WASM binding flushes to IndexedDB.
+    pub fn from_shared(storage: Arc<dyn Storage + Send + Sync>) -> Self {
         // Strict unless explicitly disabled. An unset or unrecognized value
         // keeps the safe default; only a clearly falsey value opts out.
         let strict = std::env::var(EPOCH_SEAL_STRICT_ENV)
@@ -526,7 +544,7 @@ impl Repository {
             })
             .unwrap_or(true);
         Self {
-            storage: Arc::from(storage),
+            storage,
             specs: SpeculationManager::new(),
             instance: uuid::Uuid::new_v4().simple().to_string(),
             watch_mgr: crate::watch::WatchManager::new(),
@@ -591,7 +609,12 @@ impl Repository {
     }
 
     /// Initialize the repository with an empty state tree on "main".
-    /// If "main" already exists, this is a no-op.
+    /// If "main" already exists, this is a no-op that returns its head.
+    ///
+    /// Safe to call from several processes at once: `main` is created only if
+    /// absent, so every caller ends up with the same `main`. Setting it
+    /// unconditionally let a late initializer replace an earlier one's `main`
+    /// — and every commit already made on it.
     ///
     /// The initial commit stamps `/_meta/schema_version` with the crate
     /// version. See `spec/UPGRADE-PATH.md`.
@@ -628,9 +651,13 @@ impl Repository {
         .build();
 
         self.storage.put_commit(&commit)?;
-        self.storage.set_ref(&ns, "main", commit.id)?;
-
-        Ok(commit.id)
+        if self.storage.create_ref(&ns, "main", commit.id)? {
+            return Ok(commit.id);
+        }
+        // Another initializer got there first; theirs is `main`.
+        self.storage
+            .get_ref(&ns, "main")?
+            .ok_or(RepoError::NotInitialized)
     }
 
     // -----------------------------------------------------------------------
@@ -883,27 +910,49 @@ impl Repository {
     // Branch operations
     // -----------------------------------------------------------------------
 
-    /// Create a new branch from the given ref.
+    /// Create a new branch from the given ref. Fails with
+    /// `BranchAlreadyExists` if the name is taken — including by another
+    /// caller creating it at the same moment: the ref is created only if
+    /// absent, so exactly one creator succeeds. (Checking and then setting
+    /// gave every racer `Ok` and silently repointed all but the last.)
+    ///
+    /// Creating a ref orphans no commit, so there are no epoch seals to
+    /// enforce, and a new ref has no leaf index to update.
     pub fn branch(&self, name: &str, from: &str) -> Result<ObjectId, RepoError> {
         let ns = self.active_namespace()?;
-        // Check if branch already exists
         if self.storage.get_ref(&ns, name)?.is_some() {
             return Err(RepoError::BranchAlreadyExists(name.to_string()));
         }
-
         let commit_id = self.resolve_ref(from)?;
-        // Branch creation is a new-pointer write; no existing commits become
-        // unreachable, so epoch-seal enforcement is a no-op here. Route
-        // through `guarded_set_ref` anyway for consistency.
-        self.guarded_set_ref(name, commit_id)?;
+        if !self.storage.create_ref(&ns, name, commit_id)? {
+            return Err(RepoError::BranchAlreadyExists(name.to_string()));
+        }
         Ok(commit_id)
     }
 
     /// Delete a branch. Returns true if the branch existed.
-    /// Does NOT delete any commits (they remain in the DAG).
+    /// Does NOT delete any commits (they remain in the DAG until GC sweeps
+    /// what no ref reaches).
+    ///
+    /// Refuses `main`: every namespace forks from it, and with it gone the
+    /// next `init()` creates an empty `main`, after which a sweep deletes
+    /// everything the old one reached. A commit landing on the branch while
+    /// the caller decides is lost with it; [`Repository::delete_branch_if`]
+    /// deletes only the head the caller looked at.
     pub fn delete_branch(&self, name: &str) -> Result<bool, RepoError> {
+        refuse_deleting_main(name)?;
         let ns = self.active_namespace()?;
         Ok(self.storage.delete_ref(&ns, name)?)
+    }
+
+    /// Delete a branch only if it still points to `expected` — the head the
+    /// caller decided to delete. Returns `false`, leaving the branch alone,
+    /// if it is absent or has moved since. Refuses `main`, like
+    /// [`Repository::delete_branch`].
+    pub fn delete_branch_if(&self, name: &str, expected: ObjectId) -> Result<bool, RepoError> {
+        refuse_deleting_main(name)?;
+        let ns = self.active_namespace()?;
+        Ok(self.storage.cas_delete_ref(&ns, name, expected)?)
     }
 
     /// List all branches, optionally filtered by prefix.

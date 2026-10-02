@@ -65,6 +65,9 @@ pub enum DiffValue {
     Null,
     Bool(bool),
     Int(i64),
+    /// Above `i64::MAX`. Before `Float`: untagged, so a large integer read
+    /// back must reach this variant first.
+    UInt(u64),
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
@@ -80,6 +83,7 @@ impl DiffValue {
             Atom::Null => DiffValue::Null,
             Atom::Bool(b) => DiffValue::Bool(*b),
             Atom::Int(i) => DiffValue::Int(*i),
+            Atom::UInt(u) => DiffValue::UInt(*u),
             Atom::Float(f) => DiffValue::Float(*f),
             Atom::String(s) => DiffValue::String(s.clone()),
             Atom::Bytes(b) => DiffValue::Bytes(b.clone()),
@@ -355,7 +359,7 @@ fn type_name(obj: &Object) -> String {
     match obj {
         Object::Atom(Atom::Null) => "null".to_string(),
         Object::Atom(Atom::Bool(_)) => "bool".to_string(),
-        Object::Atom(Atom::Int(_)) => "int".to_string(),
+        Object::Atom(Atom::Int(_)) | Object::Atom(Atom::UInt(_)) => "int".to_string(),
         Object::Atom(Atom::Float(_)) => "float".to_string(),
         Object::Atom(Atom::String(_)) => "string".to_string(),
         Object::Atom(Atom::Bytes(_)) => "bytes".to_string(),
@@ -367,6 +371,19 @@ fn type_name(obj: &Object) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_large_integer_reads_back_as_itself() {
+        // Untagged: UInt must come before Float to be reachable.
+        let v = DiffValue::from_atom(&Atom::UInt(u64::MAX));
+        let back: DiffValue = serde_json::from_value(serde_json::to_value(&v).unwrap()).unwrap();
+        assert_eq!(back, DiffValue::UInt(u64::MAX));
+        let c = crate::merge::ConflictValue::from_object(&Object::uint(u64::MAX));
+        let back: crate::merge::ConflictValue =
+            serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
+        assert_eq!(back, crate::merge::ConflictValue::UInt(u64::MAX));
+    }
+
     use super::*;
     use std::collections::{BTreeMap, HashMap};
 

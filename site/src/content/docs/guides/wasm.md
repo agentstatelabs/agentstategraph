@@ -98,6 +98,9 @@ function flushToIndexedDB(sg, db) {
   for (const [id, json] of pendingRefs) {
     tx.objectStore("refs").put({ id, data: json })
   }
+  for (const id of JSON.parse(sg.drainDeletedRefs())) {
+    tx.objectStore("refs").delete(id)
+  }
 }
 
 // Flush after each write, or debounce
@@ -213,3 +216,4 @@ For persistence in serverless, pair with Durable Objects (Cloudflare) or an exte
 | `listEpochs()` | List epochs (JSON string) |
 | `loadObjects(json)` / `loadCommits(json)` / `loadRefs(json)` | Hydrate from IndexedDB |
 | `drainPendingObjects()` / `drainPendingCommits()` / `drainPendingRefs()` | Get writes to flush |
+| `drainDeletedRefs()` | Get ref keys to delete from the `refs` store |

@@ -60,6 +60,20 @@ impl MemoryStorage {
             reminders: MemoryReminderStore::new(),
         }
     }
+
+    fn require_namespace(&self, namespace: &Namespace) -> Result<(), StorageError> {
+        let namespaces = self
+            .namespaces
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if namespaces.contains(namespace.as_str()) {
+            Ok(())
+        } else {
+            Err(StorageError::NamespaceNotFound(
+                namespace.as_str().to_string(),
+            ))
+        }
+    }
 }
 
 impl Default for MemoryStorage {
@@ -256,6 +270,44 @@ impl RefStore for MemoryStorage {
             Some(_) => Ok(false),
             None => Ok(false),
         }
+    }
+
+    fn create_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        target: ObjectId,
+    ) -> Result<bool, StorageError> {
+        self.require_namespace(namespace)?;
+        let mut store = self
+            .refs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let key = (namespace.as_str().to_string(), name.to_string());
+        if store.contains_key(&key) {
+            return Ok(false);
+        }
+        store.insert(key, target);
+        Ok(true)
+    }
+
+    fn cas_delete_ref(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+        expected: ObjectId,
+    ) -> Result<bool, StorageError> {
+        self.require_namespace(namespace)?;
+        let mut store = self
+            .refs
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let key = (namespace.as_str().to_string(), name.to_string());
+        if store.get(&key) != Some(&expected) {
+            return Ok(false);
+        }
+        store.remove(&key);
+        Ok(true)
     }
 
     fn list_refs(
