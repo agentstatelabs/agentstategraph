@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.7] — 2026-10-02
+
 ### Fixed
 - **Two processes initializing one store could each create `main`, and the later one discarded everything written on the earlier.** `init()` checked for `main` and then set it unconditionally, so an initializer that lost the race replaced `main` — and every commit another process had already made on it, all of which had returned `Ok`. `main` is now created only if absent (`RefStore::create_ref`), so every initializer ends up on the same `main`. Reproduced with eight connections initializing one SQLite store at once: writes were lost on every run before, none after.
 - **Concurrent `branch()` calls creating one name all succeeded, and all but the last were silently repointed.** Branch creation checked and then set; it now creates only if absent, so exactly one creator gets `Ok` and the rest get `BranchAlreadyExists`.
