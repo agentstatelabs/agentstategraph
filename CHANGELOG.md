@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **A backend conformance suite now runs the same checks on the in-memory, SQLite and Postgres backends.**
+  - What it covers:
+    - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
+    - `agentstategraph/tests/backend_conformance.rs` runs repository scenarios. These include the v1.2.5 lost-update case, with separate repositories writing concurrently.
+  - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
+  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. Currently listed:
+    - Postgres cannot create an epoch at all.
+    - The in-memory backend drops an epoch's seal hash.
+    - In-memory and Postgres reminder updates aren't atomic.
+    - Concurrent Postgres connects can deadlock on schema setup.
+
 ## [v1.2.7] — 2026-10-02
 
 ### Fixed

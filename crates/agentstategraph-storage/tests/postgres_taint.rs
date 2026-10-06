@@ -42,6 +42,16 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+/// One connect at a time. Each connect runs the schema DDL unlocked, and two
+/// at once can deadlock (Plan D t-006), which made this file flaky once CI
+/// started setting TEST_DATABASE_URL.
+fn connect(rt: &tokio::runtime::Runtime, url: &str, tenant: &str) -> PostgresStorage {
+    static CONNECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = CONNECT.lock().unwrap_or_else(|p| p.into_inner());
+    rt.block_on(PostgresStorage::connect_tenant(url, tenant))
+        .expect("connect tenant")
+}
+
 fn make_taint(path: &str, name: &str, kind: TaintKind, effect: TaintEffect) -> Taint {
     Taint {
         id: uuid::Uuid::new_v4().to_string(),
@@ -71,9 +81,7 @@ fn postgres_taint_store_conformance() {
     };
     let tid = tenant_id("conformance");
     let rt = runtime();
-    let store = rt
-        .block_on(PostgresStorage::connect_tenant(&url, &tid))
-        .expect("connect tenant");
+    let store = connect(&rt, &url, &tid);
 
     let _guard = rt.enter();
 
@@ -197,12 +205,8 @@ fn postgres_tenants_cannot_see_each_others_taints() {
     let tb = tenant_id("iso-b");
     let rt = runtime();
 
-    let a = rt
-        .block_on(PostgresStorage::connect_tenant(&url, &ta))
-        .expect("tenant a");
-    let b = rt
-        .block_on(PostgresStorage::connect_tenant(&url, &tb))
-        .expect("tenant b");
+    let a = connect(&rt, &url, &ta);
+    let b = connect(&rt, &url, &tb);
 
     let _guard = rt.enter();
 

@@ -89,6 +89,17 @@ build:
 
 test:
   stage: test
+  # Postgres for the backend conformance suites (DESIGN.md Plan D t-001).
+  # Without TEST_DATABASE_URL their Postgres legs skip. The alias resolves on
+  # both the docker and kubernetes executors.
+  services:
+    - name: postgres:16
+      alias: postgres
+  variables:
+    POSTGRES_USER: asg
+    POSTGRES_PASSWORD: asg
+    POSTGRES_DB: asg_test
+    TEST_DATABASE_URL: postgres://asg:asg@postgres:5432/asg_test
   script:
     - cargo test --workspace --locked --exclude agentstategraph-python
 
