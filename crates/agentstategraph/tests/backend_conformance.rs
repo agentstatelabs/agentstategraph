@@ -128,7 +128,17 @@ fn fixtures(case: &str) -> Vec<Fixture> {
                 cleanup: None,
             });
         }
-        _ => eprintln!("skip postgres for {case}: TEST_DATABASE_URL not set"),
+        _ => {
+            // CI sets ASG_REQUIRE_POSTGRES so a missing database fails the
+            // run instead of silently skipping the Postgres legs.
+            let required =
+                std::env::var("ASG_REQUIRE_POSTGRES").is_ok_and(|v| !v.is_empty() && v != "0");
+            assert!(
+                !required,
+                "ASG_REQUIRE_POSTGRES is set, but TEST_DATABASE_URL isn't ({case})"
+            );
+            eprintln!("skip postgres for {case}: TEST_DATABASE_URL not set");
+        }
     }
     all
 }

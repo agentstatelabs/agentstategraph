@@ -226,10 +226,23 @@ fn fixtures(case: &str) -> Vec<Fixture> {
     #[cfg(feature = "postgres")]
     match postgres_fixture(case) {
         Some(f) => all.push(f),
-        None => eprintln!("skip postgres for {case}: TEST_DATABASE_URL not set"),
+        None => skip_postgres(case),
     }
-    let _ = case;
+    #[cfg(not(feature = "postgres"))]
+    skip_postgres(case);
     all
+}
+
+/// CI sets `ASG_REQUIRE_POSTGRES` so a missing database fails the run
+/// instead of silently skipping the Postgres legs.
+fn skip_postgres(case: &str) {
+    let required = std::env::var("ASG_REQUIRE_POSTGRES").is_ok_and(|v| !v.is_empty() && v != "0");
+    assert!(
+        !required,
+        "ASG_REQUIRE_POSTGRES is set, but Postgres isn't available for {case} \
+         (TEST_DATABASE_URL unset, or the `postgres` feature is off)"
+    );
+    eprintln!("skip postgres for {case}: TEST_DATABASE_URL not set");
 }
 
 /// Run `body` against every available backend and judge each outcome
