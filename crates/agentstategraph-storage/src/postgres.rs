@@ -220,6 +220,16 @@ impl PostgresStorage {
                 ALTER TABLE commits ADD COLUMN IF NOT EXISTS session_id TEXT;
                 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS scope_namespace TEXT;
 
+                -- Epoch fidelity and scoping, as in the SQLite backend: the
+                -- seal digest, the owning namespace, and what the seal covers.
+                -- Nullable or defaulted, so existing rows read back as before
+                -- (global, scope = all).
+                ALTER TABLE epochs ADD COLUMN IF NOT EXISTS seal_hash BYTEA;
+                ALTER TABLE epochs ADD COLUMN IF NOT EXISTS namespace TEXT;
+                ALTER TABLE epochs ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'all';
+                CREATE INDEX IF NOT EXISTS idx_epochs_tenant_namespace
+                    ON epochs(tenant_id, namespace);
+
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_epoch
                     ON commits(tenant_id, epoch_id);
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_session
@@ -908,6 +918,9 @@ fn row_to_epoch(
     agents: String,
     tags: String,
     sealed_commits: String,
+    seal_hash: Option<Vec<u8>>,
+    namespace: Option<String>,
+    scope: String,
 ) -> Result<Epoch, StorageError> {
     let root_intents: Vec<String> = serde_json::from_str(&root_intents)
         .map_err(|e| StorageError::Serialization(format!("root_intents: {}", e)))?;
@@ -926,15 +939,49 @@ fn row_to_epoch(
         created_at: parse_rfc3339(&created_at)?,
         sealed_at: sealed_at.as_deref().map(parse_rfc3339).transpose()?,
         seal_summary: summary,
-        seal_hash: None,
+        // A 32-byte digest or nothing; a short or corrupt value reads as
+        // absent rather than failing the whole read, as in SQLite.
+        seal_hash: seal_hash.and_then(|b| {
+            <[u8; 32]>::try_from(b.as_slice())
+                .ok()
+                .map(ObjectId::from_bytes)
+        }),
         commits: Vec::new(),
         agents,
         branches: Vec::new(),
-        scope: EpochScope::All,
-        namespace: None,
+        scope: EpochScope::from_storage_str(&scope),
+        namespace,
         tags,
         sealed_commits,
     })
+}
+
+/// `commit_count` is an `INTEGER` column, so it must be bound as `i32`:
+/// binding an `i64` fails every statement ("error serializing parameter").
+fn commit_count_param(n: usize) -> i32 {
+    i32::try_from(n).unwrap_or(i32::MAX)
+}
+
+/// The columns `row_to_epoch` reads, in the order it takes them.
+const EPOCH_COLUMNS: &str = "id, description, status, created_at, sealed_at, summary,
+     root_intents, agents, tags, sealed_commits, seal_hash, namespace, scope";
+
+fn epoch_from_row(row: &tokio_postgres::Row) -> Result<Epoch, StorageError> {
+    row_to_epoch(
+        row.get("id"),
+        row.get("description"),
+        row.get("status"),
+        row.get("created_at"),
+        row.get("sealed_at"),
+        row.get("summary"),
+        row.get("root_intents"),
+        row.get("agents"),
+        row.get("tags"),
+        row.get("sealed_commits"),
+        row.get("seal_hash"),
+        row.get("namespace"),
+        row.get("scope"),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1013,8 +1060,9 @@ impl EpochStore for PostgresStorage {
                 .execute(
                     "INSERT INTO epochs
                      (tenant_id, id, description, status, created_at, sealed_at,
-                      summary, root_intents, agents, tags, commit_count, sealed_commits)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                      summary, root_intents, agents, tags, commit_count, sealed_commits,
+                      namespace, scope)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                     &[
                         &self.tenant_id,
                         &epoch.id,
@@ -1026,8 +1074,10 @@ impl EpochStore for PostgresStorage {
                         &root_intents,
                         &agents,
                         &tags,
-                        &(epoch.commits.len() as i64),
+                        &commit_count_param(epoch.commits.len()),
                         &sealed_commits,
+                        &epoch.namespace,
+                        &epoch.scope.as_storage_str(),
                     ],
                 )
                 .await
@@ -1054,38 +1104,40 @@ impl EpochStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
-            let row = client
+            // One conditional UPDATE, so two sealers can't both pass a status
+            // check and overwrite each other's seal.
+            let sealed = client
+                .execute(
+                    "UPDATE epochs
+                     SET status = 'Sealed', sealed_at = $1, summary = $2,
+                         sealed_commits = $3, seal_hash = $4, commit_count = $5
+                     WHERE tenant_id = $6 AND id = $7
+                       AND status NOT IN ('Sealed', 'Archived')",
+                    &[
+                        &sealed_at.to_rfc3339(),
+                        &summary,
+                        &sc_json,
+                        &seal_hash.as_bytes().as_slice(),
+                        &commit_count_param(sealed_commits.len()),
+                        &self.tenant_id,
+                        &id,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
+            if sealed > 0 {
+                return Ok(());
+            }
+            let exists = client
                 .query_opt(
-                    "SELECT status FROM epochs WHERE tenant_id = $1 AND id = $2",
+                    "SELECT 1 FROM epochs WHERE tenant_id = $1 AND id = $2",
                     &[&self.tenant_id, &id],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("seal lookup: {}", e)))?;
-
-            match row.as_ref().map(|r| r.get::<_, String>("status")) {
+            match exists {
+                Some(_) => Err(StorageError::EpochAlreadySealed { id: id.to_string() }),
                 None => Err(StorageError::Backend(format!("epoch not found: {}", id))),
-                Some(s) if s == "Sealed" || s == "Archived" => {
-                    Err(StorageError::EpochAlreadySealed { id: id.to_string() })
-                }
-                _ => {
-                    client
-                        .execute(
-                            "UPDATE epochs
-                             SET status = 'Sealed', sealed_at = $1, summary = $2,
-                                 sealed_commits = $3
-                             WHERE tenant_id = $4 AND id = $5",
-                            &[
-                                &sealed_at.to_rfc3339(),
-                                &summary,
-                                &sc_json,
-                                &self.tenant_id,
-                                &id,
-                            ],
-                        )
-                        .await
-                        .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
-                    Ok(())
-                }
             }
         })
     }
@@ -1133,32 +1185,16 @@ impl EpochStore for PostgresStorage {
 
             let rows = client
                 .query(
-                    "SELECT id, description, status, created_at, sealed_at, summary,
-                            root_intents, agents, tags, sealed_commits
-                     FROM epochs
-                     WHERE tenant_id = $1
-                     ORDER BY created_at DESC",
+                    &format!(
+                        "SELECT {EPOCH_COLUMNS} FROM epochs
+                         WHERE tenant_id = $1
+                         ORDER BY created_at DESC"
+                    ),
                     &[&self.tenant_id],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("list epochs: {}", e)))?;
-
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                out.push(row_to_epoch(
-                    row.get("id"),
-                    row.get("description"),
-                    row.get("status"),
-                    row.get("created_at"),
-                    row.get("sealed_at"),
-                    row.get("summary"),
-                    row.get("root_intents"),
-                    row.get("agents"),
-                    row.get("tags"),
-                    row.get("sealed_commits"),
-                )?);
-            }
-            Ok(out)
+            rows.iter().map(epoch_from_row).collect()
         })
     }
 
@@ -1172,9 +1208,7 @@ impl EpochStore for PostgresStorage {
 
             let row = client
                 .query_opt(
-                    "SELECT id, description, status, created_at, sealed_at, summary,
-                            root_intents, agents, tags, sealed_commits
-                     FROM epochs WHERE tenant_id = $1 AND id = $2",
+                    &format!("SELECT {EPOCH_COLUMNS} FROM epochs WHERE tenant_id = $1 AND id = $2"),
                     &[&self.tenant_id, &id],
                 )
                 .await
@@ -1183,24 +1217,15 @@ impl EpochStore for PostgresStorage {
             match row {
                 None => Ok(None),
                 Some(row) => {
-                    let mut epoch = row_to_epoch(
-                        row.get("id"),
-                        row.get("description"),
-                        row.get("status"),
-                        row.get("created_at"),
-                        row.get("sealed_at"),
-                        row.get("summary"),
-                        row.get("root_intents"),
-                        row.get("agents"),
-                        row.get("tags"),
-                        row.get("sealed_commits"),
-                    )?;
-                    // Rehydrate commits list.
+                    let mut epoch = epoch_from_row(&row)?;
+                    // Rehydrate the commit list in commit order. `commits` has
+                    // no `created_at`; ordering by it failed every call. The id
+                    // breaks ties between commits made in the same instant.
                     let rows = client
                         .query(
                             "SELECT id FROM commits
                               WHERE tenant_id = $1 AND epoch_id = $2
-                              ORDER BY created_at",
+                              ORDER BY timestamp, id",
                             &[&self.tenant_id, &epoch.id],
                         )
                         .await

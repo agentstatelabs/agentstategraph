@@ -12,8 +12,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Barrier, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
-use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::{EpochStatus, IntentCategory};
+use agentstategraph::{CommitOptions, RepoError, Repository};
+use agentstategraph_core::{EpochStatus, IntentCategory, Namespace};
 use agentstategraph_storage::{MemoryStorage, PostgresStorage, SqliteStorage, Storage};
 use serde_json::json;
 
@@ -30,11 +30,7 @@ struct Known {
     owner: &'static str,
 }
 
-const KNOWN_FAILURES: &[Known] = &[Known {
-    case: "epoch_create_seal_export",
-    backend: Backend::Postgres,
-    owner: "Plan D t-003: PostgresStorage::create_epoch fails ('error serializing parameter 10')",
-}];
+const KNOWN_FAILURES: &[Known] = &[];
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -286,6 +282,50 @@ fn epoch_create_seal_export(f: &Fixture) {
     );
 }
 
+/// A sealed epoch protects its own namespace's history and no other's: the
+/// v1.1.x scoping that Postgres silently skipped while it dropped an epoch's
+/// namespace.
+fn sealed_epoch_binds_only_its_namespace(f: &Fixture) {
+    let open_in = |ns: &str| {
+        f.open()
+            .with_namespace(Namespace::new(ns).unwrap())
+            .with_epoch_seal_strict(true)
+    };
+    let (team_a, team_b) = (open_in("team-a"), open_in("team-b"));
+    let mut before_seal = Vec::new();
+    for repo in [&team_a, &team_b] {
+        repo.init().unwrap();
+        repo.set_json("main", "/a", &json!(1), opts("a")).unwrap();
+        before_seal.push(repo.set_json("main", "/b", &json!(2), opts("b")).unwrap());
+        repo.set_json("main", "/c", &json!(3), opts("c")).unwrap();
+    }
+
+    team_a
+        .create_epoch("ship-a", "team a release", vec![])
+        .unwrap();
+    team_a.seal_epoch("ship-a", "shipped").unwrap();
+    let sealed = team_a.get_epoch("ship-a").unwrap();
+    assert_eq!(
+        sealed.namespace.as_deref(),
+        Some("team-a"),
+        "the epoch keeps its namespace"
+    );
+    assert!(sealed.seal_hash.is_some(), "the seal digest is stored");
+
+    // Rewinding team a's main past its sealed commits is refused...
+    assert!(
+        matches!(
+            team_a.set_ref("main", before_seal[0]),
+            Err(RepoError::EpochSealViolated { .. })
+        ),
+        "a sealed epoch must protect its own namespace"
+    );
+    // ...but team b's history isn't covered by team a's seal.
+    team_b
+        .set_ref("main", before_seal[1])
+        .expect("another namespace is not bound by team a's seal");
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -302,4 +342,12 @@ fn concurrent_writers() {
 #[test]
 fn epochs() {
     run("epoch_create_seal_export", epoch_create_seal_export);
+}
+
+#[test]
+fn epoch_namespace_binding() {
+    run(
+        "sealed_epoch_binds_only_its_namespace",
+        sealed_epoch_binds_only_its_namespace,
+    );
 }
