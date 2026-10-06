@@ -533,6 +533,129 @@ docs promise no isolation or enforcement that the code doesn't provide.
 
 ---
 
+## Plan F — Embedding API for multi-user hosts
+
+Scoped on 2026-10-05.
+
+### Motivation
+
+Products embed ASG as a library, and some of them now serve many users,
+agents and stores from one process: team servers, and Plan G's sync hub.
+The library still assumes one trusted user per `Repository`:
+
+- **The active session, epoch and namespace are process-wide.** They're
+  fields on the shared `Repository` (`repo.rs:151-173`). One caller's
+  `set_active_session` changes the effective namespace for every other
+  caller (`repo.rs:1849`, `:1883`).
+- **Provenance is whatever the caller passes.** `CommitOptions` carries
+  `agent_id` and `authority`, but nothing ties them to an identity the
+  host has verified. The delegation model (`AuthScope`, `DelegationLink`)
+  is still unwired; that's Plan C t-004.
+- **Guards are applied method by method.** The `/_meta` write and read
+  guards and the taint check are each called from specific methods, so
+  coverage depends on every method remembering to call them. Policy is
+  advisory (`docs/POLICY_GUIDE.md`), and reads are never authorized.
+- **One storage instance is one store.** Postgres opens a pool of up to
+  32 connections per `connect_tenant`, so a process serving N stores
+  needs N pools.
+- **Namespaces don't isolate reads.** Commit ids and prefixes resolve
+  across every namespace in the store (`repo.rs:3308`).
+
+**The principle: ASG doesn't authenticate; the host does.** ASG's job is
+to carry the identity the host has verified, enforce access the same way
+on every operation, record what happened, and make it hard for host
+code to skip any of that.
+
+### Design shape
+
+```rust
+// The host builds this from what it has verified.
+pub struct CallContext {
+    pub namespace: Namespace,
+    pub principal: Principal,              // who is authorized (a person or service)
+    pub agent_id: AgentId,                 // who is acting
+    pub delegation: Vec<DelegationLink>,   // principal → … → agent
+    pub session: Option<SessionId>,
+    pub epoch: Option<String>,
+    pub request_id: Option<String>,        // correlates audit events
+}
+
+let repo = stores.open(&store_id)?;      // F t-003: cheap, shares one pool
+let scoped = repo.scoped(ctx);           // F t-001: per-call handle
+scoped.set("main", "/x", &value, intent)?;   // provenance from ctx; authorized; audited
+```
+
+- **`ScopedRepo`** exposes the `Repository` operations. Every one of
+  them:
+  - fills provenance from the context (principal, agent, delegation,
+    session, epoch);
+  - calls the `Authorizer`;
+  - emits to the `AuditSink`.
+- **`Authorizer::check(ctx, action, target) -> Decision`.**
+  - `action` is read, write, branch, merge, delete-ref, epoch,
+    taint/reminder or admin (GC, namespaces).
+  - `target` is namespace, ref and optional path.
+  - `Decision` is `Allow`, `Deny(reason)`, or `AllowExcept(path
+    prefixes)` so tree reads can be redacted rather than refused.
+  - The built-in reserved-path rules (`/_meta`, `/_meta/_secret`) become
+    the first authorizer rules, applied at one choke point.
+- **`AuditSink::record(event)`** receives every decision and every
+  mutation (context, action, target, decision, resulting commit, time).
+- **Enforcement mode.** With an `Authorizer` configured, unscoped
+  `Repository` methods return `ContextRequired`; only `scoped()` works.
+  With no `Authorizer`, unscoped methods behave exactly as today, so
+  local single-user use and the language bindings don't change.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **`CallContext` and `ScopedRepo`.** Add the per-call handle. Move the active session, epoch and namespace from `Repository` fields into the context. The existing setters stay as the default context for unscoped single-user use. Build `CommitOptions` from the context, so every commit records the host-verified principal, the acting agent and the delegation chain; this resolves Plan C t-004 by wiring delegation. Scope speculation handles to the principal that created them. Key them by namespace, so a namespaced speculation is reachable (the bug class in Plan E t-005). | 1 |
+| t-002 | **`Authorizer` and `AuditSink`, behind one choke point.** Define both traits. The defaults allow everything and record nothing. Route every `ScopedRepo` operation through a single internal enforcement path, and re-express the reserved-path guards as built-in rules there. Add the enforcement mode (`ContextRequired`). **Coverage test:** with a deny-all authorizer, every public operation must fail, enumerated so that a new method without a check fails the test. Decide whether an audit failure fails the operation (best-effort vs. required) and make it configurable. | 1 |
+| t-003 | **Several stores per process.** Add a `StoreProvider` trait, `open(store_id) -> Arc<Repository>`, with two implementations. **Postgres:** one shared pool; each store is a cheap view keyed by the existing `tenant_id` column; each transaction sets `SET LOCAL app.store_id`; Row-Level Security policies on every table, under an app role without `BYPASSRLS`, so a query that forgets the filter returns nothing. **SQLite:** one file per store under a directory. Bound per-store in-memory state (watchers, speculations) with eviction. Builds on Plan D t-004 (transactions). Plan G's reference hub uses it. | 1 |
+| t-004 | **Policy-backed `Authorizer`.** An `Authorizer` implementation backed by the policy crate, with Cedar evaluated in-process through the `cedar-policy` crate instead of the `cedar` CLI (today one subprocess per evaluation, `agentstategraph-policy-cedar/src/lib.rs:169`). Pass real principal attributes and groups from the context instead of an empty `Agent::"<id>"`. Make `/policies` a protected path that only policy APIs can write. | 2 |
+| t-005 | **Namespace read isolation.** Commit-id and prefix resolution only sees commits reachable from the context's namespace, through a commit → namespace index maintained on ref moves; measure it against a reachability walk first. Filter sessions, history rollups and control-ref records (Plan G t-001) by namespace. Make cross-namespace reads an explicit authorizer action. | 2 |
+| t-006 | **Host-friendly performance.** Add an async facade (`AsyncRepository`) that runs operations on a blocking pool, so tokio hosts don't stall reactor threads. Plan D t-002 already frees storage from the caller's runtime. Bound the per-write epoch-seal check: index sealed commits and check only the commits a ref move would orphan, instead of scanning every epoch and walking the reachable graph (`repo.rs:3085-3129`). Add generation numbers to the commit graph so merge-base and bounded walks stop early. | 2 |
+| t-007 | **Context through the surfaces.** The MCP server builds a context per call (namespace from the argument, not `fork_namespace`), and so does the HTTP server (principal from the authenticated key, Plan E t-006). Expose `scoped` in the FFI and language bindings once the Rust API settles. ASG's own server stays a single-store reference server, but it uses the same API. | 2 |
+| t-008 | **Store lifecycle.** Export and import a whole store (reusing Plan G's bundle format); purge a store (delete every row for its id, which is clean because dedup is per store); history retention with sealed epochs exempt. Erasing *part* of a store (one person's data) conflicts with content-addressed, sealed history. Choose between crypto-shredding with per-subject keys and redaction commits plus GC before building it. | 3 |
+| t-009 | **Rolling-upgrade schema contract.** Migrations follow expand-then-contract, so two versions of an embedder can share a database during a deploy. At startup, refuse a schema newer than the binary understands. Extends Plan D t-006. | 3 |
+
+### Acceptance
+
+- With an `Authorizer` configured, every public operation goes through
+  it. The deny-all coverage test proves this, and unscoped calls fail
+  with `ContextRequired`.
+- Two callers in one process, in different namespaces and sessions,
+  don't affect each other's reads, writes or speculations.
+- Commits record the host-verified principal, the acting agent and the
+  delegation chain from the context.
+- One process serves many stores over one Postgres pool. A raw query run
+  under the app role without the store setting returns no rows.
+- A context bound to one namespace can't read another namespace's
+  commits by id or prefix.
+- Local single-user use (no authorizer, unscoped calls) behaves exactly
+  as before, and the bindings keep working unchanged.
+- A store exports, imports and purges cleanly.
+
+### What's NOT in this plan
+
+- **Authentication** (API keys, OIDC, SAML, device login), and role
+  definitions or role management. Hosts own these and express them
+  through an `Authorizer`.
+- **Accounts, billing, or mapping accounts to stores.**
+- **Remote MCP transport.** That belongs to the host.
+- **Sync.** That's Plan G. Plan F's store provider and context are what
+  a hub needs to serve many stores safely.
+
+### Done when
+
+An embedder can serve many users, agents and stores from one process by
+passing a verified context, and ASG enforces and records it the same
+way on every operation, with no per-method gaps and no change for local
+single-user use.
+
+---
+
 ## Plan G — Sync: push and pull between ASG stores
 
 Scoped on 2026-10-05. Plan G closes RFC open question 3, "Remote sync
