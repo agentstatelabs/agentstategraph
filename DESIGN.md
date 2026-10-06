@@ -306,6 +306,233 @@ epoch-seal safety guard Plan B depends on is live.
 
 ---
 
+## Plan D — Postgres as a first-class backend
+
+Plans D and E were scoped on 2026-10-05 from a review of v1.2.7 for
+shared (team / enterprise) deployments.
+
+### Motivation
+
+Postgres is the only backend that partitions by tenant (`tenant_id` is
+in every primary key). The README and `agentstategraph-storage/src/lib.rs`
+present it as the backend for shared deployments, and downstream
+servers build on it. It is also the least exercised
+backend. Its tests skip unless `TEST_DATABASE_URL` is set, and neither CI
+sets it. It was ported from SQLite before the transactions, history, GC
+and search work that has landed since. The review found it broken in the
+paths a shared deployment depends on.
+
+Plan D holds Postgres to the same behavior as SQLite, proven by the same
+tests.
+
+### Findings this plan closes
+
+Verified against v1.2.7 by reading the code. Items marked *(confirm)*
+still need a run against a live database.
+
+1. **`get_epoch` queries a column that doesn't exist.** It loads an
+   epoch's commits with `ORDER BY created_at` (`postgres.rs:1201-1203`),
+   but `commits` has `timestamp`, not `created_at` (`postgres.rs:100-106`).
+   So `get_epoch` fails, and so do `seal_epoch` and `export_epoch`, which
+   call it.
+2. **Epochs lose their namespace and seal.** The `epochs` table
+   (`postgres.rs:126-140`) has no `namespace`, `scope` or `seal_hash`
+   column.
+   - `create_epoch` doesn't write them, and `row_to_epoch` returns `None`
+     for namespace and seal hash.
+   - `assign_epoch_namespace` updates a column that isn't there.
+   - As a result, the per-namespace epoch binding from v1.1.x and seal
+     enforcement don't work on Postgres.
+3. **The server binary drops its async runtime before using Postgres**
+   *(confirm)*.
+   - `main.rs:413-422` builds a `tokio` runtime inside the storage match
+     arm, connects, and drops the runtime when the arm ends.
+   - `repo.init()` (`main.rs:431`) then calls `PostgresStorage::block_on`,
+     which runs `block_in_place(|| Handle::current().block_on(..))`
+     (`postgres.rs:247-252`) with no runtime present.
+   - MCP stdio mode runs on a `current_thread` runtime, where
+     `block_in_place` panics.
+   - Embedders that connect inside their own `#[tokio::main]` don't hit
+     this, which is likely why it went unnoticed.
+4. **No transactions.** `postgres.rs` never calls `BEGIN` or
+   `transaction()`.
+   - Multi-statement operations run as separate autocommits on separate
+     pooled connections. Examples: `delete_namespace`; and a commit plus
+     its epoch/session association and `COUNT(*)` recount.
+   - `batch_put_objects` isn't overridden. The merge path assumes one
+     atomic batch but gets N independent inserts.
+5. **Check-then-act races.** Epoch seal and session end read the status
+   and then write it, with no lock and no conditional update. Reminder
+   `update_if_unchanged` falls back to the trait's non-atomic default.
+6. **Missing hooks.** SQLite implements the history-rollup, GC, leaf-index
+   (search) and `list_commits_dag` hooks. Postgres overrides none of them.
+   - `/api/history` and GC silently do nothing.
+   - Search falls back to a full tree walk.
+   - Every history walk costs one round trip per commit.
+7. **No TLS.** Connections use `NoTls` (`postgres.rs:15, 67`).
+8. **No migration versioning.** The schema DDL (`CREATE ... IF NOT
+   EXISTS` / `ALTER ... ADD COLUMN IF NOT EXISTS`) runs on every connect.
+   Concurrent startups race, and nothing records which schema version a
+   database is at.
+9. **Untested.** `tests/postgres_tenant_isolation.rs` and
+   `tests/postgres_taint.rs` skip without `TEST_DATABASE_URL`, and neither
+   GitLab nor GitHub CI provides a database. There is no Postgres
+   concurrency test.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **Backend conformance suite, with Postgres in CI.** Turn the storage behavior tests into one suite that runs against memory, SQLite and Postgres, so parity is tested instead of checked by eye. Add a Postgres service to GitHub Actions `ci.yml`, which is the pre-merge gate because GitLab only builds `main` and tags. Add the same service to `.gitlab-ci.yml`. Add `scripts/test-postgres.sh` (Docker) for local runs. Include a two-process concurrent-writer test modeled on the v1.2.5 lost-update test. Expect this suite to surface failures beyond the list above; that's its job. | 1 |
+| t-002 | **Make `PostgresStorage` independent of the caller's runtime, and fix the server's wiring.** Products embed ASG and call storage from both plain sync code and tokio servers. So `PostgresStorage` should own its own runtime or worker, instead of `block_in_place` on whatever `Handle::current()` happens to be. That fixes the binary's dropped-runtime crash and the `current_thread` MCP panic as one class of bug. Add a smoke test that starts the binary in HTTP and in MCP mode against Postgres and does a set → get → log round trip. Add an embedding test that calls the storage from inside a `#[tokio::main]` host and from plain sync code. | 1 |
+| t-003 | **Fix epochs.** Add `namespace`, `scope` and `seal_hash` columns to `epochs`, and write and read them. Fix `get_epoch` to order by `timestamp`. If t-006 is ready, land this as a migration; otherwise use `ADD COLUMN IF NOT EXISTS` and convert it later. Add conformance tests for epoch namespace binding, seal and export. | 1 |
+| t-004 | **Transactions where atomicity is assumed.** Add a transaction helper. Implement `batch_put_objects` as one multi-row `INSERT ... ON CONFLICT DO NOTHING` inside a transaction, which also removes N round trips. Make `delete_namespace` and commit association atomic. Replace the per-commit `COUNT(*)` recount with an increment. | 2 |
+| t-005 | **Close the check-then-act races.** Do seal and session end as a conditional `UPDATE ... WHERE status = 'Active'`, or `SELECT ... FOR UPDATE` inside a transaction. Make reminder `update_if_unchanged` atomic. | 2 |
+| t-006 | **Versioned migrations.** Add a `schema_migrations` table and ordered migrations. Hold `pg_advisory_lock` while migrating so concurrent startups are safe. Existing databases are adopted as version 1 with no data changes. | 2 |
+| t-007 | **TLS.** Use a rustls connector and honor `sslmode` from the connection URL. Document `require` as the expected setting for non-local hosts. | 2 |
+| t-008 | **History and search parity.** Override `list_commits_dag` with a recursive CTE or a `commit_parents` table, so a walk is one query instead of N. Add a Postgres leaf index for search using `pg_trgm`. Add history-rollup tables equivalent to SQLite's. | 3 |
+| t-009 | **GC on Postgres.** Port the SQLite design (Plan B) and run it through the t-001 suite: mark and sweep scoped to `tenant_id`, writer exclusion through an advisory lock, and pinned speculation roots. | 3 |
+
+### Acceptance
+
+- The conformance suite passes identically on memory, SQLite and Postgres in CI.
+- `agentstategraph-mcp --storage postgres` starts and serves both HTTP and MCP.
+- Two server processes sharing one database finish the concurrent-writer test with zero lost updates.
+- Epochs bind to a namespace, seal and export on Postgres.
+- Connections can require TLS.
+- Startup migrations are versioned and safe to run from several processes at once.
+
+### What's NOT in this plan
+
+- Serving more than one tenant per process, and Postgres Row-Level
+  Security. Tenant routing is a separate plan, not yet scoped.
+- Making the `Storage` trait async. One `block_in_place` per call caps
+  throughput, but changing the trait touches every backend and binding.
+  Measure after t-008 first.
+- Backup, restore and replication. Operators get these from Postgres.
+- IndexedDB parity.
+
+### Done when
+
+Postgres can be recommended for a shared deployment without caveats. It
+behaves the same as SQLite, and the same tests prove it on every merge.
+
+---
+
+## Plan E — Server hardening (safe defaults for `agentstategraph-mcp`)
+
+### Motivation
+
+`agentstategraph-mcp` began as a local tool: one user, a loopback
+address, trusted callers. It is now also what the Docker image and the
+README's HTTP quick start ship, and the first thing anyone evaluating ASG
+for a team will run. Its defaults, and a handful of bugs, still reflect
+the local-only origin.
+
+Plan E makes the server safe by default and accurate about what it
+enforces, without changing the local developer experience.
+
+### Findings this plan closes
+
+Verified against v1.2.7 by reading the code. Items marked *(confirm)*
+still need a test.
+
+1. **CORS allows any origin.** `http.rs:118-122` allows any origin,
+   method and header, while auth is off by default. Loopback binds have no
+   `Host` header check.
+2. **API keys are stored in plaintext.**
+   - `--keys-file` holds the raw keys. `save_keys` in `auth.rs` writes it
+     with a non-atomic `fs::write` at default permissions.
+   - Load errors are ignored. If the file fails to parse and
+     `--initial-admin-key` is set, the file is rewritten with only the
+     bootstrap key, and every other key is lost.
+3. **Revoke and rotate match keys by prefix** and take the first hash-map
+   hit. `list_keys` shows only 8 characters, so prefixes are ambiguous.
+4. **The ASD proxy routes skip auth and rate limiting.** `/api/code/*` is
+   merged after those layers (around `main.rs:510-514`).
+5. **Per-key scoping is stored but not enforced.**
+   - Keys carry `tenant_id` and `namespace_id`.
+   - `get_repo` discards the tenant and returns the default repo for every
+     key (`auth.rs:405-410`).
+   - No HTTP handler reads `namespace_id`. Handlers take `State(repo)`, not
+     the repo the auth middleware injects.
+6. **The Docker quick start can't connect.** The image's CMD has no
+   `--bind` (`Dockerfile:40`) and the default bind is `127.0.0.1`
+   (`main.rs:50-61`), so the published port reaches nothing. The compose
+   healthcheck calls `curl`, which the runtime image doesn't install.
+7. **Warnings never print.** The code calls `tracing::warn!` (for example,
+   the warning about a self-asserted agent id, around `http.rs:804-810`),
+   but no tracing subscriber is installed anywhere. There is no request
+   logging and no metrics.
+8. **`/api/health` isn't a readiness probe.** With auth on, it builds a
+   throwaway in-memory repo instead of touching the real store.
+9. **No request bounds.**
+   - Only axum's default body limit applies; there are no timeout or
+     concurrency layers.
+   - Rate limiting is per peer IP, so behind a load balancer every client
+     shares one bucket.
+10. **Namespaced speculations are unreachable** *(confirm)*.
+    `agentstategraph_speculate` with a `namespace` creates the speculation
+    on a temporary forked repo (around `server/mod.rs:1458-1463`).
+    `spec_modify` and `commit_spec` look on `self.repo` and don't find it.
+11. **MCP reminders don't survive a restart.** The MCP server uses
+    `MemoryReminderStore` (`server/mod.rs:1021-1024`), even though
+    `Repository` implements a durable `ReminderStore`.
+12. **The docs claim more than ships.**
+    - README: "Multi-tenant & multi-agent by design", and Postgres
+      "(multi-tenant)".
+    - `storage/src/lib.rs:6`: Postgres "for SaaS and enterprise".
+    - Site compare page: governance "enforced at commit time". Taint gates
+      are enforced at commit time; policy is advisory.
+    - `docs/TAINT_GUIDE.md:188` still calls Postgres taint storage a stub,
+      but `postgres.rs:1680` implements it.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **CORS allow-list and Host validation.** Allow only loopback origins by default, plus the hosted explorer if it needs access. Make the list configurable by flag or env var. On loopback binds, reject unexpected `Host` headers. Record the behavior change in CHANGELOG. | 1 |
+| t-002 | **Key storage.** Store SHA-256 hashes instead of keys. Write the file atomically (temp file + rename) with 0600 permissions. Fail loudly on a parse error. Revoke and rotate by key id, not prefix. Migrate existing plaintext files when they're loaded. | 1 |
+| t-003 | **Put the proxy routes behind auth and rate limiting.** | 1 |
+| t-004 | **Docker.** Set `ENV ASG_BIND=0.0.0.0` in the image; unlike a CMD flag, it survives CMD overrides such as the README's `--http`. Make the healthcheck work, either with an `agentstategraph-mcp healthcheck` subcommand or by installing curl. Note in the README and compose file that a container listening on all interfaces should run with `--auth`. Test the README commands exactly as written. | 1 |
+| t-005 | **Fix namespaced speculations and make MCP reminders durable.** Keep a speculation on the long-lived repo, or key forks by namespace and reuse them. Have the MCP server use the repo's `ReminderStore`. | 1 |
+| t-006 | **Enforce per-key scope, or stop carrying it.** HTTP handlers use the repo the auth middleware injects, bound to the key's `namespace_id`. A namespace-bound key may use branch names but not raw commit ids or prefixes, because those resolve across namespaces today (`repo.rs:3308`). Until per-request tenant routing exists, reject a key whose `tenant_id` doesn't match the process's tenant instead of silently ignoring it. | 2 |
+| t-007 | **Observability baseline.** Install `tracing-subscriber` with an env filter. Add request logging with `tower-http`'s `TraceLayer`; log the key id, never the key. Split health into liveness (`/api/health`) and readiness (`/api/ready`, which touches storage). Add an optional metrics endpoint behind a flag. | 2 |
+| t-008 | **Request bounds.** Set an explicit body limit and add timeout and concurrency layers. Rate-limit by API key when auth is on, and by IP otherwise. | 2 |
+| t-009 | **Docs accuracy pass.** After Plans D and E, align the README, `storage/src/lib.rs`, the site pages and `TAINT_GUIDE.md` with what ships. Describe namespaces as a branch-level partition, not an isolation boundary. Describe policy as advisory except where a specific gate is named. | 3 |
+
+### Acceptance
+
+- A fresh install, local or Docker, accepts browser requests only from allowed origins.
+- No plaintext keys are kept on disk.
+- Every route sits behind the same auth and rate-limit layers.
+- The README's Docker commands work as written.
+- A namespace-bound key can't read or write outside its namespace over HTTP.
+- Server warnings and requests appear in the logs.
+- Namespaced speculations and MCP reminders last as long as they're meant to.
+- Public docs describe isolation and enforcement as they actually behave.
+
+### What's NOT in this plan
+
+- New authentication schemes (OIDC, SAML, JWT), roles, or per-request
+  tenant routing.
+- Remote MCP over HTTP. MCP is stdio-only today.
+- Binding commit identity to the authenticated principal. That is Plan C
+  t-002 / t-004 territory.
+- Namespace-scoped commit resolution for every caller. t-006 only fences
+  namespace-bound keys. The general fix needs a decision on how commits map
+  to namespaces.
+- Making the active session, epoch and namespace per caller instead of
+  per process (`repo.rs:1849`). It isn't reachable over HTTP today, but it
+  blocks serving many callers from one process.
+
+### Done when
+
+Running the server for more than one person is safe by default, and the
+docs promise no isolation or enforcement that the code doesn't provide.
+
+---
+
 ## First-parent surfaces — which are deliberate, which are accidents
 
 `Repository::log` follows `parents[0]`. That is a legitimate thing to offer —
