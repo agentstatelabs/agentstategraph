@@ -42,12 +42,7 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// One connect at a time. Each connect runs the schema DDL unlocked, and two
-/// at once can deadlock (Plan D t-006), which made this file flaky once CI
-/// started setting TEST_DATABASE_URL.
 fn connect(rt: &tokio::runtime::Runtime, url: &str, tenant: &str) -> PostgresStorage {
-    static CONNECT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one_at_a_time = CONNECT.lock().unwrap_or_else(|p| p.into_inner());
     rt.block_on(PostgresStorage::connect_tenant(url, tenant))
         .expect("connect tenant")
 }

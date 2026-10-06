@@ -6,12 +6,23 @@
 //! Usage:
 //!   let storage = PostgresStorage::connect("postgres://localhost/agentstategraph").await?;
 //!   let storage = PostgresStorage::connect_tenant("postgres://...", "tenant-123").await?;
+//!   // From sync code, with or without an async runtime:
+//!   let storage = PostgresStorage::connect_tenant_blocking("postgres://...", "tenant-123", 8)?;
+//!
+//! The storage traits are synchronous. Every connection is driven by one
+//! process-wide runtime owned by this module, so callers can use the storage
+//! from plain threads, from a multi-threaded tokio runtime, or from a
+//! single-threaded one, and the runtime that connected needn't outlive it.
 //!
 //! As of 0.6.75-beta.1 this backend persists epochs and sessions too,
 //! with the same schema shape as SQLite (JSON-as-TEXT). Multi-tenant
 //! isolation continues via a `tenant_id` column on every table.
 
-use deadpool_postgres::{Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime};
+use deadpool_postgres::{
+    Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime as PoolRuntime,
+};
+use std::sync::OnceLock;
+use tokio::runtime::RuntimeFlavor;
 use tokio_postgres::NoTls;
 
 /// Default Postgres pool cap (v2-M1). Overridable via constructor or
@@ -26,6 +37,28 @@ use chrono::{DateTime, Utc};
 use crate::traits::{
     CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
 };
+
+/// Advisory-lock key that serializes schema setup across every process using
+/// a database ("asg-sch" as bytes).
+const SCHEMA_LOCK_KEY: i64 = 0x6173_672d_7363_68;
+
+/// The runtime that drives every `PostgresStorage` connection in the process.
+///
+/// A pooled connection lives on the runtime it was opened in. Owning that
+/// runtime here means no caller's runtime has to exist, be multi-threaded, or
+/// outlive the pool, and it is never dropped inside an async context.
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 8));
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .thread_name("asg-postgres")
+            .enable_all()
+            .build()
+            .expect("start the Postgres storage runtime")
+    })
+}
 
 /// PostgreSQL-backed storage with connection pooling and optional multi-tenancy.
 pub struct PostgresStorage {
@@ -53,6 +86,38 @@ impl PostgresStorage {
         tenant_id: &str,
         max_size: usize,
     ) -> Result<Self, StorageError> {
+        let storage = Self::with_pool(database_url, tenant_id, max_size)?;
+        // Schema setup runs on the storage runtime, so the connection it opens
+        // (which then goes back into the pool) is driven there rather than by
+        // the caller's runtime, which may be gone when that connection is reused.
+        let setup = Self {
+            pool: storage.pool.clone(),
+            tenant_id: storage.tenant_id.clone(),
+        };
+        runtime()
+            .spawn(async move { setup.init_tables().await })
+            .await
+            .map_err(|e| StorageError::Backend(format!("postgres setup task: {e}")))??;
+        Ok(storage)
+    }
+
+    /// Connect from synchronous code. Needs no async runtime, and also works
+    /// when called from inside one.
+    pub fn connect_tenant_blocking(
+        database_url: &str,
+        tenant_id: &str,
+        max_size: usize,
+    ) -> Result<Self, StorageError> {
+        let storage = Self::with_pool(database_url, tenant_id, max_size)?;
+        storage.block_on(storage.init_tables())?;
+        Ok(storage)
+    }
+
+    fn with_pool(
+        database_url: &str,
+        tenant_id: &str,
+        max_size: usize,
+    ) -> Result<Self, StorageError> {
         let mut cfg = Config::new();
         cfg.url = Some(database_url.to_string());
         cfg.manager = Some(ManagerConfig {
@@ -64,15 +129,12 @@ impl PostgresStorage {
         });
 
         let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .create_pool(Some(PoolRuntime::Tokio1), NoTls)
             .map_err(|e| StorageError::Backend(format!("postgres pool: {}", e)))?;
-
-        let storage = Self {
+        Ok(Self {
             pool,
             tenant_id: tenant_id.to_string(),
-        };
-        storage.init_tables().await?;
-        Ok(storage)
+        })
     }
 
     /// Return the configured pool's maximum size. Useful for tests.
@@ -81,15 +143,26 @@ impl PostgresStorage {
     }
 
     async fn init_tables(&self) -> Result<(), StorageError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
             .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
 
-        client
-            .batch_execute(
-                "
+        // Every connect runs this DDL. Unserialized, two processes starting
+        // at once deadlocked on the schema's locks and one failed to start, so
+        // the setup is one transaction behind a database-wide advisory lock.
+        // Versioned migrations (Plan D t-006) build on this lock.
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| StorageError::Backend(format!("init tables: begin: {}", e)))?;
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_KEY])
+            .await
+            .map_err(|e| StorageError::Backend(format!("init tables: schema lock: {}", e)))?;
+
+        tx.batch_execute(
+            "
                 CREATE TABLE IF NOT EXISTS objects (
                     tenant_id TEXT NOT NULL,
                     id        BYTEA NOT NULL,
@@ -235,30 +308,50 @@ impl PostgresStorage {
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_session
                     ON commits(tenant_id, session_id);
                 ",
-            )
-            .await
-            .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
+        )
+        .await
+        .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
 
         // Seed the default namespace for this tenant.
-        client
-            .execute(
-                "INSERT INTO namespaces (tenant_id, name, created_at)
-                 VALUES ($1, 'default', NOW()::TEXT)
-                 ON CONFLICT DO NOTHING",
-                &[&self.tenant_id],
-            )
-            .await
-            .map_err(|e| StorageError::Backend(format!("seed default namespace: {}", e)))?;
+        tx.execute(
+            "INSERT INTO namespaces (tenant_id, name, created_at)
+             VALUES ($1, 'default', NOW()::TEXT)
+             ON CONFLICT DO NOTHING",
+            &[&self.tenant_id],
+        )
+        .await
+        .map_err(|e| StorageError::Backend(format!("seed default namespace: {}", e)))?;
 
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Backend(format!("init tables: commit: {}", e)))?;
         Ok(())
     }
 
-    /// Helper: run an async operation from a sync context.
-    fn block_on<F: std::future::Future<Output = Result<T, StorageError>>, T>(
-        &self,
-        f: F,
-    ) -> Result<T, StorageError> {
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    /// Run an async operation for the sync storage API, on whatever kind of
+    /// thread the caller is on. Before, this assumed a multi-threaded tokio
+    /// runtime: plain threads panicked (no runtime), as did single-threaded
+    /// runtimes (`block_in_place` is multi-thread only).
+    fn block_on<F, T>(&self, f: F) -> Result<T, StorageError>
+    where
+        F: std::future::Future<Output = Result<T, StorageError>> + Send,
+        T: Send,
+    {
+        let rt = runtime().handle();
+        match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            // Not on a runtime: drive the operation on this thread.
+            Err(_) => rt.block_on(f),
+            // A multi-threaded runtime's thread: hand its other work off first.
+            Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(|| rt.block_on(f)),
+            // A single-threaded runtime can neither give up its only thread nor
+            // start another runtime on it, so wait on a helper thread.
+            Ok(_) => std::thread::scope(|scope| {
+                scope
+                    .spawn(|| rt.block_on(f))
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            }),
+        }
     }
 
     async fn require_namespace(
@@ -2401,7 +2494,7 @@ mod tests {
             ..Default::default()
         });
         let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .create_pool(Some(PoolRuntime::Tokio1), NoTls)
             .expect("build pool");
         assert_eq!(pool.status().max_size, 7);
     }

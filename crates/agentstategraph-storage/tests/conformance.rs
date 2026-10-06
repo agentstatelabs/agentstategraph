@@ -14,8 +14,6 @@
 use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Barrier};
-#[cfg(feature = "postgres")]
-use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use agentstategraph_core::{
@@ -60,13 +58,6 @@ const KNOWN_FAILURES: &[Known] = &[
                 update_if_unchanged",
         flaky: true,
     },
-    Known {
-        case: "concurrent_first_connects",
-        backend: Backend::Postgres,
-        owner: "Plan D t-006: schema DDL runs unlocked on every connect, and concurrent \
-                connects can deadlock",
-        flaky: true,
-    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -79,9 +70,6 @@ struct Fixture {
     backend: Backend,
     store: Store,
     opener: Arc<dyn Fn() -> Store + Send + Sync>,
-    /// `PostgresStorage` calls `Handle::current()`, so its callers must be
-    /// inside the runtime's context.
-    runtime: Option<tokio::runtime::Handle>,
     cleanup: Option<std::path::PathBuf>,
 }
 
@@ -94,13 +82,10 @@ impl Fixture {
         (self.opener)()
     }
 
-    /// Run `f` on a new thread with the runtime context the backend needs.
+    /// Run `f` on a new plain thread. Every backend must work from one; for
+    /// Postgres that needs no async runtime (Plan D t-002).
     fn spawn<T: Send + 'static>(&self, f: impl FnOnce() -> T + Send + 'static) -> JoinHandle<T> {
-        let runtime = self.runtime.clone();
-        std::thread::spawn(move || {
-            let _ctx = runtime.as_ref().map(|h| h.enter());
-            f()
-        })
+        std::thread::spawn(f)
     }
 }
 
@@ -123,7 +108,6 @@ fn memory_fixture() -> Fixture {
         store,
         // One process: every "handle" is the same instance.
         opener: Arc::new(move || Arc::clone(&shared)),
-        runtime: None,
         cleanup: None,
     }
 }
@@ -141,37 +125,15 @@ fn sqlite_fixture(case: &str) -> Fixture {
         backend: Backend::Sqlite,
         store,
         opener: Arc::new(move || Arc::new(SqliteStorage::open(&opened).expect("reopen sqlite"))),
-        runtime: None,
         cleanup: Some(path),
     }
 }
 
-#[cfg(feature = "postgres")]
-fn postgres_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime")
-    })
-}
-
-/// Held around every connect, because concurrent connects race on schema DDL
-/// (see `concurrent_first_connects`) and the suite shouldn't depend on that.
-#[cfg(feature = "postgres")]
-fn connect_lock() -> std::sync::MutexGuard<'static, ()> {
-    static CONNECT: Mutex<()> = Mutex::new(());
-    CONNECT.lock().unwrap_or_else(|p| p.into_inner())
-}
-
+/// Connects from whatever thread calls it, with no runtime and no lock:
+/// concurrent connects serialize their schema setup in the database.
 #[cfg(feature = "postgres")]
 fn postgres_connect(url: &str, tenant: &str) -> Store {
-    let _one_at_a_time = connect_lock();
-    let storage = postgres_runtime()
-        .block_on(agentstategraph_storage::PostgresStorage::connect_tenant(
-            url, tenant,
-        ))
+    let storage = agentstategraph_storage::PostgresStorage::connect_tenant_blocking(url, tenant, 8)
         .expect("connect to TEST_DATABASE_URL");
     Arc::new(storage)
 }
@@ -192,7 +154,6 @@ fn postgres_fixture(case: &str) -> Option<Fixture> {
         backend: Backend::Postgres,
         store,
         opener: Arc::new(move || postgres_connect(&url, &tenant)),
-        runtime: Some(postgres_runtime().handle().clone()),
         cleanup: None,
     })
 }
@@ -232,10 +193,7 @@ fn run(case: &str, body: fn(&Fixture)) {
     let mut problems = Vec::new();
     for fixture in fixtures(case) {
         let backend = fixture.backend;
-        let outcome = {
-            let _ctx = fixture.runtime.as_ref().map(|h| h.enter());
-            catch_unwind(AssertUnwindSafe(|| body(&fixture)))
-        };
+        let outcome = catch_unwind(AssertUnwindSafe(|| body(&fixture)));
         let known = KNOWN_FAILURES
             .iter()
             .find(|k| k.case == case && k.backend == backend);
@@ -582,12 +540,11 @@ fn concurrent_first_connects(f: &Fixture) {
     if f.backend != Backend::Postgres {
         return;
     }
-    // Race connects against each other on purpose; that's the race the
-    // harness lock hides. Hold the lock meanwhile so other tests' connects
-    // can't be caught in it.
+    // Processes starting at once each run the schema setup. Unserialized,
+    // they deadlocked and one failed to start; the setup now holds an
+    // advisory lock (Plan D t-002, ahead of t-006's versioned migrations).
     #[cfg(feature = "postgres")]
     {
-        let _others_wait = connect_lock();
         let url = postgres_url().expect("postgres fixture implies a url");
         let barrier = Arc::new(Barrier::new(6));
         let connects: Vec<_> = (0..6)
@@ -595,21 +552,16 @@ fn concurrent_first_connects(f: &Fixture) {
                 let (url, barrier) = (url.clone(), Arc::clone(&barrier));
                 std::thread::spawn(move || {
                     barrier.wait();
-                    postgres_runtime().block_on(
-                        agentstategraph_storage::PostgresStorage::connect_tenant(
-                            &url,
-                            &format!("conformance-connect-{i}-{}", uuid::Uuid::new_v4().simple()),
-                        ),
+                    agentstategraph_storage::PostgresStorage::connect_tenant_blocking(
+                        &url,
+                        &format!("conformance-connect-{i}-{}", uuid::Uuid::new_v4().simple()),
+                        2,
                     )
                 })
             })
             .collect();
-        // Join every racer before judging any: failing on the first error
-        // would release the connect lock while the others still run DDL,
-        // and pull an unrelated test's connect into the race.
-        let results: Vec<_> = connects.into_iter().map(|c| c.join().unwrap()).collect();
-        for r in results {
-            r.expect("concurrent connect");
+        for c in connects {
+            c.join().unwrap().expect("concurrent connect");
         }
     }
 }

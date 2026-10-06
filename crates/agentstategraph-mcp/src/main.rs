@@ -410,15 +410,15 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 "Storage: postgres (tenant: {}, pool: {})",
                 args.tenant_id, args.pg_pool_size
             );
-            let rt = tokio::runtime::Runtime::new()?;
-            let storage = rt.block_on(async {
-                agentstategraph_storage::PostgresStorage::connect_tenant_with_pool_size(
-                    &args.database_url,
-                    &args.tenant_id,
-                    args.pg_pool_size,
-                )
-                .await
-            })?;
+            // The storage drives its connections on its own runtime, so it can
+            // connect from here and then serve either transport. A throwaway
+            // runtime used to connect, and was dropped with the connection's
+            // driver still on it.
+            let storage = agentstategraph_storage::PostgresStorage::connect_tenant_blocking(
+                &args.database_url,
+                &args.tenant_id,
+                args.pg_pool_size,
+            )?;
             Arc::new(Repository::new(Box::new(storage)).with_namespace(repo_namespace))
         }
         _ => {
