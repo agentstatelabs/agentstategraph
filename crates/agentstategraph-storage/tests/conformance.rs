@@ -624,8 +624,12 @@ fn concurrent_first_connects(f: &Fixture) {
                 })
             })
             .collect();
-        for c in connects {
-            c.join().unwrap().expect("concurrent connect");
+        // Join every racer before judging any: failing on the first error
+        // would release the connect lock while the others still run DDL,
+        // and pull an unrelated test's connect into the race.
+        let results: Vec<_> = connects.into_iter().map(|c| c.join().unwrap()).collect();
+        for r in results {
+            r.expect("concurrent connect");
         }
     }
 }
