@@ -533,6 +533,136 @@ docs promise no isolation or enforcement that the code doesn't provide.
 
 ---
 
+## Plan G — Sync: push and pull between ASG stores
+
+Scoped on 2026-10-05. Plan G closes RFC open question 3, "Remote sync
+protocol" (`spec/AGENTSTATEGRAPH-RFC.md:2973`).
+
+### Motivation
+
+ASG stores are local today: one SQLite file per app or repo. Products
+built on ASG are local-first, and their users want the same state on
+every machine and shared with their team. ASD wants judgment (ledger,
+conclusions) to follow a developer and their teammates. CTXone wants
+memory to follow its user. ASD currently shares judgment by
+committing a JSONL sidecar to git. That sidecar is a lossy copy with a
+known merge hazard on stale branches.
+
+ASG's history is content-addressed and branchable, which is git's model
+applied to structured state. So sync can work the way git does: push and
+pull per ref, fast-forward on the receiving side, merge on the client.
+Plan G builds that once, in the library, so every embedder gets it. It
+also ships a basic single-account **reference hub** so anyone can
+self-host one.
+
+### Decisions this plan builds on
+
+1. **What syncs: anything hard or impossible to reproduce.** Regenerable
+   data (code indexes, call graphs, search tables, history rollups)
+   stays local and is rebuilt on each machine. Each embedder keeps
+   irreplaceable data on refs it syncs, and regenerable data on refs it
+   doesn't. The sync unit is a ref, and a ref ships its whole tree.
+2. **Side tables move into a control ref.**
+   - Today, taints, reminders and epochs live in storage tables outside
+     the commit graph. A taint's commit is only a one-line marker; the
+     record itself is in the table (`taint.rs:58`).
+   - Which commits belong to which epoch is a side column on `commits`
+     (`epoch_id`, `session_id`), not part of the commit.
+   - These move into a reserved per-store **control ref** as ordinary
+     tree state. The tables become local indexes rebuilt from it, the
+     same way the leaf index is.
+   - Sync then moves exactly one kind of thing, commit history. ASG's
+     merge handles edits made on two machines, and every taint, reminder
+     and epoch change gets full provenance.
+   - Policies (`/policies`) and plans (`/plans`) already live in the
+     tree this way.
+   - ASG sessions (`SessionStore`) stay local in v1; no current embedder
+     uses them.
+3. **Secrets never sync.** A push fails if the ref's tree contains
+   `/_meta/_secret`, and the error names the path. Secrets belong in a
+   keychain, not in synced state.
+4. **The receiving side never merges.** A push is a compare-and-swap
+   from the client's expected old head to its new head. If the remote
+   has moved, the client fetches, merges locally and pushes again. This
+   keeps a hub simple and leaves conflicts with the party that
+   understands them.
+5. **The receiver never trusts client hashes.** Every commit and object
+   id is recomputed (BLAKE3) on receipt; one mismatch rejects the whole
+   bundle. Otherwise a client could plant content under another
+   object's id.
+
+### Design shape
+
+- **Remote-tracking refs.** A fetch records the remote's heads locally,
+  as `remotes/<remote>/<ref>`. A later push can then compute exactly
+  what the remote lacks without asking per object.
+- **Missing-set computation.** Walk the new commits back to the known
+  remote head, and diff each new state tree against what the remote
+  already has. Unchanged subtrees are skipped by hash. This is git's
+  "thin pack" idea.
+- **Bundle.** A versioned header, then length-prefixed commits and
+  objects, compressed with zstd. Bundles have explicit size limits.
+- **Shallow history.** A first push can start from a chosen commit; the
+  boundary is recorded, so a large store can start syncing without
+  uploading its whole past.
+- **`Remote` trait.** `list_refs`, `fetch(wants, haves)`,
+  `push(ref, expected_old, new, bundle)`. There's an in-process
+  implementation for tests and an HTTP implementation for real use.
+- **HTTP endpoints:** `GET /sync/v1/{store}/refs`,
+  `POST /sync/v1/{store}/fetch`, `POST /sync/v1/{store}/push`.
+- **Push log.** The receiving side appends a record for every accepted
+  push: authenticated key, ref, old → new, time. Agent ids inside
+  commits are claims made on the client; the push log is the receiver's
+  own record of who delivered what.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **Control ref.** Add a reserved per-store ref holding taints, reminders and epochs (with each epoch's commit membership) as tree state at fixed paths. Rebuild the tables from it on open and after every fetch, and keep them current on local writes so the per-write taint check stays index-backed. Writes to the control ref go only through the taint, reminder and epoch APIs, guarded like `/_meta`. Define merge rules per record type: a resolved taint stays resolved; reminder status changes are ordered, and otherwise the newest edit wins; a sealed epoch is immutable. Migrate existing rows on open, idempotently. Settle the ref's name. | 1 |
+| t-002 | **Bundle format and verification.** Serialize and deserialize commits and objects with a versioned header, length prefixes and zstd. Recompute every id on read and reject the whole bundle on any mismatch. Enforce size limits. Library only, no network. | 1 |
+| t-003 | **Missing-set computation.** Given a local head and the last known remote head (or none), produce the commits and objects the remote lacks by walking commits and diffing trees. Support a shallow boundary. Test against `list_commits_dag`, including merge commits and second parents. | 1 |
+| t-004 | **`Remote` trait and library push / fetch / pull.** In-process remote for tests. Remote-tracking refs. Fetch applies a verified bundle and moves `remotes/<remote>/<ref>`. Push is fast-forward-only, a CAS on the expected old head; on rejection it returns a clear "fetch and merge" error. `pull` = fetch + `merge`, with the caller supplying `CommitOptions`. | 2 |
+| t-005 | **Push guards.** Refuse a push when the ref's tree contains `/_meta/_secret`. Refuse refs the store marks local-only. Both errors name what was refused. | 2 |
+| t-006 | **HTTP transport and reference hub.** HTTP `Remote` client. `agentstategraph-mcp --hub` serves `/sync/v1/*` for one account on SQLite or Postgres, behind Plan E's hashed API keys, and keeps the push log. Version is negotiated in the URL and the bundle header. | 2 |
+| t-007 | **Shallow push and fetch.** Record boundary commits; make history walks, blame and merge-base stop cleanly at a boundary instead of erroring. | 3 |
+| t-008 | **Surfaces.** MCP tools (`agentstategraph_remote_add`, `_fetch`, `_push`, `_pull`) and the matching HTTP routes. Expose the same calls in the FFI and language bindings after the Rust API settles. | 3 |
+| t-009 | **End-to-end sync suite.** Two stores and a hub. Cover: concurrent pushes, and the fetch → merge → push retry; a taint applied on store A blocks a write on store B after B pulls; reminder and epoch round-trips; secrets refusal; a tampered bundle rejected; and the same suite against a Postgres hub through Plan D's harness. | 3 |
+
+### Acceptance
+
+- Two machines can push and pull a ref through a hub, with no lost updates under concurrent pushes.
+- A diverged push is rejected, and fetch → merge → push resolves it.
+- Taints, reminders and epochs made on one machine are present and enforced on the other after a pull.
+- A bundle with any wrong id is rejected whole.
+- A branch containing `/_meta/_secret` can't be pushed.
+- The reference hub runs from the public binary on SQLite or Postgres, and keeps a push log.
+- A large store can start syncing from a shallow boundary.
+
+### What's NOT in this plan
+
+- **Embedder changes.** Moving each embedder's irreplaceable data onto a
+  synced ref is the embedder's job. For ASD: judgment onto its own ref,
+  the index on a local-only ref, and `asd remote` / `push` / `pull`.
+  For CTXone: memory sync, and whether session transcripts sync.
+- **Accounts, teams, billing, or a multi-account hosted hub.** The
+  reference hub serves one account.
+- **Commit signing.** Per-device Ed25519 signatures would let a hub
+  verify authorship rather than only the pusher. That's a follow-on
+  using the existing signing infrastructure.
+- **Partial clone** (fetching a subtree of a ref) and real-time push
+  notifications.
+- **Syncing ASG sessions.**
+
+### Done when
+
+Any ASG embedder can keep a store in sync across machines and teammates
+through a hub, including its taints, reminders and epochs, with the same
+integrity guarantees as local history, and anyone can run that hub from
+the public binary.
+
+---
+
 ## First-parent surfaces — which are deliberate, which are accidents
 
 `Repository::log` follows `parents[0]`. That is a legitimate thing to offer —
