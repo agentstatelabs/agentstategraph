@@ -14,6 +14,20 @@
 //! from plain threads, from a multi-threaded tokio runtime, or from a
 //! single-threaded one, and the runtime that connected needn't outlive it.
 //!
+//! TLS (the `postgres-tls` feature) is set in the connection string, the way
+//! libpq does it:
+//!   postgres://user@db.example.com/app?sslmode=verify-full&sslrootcert=/etc/ca.pem
+//! - `sslmode=require`, `verify-ca` and `verify-full` all mean verified TLS: the
+//!   server's certificate must chain to Mozilla's roots or to a certificate in
+//!   `sslrootcert` (or `PGSSLROOTCERT`), and must match the host name. There is
+//!   no unverified TLS. `verify-ca` is stricter here than in libpq, because the
+//!   host name is checked too.
+//! - `sslmode=prefer` uses TLS when the server offers it, and still verifies it.
+//! - No `sslmode`, or `sslmode=disable`, is plaintext, as before. Use
+//!   `sslmode=require` or `verify-full` for any host that isn't local.
+//! Without the `postgres-tls` feature, asking for TLS is an error that names
+//! the feature, never a silent plaintext connection.
+//!
 //! As of 0.6.75-beta.1 this backend persists epochs and sessions too,
 //! with the same schema shape as SQLite (JSON-as-TEXT). Multi-tenant
 //! isolation continues via a `tenant_id` column on every table.
@@ -23,6 +37,7 @@ use deadpool_postgres::{
 };
 use std::sync::OnceLock;
 use tokio::runtime::RuntimeFlavor;
+#[cfg(not(feature = "postgres-tls"))]
 use tokio_postgres::NoTls;
 
 /// Default Postgres pool cap (v2-M1). Overridable via constructor or
@@ -37,6 +52,250 @@ use chrono::{DateTime, Utc};
 use crate::traits::{
     CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
 };
+
+/// TLS settings read from a connection string, and the string tokio-postgres
+/// is given in its place: it knows only `sslmode=disable|prefer|require` and
+/// rejects `sslrootcert`, so `verify-ca`/`verify-full` become `require` (TLS
+/// here is always verified) and `sslrootcert` is taken out. A string with no
+/// `sslmode` gets `sslmode=disable`, so it stays plaintext as it always was;
+/// tokio-postgres alone would default to `prefer`.
+#[derive(Debug, PartialEq)]
+struct ConnectionTls {
+    url: String,
+    requires_tls: bool,
+    root_cert: Option<std::path::PathBuf>,
+}
+
+impl ConnectionTls {
+    /// `env_root_cert` is `PGSSLROOTCERT`, used when the string names none.
+    fn parse(database_url: &str, env_root_cert: Option<String>) -> Result<Self, StorageError> {
+        let is_url =
+            database_url.starts_with("postgres://") || database_url.starts_with("postgresql://");
+        // URL form keeps options in the query string; key/value form is
+        // space-separated `key=value` pairs (quoted values aren't supported
+        // for these two keys).
+        let (head, options, sep) = if is_url {
+            match database_url.split_once('?') {
+                Some((head, query)) => (head, query, '&'),
+                None => (database_url, "", '&'),
+            }
+        } else {
+            ("", database_url, ' ')
+        };
+
+        let mut kept: Vec<String> = Vec::new();
+        let mut mode: Option<String> = None;
+        let mut root_cert = None;
+        for part in options.split(sep).filter(|p| !p.is_empty()) {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            match key {
+                "sslmode" => {
+                    let mapped = match value {
+                        "verify-ca" | "verify-full" => "require",
+                        other => other,
+                    };
+                    mode = Some(value.to_string());
+                    kept.push(format!("sslmode={mapped}"));
+                }
+                "sslrootcert" => {
+                    let path = if is_url {
+                        percent_decode(value)?
+                    } else {
+                        value.to_string()
+                    };
+                    root_cert = Some(std::path::PathBuf::from(path));
+                }
+                _ => kept.push(part.to_string()),
+            }
+        }
+        if mode.is_none() {
+            kept.push("sslmode=disable".to_string());
+        }
+        let options = kept.join(&sep.to_string());
+        let url = if is_url {
+            format!("{head}?{options}")
+        } else {
+            options
+        };
+        Ok(Self {
+            url,
+            requires_tls: matches!(
+                mode.as_deref(),
+                Some("require") | Some("verify-ca") | Some("verify-full")
+            ),
+            root_cert: root_cert.or_else(|| env_root_cert.map(std::path::PathBuf::from)),
+        })
+    }
+}
+
+/// Decode `%XX` escapes in a URL query value (a file path may contain them).
+fn percent_decode(value: &str) -> Result<String, StorageError> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = value
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| {
+                    StorageError::Backend(format!(
+                        "bad percent-escape in connection string: {value}"
+                    ))
+                })?;
+            out.push(hex);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out)
+        .map_err(|_| StorageError::Backend(format!("connection string value isn't UTF-8: {value}")))
+}
+
+/// rustls for tokio-postgres: always-verified TLS against Mozilla's roots
+/// plus any `sslrootcert`. Channel binding (SCRAM-SHA-256-PLUS) isn't
+/// offered; ordinary SCRAM authentication works over the TLS connection.
+#[cfg(feature = "postgres-tls")]
+mod tls {
+    use std::future::Future;
+    use std::io;
+    use std::path::Path;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use rustls::{ClientConfig, RootCertStore};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect, TlsStream};
+
+    use crate::traits::StorageError;
+
+    pub(super) fn connector(root_cert: Option<&Path>) -> Result<MakeRustlsConnect, StorageError> {
+        let mut roots = RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        if let Some(path) = root_cert {
+            let bad = |e: &dyn std::fmt::Display| {
+                StorageError::Backend(format!("sslrootcert {}: {e}", path.display()))
+            };
+            let certs = CertificateDer::pem_file_iter(path)
+                .map_err(|e| bad(&e))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| bad(&e))?;
+            if certs.is_empty() {
+                return Err(bad(&"no PEM certificates in the file"));
+            }
+            for cert in certs {
+                roots.add(cert).map_err(|e| bad(&e))?;
+            }
+        }
+        let config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| StorageError::Backend(format!("postgres tls: {e}")))?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        Ok(MakeRustlsConnect(Arc::new(config)))
+    }
+
+    #[derive(Clone)]
+    pub(super) struct MakeRustlsConnect(Arc<ClientConfig>);
+
+    impl<S> MakeTlsConnect<S> for MakeRustlsConnect
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        type Stream = RustlsStream<S>;
+        type TlsConnect = RustlsConnect;
+        type Error = io::Error;
+
+        fn make_tls_connect(&mut self, host: &str) -> io::Result<RustlsConnect> {
+            let name = ServerName::try_from(host.to_string())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            Ok(RustlsConnect {
+                config: Arc::clone(&self.0),
+                name,
+            })
+        }
+    }
+
+    pub(super) struct RustlsConnect {
+        config: Arc<ClientConfig>,
+        name: ServerName<'static>,
+    }
+
+    impl<S> TlsConnect<S> for RustlsConnect
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        type Stream = RustlsStream<S>;
+        type Error = io::Error;
+        type Future = Pin<Box<dyn Future<Output = io::Result<RustlsStream<S>>> + Send>>;
+
+        fn connect(self, stream: S) -> Self::Future {
+            Box::pin(async move {
+                tokio_rustls::TlsConnector::from(self.config)
+                    .connect(self.name, stream)
+                    .await
+                    .map(RustlsStream)
+            })
+        }
+    }
+
+    pub(super) struct RustlsStream<S>(tokio_rustls::client::TlsStream<S>);
+
+    impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream for RustlsStream<S> {
+        fn channel_binding(&self) -> ChannelBinding {
+            ChannelBinding::none()
+        }
+    }
+
+    impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for RustlsStream<S> {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+        }
+    }
+
+    impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RustlsStream<S> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+        }
+    }
+}
+
+/// A failure to get a pooled connection, with its whole cause chain: the pool
+/// and tokio-postgres errors alone say only "error performing TLS handshake",
+/// and the reason (an untrusted issuer, a name mismatch, a refused login) is
+/// further down the chain.
+fn conn_error(e: impl std::error::Error) -> StorageError {
+    let mut msg = format!("get conn: {e}");
+    let mut source = e.source();
+    while let Some(cause) = source {
+        msg.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    StorageError::Backend(msg)
+}
 
 /// Advisory-lock key that serializes schema setup across every process using
 /// a database ("asg-sch" as bytes).
@@ -118,8 +377,14 @@ impl PostgresStorage {
         tenant_id: &str,
         max_size: usize,
     ) -> Result<Self, StorageError> {
+        let tls = ConnectionTls::parse(
+            database_url,
+            std::env::var("PGSSLROOTCERT")
+                .ok()
+                .filter(|v| !v.is_empty()),
+        )?;
         let mut cfg = Config::new();
-        cfg.url = Some(database_url.to_string());
+        cfg.url = Some(tls.url.clone());
         cfg.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });
@@ -128,9 +393,24 @@ impl PostgresStorage {
             ..Default::default()
         });
 
-        let pool = cfg
-            .create_pool(Some(PoolRuntime::Tokio1), NoTls)
-            .map_err(|e| StorageError::Backend(format!("postgres pool: {}", e)))?;
+        #[cfg(feature = "postgres-tls")]
+        let pool = cfg.create_pool(
+            Some(PoolRuntime::Tokio1),
+            tls::connector(tls.root_cert.as_deref())?,
+        );
+        #[cfg(not(feature = "postgres-tls"))]
+        let pool = {
+            if tls.requires_tls || tls.root_cert.is_some() {
+                return Err(StorageError::Backend(
+                    "the connection string asks for TLS (sslmode=require/verify-*, or \
+                     sslrootcert), but this build has no Postgres TLS support: build with \
+                     the `postgres-tls` feature"
+                        .into(),
+                ));
+            }
+            cfg.create_pool(Some(PoolRuntime::Tokio1), NoTls)
+        };
+        let pool = pool.map_err(|e| StorageError::Backend(format!("postgres pool: {}", e)))?;
         Ok(Self {
             pool,
             tenant_id: tenant_id.to_string(),
@@ -143,11 +423,7 @@ impl PostgresStorage {
     }
 
     async fn init_tables(&self) -> Result<(), StorageError> {
-        let mut client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+        let mut client = self.pool.get().await.map_err(conn_error)?;
 
         // Every connect runs this DDL. Unserialized, two processes starting
         // at once deadlocked on the schema's locks and one failed to start, so
@@ -380,11 +656,7 @@ impl PostgresStorage {
 impl ObjectStore for PostgresStorage {
     fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_opt(
@@ -412,11 +684,7 @@ impl ObjectStore for PostgresStorage {
             serde_json::to_value(obj).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             client
                 .execute(
@@ -433,11 +701,7 @@ impl ObjectStore for PostgresStorage {
 
     fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_one(
@@ -457,11 +721,7 @@ impl ObjectStore for PostgresStorage {
 impl CommitStore for PostgresStorage {
     fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let rows = client
                 .query(
                     "SELECT id FROM commits WHERE tenant_id = $1",
@@ -484,11 +744,7 @@ impl CommitStore for PostgresStorage {
 
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_opt(
@@ -516,11 +772,7 @@ impl CommitStore for PostgresStorage {
         let timestamp = commit.timestamp;
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             client
                 .execute(
@@ -542,11 +794,7 @@ impl CommitStore for PostgresStorage {
 
     fn has_commit(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_one(
@@ -562,11 +810,7 @@ impl CommitStore for PostgresStorage {
 
     fn list_commits(&self, from: &ObjectId, limit: usize) -> Result<Vec<Commit>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let mut result = Vec::new();
             let mut current = Some(*from);
@@ -606,11 +850,7 @@ impl CommitStore for PostgresStorage {
 impl RefStore for PostgresStorage {
     fn create_namespace(&self, namespace: &Namespace) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let rows = client
                 .execute(
@@ -632,11 +872,7 @@ impl RefStore for PostgresStorage {
 
     fn list_namespaces(&self) -> Result<Vec<Namespace>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let rows = client
                 .query(
@@ -660,11 +896,7 @@ impl RefStore for PostgresStorage {
 
     fn get_ref(&self, namespace: &Namespace, name: &str) -> Result<Option<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let ns_row = client
                 .query_opt(
@@ -709,11 +941,7 @@ impl RefStore for PostgresStorage {
         target: ObjectId,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let ns_row = client
                 .query_opt(
@@ -755,11 +983,7 @@ impl RefStore for PostgresStorage {
         new: ObjectId,
     ) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let ns_row = client
                 .query_opt(
@@ -801,11 +1025,7 @@ impl RefStore for PostgresStorage {
         target: ObjectId,
     ) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             self.require_namespace(&client, namespace).await?;
             let rows = client
                 .execute(
@@ -832,11 +1052,7 @@ impl RefStore for PostgresStorage {
         expected: ObjectId,
     ) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             self.require_namespace(&client, namespace).await?;
             let rows = client
                 .execute(
@@ -862,11 +1078,7 @@ impl RefStore for PostgresStorage {
         prefix: &str,
     ) -> Result<Vec<(String, ObjectId)>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let ns_row = client
                 .query_opt(
@@ -909,11 +1121,7 @@ impl RefStore for PostgresStorage {
 
     fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let ns_row = client
                 .query_opt(
@@ -1143,11 +1351,7 @@ impl EpochStore for PostgresStorage {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             client
                 .execute(
@@ -1191,11 +1395,7 @@ impl EpochStore for PostgresStorage {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             // One conditional UPDATE, so two sealers can't both pass a status
             // check and overwrite each other's seal.
@@ -1237,11 +1437,7 @@ impl EpochStore for PostgresStorage {
 
     fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("pg pool: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             // `namespace IS NULL` makes this assign-only — see the trait docs.
             let changed = client
                 .execute(
@@ -1270,11 +1466,7 @@ impl EpochStore for PostgresStorage {
 
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let rows = client
                 .query(
@@ -1293,11 +1485,7 @@ impl EpochStore for PostgresStorage {
 
     fn get_epoch(&self, id: &str) -> Result<Option<Epoch>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_opt(
@@ -1344,11 +1532,7 @@ impl EpochStore for PostgresStorage {
 
     fn archive_epoch(&self, id: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let n = client
                 .execute(
                     "UPDATE epochs SET status = 'Archived'
@@ -1369,11 +1553,7 @@ impl EpochStore for PostgresStorage {
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_opt(
@@ -1439,11 +1619,7 @@ impl SessionStore for PostgresStorage {
         .to_string();
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             client
                 .execute(
@@ -1495,11 +1671,7 @@ impl SessionStore for PostgresStorage {
         ended_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_opt(
@@ -1534,11 +1706,7 @@ impl SessionStore for PostgresStorage {
 
     fn list_sessions(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let rows = client
                 .query(
@@ -1573,11 +1741,7 @@ impl SessionStore for PostgresStorage {
 
     fn get_session(&self, id: &str) -> Result<Option<Session>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_opt(
@@ -1613,11 +1777,7 @@ impl SessionStore for PostgresStorage {
         session_id: &str,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {}", e)))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let row = client
                 .query_opt(
@@ -1798,11 +1958,7 @@ fn pg_row_to_taint(
 impl TaintStore for PostgresStorage {
     fn create_taint(&self, taint: &agentstategraph_taint::Taint) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let metadata_json = serde_json::to_string(&taint.metadata)
                 .map_err(|e| StorageError::Serialization(format!("taint metadata: {e}")))?;
             let expires = taint.expires_at.map(|t| t.to_rfc3339());
@@ -1850,11 +2006,7 @@ impl TaintStore for PostgresStorage {
         resolved_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             // Guard: fail on already-resolved / not-found. Partial
             // unique index would force failures on re-activation;
             // we want explicit control here so the error is legible.
@@ -1901,11 +2053,7 @@ impl TaintStore for PostgresStorage {
         include_resolved: bool,
     ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             // Build dynamic WHERE without sacrificing parameterization:
             // we always pass tenant_id + optional prefix/plike/kind.
             let prefix = path_prefix.map(|p| p.trim_end_matches('/').to_string());
@@ -2011,11 +2159,7 @@ impl TaintStore for PostgresStorage {
         request_path: &str,
     ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let now = Utc::now().to_rfc3339();
             // Ancestor match: exact OR (propagate=true AND request_path
             // LIKE path || '/%'). Postgres LIKE is case-sensitive.
@@ -2041,11 +2185,7 @@ impl TaintStore for PostgresStorage {
 
     fn get_taint(&self, id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let row = client
                 .query_opt(
                     "SELECT * FROM taints WHERE tenant_id = $1 AND id = $2",
@@ -2062,11 +2202,7 @@ impl TaintStore for PostgresStorage {
 
     fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             client
                 .execute(
                     "UPDATE taints SET commit_id = $3
@@ -2234,11 +2370,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         let snoozed_until = reminder.snoozed_until.map(|t| t.to_rfc3339());
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             client
                 .execute(
                     "INSERT INTO reminders (
@@ -2278,11 +2410,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
     ) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
     {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let row = client
                 .query_opt(
                     "SELECT * FROM reminders WHERE tenant_id = $1 AND id = $2",
@@ -2328,11 +2456,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         let id = reminder.id.clone();
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let n = client
                 .execute(
                     "UPDATE reminders SET
@@ -2378,11 +2502,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
 
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
             let n = client
                 .execute(
                     "DELETE FROM reminders WHERE tenant_id = $1 AND id = $2",
@@ -2411,11 +2531,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         let tags = filter.tags.clone();
 
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| StorageError::Backend(format!("get conn: {e}")))?;
+            let client = self.pool.get().await.map_err(conn_error)?;
 
             let mut sql = "SELECT * FROM reminders WHERE tenant_id = $1".to_string();
             let mut idx = 2usize;
@@ -2494,9 +2610,93 @@ mod tests {
             ..Default::default()
         });
         let pool = cfg
-            .create_pool(Some(PoolRuntime::Tokio1), NoTls)
+            .create_pool(Some(PoolRuntime::Tokio1), tokio_postgres::NoTls)
             .expect("build pool");
         assert_eq!(pool.status().max_size, 7);
+    }
+
+    fn tls_of(url: &str) -> ConnectionTls {
+        ConnectionTls::parse(url, None).unwrap()
+    }
+
+    #[test]
+    fn no_sslmode_stays_plaintext() {
+        let t = tls_of("postgres://u@h/db");
+        assert_eq!(t.url, "postgres://u@h/db?sslmode=disable");
+        assert!(!t.requires_tls);
+        assert_eq!(t.root_cert, None);
+        assert_eq!(
+            tls_of("postgres://u@h/db?application_name=asg").url,
+            "postgres://u@h/db?application_name=asg&sslmode=disable"
+        );
+    }
+
+    #[test]
+    fn verify_modes_become_require_and_sslrootcert_is_taken_out() {
+        let t = tls_of(
+            "postgres://u@h/db?sslmode=verify-full&sslrootcert=/etc/ssl/My%20CA.pem&application_name=asg",
+        );
+        assert_eq!(
+            t.url,
+            "postgres://u@h/db?sslmode=require&application_name=asg"
+        );
+        assert!(t.requires_tls);
+        assert_eq!(
+            t.root_cert,
+            Some(std::path::PathBuf::from("/etc/ssl/My CA.pem"))
+        );
+        assert!(tls_of("postgresql://h/db?sslmode=verify-ca").requires_tls);
+        assert!(tls_of("postgres://h/db?sslmode=require").requires_tls);
+        let prefer = tls_of("postgres://h/db?sslmode=prefer");
+        assert!(!prefer.requires_tls);
+        assert_eq!(prefer.url, "postgres://h/db?sslmode=prefer");
+    }
+
+    #[test]
+    fn key_value_strings_are_handled_too() {
+        let t = tls_of("host=db.example.com user=asg sslmode=verify-full sslrootcert=/ca.pem");
+        assert_eq!(t.url, "host=db.example.com user=asg sslmode=require");
+        assert!(t.requires_tls);
+        assert_eq!(t.root_cert, Some(std::path::PathBuf::from("/ca.pem")));
+    }
+
+    #[test]
+    fn pgsslrootcert_is_the_fallback() {
+        let env = Some("/env/ca.pem".to_string());
+        let t = ConnectionTls::parse("postgres://h/db?sslmode=require", env.clone()).unwrap();
+        assert_eq!(t.root_cert, Some(std::path::PathBuf::from("/env/ca.pem")));
+        let t = ConnectionTls::parse("postgres://h/db?sslrootcert=/url/ca.pem", env).unwrap();
+        assert_eq!(
+            t.root_cert,
+            Some(std::path::PathBuf::from("/url/ca.pem")),
+            "the connection string wins"
+        );
+    }
+
+    #[cfg(not(feature = "postgres-tls"))]
+    #[test]
+    fn asking_for_tls_without_the_feature_is_an_error() {
+        let err = PostgresStorage::with_pool("postgres://h/db?sslmode=require", "t", 1)
+            .err()
+            .expect("refused");
+        assert!(format!("{err:?}").contains("postgres-tls"), "{err:?}");
+        assert!(
+            PostgresStorage::with_pool("postgres://h/db?sslmode=prefer", "t", 1).is_ok(),
+            "prefer may fall back to plaintext"
+        );
+    }
+
+    #[cfg(feature = "postgres-tls")]
+    #[test]
+    fn an_unreadable_sslrootcert_is_a_clear_error() {
+        let err = PostgresStorage::with_pool(
+            "postgres://h/db?sslmode=require&sslrootcert=/nonexistent/ca.pem",
+            "t",
+            1,
+        )
+        .err()
+        .expect("refused");
+        assert!(format!("{err:?}").contains("sslrootcert"), "{err:?}");
     }
 
     #[test]

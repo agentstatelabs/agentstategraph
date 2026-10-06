@@ -54,6 +54,9 @@ policy-wasm = ["dep:agentstategraph-policy-wasm"]
 policy-rego = ["dep:agentstategraph-policy-rego"]
 policy-cedar = ["dep:agentstategraph-policy-cedar"]
 all-external-evaluators = ["policy-wasm", "policy-rego", "policy-cedar"]
+# TLS for --storage postgres (rustls). Off by default per the guard rail below;
+# release builds and the Docker image turn it on.
+postgres-tls = ["agentstategraph-storage/postgres-tls"]
 # Guard rail: any future external-network provider crate (reqwest, rustls, AI
 # clients) MUST be gated behind this feature so `cargo build` stays lean.
 # Pattern: providers = ["dep:my-providers-crate"]

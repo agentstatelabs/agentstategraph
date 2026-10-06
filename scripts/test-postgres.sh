@@ -5,6 +5,7 @@
 #
 #   scripts/test-postgres.sh                 # the Postgres-relevant test targets
 #   scripts/test-postgres.sh --workspace     # the whole workspace test suite
+#   scripts/test-postgres.sh --tls           # TLS: a Postgres that refuses plaintext
 #   scripts/test-postgres.sh -p <crate> ...  # any `cargo test` arguments
 #
 # With TEST_DATABASE_URL already set, that database is used and nothing is
@@ -60,13 +61,59 @@ start_local() {
     echo "unix_socket_directories = ''"
   } >>"$dir/data/postgresql.conf"
   # macOS: without a valid locale the postmaster refuses to start
-  # ("postmaster became multithreaded during startup").
-  LC_ALL="${LC_ALL:-en_US.UTF-8}" LANG="${LANG:-en_US.UTF-8}" \
+  # ("postmaster became multithreaded during startup"); C exists everywhere.
+  LC_ALL="${LC_ALL:-C}" LANG="${LANG:-C}" \
     pg_ctl -D "$dir/data" -l "$dir/log" -w start >/dev/null
   CLEANUP="pg_ctl -D '$dir/data' -m immediate stop; rm -rf '$dir'"
   createdb -h 127.0.0.1 -p "$port" -U asg asg_test
   export TEST_DATABASE_URL="postgres://asg@127.0.0.1:${port}/asg_test"
 }
+
+# --tls: a local Postgres with a throwaway CA, a certificate valid only for
+# "localhost", and an hba that accepts TLS connections only, so a successful
+# connection proves TLS was used. Needs a local initdb and openssl.
+start_local_tls() {
+  local port dir
+  port="$(free_port)"
+  dir="$(mktemp -d /tmp/asg-pgtls.XXXXXX)"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=asg test CA" \
+    -keyout "$dir/ca.key" -out "$dir/ca.crt" 2>/dev/null
+  openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" \
+    -keyout "$dir/server.key" -out "$dir/server.csr" 2>/dev/null
+  printf 'subjectAltName=DNS:localhost\n' >"$dir/san.ext"
+  openssl x509 -req -in "$dir/server.csr" -CA "$dir/ca.crt" -CAkey "$dir/ca.key" \
+    -CAcreateserial -days 1 -extfile "$dir/san.ext" -out "$dir/server.crt" 2>/dev/null
+  chmod 600 "$dir/server.key"
+  initdb -D "$dir/data" -U asg --auth=trust -E UTF8 >/dev/null
+  {
+    echo "listen_addresses = 'localhost'"
+    echo "port = $port"
+    echo "unix_socket_directories = ''"
+    echo "ssl = on"
+    echo "ssl_cert_file = '$dir/server.crt'"
+    echo "ssl_key_file = '$dir/server.key'"
+  } >>"$dir/data/postgresql.conf"
+  printf 'hostssl all all 127.0.0.1/32 trust\nhostssl all all ::1/128 trust\n' \
+    >"$dir/data/pg_hba.conf"
+  LC_ALL="${LC_ALL:-C}" LANG="${LANG:-C}" \
+    pg_ctl -D "$dir/data" -l "$dir/log" -w start >/dev/null
+  CLEANUP="pg_ctl -D '$dir/data' -m immediate stop; rm -rf '$dir'"
+  PGSSLMODE=require PGSSLROOTCERT="$dir/ca.crt" \
+    createdb -h localhost -p "$port" -U asg asg_test
+  export TEST_DATABASE_TLS_URL="postgres://asg@localhost:${port}/asg_test"
+  export TEST_DATABASE_TLS_ROOTCERT="$dir/ca.crt"
+}
+
+if [ "${1:-}" = "--tls" ]; then
+  if ! command -v initdb >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+    echo "test-postgres --tls: needs a local initdb and openssl" >&2
+    exit 2
+  fi
+  start_local_tls
+  echo "test-postgres: TEST_DATABASE_TLS_URL=$TEST_DATABASE_TLS_URL"
+  cargo test -p agentstategraph-storage --features postgres-tls,memory --test postgres_tls
+  exit 0
+fi
 
 if [ -z "${TEST_DATABASE_URL:-}" ]; then
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then

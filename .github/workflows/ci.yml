@@ -77,6 +77,20 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked --exclude agentstategraph-python
 
+      # Postgres TLS is opt-in (postgres-tls). Run it against a local server
+      # that refuses plaintext, with a certificate from a throwaway CA.
+      - name: Postgres TLS
+        env:
+          ASG_REQUIRE_POSTGRES_TLS: "1"
+        run: |
+          PGBIN="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$PGBIN" ]; then
+            sudo apt-get install -y --no-install-recommends postgresql
+            PGBIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
+          fi
+          cargo test --locked -p agentstategraph-storage --features postgres-tls,memory --lib
+          PATH="$PGBIN:$PATH" scripts/test-postgres.sh --tls
+
   swift:
     name: swift binding (macOS)
     runs-on: macos-14
