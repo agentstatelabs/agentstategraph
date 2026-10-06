@@ -379,15 +379,40 @@ still need a run against a live database.
    GitLab nor GitHub CI provides a database. There is no Postgres
    concurrency test.
 
+**Found by the conformance suite (t-001, 2026-10-06), confirmed by running
+it against Postgres 16:**
+
+10. **No epoch can be created on Postgres.** `create_epoch` binds
+    `commit_count` as an `i64` into an `INTEGER` column, so every call fails
+    with "error serializing parameter 10". Finding 1 is never even reached.
+    Epochs have not worked on Postgres at all.
+11. **The in-memory backend drops an epoch's seal hash.**
+    `MemoryStorage::seal_epoch` ignores its `seal_hash` argument.
+12. **Reminder compare-and-swap isn't atomic in the in-memory backend
+    either.** `MemoryStorage` doesn't override `update_if_unchanged` (the
+    trait docs mean the reminders crate's `MemoryReminderStore`). Racing
+    updates from one snapshot let several writers win: 3 of 6 in memory,
+    6 of 6 on Postgres.
+13. **Finding 8 is a real deadlock, not just a theoretical race.** Two
+    connects at once deadlocked in Postgres (`deadlock detected`). That made
+    `postgres_taint.rs` flaky as soon as CI set `TEST_DATABASE_URL`; its
+    connects are now serialized until t-006 lands.
+
+What passed on all three backends: objects, commits and DAG walks, refs and
+namespaces (including `create_ref` and `cas_ref` races across separate
+handles), sessions, taints, and repository write/branch/merge/history. That
+includes the v1.2.5 lost-update scenario, with separate repositories writing
+concurrently.
+
 ### Task table
 
 | Task | Description | Wave |
 |------|-------------|------|
-| t-001 | **Backend conformance suite, with Postgres in CI.** Turn the storage behavior tests into one suite that runs against memory, SQLite and Postgres, so parity is tested instead of checked by eye. Add a Postgres service to GitHub Actions `ci.yml`, which is the pre-merge gate because GitLab only builds `main` and tags. Add the same service to `.gitlab-ci.yml`. Add `scripts/test-postgres.sh` (Docker) for local runs. Include a two-process concurrent-writer test modeled on the v1.2.5 lost-update test. Expect this suite to surface failures beyond the list above; that's its job. | 1 |
+| t-001 | **Backend conformance suite, with Postgres in CI.** Turn the storage behavior tests into one suite that runs against memory, SQLite and Postgres, so parity is tested instead of checked by eye. Add a Postgres service to `.gitlab-ci.yml`, whose merge-request pipeline is the pre-merge gate, and to GitHub Actions `ci.yml`. Add `scripts/test-postgres.sh` (Docker) for local runs. Include a two-process concurrent-writer test modeled on the v1.2.5 lost-update test. Expect this suite to surface failures beyond the list above; that's its job. — **In review (MR !58).** The local runner falls back to a local `initdb` when Docker isn't running. It found findings 10–13. | 1 |
 | t-002 | **Make `PostgresStorage` independent of the caller's runtime, and fix the server's wiring.** Products embed ASG and call storage from both plain sync code and tokio servers. So `PostgresStorage` should own its own runtime or worker, instead of `block_in_place` on whatever `Handle::current()` happens to be. That fixes the binary's dropped-runtime crash and the `current_thread` MCP panic as one class of bug. Add a smoke test that starts the binary in HTTP and in MCP mode against Postgres and does a set → get → log round trip. Add an embedding test that calls the storage from inside a `#[tokio::main]` host and from plain sync code. | 1 |
-| t-003 | **Fix epochs.** Add `namespace`, `scope` and `seal_hash` columns to `epochs`, and write and read them. Fix `get_epoch` to order by `timestamp`. If t-006 is ready, land this as a migration; otherwise use `ADD COLUMN IF NOT EXISTS` and convert it later. Add conformance tests for epoch namespace binding, seal and export. | 1 |
+| t-003 | **Fix epochs.** Bind `commit_count` with the column's type (finding 10). Add `namespace`, `scope` and `seal_hash` columns to `epochs`, and write and read them. Make `MemoryStorage::seal_epoch` keep `seal_hash` (finding 11). Fix `get_epoch` to order by `timestamp`. If t-006 is ready, land this as a migration; otherwise use `ADD COLUMN IF NOT EXISTS` and convert it later. Add conformance tests for epoch namespace binding, seal and export. | 1 |
 | t-004 | **Transactions where atomicity is assumed.** Add a transaction helper. Implement `batch_put_objects` as one multi-row `INSERT ... ON CONFLICT DO NOTHING` inside a transaction, which also removes N round trips. Make `delete_namespace` and commit association atomic. Replace the per-commit `COUNT(*)` recount with an increment. | 2 |
-| t-005 | **Close the check-then-act races.** Do seal and session end as a conditional `UPDATE ... WHERE status = 'Active'`, or `SELECT ... FOR UPDATE` inside a transaction. Make reminder `update_if_unchanged` atomic. | 2 |
+| t-005 | **Close the check-then-act races.** Do seal and session end as a conditional `UPDATE ... WHERE status = 'Active'`, or `SELECT ... FOR UPDATE` inside a transaction. Make reminder `update_if_unchanged` atomic on Postgres and in `MemoryStorage` (finding 12). | 2 |
 | t-006 | **Versioned migrations.** Add a `schema_migrations` table and ordered migrations. Hold `pg_advisory_lock` while migrating so concurrent startups are safe. Existing databases are adopted as version 1 with no data changes. | 2 |
 | t-007 | **TLS.** Use a rustls connector and honor `sslmode` from the connection URL. Document `require` as the expected setting for non-local hosts. | 2 |
 | t-008 | **History and search parity.** Override `list_commits_dag` with a recursive CTE or a `commit_parents` table, so a walk is one query instead of N. Add a Postgres leaf index for search using `pg_trgm`. Add history-rollup tables equivalent to SQLite's. | 3 |
