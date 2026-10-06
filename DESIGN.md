@@ -751,6 +751,8 @@ self-host one.
 | t-007 | **Shallow push and fetch.** Record boundary commits; make history walks, blame and merge-base stop cleanly at a boundary instead of erroring. | 3 |
 | t-008 | **Surfaces.** MCP tools (`agentstategraph_remote_add`, `_fetch`, `_push`, `_pull`) and the matching HTTP routes. Expose the same calls in the FFI and language bindings after the Rust API settles. | 3 |
 | t-009 | **End-to-end sync suite.** Two stores and a hub. Cover: concurrent pushes, and the fetch → merge → push retry; a taint applied on store A blocks a write on store B after B pulls; reminder and epoch round-trips; secrets refusal; a tampered bundle rejected; and the same suite against a Postgres hub through Plan D's harness. | 3 |
+| t-010 | **Merge-safe task ids.** `TaskStore` mints sequential `t-NNN` ids, so two stores adding tasks offline mint the same id. On pull, renumber local tasks that haven't been pushed and whose ids the remote already used, moving them past the remote's highest id. Rewrite `blocked_by`, parent ids and plan links in the same commit. Nothing already pushed is ever renumbered (git-rebase semantics). The same pass detects same-name plans created on both sides and reports them as conflicts. | 2 |
+| t-011 | **Pluggable push filter.** A `PushFilter` hook runs over a bundle's new content before it leaves the store. It can block with findings (path + rule) or pass. Ship a credential-pattern filter (provider token and key shapes, private keys, password assignments) that embedders can extend, with an explicit per-finding override recorded in the push log. t-005's `/_meta/_secret` rule becomes one built-in filter. | 2 |
 
 ### Acceptance
 
@@ -759,6 +761,8 @@ self-host one.
 - Taints, reminders and epochs made on one machine are present and enforced on the other after a pull.
 - A bundle with any wrong id is rejected whole.
 - A branch containing `/_meta/_secret` can't be pushed.
+- A credential-shaped string in new content blocks the push unless explicitly overridden.
+- Tasks added offline on two stores to the same plan land with distinct ids after a pull, and their references stay intact.
 - The reference hub runs from the public binary on SQLite or Postgres, and keeps a push log.
 - A large store can start syncing from a shallow boundary.
 
