@@ -343,8 +343,10 @@ still need a run against a live database.
    - `assign_epoch_namespace` updates a column that isn't there.
    - As a result, the per-namespace epoch binding from v1.1.x and seal
      enforcement don't work on Postgres.
-3. **The server binary drops its async runtime before using Postgres**
-   *(confirm)*.
+3. **The server binary drops its async runtime before using Postgres.**
+   *Confirmed in t-002:* the binary crashes at startup with `--storage
+   postgres` in both HTTP and MCP modes ("there is no reactor running"), so
+   it has never worked with Postgres.
    - `main.rs:413-422` builds a `tokio` runtime inside the storage match
      arm, connects, and drops the runtime when the arm ends.
    - `repo.init()` (`main.rs:431`) then calls `PostgresStorage::block_on`,
@@ -415,11 +417,11 @@ concurrently.
 | Task | Description | Wave |
 |------|-------------|------|
 | t-001 | **Backend conformance suite, with Postgres in CI.** Turn the storage behavior tests into one suite that runs against memory, SQLite and Postgres, so parity is tested instead of checked by eye. Add a Postgres service to `.gitlab-ci.yml`, whose merge-request pipeline is the pre-merge gate, and to GitHub Actions `ci.yml`. Add `scripts/test-postgres.sh` (Docker) for local runs. Include a two-process concurrent-writer test modeled on the v1.2.5 lost-update test. Expect this suite to surface failures beyond the list above; that's its job. — **In review (MR !58).** The local runner falls back to a local `initdb` when Docker isn't running. It found findings 10–13. | 1 |
-| t-002 | **Make `PostgresStorage` independent of the caller's runtime, and fix the server's wiring.** Products embed ASG and call storage from both plain sync code and tokio servers. So `PostgresStorage` should own its own runtime or worker, instead of `block_in_place` on whatever `Handle::current()` happens to be. That fixes the binary's dropped-runtime crash and the `current_thread` MCP panic as one class of bug. Add a smoke test that starts the binary in HTTP and in MCP mode against Postgres and does a set → get → log round trip. Add an embedding test that calls the storage from inside a `#[tokio::main]` host and from plain sync code. | 1 |
+| t-002 | **Make `PostgresStorage` independent of the caller's runtime, and fix the server's wiring.** — **In review (MR !60, stacked on !59 and !58).** It also serializes schema setup with `pg_advisory_xact_lock`, the lock half of t-006, because the binary smoke tests start two servers at once. Products embed ASG and call storage from both plain sync code and tokio servers. So `PostgresStorage` should own its own runtime or worker, instead of `block_in_place` on whatever `Handle::current()` happens to be. That fixes the binary's dropped-runtime crash and the `current_thread` MCP panic as one class of bug. Add a smoke test that starts the binary in HTTP and in MCP mode against Postgres and does a set → get → log round trip. Add an embedding test that calls the storage from inside a `#[tokio::main]` host and from plain sync code. | 1 |
 | t-003 | **Fix epochs.** — **In review (MR !59, stacked on !58).** Bind `commit_count` with the column's type (finding 10). Add `namespace`, `scope` and `seal_hash` columns to `epochs`, and write and read them. Make `MemoryStorage::seal_epoch` keep `seal_hash` (finding 11). Fix `get_epoch` to order by `timestamp`. If t-006 is ready, land this as a migration; otherwise use `ADD COLUMN IF NOT EXISTS` and convert it later. Add conformance tests for epoch namespace binding, seal and export. | 1 |
 | t-004 | **Transactions where atomicity is assumed.** Add a transaction helper. Implement `batch_put_objects` as one multi-row `INSERT ... ON CONFLICT DO NOTHING` inside a transaction, which also removes N round trips. Make `delete_namespace` and commit association atomic. Replace the per-commit `COUNT(*)` recount with an increment. | 2 |
 | t-005 | **Close the check-then-act races.** Seal is done in t-003 (finding 14). Do session end as a conditional `UPDATE ... WHERE status = 'Active'`, or `SELECT ... FOR UPDATE` inside a transaction. Make reminder `update_if_unchanged` atomic on Postgres and in `MemoryStorage` (finding 12). | 2 |
-| t-006 | **Versioned migrations.** Add a `schema_migrations` table and ordered migrations. Hold `pg_advisory_lock` while migrating so concurrent startups are safe. Existing databases are adopted as version 1 with no data changes. | 2 |
+| t-006 | **Versioned migrations.** Add a `schema_migrations` table and ordered migrations. (The advisory lock that makes concurrent startups safe landed with t-002.) Existing databases are adopted as version 1 with no data changes. | 2 |
 | t-007 | **TLS.** Use a rustls connector and honor `sslmode` from the connection URL. Document `require` as the expected setting for non-local hosts. | 2 |
 | t-008 | **History and search parity.** Override `list_commits_dag` with a recursive CTE or a `commit_parents` table, so a walk is one query instead of N. Add a Postgres leaf index for search using `pg_trgm`. Add history-rollup tables equivalent to SQLite's. | 3 |
 | t-009 | **GC on Postgres.** Port the SQLite design (Plan B) and run it through the t-001 suite: mark and sweep scoped to `tenant_id`, writer exclusion through an advisory lock, and pinned speculation roots. | 3 |
