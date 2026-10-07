@@ -422,6 +422,19 @@ it against Postgres 16:**
     records the state root it reflects, an update applies only from the
     tree it was computed against, and a search catches the set up first.
 
+17. **A SQLite sweep can take a write that's in flight** (found while doing
+    t-009). Every write stores its new tree, then its commit, then moves
+    the ref. A sweep that takes the write lock after the first step finds
+    the tree unreferenced and deletes it; the write then commits, and the
+    ref lands on a tree with objects missing. The writer lock doesn't help,
+    because the objects were written before the sweep took it.
+    `sweep_spares_a_write_in_flight` in `backend_conformance.rs` shows it
+    and lists it as a known SQLite failure. Postgres doesn't have it (t-009
+    spares recent writes instead of locking writers out). The fix for SQLite
+    is the same grace period: a write time on each object and a sweep that
+    spares recent ones. That changes what a sweep reclaims right after a
+    write, which SQLite's GC tests assume, so it is a follow-up.
+
 What passed on all three backends: objects, commits and DAG walks, refs and
 namespaces (including `create_ref` and `cas_ref` races across separate
 handles), sessions, taints, and repository write/branch/merge/history. That
@@ -440,7 +453,7 @@ concurrently.
 | t-006 | **Versioned migrations.** Add a `schema_migrations` table and ordered migrations. (The advisory lock that makes concurrent startups safe landed with t-002.) Existing databases are adopted as version 1 with no data changes. — **Mostly in review (MR !62).** The database records its schema version in `asg_schema`, and the idempotent DDL runs only when that is behind the build, under the advisory lock, with a retry on deadlock. Existing databases are brought up to version 1 on their first connect. A test upgrades an older database once and shows an up-to-date one isn't touched. Still open: ordered migrations, which the first change that can't be written as `IF NOT EXISTS` will need. | 2 |
 | t-007 | **TLS.** Use a rustls connector and honor `sslmode` from the connection URL. Document `require` as the expected setting for non-local hosts. — **In review (MR !61, stacked on !60).** It's behind an opt-in `postgres-tls` feature, per the network-crate guard rail; release binaries and the Docker image enable it. TLS is always verified (`require`, `verify-ca` and `verify-full` all check the chain and host name), with `sslrootcert` / `PGSSLROOTCERT` for provider CAs. Tests run against a local server that refuses plaintext. | 2 |
 | t-008 | **History and search parity.** Override `list_commits_dag` with a recursive CTE or a `commit_parents` table, so a walk is one query instead of N. Add a Postgres leaf index for search using `pg_trgm`. Add history-rollup tables equivalent to SQLite's. — **In review (MR !63, stacked on !62).** Walks follow parent ids in the commit JSON through a hash index, so commits written by older binaries are walkable too; 200,000 commits walk in about a second. The history extractor reads commits in transaction-id order, and only from transactions older than every one still running, so a commit that becomes visible late can't be skipped. Search uses `pg_trgm` when it can be installed and a scan otherwise. It also fixed finding 16 on every indexed backend. Postgres now needs version 13+. `history_store_shape` moves to t-009 with the rest of the GC evidence. | 3 |
-| t-009 | **GC on Postgres.** Port the SQLite design (Plan B) and run it through the t-001 suite: mark and sweep scoped to `tenant_id`, writer exclusion through an advisory lock, and pinned speculation roots. | 3 |
+| t-009 | **GC on Postgres.** Port the SQLite design (Plan B) and run it through the t-001 suite: mark and sweep scoped to `tenant_id`, writer exclusion through an advisory lock, and pinned speculation roots. — **In review (MR !64, stacked on !63).** It doesn't lock writers out. A sweep spares objects written within a grace period (10 minutes by default) or since it started, and storing an object again refreshes its write time. That keeps a write in flight safe, which SQLite's lock doesn't (finding 17), and writers never wait. The advisory lock allows one sweep per tenant at a time. Every statement is short, so a sweep doesn't hold back history extraction for other tenants. Also includes `history_store_shape`, moved from t-008. | 3 |
 
 ### Acceptance
 
