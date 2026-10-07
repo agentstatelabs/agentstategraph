@@ -430,10 +430,12 @@ it against Postgres 16:**
     because the objects were written before the sweep took it.
     `sweep_spares_a_write_in_flight` in `backend_conformance.rs` shows it
     and lists it as a known SQLite failure. Postgres doesn't have it (t-009
-    spares recent writes instead of locking writers out). The fix for SQLite
-    is the same grace period: a write time on each object and a sweep that
-    spares recent ones. That changes what a sweep reclaims right after a
-    write, which SQLite's GC tests assume, so it is a follow-up.
+    spares recent writes instead of locking writers out). **Fix in review
+    (MR !65, stacked on !64):** SQLite now does the same. Each object has a
+    write time, a sweep spares unreachable objects written within a grace
+    period (10 minutes by default), and storing an object again refreshes
+    its time. Existing objects count as old, so existing stores sweep as
+    before.
 
 What passed on all three backends: objects, commits and DAG walks, refs and
 namespaces (including `create_ref` and `cas_ref` races across separate
