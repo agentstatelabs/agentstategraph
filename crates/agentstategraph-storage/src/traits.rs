@@ -131,6 +131,63 @@ pub trait ObjectStore: Send + Sync {
     ) -> Result<Option<Vec<(String, String)>>, StorageError> {
         Ok(None)
     }
+
+    // ---- Which tree a leaf set reflects (Plan D t-008) ----
+    //
+    // `leaf_index_apply` applies diffs in whatever order writers reach it. Two
+    // writers advancing one ref can apply theirs out of order, and the set
+    // then keeps a value that was overwritten. A backend that records the
+    // state root each set reflects avoids this: a diff applies only to the
+    // tree it was computed from, and a reader can check the set is current
+    // before trusting it, and catch it up when it isn't.
+
+    /// Whether this backend records the state root of each built set, through
+    /// [`leaf_index_root`](Self::leaf_index_root),
+    /// [`leaf_index_build_at`](Self::leaf_index_build_at) and
+    /// [`leaf_index_advance`](Self::leaf_index_advance).
+    fn leaf_index_tracks_roots(&self) -> bool {
+        false
+    }
+
+    /// The state root the `(namespace, ref)` set reflects. `None` when it
+    /// isn't built, was built or changed without a root, or the backend
+    /// doesn't record roots.
+    fn leaf_index_root(
+        &self,
+        _namespace: &str,
+        _ref_name: &str,
+    ) -> Result<Option<ObjectId>, StorageError> {
+        Ok(None)
+    }
+
+    /// [`leaf_index_build`](Self::leaf_index_build) from the tree at `root`,
+    /// recording `root`.
+    fn leaf_index_build_at(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        _root: &ObjectId,
+        entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        self.leaf_index_build(namespace, ref_name, entries)
+    }
+
+    /// Move the set from the tree at `from` to the tree at `to`, by the leaf
+    /// diff between them, only if it is at `from`. Returns whether it moved.
+    /// A backend that doesn't record roots applies the diff unconditionally,
+    /// as [`leaf_index_apply`](Self::leaf_index_apply), and returns `true`.
+    fn leaf_index_advance(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        _from: &ObjectId,
+        _to: &ObjectId,
+        removed_paths: &[String],
+        added: &[(String, String)],
+    ) -> Result<bool, StorageError> {
+        self.leaf_index_apply(namespace, ref_name, removed_paths, added)?;
+        Ok(true)
+    }
 }
 
 /// One row of the commit-history rollup (Plan A t-001): commit activity for a

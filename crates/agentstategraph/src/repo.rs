@@ -2234,18 +2234,25 @@ impl Repository {
         let query_lower = query.to_lowercase();
         let index_fetch = limit.saturating_mul(4).min(tree::LIST_PATHS_MAX_RESULTS);
 
-        if !self.storage.leaf_index_is_built(ns_str, ref_name)? {
-            // One-time backfill. Non-fatal on error — we simply fall back to the
-            // tree walk below and can retry the backfill on a later search.
-            if let Ok(leaves) = tree::tree_collect_leaves(self.storage.as_ref(), &commit.state_root)
-            {
-                let _ = self.storage.leaf_index_build(ns_str, ref_name, &leaves);
+        let current = if self.storage.leaf_index_tracks_roots() {
+            self.leaf_index_catch_up(&ns, ref_name, &commit.state_root)?
+        } else {
+            if !self.storage.leaf_index_is_built(ns_str, ref_name)? {
+                // One-time backfill. Non-fatal on error — we simply fall back to
+                // the tree walk below and can retry the backfill on a later search.
+                if let Ok(leaves) =
+                    tree::tree_collect_leaves(self.storage.as_ref(), &commit.state_root)
+                {
+                    let _ = self.storage.leaf_index_build(ns_str, ref_name, &leaves);
+                }
             }
-        }
+            true
+        };
 
-        if let Some(mut hits) =
-            self.storage
-                .leaf_index_search(ns_str, ref_name, &query_lower, index_fetch)?
+        if current
+            && let Some(mut hits) =
+                self.storage
+                    .leaf_index_search(ns_str, ref_name, &query_lower, index_fetch)?
         {
             hits.retain(|(path, _)| !path_is_secret(path));
             hits.truncate(limit);
@@ -2258,6 +2265,57 @@ impl Repository {
         // Never surface values from the secret sub-prefix.
         results.retain(|(path, _)| !path_is_secret(path));
         Ok(results)
+    }
+
+    /// Bring the `(namespace, ref)` leaf set to the tree at `root`, for a
+    /// backend that records which tree each set reflects, and say whether the
+    /// set can answer for it. An unbuilt set (or one built before roots were
+    /// recorded) is built; one at another tree is moved by the diff from it,
+    /// which repairs a write whose own update was skipped or lost a race. A
+    /// set already at the ref's newest tree, because a write landed after
+    /// `root` was read, answers as it is rather than being moved back.
+    /// Best-effort like all index upkeep: on `false` the caller walks the
+    /// tree instead.
+    fn leaf_index_catch_up(
+        &self,
+        ns: &Namespace,
+        ref_name: &str,
+        root: &ObjectId,
+    ) -> Result<bool, RepoError> {
+        let store = self.storage.as_ref();
+        let namespace = ns.as_str();
+        match store.leaf_index_root(namespace, ref_name)? {
+            Some(indexed) if indexed == *root => return Ok(true),
+            Some(indexed) if self.ref_state_root(ns, ref_name)? == Some(indexed) => {
+                return Ok(true);
+            }
+            Some(indexed) => {
+                if let Ok((removed, added)) = tree::tree_diff_leaves(store, Some(&indexed), root) {
+                    let _ = store
+                        .leaf_index_advance(namespace, ref_name, &indexed, root, &removed, &added);
+                }
+            }
+            None => {
+                if let Ok(leaves) = tree::tree_collect_leaves(store, root) {
+                    let _ = store.leaf_index_build_at(namespace, ref_name, root, &leaves);
+                }
+            }
+        }
+        // Another writer may have moved the set meanwhile; use it only if it
+        // now reflects this tree.
+        Ok(store.leaf_index_root(namespace, ref_name)? == Some(*root))
+    }
+
+    /// The state root `ref_name` points at now, if it is a stored ref.
+    fn ref_state_root(
+        &self,
+        ns: &Namespace,
+        ref_name: &str,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        let Some(head) = self.storage.get_ref(ns, ref_name)? else {
+            return Ok(None);
+        };
+        Ok(self.storage.get_commit(&head)?.map(|c| c.state_root))
     }
 
     /// Get summary statistics for a ref.
@@ -3253,6 +3311,12 @@ impl Repository {
     /// upkeep must never fail a write, and it only runs for a set that has
     /// already been backfilled — otherwise the first search will build it
     /// from the current state anyway.
+    ///
+    /// A backend that records each set's tree applies the diff only if the
+    /// set is still at `old_root`. Writers racing on one ref can reach here
+    /// out of order, and an unconditional apply then leaves an overwritten
+    /// value in the set. A skipped update leaves the set behind, never wrong;
+    /// the next search catches it up.
     fn update_leaf_index(
         &self,
         ns: &Namespace,
@@ -3260,17 +3324,33 @@ impl Repository {
         old_root: Option<&ObjectId>,
         new_target: &ObjectId,
     ) {
-        if self
-            .storage
+        let store = self.storage.as_ref();
+        if !store
             .leaf_index_is_built(ns.as_str(), ref_name)
             .unwrap_or(false)
-            && let Ok(Some(new_commit)) = self.storage.get_commit(new_target)
-            && let Ok((removed, added)) =
-                tree::tree_diff_leaves(self.storage.as_ref(), old_root, &new_commit.state_root)
         {
-            let _ = self
-                .storage
-                .leaf_index_apply(ns.as_str(), ref_name, &removed, &added);
+            return;
+        }
+        let Ok(Some(new_commit)) = store.get_commit(new_target) else {
+            return;
+        };
+        let new_root = new_commit.state_root;
+        if store.leaf_index_tracks_roots() {
+            if let Some(old_root) = old_root
+                && let Ok((removed, added)) =
+                    tree::tree_diff_leaves(store, Some(old_root), &new_root)
+            {
+                let _ = store.leaf_index_advance(
+                    ns.as_str(),
+                    ref_name,
+                    old_root,
+                    &new_root,
+                    &removed,
+                    &added,
+                );
+            }
+        } else if let Ok((removed, added)) = tree::tree_diff_leaves(store, old_root, &new_root) {
+            let _ = store.leaf_index_apply(ns.as_str(), ref_name, &removed, &added);
         }
     }
 

@@ -221,9 +221,12 @@ impl SqliteStorage {
             CREATE TRIGGER IF NOT EXISTS leaf_rows_ad AFTER DELETE ON leaf_rows BEGIN
                 INSERT INTO leaf_fts(leaf_fts, rowid, value) VALUES ('delete', old.id, old.value);
             END;
+            -- `root` is the state root the set reflects (NULL when unknown),
+            -- so a diff applies only to the tree it was computed from.
             CREATE TABLE IF NOT EXISTS leaf_index_refs (
                 namespace TEXT NOT NULL,
                 ref       TEXT NOT NULL,
+                root      BLOB,
                 PRIMARY KEY (namespace, ref)
             );
             -- Roots of uncommitted work (open speculations) that a GC sweep
@@ -330,6 +333,26 @@ impl SqliteStorage {
                 [],
             )
             .map_err(|e| StorageError::Backend(format!("add milestone git_sha: {}", e)))?;
+        }
+
+        // Migration-safe add of leaf_index_refs.root. Sets built before it
+        // read NULL, so the repository rebuilds each one on its next search.
+        let leaf_ref_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(leaf_index_refs)")
+                .map_err(|e| StorageError::Backend(format!("pragma leaf_index_refs: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| StorageError::Backend(format!("pragma query: {}", e)))?;
+            let mut cols = Vec::new();
+            for r in rows {
+                cols.push(r.map_err(|e| StorageError::Backend(format!("pragma row: {}", e)))?);
+            }
+            cols
+        };
+        if !leaf_ref_cols.iter().any(|c| c == "root") {
+            conn.execute("ALTER TABLE leaf_index_refs ADD COLUMN root BLOB", [])
+                .map_err(|e| StorageError::Backend(format!("add leaf_index_refs root: {}", e)))?;
         }
 
         // Migration-safe add of commits.epoch_id / commits.session_id.
@@ -544,28 +567,7 @@ impl ObjectStore for SqliteStorage {
         let tx = conn
             .transaction()
             .map_err(|e| StorageError::Backend(format!("leaf_index_build tx: {}", e)))?;
-        // Idempotent rebuild: clear any prior rows for this (ns, ref) first.
-        tx.execute(
-            "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2",
-            params![namespace, ref_name],
-        )
-        .map_err(|e| StorageError::Backend(format!("leaf_index_build clear: {}", e)))?;
-        {
-            let mut stmt = tx
-                .prepare_cached(
-                    "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(|e| StorageError::Backend(format!("leaf_index_build prep: {}", e)))?;
-            for (path, value) in entries {
-                stmt.execute(params![namespace, ref_name, path, value])
-                    .map_err(|e| StorageError::Backend(format!("leaf_index_build row: {}", e)))?;
-            }
-        }
-        tx.execute(
-            "INSERT OR IGNORE INTO leaf_index_refs (namespace, ref) VALUES (?1, ?2)",
-            params![namespace, ref_name],
-        )
-        .map_err(|e| StorageError::Backend(format!("leaf_index_build mark: {}", e)))?;
+        leaf_set_replace(&tx, namespace, ref_name, None, entries)?;
         tx.commit()
             .map_err(|e| StorageError::Backend(format!("leaf_index_build commit: {}", e)))
     }
@@ -583,43 +585,93 @@ impl ObjectStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("leaf_index_apply tx: {}", e)))?;
         // Only maintain a set that has actually been built; otherwise the
         // eventual backfill reads the current state and this diff would be lost.
-        let built: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM leaf_index_refs WHERE namespace = ?1 AND ref = ?2)",
+        // The set no longer reflects a known tree, so its root is cleared.
+        let built = tx
+            .execute(
+                "UPDATE leaf_index_refs SET root = NULL WHERE namespace = ?1 AND ref = ?2",
                 params![namespace, ref_name],
-                |row| row.get(0),
             )
-            .map_err(|e| StorageError::Backend(format!("leaf_index_apply check: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply check: {}", e)))?
+            > 0;
         if built {
-            {
-                let mut del = tx
-                    .prepare_cached(
-                        "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2 AND path = ?3",
-                    )
-                    .map_err(|e| {
-                        StorageError::Backend(format!("leaf_index_apply del prep: {}", e))
-                    })?;
-                for path in removed_paths {
-                    del.execute(params![namespace, ref_name, path])
-                        .map_err(|e| {
-                            StorageError::Backend(format!("leaf_index_apply del: {}", e))
-                        })?;
-                }
-                let mut ins = tx
-                    .prepare_cached(
-                        "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
-                    )
-                    .map_err(|e| StorageError::Backend(format!("leaf_index_apply ins prep: {}", e)))?;
-                for (path, value) in added {
-                    ins.execute(params![namespace, ref_name, path, value])
-                        .map_err(|e| {
-                            StorageError::Backend(format!("leaf_index_apply ins: {}", e))
-                        })?;
-                }
-            }
+            leaf_set_apply(&tx, namespace, ref_name, removed_paths, added)?;
         }
         tx.commit()
             .map_err(|e| StorageError::Backend(format!("leaf_index_apply commit: {}", e)))
+    }
+
+    fn leaf_index_tracks_roots(&self) -> bool {
+        true
+    }
+
+    fn leaf_index_root(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+    ) -> Result<Option<ObjectId>, StorageError> {
+        let conn = self.lock_conn()?;
+        let root: Option<Option<Vec<u8>>> = conn
+            .query_row(
+                "SELECT root FROM leaf_index_refs WHERE namespace = ?1 AND ref = ?2",
+                params![namespace, ref_name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_root: {}", e)))?;
+        Ok(root.flatten().as_deref().and_then(object_id_from_bytes))
+    }
+
+    fn leaf_index_build_at(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        root: &ObjectId,
+        entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build tx: {}", e)))?;
+        leaf_set_replace(&tx, namespace, ref_name, Some(root), entries)?;
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build commit: {}", e)))
+    }
+
+    fn leaf_index_advance(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        from: &ObjectId,
+        to: &ObjectId,
+        removed_paths: &[String],
+        added: &[(String, String)],
+    ) -> Result<bool, StorageError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_advance tx: {}", e)))?;
+        // Moving the root first takes the write lock, so the check and the
+        // rows change together.
+        let moved = tx
+            .execute(
+                "UPDATE leaf_index_refs SET root = ?4 \
+                 WHERE namespace = ?1 AND ref = ?2 AND root = ?3",
+                params![
+                    namespace,
+                    ref_name,
+                    from.as_bytes().as_slice(),
+                    to.as_bytes().as_slice()
+                ],
+            )
+            .map_err(|e| StorageError::Backend(format!("leaf_index_advance root: {}", e)))?
+            > 0;
+        if !moved {
+            return Ok(false);
+        }
+        leaf_set_apply(&tx, namespace, ref_name, removed_paths, added)?;
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_advance commit: {}", e)))?;
+        Ok(true)
     }
 
     fn leaf_index_search(
@@ -643,7 +695,9 @@ impl ObjectStore for SqliteStorage {
         // Trigram FTS5 gives substring MATCH for needles >= 3 chars. Quote the
         // needle as a phrase and escape embedded quotes so punctuation in the
         // query can't be read as FTS syntax. Shorter needles can't use the
-        // trigram index, so fall back to a scan-assisted LIKE on the base rows.
+        // trigram index, so fall back to a scan-assisted LIKE on the base rows,
+        // with `%`, `_` and `\` escaped so they match themselves, as they do in
+        // the trigram path.
         let mut out = Vec::new();
         if query_lower.chars().count() >= 3 {
             let match_expr = format!("\"{}\"", query_lower.replace('"', "\"\""));
@@ -667,11 +721,18 @@ impl ObjectStore for SqliteStorage {
                 );
             }
         } else {
-            let pattern = format!("%{}%", query_lower);
+            let mut pattern = String::from("%");
+            for ch in query_lower.chars() {
+                if matches!(ch, '%' | '_' | '\\') {
+                    pattern.push('\\');
+                }
+                pattern.push(ch);
+            }
+            pattern.push('%');
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT path, value FROM leaf_rows \
-                     WHERE namespace = ?1 AND ref = ?2 AND value LIKE ?3 LIMIT ?4",
+                     WHERE namespace = ?1 AND ref = ?2 AND value LIKE ?3 ESCAPE '\\' LIMIT ?4",
                 )
                 .map_err(|e| StorageError::Backend(format!("leaf_index_search prep2: {}", e)))?;
             let rows = stmt
@@ -727,6 +788,65 @@ impl ObjectStore for SqliteStorage {
 
         Ok(ids)
     }
+}
+
+/// Replace the `(namespace, ref)` leaf set with `entries`, marking it built
+/// at `root` (unknown when `None`).
+fn leaf_set_replace(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+    ref_name: &str,
+    root: Option<&ObjectId>,
+    entries: &[(String, String)],
+) -> Result<(), StorageError> {
+    tx.execute(
+        "INSERT INTO leaf_index_refs (namespace, ref, root) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(namespace, ref) DO UPDATE SET root = excluded.root",
+        params![namespace, ref_name, root.map(|r| r.as_bytes().to_vec())],
+    )
+    .map_err(|e| StorageError::Backend(format!("leaf_index_build mark: {}", e)))?;
+    tx.execute(
+        "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2",
+        params![namespace, ref_name],
+    )
+    .map_err(|e| StorageError::Backend(format!("leaf_index_build clear: {}", e)))?;
+    let mut stmt = tx
+        .prepare_cached(
+            "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(|e| StorageError::Backend(format!("leaf_index_build prep: {}", e)))?;
+    for (path, value) in entries {
+        stmt.execute(params![namespace, ref_name, path, value])
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build row: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Delete the rows at `removed_paths` and insert `added`.
+fn leaf_set_apply(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+    ref_name: &str,
+    removed_paths: &[String],
+    added: &[(String, String)],
+) -> Result<(), StorageError> {
+    let mut del = tx
+        .prepare_cached("DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2 AND path = ?3")
+        .map_err(|e| StorageError::Backend(format!("leaf_index_apply del prep: {}", e)))?;
+    for path in removed_paths {
+        del.execute(params![namespace, ref_name, path])
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply del: {}", e)))?;
+    }
+    let mut ins = tx
+        .prepare_cached(
+            "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(|e| StorageError::Backend(format!("leaf_index_apply ins prep: {}", e)))?;
+    for (path, value) in added {
+        ins.execute(params![namespace, ref_name, path, value])
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply ins: {}", e)))?;
+    }
+    Ok(())
 }
 
 impl CommitStore for SqliteStorage {
