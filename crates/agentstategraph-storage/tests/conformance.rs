@@ -115,11 +115,14 @@ fn sqlite_fixture(case: &str) -> Fixture {
 }
 
 /// Connects from whatever thread calls it, with no runtime and no lock:
-/// concurrent connects serialize their schema setup in the database.
+/// concurrent connects serialize their schema setup in the database. No GC
+/// grace period, so a sweep takes garbage at once as on SQLite
+/// (`postgres_gc.rs` tests the grace period).
 #[cfg(feature = "postgres")]
 fn postgres_connect(url: &str, tenant: &str) -> Store {
     let storage = agentstategraph_storage::PostgresStorage::connect_tenant_blocking(url, tenant, 8)
-        .expect("connect to TEST_DATABASE_URL");
+        .expect("connect to TEST_DATABASE_URL")
+        .with_gc_grace(std::time::Duration::ZERO);
     Arc::new(storage)
 }
 
@@ -1343,6 +1346,154 @@ fn leaf_index_roots(f: &Fixture) {
 }
 
 // ---------------------------------------------------------------------------
+// Garbage collection
+//
+// The memory backend has no GC (the trait defaults: nothing marked, nothing
+// swept, nothing pinned).
+// ---------------------------------------------------------------------------
+
+fn map(entries: &[(&str, ObjectId)]) -> Object {
+    Object::map(entries.iter().map(|(k, v)| (k.to_string(), *v)).collect())
+}
+
+/// A sweep keeps the closure of its roots, every ref tip and every pinned
+/// root, and deletes the rest; the reachability report counts the same.
+fn gc_mark_and_sweep(f: &Fixture) {
+    let s = f.store();
+    let put = |obj: Object| s.put_object(&obj).unwrap();
+    // On a ref tip: a map holding a list holding a shared atom.
+    let shared = put(Object::string("shared"));
+    let list = put(Object::list(vec![shared]));
+    let tip_root = put(map(&[("list", list), ("name", put(Object::string("tip")))]));
+    let tip = CommitBuilder::new(
+        tip_root,
+        "agent/conformance",
+        Authority::simple("conformance"),
+        Intent::new(IntentCategory::Checkpoint, "tip"),
+    )
+    .build();
+    s.put_commit(&tip).unwrap();
+    s.set_ref(&Namespace::default_ns(), "main", tip.id).unwrap();
+    // Kept because the caller asks, or because a speculation pins it.
+    let asked = put(map(&[("shared", shared)]));
+    let pinned = put(Object::string("pinned"));
+    s.gc_pin_root("spec:conformance", &pinned).unwrap();
+    // Reachable from nothing.
+    let leaf = put(Object::string("garbage leaf"));
+    let garbage = [
+        put(map(&[("leaf", leaf)])),
+        leaf,
+        put(Object::string("garbage")),
+    ];
+
+    if f.backend == Backend::Memory {
+        assert_eq!(
+            s.history_gc_reachability(&[tip_root], 10).unwrap(),
+            Default::default()
+        );
+        assert_eq!(
+            s.history_gc_sweep(&[asked], 10).unwrap(),
+            Default::default()
+        );
+        assert!(
+            s.gc_pinned_roots(std::time::Duration::from_secs(60))
+                .unwrap()
+                .is_empty()
+        );
+        return;
+    }
+
+    // tip closure: tip_root, list, shared, "tip".
+    let reach = s.history_gc_reachability(&[tip_root], 2).unwrap();
+    assert_eq!(reach.live_objects, 4);
+    assert_eq!(reach.total_objects, 9);
+    assert_eq!(reach.reclaimable_objects, 5);
+    assert_eq!(reach.roots_walked, 1);
+    assert_eq!(
+        s.history_gc_reachability(&[ObjectId::hash(b"absent")], 2)
+            .unwrap()
+            .live_objects,
+        0,
+        "a root that isn't stored marks nothing"
+    );
+
+    let sweep = s.history_gc_sweep(&[asked], 2).unwrap();
+    assert_eq!(sweep.objects_before, 9);
+    assert_eq!(sweep.deleted_target, 3);
+    assert_eq!(sweep.objects_deleted, 3);
+    assert_eq!(sweep.objects_after, 6);
+    for id in garbage {
+        assert!(!s.has_object(&id).unwrap(), "garbage survived the sweep");
+    }
+    for id in [tip_root, list, shared, asked, pinned] {
+        assert!(s.has_object(&id).unwrap(), "the sweep took a kept object");
+    }
+    let again = s.history_gc_sweep(&[asked], 2).unwrap();
+    assert_eq!(again.objects_deleted, 0, "a second sweep finds nothing");
+
+    // Unpinned, the speculation's object goes on the next sweep.
+    s.gc_unpin_root("spec:conformance").unwrap();
+    assert_eq!(s.history_gc_sweep(&[asked], 2).unwrap().objects_deleted, 1);
+    assert!(!s.has_object(&pinned).unwrap());
+}
+
+fn gc_pins(f: &Fixture) {
+    let s = f.store();
+    let hour = std::time::Duration::from_secs(3600);
+    let (r1, r2, r3) = (
+        ObjectId::hash(b"r1"),
+        ObjectId::hash(b"r2"),
+        ObjectId::hash(b"r3"),
+    );
+    s.gc_pin_root("spec:a", &r1).unwrap();
+    s.gc_pin_root("spec:a", &r2).unwrap();
+    s.gc_pin_root("spec:b", &r3).unwrap();
+    let pinned =
+        |s: &Store| -> HashSet<ObjectId> { s.gc_pinned_roots(hour).unwrap().into_iter().collect() };
+    if f.backend == Backend::Memory {
+        assert!(pinned(s).is_empty());
+        return;
+    }
+    assert_eq!(
+        pinned(s),
+        HashSet::from([r2, r3]),
+        "a key holds its latest root"
+    );
+    assert_eq!(
+        pinned(&f.open_another()),
+        HashSet::from([r2, r3]),
+        "pins are seen by every process"
+    );
+    s.gc_unpin_root("spec:a").unwrap();
+    s.gc_unpin_root("spec:missing").unwrap();
+    assert_eq!(pinned(s), HashSet::from([r3]));
+}
+
+fn gc_inputs(f: &Fixture) {
+    let s = f.store();
+    let commits: Vec<Commit> = (0..3).map(|i| commit(s, &format!("c{i}"), &[])).collect();
+    let roots = s.commit_state_roots_recent_first().unwrap();
+    let shape = s.history_store_shape().unwrap();
+    if f.backend == Backend::Memory {
+        assert!(roots.is_empty());
+        assert_eq!(shape, Default::default());
+        return;
+    }
+    assert_eq!(
+        roots,
+        commits
+            .iter()
+            .rev()
+            .map(|c| c.state_root)
+            .collect::<Vec<_>>(),
+        "state roots come newest first"
+    );
+    assert_eq!(shape.objects, 3);
+    assert_eq!(shape.commits, 3);
+    assert!(shape.total_bytes > 0);
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1456,4 +1607,19 @@ fn leaf_index() {
 #[test]
 fn leaf_index_root_tracking() {
     run("leaf_index_roots", leaf_index_roots);
+}
+
+#[test]
+fn gc_sweep() {
+    run("gc_mark_and_sweep", gc_mark_and_sweep);
+}
+
+#[test]
+fn gc_pinned_roots() {
+    run("gc_pins", gc_pins);
+}
+
+#[test]
+fn gc_retention_inputs() {
+    run("gc_inputs", gc_inputs);
 }
