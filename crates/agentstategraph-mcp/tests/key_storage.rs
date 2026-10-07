@@ -323,19 +323,23 @@ async fn admin_calls_name_a_key_by_id_not_prefix() {
 
 /// A change the keys file can't record doesn't happen: a revoke that only
 /// reached memory would come back after a restart.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_change_that_cant_be_saved_doesnt_happen() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = scratch_dir("readonly");
-    let path = dir.join("keys.json");
+    let dir = scratch_dir("unsavable");
+    let keys_dir = dir.join("keys");
+    std::fs::create_dir(&keys_dir).unwrap();
+    let path = keys_dir.join("keys.json");
     let mgr = load(&path);
     mgr.register_key(key("asg_admin_for_readonly_tests_000000", true))
         .unwrap();
     let user = mgr
         .register_key(key("asg_user_for_readonly_tests_0000000", false))
         .unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // Saving now fails for any user, root included (CI runs as root, which
+    // a read-only directory doesn't stop): the keys file's directory is
+    // replaced by a plain file.
+    std::fs::remove_dir_all(&keys_dir).unwrap();
+    std::fs::write(&keys_dir, "not a directory").unwrap();
 
     assert!(mgr.revoke_key(&user).is_err());
     assert!(
@@ -356,6 +360,5 @@ async fn a_change_that_cant_be_saved_doesnt_happen() {
     assert_eq!(created.status().as_u16(), 500);
     assert_eq!(mgr.list_keys().len(), 2, "an unsaved key was added");
 
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
