@@ -30,7 +30,7 @@ use tracing::{info, warn};
 use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
 use agentstategraph_core::IntentCategory;
 
-use crate::auth::{self, AuthContext, CreateKeyOptions, TenantManager};
+use crate::auth::{self, AuthContext, CreateKeyOptions, KeyRef, KeyStoreError, TenantManager};
 
 /// Compiled config for per-peer-IP governor.
 pub type PeerIpGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
@@ -88,20 +88,25 @@ pub fn router_with_rate_limit(repo: Arc<Repository>, rpm: u32) -> Router {
     build_router(repo, tenant_mgr, rpm)
 }
 
-/// Create a multi-tenant router with API key authentication.
+/// Create a multi-tenant router with API key authentication. Fails if the
+/// keys file can't be read.
 #[allow(dead_code)]
-pub fn router_multi_tenant(repo: Arc<Repository>, keys_file: Option<&str>) -> Router {
+pub fn router_multi_tenant(
+    repo: Arc<Repository>,
+    keys_file: Option<&str>,
+) -> Result<Router, KeyStoreError> {
     router_multi_tenant_with_rate_limit(repo, keys_file, 0)
 }
 
-/// Create a multi-tenant router with an explicit rate limit (rpm).
+/// Create a multi-tenant router with an explicit rate limit (rpm). Fails if
+/// the keys file can't be read.
 pub fn router_multi_tenant_with_rate_limit(
     repo: Arc<Repository>,
     keys_file: Option<&str>,
     rpm: u32,
-) -> Router {
-    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), keys_file);
-    build_router(repo, tenant_mgr, rpm)
+) -> Result<Router, KeyStoreError> {
+    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), keys_file)?;
+    Ok(build_router(repo, tenant_mgr, rpm))
 }
 
 /// Test hook: build the router with a pre-constructed `TenantManager`
@@ -415,80 +420,124 @@ async fn list_keys(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Va
     Json(serde_json::json!({ "keys": mgr.list_keys() }))
 }
 
+/// A key change the keys file couldn't record: the change didn't happen.
+fn key_store_error(e: KeyStoreError) -> AppError {
+    AppError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: e.to_string(),
+    }
+}
+
+/// The JSON for a newly issued key, the only time its raw value is shown.
+fn issued_key_json(key: &auth::ApiKey, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": key.id,
+        "key": key.key,
+        "tenant_id": key.tenant_id,
+        "name": key.name,
+        "plan": key.plan,
+        "commit_agent_id": key.commit_agent_id,
+        "namespace_id": key.namespace_id,
+        "can_migrate": key.can_migrate,
+        "is_admin": key.is_admin,
+        "expires_at": key.expires_at.map(|t| t.to_rfc3339()),
+        "message": message,
+    })
+}
+
 async fn create_key(
     State(mgr): State<Arc<TenantManager>>,
     Json(req): Json<CreateKeyRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let plan = req.plan.unwrap_or_else(|| "free".to_string());
     let can_migrate = req.can_migrate.unwrap_or(false);
     let is_admin = req.is_admin.unwrap_or(false);
     let expires_at = req
         .expires_in_days
         .map(|d| chrono::Utc::now() + chrono::Duration::days(d as i64));
-    let key = mgr.create_key_with(
-        &req.tenant_id,
-        &req.name,
-        &plan,
-        CreateKeyOptions {
-            commit_agent_id: req.commit_agent_id,
-            can_migrate,
-            is_admin,
-            expires_at,
-        },
-    );
-    // Return the full key ONCE — it won't be shown again
-    Json(serde_json::json!({
-        "key": key.key,
-        "tenant_id": key.tenant_id,
-        "name": key.name,
-        "plan": key.plan,
-        "commit_agent_id": key.commit_agent_id,
-        "can_migrate": key.can_migrate,
-        "is_admin": key.is_admin,
-        "expires_at": key.expires_at.map(|t| t.to_rfc3339()),
-        "message": "Save this key — it will not be shown again."
-    }))
+    let key = mgr
+        .create_key_with(
+            &req.tenant_id,
+            &req.name,
+            &plan,
+            CreateKeyOptions {
+                commit_agent_id: req.commit_agent_id,
+                can_migrate,
+                is_admin,
+                expires_at,
+            },
+        )
+        .map_err(key_store_error)?;
+    Ok(Json(issued_key_json(
+        &key,
+        "Save this key — it will not be shown again.",
+    )))
 }
 
+/// Which key a revoke or rotate means: `key_id` (from `GET /api/admin/keys`)
+/// or the full `key`. A `key_prefix`, which this API used to take, is
+/// refused: a prefix can match more than one key.
 #[derive(Deserialize)]
-struct RotateKeyRequest {
-    key_prefix: String,
+struct KeySelector {
+    #[serde(default)]
+    key_id: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    key_prefix: Option<String>,
+}
+
+impl KeySelector {
+    fn resolve(&self, mgr: &TenantManager) -> Result<String, AppError> {
+        let key_ref = match (&self.key_id, &self.key, &self.key_prefix) {
+            (Some(id), _, _) => KeyRef::Id(id),
+            (None, Some(key), _) => KeyRef::Key(key),
+            (None, None, Some(_)) => {
+                return Err(AppError {
+                    status: StatusCode::BAD_REQUEST,
+                    message: "key_prefix is no longer accepted: a prefix can match more than one \
+                              key. Pass key_id (from GET /api/admin/keys) or the full key."
+                        .into(),
+                });
+            }
+            (None, None, None) => {
+                return Err(AppError {
+                    status: StatusCode::BAD_REQUEST,
+                    message: "pass key_id (from GET /api/admin/keys) or the full key".into(),
+                });
+            }
+        };
+        mgr.key_id(key_ref).ok_or_else(|| AppError {
+            status: StatusCode::NOT_FOUND,
+            message: "no such key".into(),
+        })
+    }
 }
 
 async fn rotate_key(
     State(mgr): State<Arc<TenantManager>>,
-    Json(req): Json<RotateKeyRequest>,
+    Json(req): Json<KeySelector>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    match mgr.rotate_key(&req.key_prefix) {
-        Some(k) => Ok(Json(serde_json::json!({
-            "key": k.key,
-            "tenant_id": k.tenant_id,
-            "name": k.name,
-            "plan": k.plan,
-            "commit_agent_id": k.commit_agent_id,
-            "can_migrate": k.can_migrate,
-            "is_admin": k.is_admin,
-            "expires_at": k.expires_at.map(|t| t.to_rfc3339()),
-            "message": "Save this key — it will not be shown again. The old key has been revoked."
-        }))),
+    let id = req.resolve(&mgr)?;
+    match mgr.rotate_key(&id).map_err(key_store_error)? {
+        Some(k) => Ok(Json(issued_key_json(
+            &k,
+            "Save this key — it will not be shown again. The old key has been revoked.",
+        ))),
         None => Err(AppError {
             status: StatusCode::NOT_FOUND,
-            message: format!("No key matches prefix `{}`", req.key_prefix),
+            message: "no such key".into(),
         }),
     }
 }
 
-#[derive(Deserialize)]
-struct RevokeKeyRequest {
-    key_prefix: String,
-}
-
 async fn revoke_key(
     State(mgr): State<Arc<TenantManager>>,
-    Json(req): Json<RevokeKeyRequest>,
-) -> Json<serde_json::Value> {
-    let revoked = mgr.revoke_key(&req.key_prefix);
-    Json(serde_json::json!({ "revoked": revoked }))
+    Json(req): Json<KeySelector>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let id = req.resolve(&mgr)?;
+    let revoked = mgr.revoke_key(&id).map_err(key_store_error)?;
+    Ok(Json(serde_json::json!({ "revoked": revoked, "id": id })))
 }
 
 // ─── State operations ───────────────────────────────────────
