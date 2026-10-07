@@ -43,10 +43,11 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 rand = "0.9"
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 governor = "0.10"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 [features]
@@ -64,3 +65,4 @@ providers = ["dep:reqwest"]
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 agentstategraph-ffi = { workspace = true }
+rusqlite = { workspace = true }

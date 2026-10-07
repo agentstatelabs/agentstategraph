@@ -195,8 +195,8 @@ pub struct AuthContext {
     pub commit_agent_id: Option<String>,
     /// Whether this request is allowed to commit with `IntentCategory::Migrate`.
     pub can_migrate: bool,
-    /// Short prefix of the key (for logging), if any.
-    pub key_prefix: Option<String>,
+    /// The id of the request's API key (for logging; never the key), if any.
+    pub key_id: Option<String>,
     /// Namespace from the API key, if any.
     pub namespace_id: Option<String>,
 }
@@ -461,6 +461,12 @@ impl TenantManager {
     /// The namespace_id bound to this API key, if any.
     pub fn get_namespace_id(&self, api_key: &str) -> Option<String> {
         self.live(api_key)?.namespace_id
+    }
+
+    /// The repository requests use when auth is off, and keys without a
+    /// namespace use when it's on.
+    pub fn default_repo(&self) -> &Arc<Repository> {
+        &self.default_repo
     }
 
     /// Whether auth is enabled on this manager.
@@ -799,24 +805,24 @@ pub async fn auth_middleware(
         let namespace_id = api_key
             .as_deref()
             .and_then(|k| tenant_mgr.get_namespace_id(k));
-        let key_prefix = api_key.as_deref().map(|k| {
-            if k.len() > 8 {
-                k[..8].to_string()
-            } else {
-                k.to_string()
-            }
-        });
+        let key_id = api_key
+            .as_deref()
+            .and_then(|k| tenant_mgr.key_id(KeyRef::Key(k)));
+        if let Some(id) = &key_id {
+            // The request's span (when a trace layer made one) logs it.
+            tracing::Span::current().record("key_id", id.as_str());
+        }
         AuthContext {
             commit_agent_id,
             can_migrate,
-            key_prefix,
+            key_id,
             namespace_id,
         }
     } else {
         AuthContext {
             commit_agent_id: None,
             can_migrate: true,
-            key_prefix: None,
+            key_id: None,
             namespace_id: None,
         }
     };
@@ -852,6 +858,9 @@ pub async fn admin_auth_middleware(
     };
     if tenant_mgr.resolve_tenant(key).is_none() {
         return Err(AuthError::InvalidKey);
+    }
+    if let Some(id) = tenant_mgr.key_id(KeyRef::Key(key)) {
+        tracing::Span::current().record("key_id", id.as_str());
     }
     if !tenant_mgr.is_admin(Some(key)) {
         return Err(AuthError::NotAdmin);
