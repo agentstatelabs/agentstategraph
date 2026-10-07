@@ -82,7 +82,7 @@ curl http://localhost:3001/api/state/main?path=/
 curl "http://localhost:3001/api/blame/main?path=/cluster/name"
 ```
 
-A CORS-enabled REST API — connect from browsers, scripts, or any HTTP client. See `--help` for the full endpoint list.
+A REST API for scripts and any HTTP client. Browser pages served from localhost can call it too; allow another origin with `--cors-origin`. See `--help` for the full endpoint list.
 
 ### As a Rust Library
 
@@ -145,7 +145,7 @@ and iOS Simulator arm64/x86_64 slices.
 ## Features
 
 - **73 MCP tools** — any agent can connect immediately
-- **HTTP REST API** — `--http` mode with CORS for browsers and scripts
+- **HTTP REST API** — `--http` mode for scripts, and for browser pages on localhost or origins you allow
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **8 language bindings** — Rust, Python, TypeScript, Go, Swift, .NET / C#, WASM, C FFI
 - **4 storage backends** — Memory, SQLite, Postgres (multi-tenant), IndexedDB (browser)

@@ -7,6 +7,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+- **The HTTP server now lets only pages served from localhost call it from a browser.** Before, it allowed any origin, so any website the user visited could read and write a local store through it. Pages from `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]` (any port) are allowed by default. Allow other origins with `--cors-origin <ORIGIN>` (repeatable) or `ASG_CORS_ORIGINS` (comma-separated); `*` allows any origin, and the server warns if that is set without `--auth`.
+- **Bound to loopback (the default), the HTTP server only answers requests addressed to a loopback name.** A website that points a domain it controls at 127.0.0.1 (DNS rebinding) now gets `403`. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host <HOST>` (repeatable) or `ASG_ALLOWED_HOSTS`; `*` turns the check off. Bound to another address, the server answers any host name unless some are listed.
+- **The router constructors in `agentstategraph_mcp::http` no longer add CORS headers.** Apply the policy with `http::with_origin_policy(router, &OriginPolicy::for_bind(..))`, as the binary now does. That covers the ASD proxy routes too.
+
 ## [v1.2.7] — 2026-10-02
 
 ### Fixed

@@ -24,7 +24,7 @@ use serde::Deserialize;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{info, warn};
 
 use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
@@ -116,11 +116,6 @@ pub fn build_router_for_test(
 }
 
 fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
     // API routes that go through auth middleware
     let api_routes = Router::new()
         // State operations
@@ -177,8 +172,7 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
     let mut router = Router::new()
         .nest("/api", api_routes)
         .merge(public_routes)
-        .merge(admin_routes)
-        .layer(cors);
+        .merge(admin_routes);
 
     // Apply the governor layer LAST so it runs FIRST in the request
     // lifecycle (tower layers execute in reverse insertion order).
@@ -190,6 +184,193 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
     }
 
     router
+}
+
+// ─── Origins and Host names ─────────────────────────────────
+
+/// Which web pages may call the API from a browser (CORS), and which `Host`
+/// names the server answers to. Apply it with [`with_origin_policy`]; the
+/// router constructors add neither, so a router served without it sends no
+/// CORS headers and browsers keep other origins out.
+#[derive(Debug, Clone, Default)]
+pub struct OriginPolicy {
+    /// Origins allowed besides loopback ones, lowercased and without a
+    /// trailing slash. Holds `"*"` when any origin is allowed.
+    cors_origins: Vec<String>,
+    /// `Host` names accepted besides loopback ones, or `None` for any.
+    allowed_hosts: Option<Vec<String>>,
+}
+
+impl OriginPolicy {
+    /// The policy for a server bound to `bind_addr`.
+    ///
+    /// CORS allows pages served from loopback (`localhost`, `*.localhost`,
+    /// `127.0.0.0/8`, `[::1]`, any port or scheme) plus `extra_origins`,
+    /// such as `https://app.example.com`. `*` allows any origin.
+    ///
+    /// On a loopback bind, only requests addressed to a loopback name are
+    /// served, plus `extra_hosts`. A web page can point a domain it controls
+    /// at 127.0.0.1 (DNS rebinding); its requests then carry that domain as
+    /// `Host`, and are refused. A reverse proxy on the same machine that
+    /// forwards the public name needs that name in `extra_hosts`. On other
+    /// binds any `Host` is served unless `extra_hosts` names some. `*` turns
+    /// the check off.
+    pub fn for_bind(bind_addr: &str, extra_origins: &[String], extra_hosts: &[String]) -> Self {
+        let normalize = |v: &String| v.trim().trim_end_matches('/').to_ascii_lowercase();
+        let cors_origins: Vec<String> = extra_origins
+            .iter()
+            .map(normalize)
+            .filter(|o| !o.is_empty())
+            .collect();
+        let hosts: Vec<String> = extra_hosts
+            .iter()
+            .map(|h| host_name(h.trim()).to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        let allowed_hosts = if hosts.iter().any(|h| h == "*") {
+            None
+        } else if is_loopback_bind(bind_addr) || !hosts.is_empty() {
+            Some(hosts)
+        } else {
+            None
+        };
+        Self {
+            cors_origins,
+            allowed_hosts,
+        }
+    }
+
+    /// Whether any origin may call the API from a browser.
+    pub fn allows_any_origin(&self) -> bool {
+        self.cors_origins.iter().any(|o| o == "*")
+    }
+
+    /// Whether a browser page served from `origin` may call the API.
+    pub fn allows_origin(&self, origin: &str) -> bool {
+        let origin = origin.trim_end_matches('/').to_ascii_lowercase();
+        self.allows_any_origin()
+            || is_loopback_origin(&origin)
+            || self.cors_origins.contains(&origin)
+    }
+
+    /// Whether a request whose `Host` header is `host` is served.
+    pub fn allows_host(&self, host: &str) -> bool {
+        let Some(allowed) = &self.allowed_hosts else {
+            return true;
+        };
+        let name = host_name(host).to_ascii_lowercase();
+        is_loopback_host(&name) || allowed.contains(&name)
+    }
+
+    /// A one-line summary for the startup log.
+    pub fn describe(&self) -> String {
+        let origins = if self.allows_any_origin() {
+            "CORS: any origin".to_string()
+        } else if self.cors_origins.is_empty() {
+            "CORS: loopback origins only".to_string()
+        } else {
+            format!("CORS: loopback origins + {}", self.cors_origins.join(", "))
+        };
+        let hosts = match &self.allowed_hosts {
+            None => "Host check: off".to_string(),
+            Some(names) if names.is_empty() => "Host check: loopback names only".to_string(),
+            Some(names) => format!("Host check: loopback names + {}", names.join(", ")),
+        };
+        format!("{origins}; {hosts}")
+    }
+}
+
+/// Serve `app` under `policy`: CORS for the allowed origins, and a 403 for a
+/// request addressed to a `Host` the policy doesn't serve.
+pub fn with_origin_policy(app: Router, policy: &OriginPolicy) -> Router {
+    let allow_origin = if policy.allows_any_origin() {
+        AllowOrigin::from(Any)
+    } else {
+        let policy = policy.clone();
+        AllowOrigin::predicate(move |origin, _| {
+            origin.to_str().is_ok_and(|o| policy.allows_origin(o))
+        })
+    };
+    let cors = CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods(Any)
+        .allow_headers(Any);
+    let app = app.layer(cors);
+    if policy.allowed_hosts.is_none() {
+        return app;
+    }
+    // Outermost, so a refused request goes no further.
+    app.layer(middleware::from_fn_with_state(
+        Arc::new(policy.clone()),
+        check_host,
+    ))
+}
+
+async fn check_host(
+    State(policy): State<Arc<OriginPolicy>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| req.uri().authority().map(|a| a.to_string()));
+    match host {
+        // No browser sends a request without a Host.
+        None => next.run(req).await,
+        Some(host) if policy.allows_host(&host) => next.run(req).await,
+        Some(host) => {
+            warn!(host = %host, "refused a request for a Host this server doesn't serve");
+            (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "this server doesn't answer to Host '{host}'. Behind a reverse proxy, \
+                     pass --allowed-host {} (or set ASG_ALLOWED_HOSTS).",
+                    host_name(&host)
+                ),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// The host part of a `host[:port]` authority, with an IPv6 literal kept in
+/// brackets.
+fn host_name(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        return authority
+            .find(']')
+            .map_or(authority, |end| &authority[..=end]);
+    }
+    authority.split(':').next().unwrap_or(authority)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "[::1]"
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|authority| is_loopback_host(host_name(authority)))
+}
+
+/// Whether the server listens only on a loopback address.
+pub fn is_loopback_bind(bind_addr: &str) -> bool {
+    let addr = bind_addr.trim_start_matches('[').trim_end_matches(']');
+    addr == "localhost"
+        || addr
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 // ─── Health ─────────────────────────────────────────────────

@@ -44,7 +44,7 @@ Restart Claude Code. The 73 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
-The same binary also supports HTTP mode — a REST API with CORS enabled:
+The same binary also supports HTTP mode, a REST API:
 
 ```bash
 cargo run --release -p agentstategraph-mcp -- --http --port 3001
@@ -57,6 +57,12 @@ curl http://localhost:3001/api/state/main?path=/cluster/name
 curl "http://localhost:3001/api/blame/main?path=/cluster/name"
 curl "http://localhost:3001/api/state/main/search?query=mesh"
 ```
+
+### Browsers and host names
+
+Browser pages served from localhost (any port) can call the API. To let a page from another origin call it, pass `--cors-origin https://app.example.com` (repeatable, or `ASG_CORS_ORIGINS` as a comma-separated list). `--cors-origin '*'` allows any origin; only do that with `--auth`.
+
+Bound to loopback, as it is by default, the server only answers requests addressed to `localhost`, `127.0.0.1` or `[::1]`. That stops another website from reaching it through DNS rebinding, where the site points a domain it controls at your machine. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host asg.example.com` (or `ASG_ALLOWED_HOSTS`). Bound to another address, the server answers any host name unless you list some.
 
 Full endpoint list:
 
