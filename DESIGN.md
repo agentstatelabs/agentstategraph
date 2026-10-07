@@ -414,6 +414,14 @@ it against Postgres 16:**
     exclusive lock even when it changes nothing. Fixed in t-004/t-005; the
     DDL now runs once per schema version (t-006).
 
+16. **Search could keep an overwritten value** (found while doing t-008, on
+    SQLite; Postgres had the same exposure). When writers raced on one
+    branch, their search-index updates could apply out of order, and the
+    index then held the older value until that path was written again:
+    about 1 run in 200 of a 4-writer test. Fixed in t-008. Each indexed set
+    records the state root it reflects, an update applies only from the
+    tree it was computed against, and a search catches the set up first.
+
 What passed on all three backends: objects, commits and DAG walks, refs and
 namespaces (including `create_ref` and `cas_ref` races across separate
 handles), sessions, taints, and repository write/branch/merge/history. That
@@ -431,7 +439,7 @@ concurrently.
 | t-005 | **Close the check-then-act races.** Seal is done in t-003 (finding 14). Do session end as a conditional `UPDATE ... WHERE status = 'Active'`, or `SELECT ... FOR UPDATE` inside a transaction. Make reminder `update_if_unchanged` atomic on Postgres and in `MemoryStorage` (finding 12). — **In review (MR !62, with t-004).** Session end is a conditional `UPDATE` on Postgres and SQLite. Reminder CAS locks the row on Postgres, and memory uses its reminder store's CAS. Linking a commit holds the epoch or session row, so it can't join one being sealed or ended. The conformance suite has no known failures left. | 2 |
 | t-006 | **Versioned migrations.** Add a `schema_migrations` table and ordered migrations. (The advisory lock that makes concurrent startups safe landed with t-002.) Existing databases are adopted as version 1 with no data changes. — **Mostly in review (MR !62).** The database records its schema version in `asg_schema`, and the idempotent DDL runs only when that is behind the build, under the advisory lock, with a retry on deadlock. Existing databases are brought up to version 1 on their first connect. A test upgrades an older database once and shows an up-to-date one isn't touched. Still open: ordered migrations, which the first change that can't be written as `IF NOT EXISTS` will need. | 2 |
 | t-007 | **TLS.** Use a rustls connector and honor `sslmode` from the connection URL. Document `require` as the expected setting for non-local hosts. — **In review (MR !61, stacked on !60).** It's behind an opt-in `postgres-tls` feature, per the network-crate guard rail; release binaries and the Docker image enable it. TLS is always verified (`require`, `verify-ca` and `verify-full` all check the chain and host name), with `sslrootcert` / `PGSSLROOTCERT` for provider CAs. Tests run against a local server that refuses plaintext. | 2 |
-| t-008 | **History and search parity.** Override `list_commits_dag` with a recursive CTE or a `commit_parents` table, so a walk is one query instead of N. Add a Postgres leaf index for search using `pg_trgm`. Add history-rollup tables equivalent to SQLite's. | 3 |
+| t-008 | **History and search parity.** Override `list_commits_dag` with a recursive CTE or a `commit_parents` table, so a walk is one query instead of N. Add a Postgres leaf index for search using `pg_trgm`. Add history-rollup tables equivalent to SQLite's. — **In review (MR !63, stacked on !62).** Walks follow parent ids in the commit JSON through a hash index, so commits written by older binaries are walkable too; 200,000 commits walk in about a second. The history extractor reads commits in transaction-id order, and only from transactions older than every one still running, so a commit that becomes visible late can't be skipped. Search uses `pg_trgm` when it can be installed and a scan otherwise. It also fixed finding 16 on every indexed backend. Postgres now needs version 13+. `history_store_shape` moves to t-009 with the rest of the GC evidence. | 3 |
 | t-009 | **GC on Postgres.** Port the SQLite design (Plan B) and run it through the t-001 suite: mark and sweep scoped to `tenant_id`, writer exclusion through an advisory lock, and pinned speculation roots. | 3 |
 
 ### Acceptance
