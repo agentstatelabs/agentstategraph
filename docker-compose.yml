@@ -4,20 +4,30 @@
 #   docker compose up -d
 #   curl http://localhost:3001/api/health
 #   open https://agentstategraph.dev/explorer/
+#
+# The port is published on 127.0.0.1, so only this machine can reach it.
+# ASG_HOST_PORT picks another host port (CTXone's hub also defaults to 3001).
+# Anything that can reach the port can read and write the store, so to serve
+# other machines publish "3001:3001" and turn on auth:
+#   command: ["--http", "--path", "/data/agentstategraph.db",
+#             "--auth", "--keys-file", "/data/keys.json"]
+#   environment:
+#     ASG_INITIAL_ADMIN_KEY: ${ASG_ADMIN_KEY}   # asg_ + 64 hex characters
 
 services:
   agentstategraph:
     build: .
     ports:
-      - "3001:3001"
+      - "127.0.0.1:${ASG_HOST_PORT:-3001}:3001"
     volumes:
       - agentstategraph-data:/data
-    command: ["--http", "--port", "3001", "--path", "/data/agentstategraph.db"]
+    command: ["--http", "--path", "/data/agentstategraph.db"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      test: ["CMD", "agentstategraph-mcp", "healthcheck"]
       interval: 30s
       timeout: 5s
+      start_period: 10s
       retries: 3
 
 volumes:
