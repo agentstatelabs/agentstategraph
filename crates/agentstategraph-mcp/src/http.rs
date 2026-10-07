@@ -199,11 +199,84 @@ pub fn build_router_with(
     // tower_governor's GovernorLayer emits axum-native 429 responses on
     // its own — no HandleErrorLayer wrapping needed. When rpm=0, the
     // layer is absent.
-    if let Some(layer) = build_governor_layer(rpm) {
+    if let Some(layer) = build_rate_limit_layer(rpm, tenant_mgr) {
         router = router.layer(layer);
     }
 
     router
+}
+
+/// Which bucket a request's rate limit comes from: its API key, when it
+/// carries a live one and auth is on, else the peer IP. Behind a load
+/// balancer every client shares the balancer's IP, so per-key buckets are
+/// what keeps one client from using up everyone's limit. A key that isn't
+/// live falls back to the IP, so inventing keys earns no extra buckets.
+#[derive(Clone)]
+pub struct KeyOrPeerIp {
+    tenant_mgr: Arc<TenantManager>,
+}
+
+/// A rate-limit bucket: an API key's id, or a peer IP.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RateKey {
+    Key(String),
+    Ip(std::net::IpAddr),
+}
+
+impl tower_governor::key_extractor::KeyExtractor for KeyOrPeerIp {
+    type Key = RateKey;
+
+    fn extract<T>(
+        &self,
+        req: &axum::http::Request<T>,
+    ) -> Result<Self::Key, tower_governor::GovernorError> {
+        if self.tenant_mgr.auth_enabled()
+            && let Some(raw) = auth::extract_api_key(req.headers())
+            && let Some(id) = self.tenant_mgr.live_key_id(&raw)
+        {
+            return Ok(RateKey::Key(id));
+        }
+        req.extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| RateKey::Ip(info.0.ip()))
+            .ok_or(tower_governor::GovernorError::UnableToExtractKey)
+    }
+}
+
+/// The rate limit layer the API uses: `rpm` requests a minute per bucket
+/// (see [`KeyOrPeerIp`]), or `None` when `rpm == 0`. Buckets idle long
+/// enough to be full again are dropped every minute, so a stream of new
+/// client IPs can't grow the table without bound.
+pub fn build_rate_limit_layer(
+    rpm: u32,
+    tenant_mgr: Arc<TenantManager>,
+) -> Option<GovernorLayer<KeyOrPeerIp, NoOpMiddleware, axum::body::Body>> {
+    if rpm == 0 {
+        info!("ASG rate limiting disabled (rpm = 0)");
+        return None;
+    }
+    let period_ms = (60_000 / rpm.max(1)) as u64;
+    let burst = (rpm / 10).max(5);
+    let config = GovernorConfigBuilder::default()
+        .key_extractor(KeyOrPeerIp { tenant_mgr })
+        .period(std::time::Duration::from_millis(period_ms))
+        .burst_size(burst)
+        .finish()?;
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let limiter = Arc::downgrade(config.limiter());
+        runtime.spawn(async move {
+            let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                every_minute.tick().await;
+                let Some(limiter) = limiter.upgrade() else {
+                    return;
+                };
+                limiter.retain_recent();
+            }
+        });
+    }
+    info!(rpm, period_ms, burst, "ASG rate limiter configured");
+    Some(GovernorLayer::new(config))
 }
 
 /// Whether a proxied path could leave ASD's `/api/v1`: URL parsing collapses
@@ -214,6 +287,109 @@ pub fn escapes_proxy_root(path: &str) -> bool {
             let segment = segment.to_ascii_lowercase().replace("%2e", ".");
             segment == "." || segment == ".."
         })
+}
+
+// ─── Request bounds ─────────────────────────────────────────
+
+/// Limits on each HTTP request (DESIGN.md Plan E t-008).
+#[derive(Debug, Clone)]
+pub struct RequestBounds {
+    /// The largest request body accepted, in bytes; a larger one gets 413.
+    pub max_body_bytes: usize,
+    /// How long a request may take before it gets 503. `None` for no limit.
+    /// Storage work already started still finishes, so a write may complete
+    /// after its caller was told it timed out.
+    pub timeout: Option<std::time::Duration>,
+    /// Requests handled at once. More get 503 straight away rather than
+    /// queueing behind them. `/api/health` is exempt, so a busy server isn't
+    /// mistaken for a dead one.
+    pub max_concurrent: usize,
+}
+
+impl Default for RequestBounds {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: 4 * 1024 * 1024,
+            timeout: Some(std::time::Duration::from_secs(30)),
+            max_concurrent: 256,
+        }
+    }
+}
+
+impl RequestBounds {
+    /// A one-line summary for the startup log.
+    pub fn describe(&self) -> String {
+        format!(
+            "Limits: body {} bytes, timeout {}, {} requests at once",
+            self.max_body_bytes,
+            self.timeout
+                .map_or_else(|| "none".to_string(), |t| format!("{}s", t.as_secs())),
+            self.max_concurrent
+        )
+    }
+}
+
+/// Apply `bounds` to every route of `app`.
+pub fn with_request_bounds(app: Router, bounds: &RequestBounds) -> Router {
+    let state = Arc::new(BoundsState {
+        permits: Arc::new(tokio::sync::Semaphore::new(bounds.max_concurrent.max(1))),
+        max_concurrent: bounds.max_concurrent.max(1),
+        timeout: bounds.timeout,
+    });
+    app.layer(middleware::from_fn_with_state(state, bound_request))
+        .layer(axum::extract::DefaultBodyLimit::max(bounds.max_body_bytes))
+}
+
+struct BoundsState {
+    permits: Arc<tokio::sync::Semaphore>,
+    max_concurrent: usize,
+    timeout: Option<std::time::Duration>,
+}
+
+async fn bound_request(
+    State(bounds): State<Arc<BoundsState>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let liveness = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|m| m.as_str() == "/api/health");
+    if liveness {
+        return next.run(req).await;
+    }
+    let Ok(_permit) = Arc::clone(&bounds.permits).try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "1")],
+            Json(serde_json::json!({
+                "error": format!(
+                    "the server is handling its limit of {} requests; retry shortly",
+                    bounds.max_concurrent
+                )
+            })),
+        )
+            .into_response();
+    };
+    let Some(limit) = bounds.timeout else {
+        return next.run(req).await;
+    };
+    match tokio::time::timeout(limit, next.run(req)).await {
+        Ok(res) => res,
+        Err(_) => {
+            warn!(timeout_secs = limit.as_secs_f64(), "request timed out");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "the request took longer than {}s; a write may still have completed",
+                        limit.as_secs_f64()
+                    )
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 // ─── Observability ──────────────────────────────────────────
@@ -814,9 +990,12 @@ async fn get_state(
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let path = q.path.as_deref().unwrap_or("/");
-    let value = repo.get_json(&ref_name, path)?;
-    Ok(Json(value))
+    blocking(move || {
+        let path = q.path.as_deref().unwrap_or("/");
+        let value = repo.get_json(&ref_name, path)?;
+        Ok(Json(value))
+    })
+    .await
 }
 
 async fn list_paths(
@@ -824,11 +1003,14 @@ async fn list_paths(
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let prefix = q.prefix.as_deref().unwrap_or("/");
-    let paths = repo.list_paths(&ref_name, prefix, q.max_depth)?;
-    Ok(Json(
-        serde_json::json!({ "count": paths.len(), "paths": paths }),
-    ))
+    blocking(move || {
+        let prefix = q.prefix.as_deref().unwrap_or("/");
+        let paths = repo.list_paths(&ref_name, prefix, q.max_depth)?;
+        Ok(Json(
+            serde_json::json!({ "count": paths.len(), "paths": paths }),
+        ))
+    })
+    .await
 }
 
 async fn search_values(
@@ -836,20 +1018,23 @@ async fn search_values(
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let query = q.query.as_deref().unwrap_or("");
-    if query.is_empty() {
-        return Ok(Json(
-            serde_json::json!({ "error": "query parameter required" }),
-        ));
-    }
-    let results = repo.search_values(&ref_name, query, q.max_results)?;
-    let entries: Vec<serde_json::Value> = results
-        .iter()
-        .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
-        .collect();
-    Ok(Json(
-        serde_json::json!({ "count": entries.len(), "results": entries }),
-    ))
+    blocking(move || {
+        let query = q.query.as_deref().unwrap_or("");
+        if query.is_empty() {
+            return Ok(Json(
+                serde_json::json!({ "error": "query parameter required" }),
+            ));
+        }
+        let results = repo.search_values(&ref_name, query, q.max_results)?;
+        let entries: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
+            .collect();
+        Ok(Json(
+            serde_json::json!({ "count": entries.len(), "results": entries }),
+        ))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -871,23 +1056,26 @@ async fn set_value(
     Path(ref_name): Path<String>,
     Json(req): Json<SetRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let category = enforce_migrate_capability(parse_category(&req.intent_category), &ctx);
-    let agent = resolve_agent(&ctx, req.agent);
-    let mut opts = CommitOptions::new(agent, category, &req.intent_description);
-    if let Some(r) = req.reasoning {
-        opts = opts.with_reasoning(r);
-    }
-    if let Some(c) = req.confidence {
-        opts = opts.with_confidence(c);
-    }
-    let tool_calls = crate::server::tool_calls_from(req.tool_calls);
-    if !tool_calls.is_empty() {
-        opts = opts.with_tool_calls(tool_calls);
-    }
-    let commit_id = repo.set_json(&ref_name, &req.path, &req.value, opts)?;
-    Ok(Json(
-        serde_json::json!({ "commit_id": commit_id.to_string() }),
-    ))
+    blocking(move || {
+        let category = enforce_migrate_capability(parse_category(&req.intent_category), &ctx);
+        let agent = resolve_agent(&ctx, req.agent);
+        let mut opts = CommitOptions::new(agent, category, &req.intent_description);
+        if let Some(r) = req.reasoning {
+            opts = opts.with_reasoning(r);
+        }
+        if let Some(c) = req.confidence {
+            opts = opts.with_confidence(c);
+        }
+        let tool_calls = crate::server::tool_calls_from(req.tool_calls);
+        if !tool_calls.is_empty() {
+            opts = opts.with_tool_calls(tool_calls);
+        }
+        let commit_id = repo.set_json(&ref_name, &req.path, &req.value, opts)?;
+        Ok(Json(
+            serde_json::json!({ "commit_id": commit_id.to_string() }),
+        ))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -905,13 +1093,16 @@ async fn delete_value(
     Path(ref_name): Path<String>,
     Json(req): Json<DeleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let category = enforce_migrate_capability(parse_category(&req.intent_category), &ctx);
-    let agent = resolve_agent(&ctx, req.agent);
-    let opts = CommitOptions::new(agent, category, &req.intent_description);
-    let commit_id = repo.delete(&ref_name, &req.path, opts)?;
-    Ok(Json(
-        serde_json::json!({ "commit_id": commit_id.to_string() }),
-    ))
+    blocking(move || {
+        let category = enforce_migrate_capability(parse_category(&req.intent_category), &ctx);
+        let agent = resolve_agent(&ctx, req.agent);
+        let opts = CommitOptions::new(agent, category, &req.intent_description);
+        let commit_id = repo.delete(&ref_name, &req.path, opts)?;
+        Ok(Json(
+            serde_json::json!({ "commit_id": commit_id.to_string() }),
+        ))
+    })
+    .await
 }
 
 // ─── History ────────────────────────────────────────────────
@@ -926,28 +1117,31 @@ async fn get_log(
     Path(ref_name): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let limit = q.limit.unwrap_or(20);
-    let commits = repo.log(&ref_name, limit)?;
-    let entries: Vec<serde_json::Value> = commits
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "id": c.id.short(),
-                "full_id": c.id.to_string(),
-                "agent": c.agent_id,
-                "intent": {
-                    "category": format!("{:?}", c.intent.category),
-                    "description": c.intent.description,
-                    "tags": c.intent.tags,
-                },
-                "reasoning": c.reasoning,
-                "confidence": c.confidence,
-                "parents": c.parents.iter().map(|p| p.short()).collect::<Vec<_>>(),
-                "timestamp": c.timestamp.to_rfc3339(),
+    blocking(move || {
+        let limit = q.limit.unwrap_or(20);
+        let commits = repo.log(&ref_name, limit)?;
+        let entries: Vec<serde_json::Value> = commits
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.short(),
+                    "full_id": c.id.to_string(),
+                    "agent": c.agent_id,
+                    "intent": {
+                        "category": format!("{:?}", c.intent.category),
+                        "description": c.intent.description,
+                        "tags": c.intent.tags,
+                    },
+                    "reasoning": c.reasoning,
+                    "confidence": c.confidence,
+                    "parents": c.parents.iter().map(|p| p.short()).collect::<Vec<_>>(),
+                    "timestamp": c.timestamp.to_rfc3339(),
+                })
             })
-        })
-        .collect();
-    Ok(Json(serde_json::json!(entries)))
+            .collect();
+        Ok(Json(serde_json::json!(entries)))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -960,8 +1154,11 @@ async fn blame(
     Path(ref_name): Path<String>,
     Query(q): Query<BlameQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let entry = repo.blame(&ref_name, &q.path)?;
-    Ok(Json(serde_json::to_value(&entry).unwrap_or_default()))
+    blocking(move || {
+        let entry = repo.blame(&ref_name, &q.path)?;
+        Ok(Json(serde_json::to_value(&entry).unwrap_or_default()))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -974,8 +1171,11 @@ async fn diff(
     Extension(repo): Extension<AppState>,
     Query(q): Query<DiffQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let ops = repo.diff(&q.ref_a, &q.ref_b)?;
-    Ok(Json(serde_json::to_value(&ops).unwrap_or_default()))
+    blocking(move || {
+        let ops = repo.diff(&q.ref_a, &q.ref_b)?;
+        Ok(Json(serde_json::to_value(&ops).unwrap_or_default()))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -996,35 +1196,38 @@ async fn query_commits(
     Path(ref_name): Path<String>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let filters = agentstategraph_core::QueryFilters {
-        agent_id: req.agent_id,
-        intent_category: req.intent_category,
-        tags: req.tags,
-        reasoning_contains: req.reasoning_contains,
-        confidence_range: req.confidence_min.zip(req.confidence_max),
-        has_deviations: req.has_deviations,
-        ..Default::default()
-    };
-    let limit = req.limit.unwrap_or(20);
-    let offset = req.offset.unwrap_or(0);
-    let commits = repo.query_commits_paged(&ref_name, &filters, limit, offset)?;
-    let entries: Vec<serde_json::Value> = commits
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "id": c.id.short(),
-                "agent": c.agent_id,
-                "intent": {
-                    "category": format!("{:?}", c.intent.category),
-                    "description": c.intent.description,
-                },
-                "reasoning": c.reasoning,
-                "confidence": c.confidence,
-                "timestamp": c.timestamp.to_rfc3339(),
+    blocking(move || {
+        let filters = agentstategraph_core::QueryFilters {
+            agent_id: req.agent_id,
+            intent_category: req.intent_category,
+            tags: req.tags,
+            reasoning_contains: req.reasoning_contains,
+            confidence_range: req.confidence_min.zip(req.confidence_max),
+            has_deviations: req.has_deviations,
+            ..Default::default()
+        };
+        let limit = req.limit.unwrap_or(20);
+        let offset = req.offset.unwrap_or(0);
+        let commits = repo.query_commits_paged(&ref_name, &filters, limit, offset)?;
+        let entries: Vec<serde_json::Value> = commits
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id.short(),
+                    "agent": c.agent_id,
+                    "intent": {
+                        "category": format!("{:?}", c.intent.category),
+                        "description": c.intent.description,
+                    },
+                    "reasoning": c.reasoning,
+                    "confidence": c.confidence,
+                    "timestamp": c.timestamp.to_rfc3339(),
+                })
             })
-        })
-        .collect();
-    Ok(Json(serde_json::json!(entries)))
+            .collect();
+        Ok(Json(serde_json::json!(entries)))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1037,9 +1240,12 @@ async fn commit_graph(
     Path(ref_name): Path<String>,
     Query(q): Query<GraphQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let depth = q.depth.unwrap_or(50);
-    let nodes = repo.commit_graph(&ref_name, depth)?;
-    Ok(Json(serde_json::json!(nodes)))
+    blocking(move || {
+        let depth = q.depth.unwrap_or(50);
+        let nodes = repo.commit_graph(&ref_name, depth)?;
+        Ok(Json(serde_json::json!(nodes)))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1056,23 +1262,29 @@ async fn history(
     Extension(ctx): Extension<AuthContext>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    store_wide(&ctx)?;
-    let report = repo.history_report(
-        q.namespace.as_deref(),
-        q.by.as_deref().unwrap_or("day"),
-        q.milestones.unwrap_or(50),
-        q.refresh.unwrap_or(true),
-        q.store.unwrap_or(false),
-    )?;
-    Ok(Json(report))
+    blocking(move || {
+        store_wide(&ctx)?;
+        let report = repo.history_report(
+            q.namespace.as_deref(),
+            q.by.as_deref().unwrap_or("day"),
+            q.milestones.unwrap_or(50),
+            q.refresh.unwrap_or(true),
+            q.store.unwrap_or(false),
+        )?;
+        Ok(Json(report))
+    })
+    .await
 }
 
 async fn gc_dry_run(
     Extension(repo): Extension<AppState>,
     Extension(ctx): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    store_wide(&ctx)?;
-    Ok(Json(repo.gc_dry_run()?))
+    blocking(move || {
+        store_wide(&ctx)?;
+        Ok(Json(repo.gc_dry_run()?))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1091,26 +1303,32 @@ async fn gc_sweep(
     Extension(ctx): Extension<AuthContext>,
     Json(req): Json<SweepRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    store_wide(&ctx)?;
-    let default = RetentionPolicy::default();
-    let policy = RetentionPolicy {
-        keep_recent: req.keep_recent.unwrap_or(default.keep_recent),
-        checkpoint_every: req.checkpoint_every.unwrap_or(default.checkpoint_every),
-        keep_milestones: req.keep_milestones.unwrap_or(default.keep_milestones),
-    };
-    Ok(Json(repo.gc_sweep(
-        policy,
-        req.mutate.unwrap_or(false),
-        req.vacuum.unwrap_or(false),
-    )?))
+    blocking(move || {
+        store_wide(&ctx)?;
+        let default = RetentionPolicy::default();
+        let policy = RetentionPolicy {
+            keep_recent: req.keep_recent.unwrap_or(default.keep_recent),
+            checkpoint_every: req.checkpoint_every.unwrap_or(default.checkpoint_every),
+            keep_milestones: req.keep_milestones.unwrap_or(default.keep_milestones),
+        };
+        Ok(Json(repo.gc_sweep(
+            policy,
+            req.mutate.unwrap_or(false),
+            req.vacuum.unwrap_or(false),
+        )?))
+    })
+    .await
 }
 
 async fn gc_vacuum(
     Extension(repo): Extension<AppState>,
     Extension(ctx): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    store_wide(&ctx)?;
-    Ok(Json(repo.gc_vacuum()?))
+    blocking(move || {
+        store_wide(&ctx)?;
+        Ok(Json(repo.gc_vacuum()?))
+    })
+    .await
 }
 
 /// Refuse a store-wide operation (GC, the history report) to a key bound to
@@ -1138,12 +1356,15 @@ async fn list_branches(
     Extension(repo): Extension<AppState>,
     Query(q): Query<BranchQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let branches = repo.list_branches(q.prefix.as_deref())?;
-    let entries: Vec<serde_json::Value> = branches
-        .iter()
-        .map(|(name, id)| serde_json::json!({ "name": name, "commit": id.short() }))
-        .collect();
-    Ok(Json(serde_json::json!(entries)))
+    blocking(move || {
+        let branches = repo.list_branches(q.prefix.as_deref())?;
+        let entries: Vec<serde_json::Value> = branches
+            .iter()
+            .map(|(name, id)| serde_json::json!({ "name": name, "commit": id.short() }))
+            .collect();
+        Ok(Json(serde_json::json!(entries)))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1156,11 +1377,14 @@ async fn create_branch(
     Extension(repo): Extension<AppState>,
     Json(req): Json<CreateBranchRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let from = req.from.as_deref().unwrap_or("main");
-    let id = repo.branch(&req.name, from)?;
-    Ok(Json(
-        serde_json::json!({ "branch": req.name, "commit": id.short() }),
-    ))
+    blocking(move || {
+        let from = req.from.as_deref().unwrap_or("main");
+        let id = repo.branch(&req.name, from)?;
+        Ok(Json(
+            serde_json::json!({ "branch": req.name, "commit": id.short() }),
+        ))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1178,19 +1402,22 @@ async fn merge_branches(
     Extension(ctx): Extension<AuthContext>,
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let target = req.target.as_deref().unwrap_or("main");
-    let agent = resolve_agent(&ctx, req.agent);
-    let mut opts = CommitOptions::new(agent, IntentCategory::Merge, &req.intent_description);
-    if let Some(r) = req.reasoning {
-        opts = opts.with_reasoning(r);
-    }
-    match repo.merge(&req.source, target, opts) {
-        Ok(id) => Ok(Json(serde_json::json!({ "commit_id": id.to_string() }))),
-        Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => Ok(Json(
-            serde_json::json!({ "conflicts": conflicts.len(), "details": serde_json::to_value(&conflicts).unwrap_or_default() }),
-        )),
-        Err(e) => Err(AppError::from(e)),
-    }
+    blocking(move || {
+        let target = req.target.as_deref().unwrap_or("main");
+        let agent = resolve_agent(&ctx, req.agent);
+        let mut opts = CommitOptions::new(agent, IntentCategory::Merge, &req.intent_description);
+        if let Some(r) = req.reasoning {
+            opts = opts.with_reasoning(r);
+        }
+        match repo.merge(&req.source, target, opts) {
+            Ok(id) => Ok(Json(serde_json::json!({ "commit_id": id.to_string() }))),
+            Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => Ok(Json(
+                serde_json::json!({ "conflicts": conflicts.len(), "details": serde_json::to_value(&conflicts).unwrap_or_default() }),
+            )),
+            Err(e) => Err(AppError::from(e)),
+        }
+    })
+    .await
 }
 
 // ─── Epochs ─────────────────────────────────────────────────
@@ -1198,22 +1425,25 @@ async fn merge_branches(
 async fn list_epochs(
     Extension(repo): Extension<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let entries = repo.list_epochs()?;
-    let json: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id,
-                "description": e.description,
-                "status": format!("{:?}", e.status),
-                "commits": e.commit_count,
-                "agents": e.agents,
-                "created": e.created_at.to_rfc3339(),
-                "sealed": e.sealed_at.map(|t| t.to_rfc3339()),
+    blocking(move || {
+        let entries = repo.list_epochs()?;
+        let json: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "description": e.description,
+                    "status": format!("{:?}", e.status),
+                    "commits": e.commit_count,
+                    "agents": e.agents,
+                    "created": e.created_at.to_rfc3339(),
+                    "sealed": e.sealed_at.map(|t| t.to_rfc3339()),
+                })
             })
-        })
-        .collect();
-    Ok(Json(serde_json::json!(json)))
+            .collect();
+        Ok(Json(serde_json::json!(json)))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1226,10 +1456,13 @@ async fn create_epoch(
     Extension(repo): Extension<AppState>,
     Json(req): Json<CreateEpochRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let epoch = repo.create_epoch(&req.id, &req.description, vec![])?;
-    Ok(Json(
-        serde_json::json!({ "id": epoch.id, "status": format!("{:?}", epoch.status) }),
-    ))
+    blocking(move || {
+        let epoch = repo.create_epoch(&req.id, &req.description, vec![])?;
+        Ok(Json(
+            serde_json::json!({ "id": epoch.id, "status": format!("{:?}", epoch.status) }),
+        ))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1242,8 +1475,11 @@ async fn seal_epoch(
     Extension(repo): Extension<AppState>,
     Json(req): Json<SealEpochRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    repo.seal_epoch(&req.id, &req.summary)?;
-    Ok(Json(serde_json::json!({ "id": req.id, "sealed": true })))
+    blocking(move || {
+        repo.seal_epoch(&req.id, &req.summary)?;
+        Ok(Json(serde_json::json!({ "id": req.id, "sealed": true })))
+    })
+    .await
 }
 
 // ─── Stats & Intents ────────────────────────────────────────
@@ -1252,8 +1488,11 @@ async fn stats(
     Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let s = repo.stats(&ref_name)?;
-    Ok(Json(s))
+    blocking(move || {
+        let s = repo.stats(&ref_name)?;
+        Ok(Json(s))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1266,8 +1505,29 @@ async fn intent_tree(
     Path(ref_name): Path<String>,
     Query(q): Query<IntentQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let tree = repo.intent_tree(&ref_name, q.root_commit_id.as_deref())?;
-    Ok(Json(tree))
+    blocking(move || {
+        let tree = repo.intent_tree(&ref_name, q.root_commit_id.as_deref())?;
+        Ok(Json(tree))
+    })
+    .await
+}
+
+/// Run a handler's storage work on the blocking pool, in the request's log
+/// span. Storage calls block; on an async worker they would hold up every
+/// other request on that worker (health checks included), and the request
+/// timeout couldn't fire until they finished. Work still running when a
+/// request times out finishes here, so a write may complete after its
+/// caller was told it timed out.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, AppError> + Send + 'static,
+) -> Result<T, AppError> {
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || span.in_scope(work))
+        .await
+        .map_err(|e| AppError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("the request failed: {e}"),
+        })?
 }
 
 // ─── Error handling ─────────────────────────────────────────

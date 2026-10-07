@@ -50,6 +50,15 @@ pub struct ServeArgs {
     /// Serve Prometheus metrics at `/metrics`. CLI: `--metrics`. Env:
     /// `ASG_METRICS=1`.
     pub metrics: bool,
+    /// Per-request limits. CLI: `--max-body-bytes`, `--request-timeout-secs`
+    /// (0 for none), `--max-concurrent-requests`. Env: `ASG_MAX_BODY_BYTES`,
+    /// `ASG_REQUEST_TIMEOUT_SECS`, `ASG_MAX_CONCURRENT_REQUESTS`.
+    pub bounds: http::RequestBounds,
+}
+
+/// A number from the environment, if set and valid.
+fn env_number<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name).ok()?.trim().parse().ok()
 }
 
 /// A comma-separated list from the environment.
@@ -268,6 +277,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let mut external_evaluators: Vec<String> = Vec::new();
     let mut asd_url: Option<String> = std::env::var("ASG_ASD_URL").ok().filter(|s| !s.is_empty());
     let mut metrics = std::env::var("ASG_METRICS").is_ok_and(|v| !v.is_empty() && v != "0");
+    let defaults = http::RequestBounds::default();
+    let mut max_body_bytes: usize =
+        env_number("ASG_MAX_BODY_BYTES").unwrap_or(defaults.max_body_bytes);
+    let mut timeout_secs: Option<u64> = env_number("ASG_REQUEST_TIMEOUT_SECS");
+    let mut max_concurrent: usize =
+        env_number("ASG_MAX_CONCURRENT_REQUESTS").unwrap_or(defaults.max_concurrent);
     let mut cors_origins_cli: Vec<String> = Vec::new();
     let mut allowed_hosts_cli: Vec<String> = Vec::new();
 
@@ -381,6 +396,24 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
             "--metrics" => {
                 metrics = true;
             }
+            "--max-body-bytes" => {
+                i += 1;
+                if let Some(v) = args.get(i).and_then(|v| v.parse().ok()) {
+                    max_body_bytes = v;
+                }
+            }
+            "--request-timeout-secs" => {
+                i += 1;
+                if let Some(v) = args.get(i).and_then(|v| v.parse().ok()) {
+                    timeout_secs = Some(v);
+                }
+            }
+            "--max-concurrent-requests" => {
+                i += 1;
+                if let Some(v) = args.get(i).and_then(|v| v.parse().ok()) {
+                    max_concurrent = v;
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -420,7 +453,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     "      --bind <ADDR>     Bind address (default: 127.0.0.1; pass 0.0.0.0 for LAN; env ASG_BIND)"
                 );
                 eprintln!(
-                    "      --rate-limit-rpm <N>  Per-IP requests/minute (default: 600, 0 disables; env ASG_RATE_LIMIT_RPM)"
+                    "      --rate-limit-rpm <N>  Requests/minute per API key with --auth, else per client IP (default: 600, 0 disables; env ASG_RATE_LIMIT_RPM)"
                 );
                 eprintln!(
                     "      --pg-pool-size <N>  Max Postgres connections (default: 32; env ASG_PG_POOL_SIZE)"
@@ -446,6 +479,15 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 );
                 eprintln!(
                     "      --metrics         Serve Prometheus metrics at /metrics (admin key needed with --auth; env ASG_METRICS=1)"
+                );
+                eprintln!(
+                    "      --max-body-bytes <N>  Largest request body (default: 4194304; env ASG_MAX_BODY_BYTES)"
+                );
+                eprintln!(
+                    "      --request-timeout-secs <N>  Answer 503 to a request still running after N seconds (default: 30, 0 for none; env ASG_REQUEST_TIMEOUT_SECS)"
+                );
+                eprintln!(
+                    "      --max-concurrent-requests <N>  Requests handled at once; more get 503 (default: 256; env ASG_MAX_CONCURRENT_REQUESTS)"
                 );
                 eprintln!();
                 eprintln!("LOGGING (stderr):");
@@ -526,6 +568,15 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
             allowed_hosts_cli
         },
         metrics,
+        bounds: http::RequestBounds {
+            max_body_bytes,
+            timeout: match timeout_secs {
+                None => defaults.timeout,
+                Some(0) => None,
+                Some(secs) => Some(std::time::Duration::from_secs(secs)),
+            },
+            max_concurrent: max_concurrent.max(1),
+        },
     }
 }
 
@@ -582,8 +633,13 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.http_mode {
         eprintln!(
-            "Rate limit: {} requests/minute per peer IP{}",
+            "Rate limit: {} requests/minute per {}{}",
             args.rate_limit_rpm,
+            if args.auth_enabled {
+                "API key (per client IP without one)"
+            } else {
+                "client IP"
+            },
             if args.rate_limit_rpm == 0 {
                 " (DISABLED)"
             } else {
@@ -623,6 +679,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         let origin_policy =
             http::OriginPolicy::for_bind(&args.bind_addr, &args.cors_origins, &args.allowed_hosts);
         eprintln!("{}", origin_policy.describe());
+        eprintln!("{}", args.bounds.describe());
         if args.metrics {
             eprintln!(
                 "Metrics: /metrics{}",
@@ -701,6 +758,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let extra = None;
                 let app =
                     http::build_router_with(Arc::clone(&tenant_mgr), args.rate_limit_rpm, extra);
+                let app = http::with_request_bounds(app, &args.bounds);
                 let app = http::with_observability(app, tenant_mgr, args.metrics);
                 let app = http::with_origin_policy(app, &origin_policy);
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
