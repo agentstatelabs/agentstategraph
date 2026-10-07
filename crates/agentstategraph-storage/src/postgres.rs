@@ -283,162 +283,13 @@ mod tls {
     }
 }
 
-/// A failure to get a pooled connection, with its whole cause chain: the pool
-/// and tokio-postgres errors alone say only "error performing TLS handshake",
-/// and the reason (an untrusted issuer, a name mismatch, a refused login) is
-/// further down the chain.
-fn conn_error(e: impl std::error::Error) -> StorageError {
-    let mut msg = format!("get conn: {e}");
-    let mut source = e.source();
-    while let Some(cause) = source {
-        msg.push_str(&format!(": {cause}"));
-        source = cause.source();
-    }
-    StorageError::Backend(msg)
-}
+/// The schema this build expects. Bump it whenever `SCHEMA_DDL` changes:
+/// databases stamped with an older version re-run the (idempotent) DDL once.
+const SCHEMA_VERSION: i32 = 1;
 
-/// Advisory-lock key that serializes schema setup across every process using
-/// a database ("asg-sch" as bytes).
-const SCHEMA_LOCK_KEY: i64 = 0x6173_672d_7363_68;
-
-/// The runtime that drives every `PostgresStorage` connection in the process.
-///
-/// A pooled connection lives on the runtime it was opened in. Owning that
-/// runtime here means no caller's runtime has to exist, be multi-threaded, or
-/// outlive the pool, and it is never dropped inside an async context.
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        let workers = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 8));
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(workers)
-            .thread_name("asg-postgres")
-            .enable_all()
-            .build()
-            .expect("start the Postgres storage runtime")
-    })
-}
-
-/// PostgreSQL-backed storage with connection pooling and optional multi-tenancy.
-pub struct PostgresStorage {
-    pool: Pool,
-    tenant_id: String,
-}
-
-impl PostgresStorage {
-    /// Connect to Postgres with the default tenant.
-    pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
-        Self::connect_tenant(database_url, "default").await
-    }
-
-    /// Connect to Postgres with a specific tenant ID for data isolation.
-    ///
-    /// Applies the default pool size cap (`DEFAULT_POOL_SIZE`).
-    pub async fn connect_tenant(database_url: &str, tenant_id: &str) -> Result<Self, StorageError> {
-        Self::connect_tenant_with_pool_size(database_url, tenant_id, DEFAULT_POOL_SIZE).await
-    }
-
-    /// Connect to Postgres with a specific tenant ID and an explicit pool
-    /// size cap (v2-M1). `max_size` is clamped to at least 1.
-    pub async fn connect_tenant_with_pool_size(
-        database_url: &str,
-        tenant_id: &str,
-        max_size: usize,
-    ) -> Result<Self, StorageError> {
-        let storage = Self::with_pool(database_url, tenant_id, max_size)?;
-        // Schema setup runs on the storage runtime, so the connection it opens
-        // (which then goes back into the pool) is driven there rather than by
-        // the caller's runtime, which may be gone when that connection is reused.
-        let setup = Self {
-            pool: storage.pool.clone(),
-            tenant_id: storage.tenant_id.clone(),
-        };
-        runtime()
-            .spawn(async move { setup.init_tables().await })
-            .await
-            .map_err(|e| StorageError::Backend(format!("postgres setup task: {e}")))??;
-        Ok(storage)
-    }
-
-    /// Connect from synchronous code. Needs no async runtime, and also works
-    /// when called from inside one.
-    pub fn connect_tenant_blocking(
-        database_url: &str,
-        tenant_id: &str,
-        max_size: usize,
-    ) -> Result<Self, StorageError> {
-        let storage = Self::with_pool(database_url, tenant_id, max_size)?;
-        storage.block_on(storage.init_tables())?;
-        Ok(storage)
-    }
-
-    fn with_pool(
-        database_url: &str,
-        tenant_id: &str,
-        max_size: usize,
-    ) -> Result<Self, StorageError> {
-        let tls = ConnectionTls::parse(
-            database_url,
-            std::env::var("PGSSLROOTCERT")
-                .ok()
-                .filter(|v| !v.is_empty()),
-        )?;
-        let mut cfg = Config::new();
-        cfg.url = Some(tls.url.clone());
-        cfg.manager = Some(ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        cfg.pool = Some(PoolConfig {
-            max_size: max_size.max(1),
-            ..Default::default()
-        });
-
-        #[cfg(feature = "postgres-tls")]
-        let pool = cfg.create_pool(
-            Some(PoolRuntime::Tokio1),
-            tls::connector(tls.root_cert.as_deref())?,
-        );
-        #[cfg(not(feature = "postgres-tls"))]
-        let pool = {
-            if tls.requires_tls || tls.root_cert.is_some() {
-                return Err(StorageError::Backend(
-                    "the connection string asks for TLS (sslmode=require/verify-*, or \
-                     sslrootcert), but this build has no Postgres TLS support: build with \
-                     the `postgres-tls` feature"
-                        .into(),
-                ));
-            }
-            cfg.create_pool(Some(PoolRuntime::Tokio1), NoTls)
-        };
-        let pool = pool.map_err(|e| StorageError::Backend(format!("postgres pool: {}", e)))?;
-        Ok(Self {
-            pool,
-            tenant_id: tenant_id.to_string(),
-        })
-    }
-
-    /// Return the configured pool's maximum size. Useful for tests.
-    pub fn pool_max_size(&self) -> usize {
-        self.pool.status().max_size
-    }
-
-    async fn init_tables(&self) -> Result<(), StorageError> {
-        let mut client = self.pool.get().await.map_err(conn_error)?;
-
-        // Every connect runs this DDL. Unserialized, two processes starting
-        // at once deadlocked on the schema's locks and one failed to start, so
-        // the setup is one transaction behind a database-wide advisory lock.
-        // Versioned migrations (Plan D t-006) build on this lock.
-        let tx = client
-            .transaction()
-            .await
-            .map_err(|e| StorageError::Backend(format!("init tables: begin: {}", e)))?;
-        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_KEY])
-            .await
-            .map_err(|e| StorageError::Backend(format!("init tables: schema lock: {}", e)))?;
-
-        tx.batch_execute(
-            "
+/// Every table, column and index, each `IF NOT EXISTS` so it's safe to re-run
+/// over any earlier schema, plus the version stamp table.
+const SCHEMA_DDL: &str = "
                 CREATE TABLE IF NOT EXISTS objects (
                     tenant_id TEXT NOT NULL,
                     id        BYTEA NOT NULL,
@@ -583,11 +434,223 @@ impl PostgresStorage {
                     ON commits(tenant_id, epoch_id);
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_session
                     ON commits(tenant_id, session_id);
-                ",
-        )
-        .await
-        .map_err(|e| StorageError::Backend(format!("init tables: {}", e)))?;
+                
+                CREATE TABLE IF NOT EXISTS asg_schema (
+                    component TEXT PRIMARY KEY,
+                    version   INTEGER NOT NULL
+                );
+";
 
+/// A database error with its whole cause chain. tokio-postgres's Display for
+/// a server error is just "db error"; the server's message is the source.
+fn with_causes(context: &str, e: &dyn std::error::Error) -> String {
+    let mut msg = format!("{context}: {e}");
+    let mut source = e.source();
+    while let Some(cause) = source {
+        msg.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    msg
+}
+
+/// A failure to get a pooled connection, with its whole cause chain: the pool
+/// and tokio-postgres errors alone say only "error performing TLS handshake",
+/// and the reason (an untrusted issuer, a name mismatch, a refused login) is
+/// further down the chain.
+fn conn_error(e: impl std::error::Error) -> StorageError {
+    let mut msg = format!("get conn: {e}");
+    let mut source = e.source();
+    while let Some(cause) = source {
+        msg.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    StorageError::Backend(msg)
+}
+
+/// Advisory-lock key that serializes schema setup across every process using
+/// a database ("asg-sch" as bytes).
+const SCHEMA_LOCK_KEY: i64 = 0x6173_672d_7363_68;
+
+/// The runtime that drives every `PostgresStorage` connection in the process.
+///
+/// A pooled connection lives on the runtime it was opened in. Owning that
+/// runtime here means no caller's runtime has to exist, be multi-threaded, or
+/// outlive the pool, and it is never dropped inside an async context.
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        let workers = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 8));
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .thread_name("asg-postgres")
+            .enable_all()
+            .build()
+            .expect("start the Postgres storage runtime")
+    })
+}
+
+/// PostgreSQL-backed storage with connection pooling and optional multi-tenancy.
+pub struct PostgresStorage {
+    pool: Pool,
+    tenant_id: String,
+}
+
+impl PostgresStorage {
+    /// Connect to Postgres with the default tenant.
+    pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
+        Self::connect_tenant(database_url, "default").await
+    }
+
+    /// Connect to Postgres with a specific tenant ID for data isolation.
+    ///
+    /// Applies the default pool size cap (`DEFAULT_POOL_SIZE`).
+    pub async fn connect_tenant(database_url: &str, tenant_id: &str) -> Result<Self, StorageError> {
+        Self::connect_tenant_with_pool_size(database_url, tenant_id, DEFAULT_POOL_SIZE).await
+    }
+
+    /// Connect to Postgres with a specific tenant ID and an explicit pool
+    /// size cap (v2-M1). `max_size` is clamped to at least 1.
+    pub async fn connect_tenant_with_pool_size(
+        database_url: &str,
+        tenant_id: &str,
+        max_size: usize,
+    ) -> Result<Self, StorageError> {
+        let storage = Self::with_pool(database_url, tenant_id, max_size)?;
+        // Schema setup runs on the storage runtime, so the connection it opens
+        // (which then goes back into the pool) is driven there rather than by
+        // the caller's runtime, which may be gone when that connection is reused.
+        let setup = Self {
+            pool: storage.pool.clone(),
+            tenant_id: storage.tenant_id.clone(),
+        };
+        runtime()
+            .spawn(async move { setup.init_tables().await })
+            .await
+            .map_err(|e| StorageError::Backend(format!("postgres setup task: {e}")))??;
+        Ok(storage)
+    }
+
+    /// Connect from synchronous code. Needs no async runtime, and also works
+    /// when called from inside one.
+    pub fn connect_tenant_blocking(
+        database_url: &str,
+        tenant_id: &str,
+        max_size: usize,
+    ) -> Result<Self, StorageError> {
+        let storage = Self::with_pool(database_url, tenant_id, max_size)?;
+        storage.block_on(storage.init_tables())?;
+        Ok(storage)
+    }
+
+    fn with_pool(
+        database_url: &str,
+        tenant_id: &str,
+        max_size: usize,
+    ) -> Result<Self, StorageError> {
+        let tls = ConnectionTls::parse(
+            database_url,
+            std::env::var("PGSSLROOTCERT")
+                .ok()
+                .filter(|v| !v.is_empty()),
+        )?;
+        let mut cfg = Config::new();
+        cfg.url = Some(tls.url.clone());
+        cfg.manager = Some(ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        });
+        cfg.pool = Some(PoolConfig {
+            max_size: max_size.max(1),
+            ..Default::default()
+        });
+
+        #[cfg(feature = "postgres-tls")]
+        let pool = cfg.create_pool(
+            Some(PoolRuntime::Tokio1),
+            tls::connector(tls.root_cert.as_deref())?,
+        );
+        #[cfg(not(feature = "postgres-tls"))]
+        let pool = {
+            if tls.requires_tls || tls.root_cert.is_some() {
+                return Err(StorageError::Backend(
+                    "the connection string asks for TLS (sslmode=require/verify-*, or \
+                     sslrootcert), but this build has no Postgres TLS support: build with \
+                     the `postgres-tls` feature"
+                        .into(),
+                ));
+            }
+            cfg.create_pool(Some(PoolRuntime::Tokio1), NoTls)
+        };
+        let pool = pool.map_err(|e| StorageError::Backend(format!("postgres pool: {}", e)))?;
+        Ok(Self {
+            pool,
+            tenant_id: tenant_id.to_string(),
+        })
+    }
+
+    /// Return the configured pool's maximum size. Useful for tests.
+    pub fn pool_max_size(&self) -> usize {
+        self.pool.status().max_size
+    }
+
+    /// Bring the schema up to date and seed this tenant's default namespace.
+    ///
+    /// The DDL runs only when the database's stamped schema version is behind
+    /// this build's. `ALTER TABLE ... IF NOT EXISTS` takes an exclusive table
+    /// lock even when it changes nothing, so running it on every connect let a
+    /// starting process deadlock with writers holding locks on several tables
+    /// (any multi-statement transaction). Up-to-date databases now take no
+    /// table locks at startup. An actual upgrade still can collide with
+    /// writers, so a deadlock victim retries.
+    async fn init_tables(&self) -> Result<(), StorageError> {
+        let mut client = self.pool.get().await.map_err(conn_error)?;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.try_init_tables(&mut client).await {
+                Err(e)
+                    if attempt < 5
+                        && e.code()
+                            == Some(&tokio_postgres::error::SqlState::T_R_DEADLOCK_DETECTED) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(StorageError::Backend(with_causes("init tables", &e))),
+                Ok(()) => return Ok(()),
+            }
+        }
+    }
+
+    async fn try_init_tables(
+        &self,
+        client: &mut deadpool_postgres::Client,
+    ) -> Result<(), tokio_postgres::Error> {
+        // Serialized across every process using the database.
+        let tx = client.transaction().await?;
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_KEY])
+            .await?;
+        let stamped: bool = tx
+            .query_one("SELECT to_regclass('asg_schema') IS NOT NULL", &[])
+            .await?
+            .get(0);
+        let version: Option<i32> = if stamped {
+            tx.query_opt(
+                "SELECT version FROM asg_schema WHERE component = 'postgres'",
+                &[],
+            )
+            .await?
+            .map(|row| row.get(0))
+        } else {
+            None
+        };
+        if version.is_none_or(|v| v < SCHEMA_VERSION) {
+            tx.batch_execute(SCHEMA_DDL).await?;
+            tx.execute(
+                "INSERT INTO asg_schema (component, version) VALUES ('postgres', $1)
+                 ON CONFLICT (component) DO UPDATE SET version = EXCLUDED.version",
+                &[&SCHEMA_VERSION],
+            )
+            .await?;
+        }
         // Seed the default namespace for this tenant.
         tx.execute(
             "INSERT INTO namespaces (tenant_id, name, created_at)
@@ -595,13 +658,8 @@ impl PostgresStorage {
              ON CONFLICT DO NOTHING",
             &[&self.tenant_id],
         )
-        .await
-        .map_err(|e| StorageError::Backend(format!("seed default namespace: {}", e)))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| StorageError::Backend(format!("init tables: commit: {}", e)))?;
-        Ok(())
+        .await?;
+        tx.commit().await
     }
 
     /// Run an async operation for the sync storage API, on whatever kind of
@@ -697,6 +755,91 @@ impl ObjectStore for PostgresStorage {
 
             Ok(id)
         })
+    }
+
+    /// One multi-row INSERT per chunk, all in one transaction: callers such as
+    /// merge write a batch as a unit, and the trait's default made one
+    /// independent round trip per object.
+    fn batch_put_objects(&self, objs: &[Object]) -> Result<Vec<ObjectId>, StorageError> {
+        // Each row is two parameters ($1 is the tenant), well under Postgres's
+        // 65,535 per statement.
+        const CHUNK: usize = 1000;
+        let rows: Vec<(ObjectId, serde_json::Value)> = objs
+            .iter()
+            .map(|obj| {
+                serde_json::to_value(obj)
+                    .map(|data| (obj.id(), data))
+                    .map_err(|e| StorageError::Serialization(e.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.block_on(async {
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| StorageError::Backend(format!("begin batch put: {e}")))?;
+            for chunk in rows.chunks(CHUNK) {
+                let ids: Vec<&[u8]> = chunk
+                    .iter()
+                    .map(|(id, _)| id.as_bytes().as_slice())
+                    .collect();
+                let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                    Vec::with_capacity(1 + chunk.len() * 2);
+                params.push(&self.tenant_id);
+                let mut values = Vec::with_capacity(chunk.len());
+                for (i, (_, data)) in chunk.iter().enumerate() {
+                    values.push(format!("($1, ${}, ${})", 2 + i * 2, 3 + i * 2));
+                    params.push(&ids[i]);
+                    params.push(data);
+                }
+                tx.execute(
+                    &format!(
+                        "INSERT INTO objects (tenant_id, id, data) VALUES {}
+                         ON CONFLICT (tenant_id, id) DO NOTHING",
+                        values.join(", ")
+                    ),
+                    &params,
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("batch put objects: {e}")))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|e| StorageError::Backend(format!("commit batch put: {e}")))?;
+            Ok(())
+        })?;
+        Ok(rows.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// One query for the whole batch, results in the order asked.
+    fn batch_get_objects(&self, ids: &[ObjectId]) -> Result<Vec<Option<Object>>, StorageError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: Vec<Vec<u8>> = ids.iter().map(|id| id.as_bytes().to_vec()).collect();
+        let found = self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let rows = client
+                .query(
+                    "SELECT id, data FROM objects WHERE tenant_id = $1 AND id = ANY($2)",
+                    &[&self.tenant_id, &wanted],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("batch get objects: {e}")))?;
+            let mut found = std::collections::HashMap::with_capacity(rows.len());
+            for row in rows {
+                let id: Vec<u8> = row.get("id");
+                let data: serde_json::Value = row.get("data");
+                let obj: Object = serde_json::from_value(data)
+                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                found.insert(id, obj);
+            }
+            Ok(found)
+        })?;
+        Ok(wanted.iter().map(|id| found.get(id).cloned()).collect())
     }
 
     fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
@@ -1157,25 +1300,30 @@ impl RefStore for PostgresStorage {
         let ns = namespace.as_str().to_string();
         let tid = self.tenant_id.clone();
         self.block_on(async {
-            let client = self
-                .pool
-                .get()
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            // Refs and the namespace row go together or not at all; separately,
+            // a failure in between left refs deleted under a namespace that
+            // still existed.
+            let tx = client
+                .transaction()
                 .await
-                .map_err(|e| StorageError::Backend(e.to_string()))?;
-            client
-                .execute(
-                    "DELETE FROM refs WHERE tenant_id = $1 AND namespace = $2",
-                    &[&tid, &ns],
-                )
-                .await
-                .map_err(|e| StorageError::Backend(e.to_string()))?;
-            let rows = client
+                .map_err(|e| StorageError::Backend(format!("begin delete namespace: {e}")))?;
+            tx.execute(
+                "DELETE FROM refs WHERE tenant_id = $1 AND namespace = $2",
+                &[&tid, &ns],
+            )
+            .await
+            .map_err(|e| StorageError::Backend(format!("delete namespace refs: {e}")))?;
+            let rows = tx
                 .execute(
                     "DELETE FROM namespaces WHERE tenant_id = $1 AND name = $2",
                     &[&tid, &ns],
                 )
                 .await
-                .map_err(|e| StorageError::Backend(e.to_string()))?;
+                .map_err(|e| StorageError::Backend(format!("delete namespace: {e}")))?;
+            tx.commit()
+                .await
+                .map_err(|e| StorageError::Backend(format!("commit delete namespace: {e}")))?;
             Ok(rows > 0)
         })
     }
@@ -1553,16 +1701,21 @@ impl EpochStore for PostgresStorage {
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
-
-            let row = client
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            // One transaction with the epoch row locked: a seal waits for it,
+            // so a commit can't join an epoch that is being sealed, and the
+            // status check can't go stale before the write.
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| StorageError::Backend(format!("begin assoc: {e}")))?;
+            let row = tx
                 .query_opt(
-                    "SELECT status FROM epochs WHERE tenant_id = $1 AND id = $2",
+                    "SELECT status FROM epochs WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
                     &[&self.tenant_id, &epoch_id],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("assoc lookup: {}", e)))?;
-
             match row.as_ref().map(|r| r.get::<_, String>("status")) {
                 None => {
                     return Err(StorageError::Backend(format!(
@@ -1577,27 +1730,29 @@ impl EpochStore for PostgresStorage {
                 }
                 _ => {}
             }
-
-            client
+            let joined = tx
                 .execute(
-                    "UPDATE commits SET epoch_id = $1 WHERE tenant_id = $2 AND id = $3",
+                    "UPDATE commits SET epoch_id = $1
+                     WHERE tenant_id = $2 AND id = $3 AND epoch_id IS DISTINCT FROM $1",
                     &[&epoch_id, &self.tenant_id, &commit_id.as_bytes().as_slice()],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("set commit epoch: {}", e)))?;
-
-            client
-                .execute(
-                    "UPDATE epochs SET commit_count = (
-                         SELECT COUNT(*) FROM commits
-                          WHERE tenant_id = $1 AND epoch_id = epochs.id
-                     )
+            // A running count, bumped only when the commit actually joins (the
+            // old full COUNT(*) per commit grew with the epoch). Sealing writes
+            // the exact count.
+            if joined > 0 {
+                tx.execute(
+                    "UPDATE epochs SET commit_count = commit_count + 1
                      WHERE tenant_id = $1 AND id = $2",
                     &[&self.tenant_id, &epoch_id],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("update commit_count: {}", e)))?;
-
+            }
+            tx.commit()
+                .await
+                .map_err(|e| StorageError::Backend(format!("commit assoc: {e}")))?;
             Ok(())
         })
     }
@@ -1672,34 +1827,34 @@ impl SessionStore for PostgresStorage {
     ) -> Result<(), StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;
-
-            let row = client
+            // One conditional UPDATE, so two callers ending one session can't
+            // both pass a status check; exactly one ends it.
+            let ended = client
+                .execute(
+                    "UPDATE sessions SET status = $1, ended_at = $2
+                     WHERE tenant_id = $3 AND id = $4 AND status = 'Active'",
+                    &[
+                        &status.as_str(),
+                        &ended_at.to_rfc3339(),
+                        &self.tenant_id,
+                        &id,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("end session: {}", e)))?;
+            if ended > 0 {
+                return Ok(());
+            }
+            let exists = client
                 .query_opt(
-                    "SELECT status FROM sessions WHERE tenant_id = $1 AND id = $2",
+                    "SELECT 1 FROM sessions WHERE tenant_id = $1 AND id = $2",
                     &[&self.tenant_id, &id],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("end session lookup: {}", e)))?;
-
-            match row.as_ref().map(|r| r.get::<_, String>("status")) {
+            match exists {
+                Some(_) => Err(StorageError::SessionEnded { id: id.to_string() }),
                 None => Err(StorageError::Backend(format!("session not found: {}", id))),
-                Some(s) if s != "Active" => Err(StorageError::SessionEnded { id: id.to_string() }),
-                _ => {
-                    client
-                        .execute(
-                            "UPDATE sessions SET status = $1, ended_at = $2
-                             WHERE tenant_id = $3 AND id = $4",
-                            &[
-                                &status.as_str(),
-                                &ended_at.to_rfc3339(),
-                                &self.tenant_id,
-                                &id,
-                            ],
-                        )
-                        .await
-                        .map_err(|e| StorageError::Backend(format!("end session: {}", e)))?;
-                    Ok(())
-                }
             }
         })
     }
@@ -1777,16 +1932,20 @@ impl SessionStore for PostgresStorage {
         session_id: &str,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
-
-            let row = client
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            // As set_commit_epoch: one transaction, the session row locked so
+            // ending the session waits and the status check can't go stale.
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| StorageError::Backend(format!("begin assoc: {e}")))?;
+            let row = tx
                 .query_opt(
-                    "SELECT status FROM sessions WHERE tenant_id = $1 AND id = $2",
+                    "SELECT status FROM sessions WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
                     &[&self.tenant_id, &session_id],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("assoc lookup: {}", e)))?;
-
             match row.as_ref().map(|r| r.get::<_, String>("status")) {
                 None => {
                     return Err(StorageError::Backend(format!(
@@ -1801,10 +1960,10 @@ impl SessionStore for PostgresStorage {
                 }
                 _ => {}
             }
-
-            client
+            let joined = tx
                 .execute(
-                    "UPDATE commits SET session_id = $1 WHERE tenant_id = $2 AND id = $3",
+                    "UPDATE commits SET session_id = $1
+                     WHERE tenant_id = $2 AND id = $3 AND session_id IS DISTINCT FROM $1",
                     &[
                         &session_id,
                         &self.tenant_id,
@@ -1813,13 +1972,9 @@ impl SessionStore for PostgresStorage {
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("set commit session: {}", e)))?;
-
-            client
-                .execute(
-                    "UPDATE sessions SET commit_count = (
-                         SELECT COUNT(*) FROM commits
-                          WHERE tenant_id = $1 AND session_id = sessions.id
-                     )
+            if joined > 0 {
+                tx.execute(
+                    "UPDATE sessions SET commit_count = commit_count + 1
                      WHERE tenant_id = $1 AND id = $2",
                     &[&self.tenant_id, &session_id],
                 )
@@ -1827,7 +1982,10 @@ impl SessionStore for PostgresStorage {
                 .map_err(|e| {
                     StorageError::Backend(format!("update session commit_count: {}", e))
                 })?;
-
+            }
+            tx.commit()
+                .await
+                .map_err(|e| StorageError::Backend(format!("commit assoc: {e}")))?;
             Ok(())
         })
     }
@@ -2271,6 +2429,61 @@ fn pg_priority_from_i32(
     }
 }
 
+/// Write every field of `reminder` over its row, on a plain connection or
+/// inside a transaction. Returns the rows changed: 0 means no such reminder.
+async fn write_reminder<C: deadpool_postgres::GenericClient + Sync>(
+    client: &C,
+    tenant_id: &str,
+    reminder: &agentstategraph_reminders::Reminder,
+) -> Result<u64, StorageError> {
+    let json = |what: &str, v: Result<String, serde_json::Error>| {
+        v.map_err(|e| StorageError::Serialization(format!("{what}: {e}")))
+    };
+    let commands_json = json("commands", serde_json::to_string(&reminder.commands))?;
+    let refs_json = json("refs", serde_json::to_string(&reminder.refs))?;
+    let schedule_json = reminder
+        .schedule
+        .as_ref()
+        .map(|s| json("schedule", serde_json::to_string(s)))
+        .transpose()?;
+    let executions_json = json("executions", serde_json::to_string(&reminder.executions))?;
+    let tags_json = json("tags", serde_json::to_string(&reminder.tags))?;
+    let priority = pg_priority_to_i32(reminder.priority);
+    let status = pg_reminder_status_to_str(reminder.status).to_string();
+    let due_at = reminder.due_at.to_rfc3339();
+    let created_at = reminder.created_at.to_rfc3339();
+    let snoozed_until = reminder.snoozed_until.map(|t| t.to_rfc3339());
+    client
+        .execute(
+            "UPDATE reminders SET
+                title = $3, instructions = $4, commands = $5, refs = $6,
+                priority = $7, due_at = $8, schedule = $9, autonomous = $10,
+                created_by = $11, created_at = $12, status = $13,
+                snoozed_until = $14, executions = $15, tags = $16
+             WHERE tenant_id = $1 AND id = $2",
+            &[
+                &tenant_id,
+                &reminder.id,
+                &reminder.title,
+                &reminder.instructions,
+                &commands_json,
+                &refs_json,
+                &priority,
+                &due_at,
+                &schedule_json,
+                &reminder.autonomous,
+                &reminder.created_by,
+                &created_at,
+                &status,
+                &snoozed_until,
+                &executions_json,
+                &tags_json,
+            ],
+        )
+        .await
+        .map_err(|e| StorageError::Backend(format!("update reminder: {e}")))
+}
+
 fn pg_row_to_reminder(
     row: &tokio_postgres::Row,
 ) -> Result<agentstategraph_reminders::Reminder, StorageError> {
@@ -2430,74 +2643,67 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         &self,
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
-        let commands_json = serde_json::to_string(&reminder.commands).map_err(|e| {
-            agentstategraph_reminders::ReminderError::Store(format!("commands: {e}"))
-        })?;
-        let refs_json = serde_json::to_string(&reminder.refs)
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("refs: {e}")))?;
-        let schedule_json = reminder
-            .schedule
-            .as_ref()
-            .map(|s| serde_json::to_string(s))
-            .transpose()
-            .map_err(|e| {
-                agentstategraph_reminders::ReminderError::Store(format!("schedule: {e}"))
-            })?;
-        let executions_json = serde_json::to_string(&reminder.executions).map_err(|e| {
-            agentstategraph_reminders::ReminderError::Store(format!("executions: {e}"))
-        })?;
-        let tags_json = serde_json::to_string(&reminder.tags)
-            .map_err(|e| agentstategraph_reminders::ReminderError::Store(format!("tags: {e}")))?;
-        let priority = pg_priority_to_i32(reminder.priority);
-        let status = pg_reminder_status_to_str(reminder.status).to_string();
-        let due_at = reminder.due_at.to_rfc3339();
-        let created_at = reminder.created_at.to_rfc3339();
-        let snoozed_until = reminder.snoozed_until.map(|t| t.to_rfc3339());
-        let id = reminder.id.clone();
+        let written = self
+            .block_on(async {
+                let client = self.pool.get().await.map_err(conn_error)?;
+                write_reminder(&client, &self.tenant_id, reminder).await
+            })
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(e.to_string()))?;
+        if written == 0 {
+            return Err(agentstategraph_reminders::ReminderError::NotFound(
+                reminder.id.clone(),
+            ));
+        }
+        Ok(())
+    }
 
-        self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
-            let n = client
-                .execute(
-                    "UPDATE reminders SET
-                        title = $3, instructions = $4, commands = $5, refs = $6,
-                        priority = $7, due_at = $8, schedule = $9, autonomous = $10,
-                        created_by = $11, created_at = $12, status = $13,
-                        snoozed_until = $14, executions = $15, tags = $16
-                     WHERE tenant_id = $1 AND id = $2",
-                    &[
-                        &self.tenant_id,
-                        &id,
-                        &reminder.title,
-                        &reminder.instructions,
-                        &commands_json,
-                        &refs_json,
-                        &priority,
-                        &due_at,
-                        &schedule_json,
-                        &reminder.autonomous,
-                        &reminder.created_by,
-                        &created_at,
-                        &status,
-                        &snoozed_until,
-                        &executions_json,
-                        &tags_json,
-                    ],
-                )
-                .await
-                .map_err(|e| StorageError::Backend(format!("update reminder: {e}")))?;
-            if n == 0 {
-                return Err(StorageError::Backend(format!("reminder {id} not found")));
-            }
-            Ok(())
-        })
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                agentstategraph_reminders::ReminderError::NotFound(reminder.id.clone())
-            } else {
-                agentstategraph_reminders::ReminderError::Store(e.to_string())
-            }
-        })
+    /// Compare and write in one transaction with the row locked, so no other
+    /// writer can change the reminder in between. The trait's default compared
+    /// and wrote separately: six racing updates from one snapshot all "won".
+    fn update_if_unchanged(
+        &self,
+        expected: &agentstategraph_reminders::Reminder,
+        new: &agentstategraph_reminders::Reminder,
+    ) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        enum Outcome {
+            Missing,
+            Changed,
+            Written,
+        }
+        let outcome = self
+            .block_on(async {
+                let mut client = self.pool.get().await.map_err(conn_error)?;
+                let tx = client
+                    .transaction()
+                    .await
+                    .map_err(|e| StorageError::Backend(format!("begin reminder update: {e}")))?;
+                let row = tx
+                    .query_opt(
+                        "SELECT * FROM reminders WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+                        &[&self.tenant_id, &expected.id],
+                    )
+                    .await
+                    .map_err(|e| StorageError::Backend(format!("get reminder: {e}")))?;
+                let Some(row) = row else {
+                    return Ok(Outcome::Missing);
+                };
+                if !agentstategraph_reminders::same_reminder(&pg_row_to_reminder(&row)?, expected) {
+                    return Ok(Outcome::Changed); // dropping the transaction rolls it back
+                }
+                write_reminder(&tx, &self.tenant_id, new).await?;
+                tx.commit()
+                    .await
+                    .map_err(|e| StorageError::Backend(format!("commit reminder update: {e}")))?;
+                Ok(Outcome::Written)
+            })
+            .map_err(|e| agentstategraph_reminders::ReminderError::Store(e.to_string()))?;
+        match outcome {
+            Outcome::Missing => Err(agentstategraph_reminders::ReminderError::NotFound(
+                expected.id.clone(),
+            )),
+            Outcome::Changed => Ok(false),
+            Outcome::Written => Ok(true),
+        }
     }
 
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {

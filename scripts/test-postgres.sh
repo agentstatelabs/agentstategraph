@@ -130,8 +130,8 @@ echo "test-postgres: TEST_DATABASE_URL=$TEST_DATABASE_URL"
 
 if [ "$#" -eq 0 ]; then
   cargo test -p agentstategraph-storage --features postgres,memory \
-    --test conformance --test postgres_runtime --test postgres_tenant_isolation \
-    --test postgres_taint
+    --test conformance --test postgres_runtime --test postgres_schema \
+    --test postgres_tenant_isolation --test postgres_taint
   cargo test -p agentstategraph --test backend_conformance
   cargo test -p agentstategraph-mcp --test postgres_binary
 elif [ "$1" = "--workspace" ]; then
