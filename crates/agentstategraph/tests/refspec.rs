@@ -104,3 +104,39 @@ fn ambiguous_prefix_errors() {
         "expected some 1-hex-digit prefix to be ambiguous"
     );
 }
+
+/// A repository limited to branch names refuses commit ids and prefixes,
+/// which resolve over every namespace's commits, and its forks keep the
+/// limit. Branch names still resolve, including one that looks like hex.
+#[test]
+fn branch_refs_only_refuses_commit_ids() {
+    let r = repo().with_branch_refs_only();
+    let c = commit(&r, "/x", 1, "c1");
+    let hex = c.to_hex();
+    for spec in [hex.clone(), format!("sg_{hex}"), hex[..10].to_string()] {
+        match r.get_json(&spec, "/x") {
+            Err(RepoError::CommitRefNotAllowed(s)) => assert_eq!(s, spec),
+            other => panic!("{spec}: {other:?}"),
+        }
+    }
+    assert!(matches!(
+        r.get_json("no-such-branch", "/x"),
+        Err(RepoError::BranchNotFound(_))
+    ));
+    assert_eq!(r.get_json("main", "/x").unwrap(), serde_json::json!(1));
+    r.branch("abc123", "main").unwrap();
+    assert_eq!(r.get_json("abc123", "/x").unwrap(), serde_json::json!(1));
+
+    let fork = r.fork_namespace(agentstategraph_core::Namespace::default_ns());
+    assert!(matches!(
+        fork.get_json(&hex, "/x"),
+        Err(RepoError::CommitRefNotAllowed(_))
+    ));
+    // Without the limit, the same id resolves.
+    let open = repo();
+    let c = commit(&open, "/x", 1, "c1");
+    assert_eq!(
+        open.get_json(&c.to_hex(), "/x").unwrap(),
+        serde_json::json!(1)
+    );
+}

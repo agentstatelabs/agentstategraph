@@ -47,7 +47,7 @@ async fn extra_routes_need_a_key_when_auth_is_on() {
         .register_key(ApiKey {
             id: String::new(),
             key: "asg_extra_routes_test_key_0000000000".into(),
-            tenant_id: "t1".into(),
+            tenant_id: "default".into(),
             name: "test".into(),
             plan: "free".into(),
             enabled: true,
@@ -60,13 +60,7 @@ async fn extra_routes_need_a_key_when_auth_is_on() {
             last_used_at: None,
         })
         .unwrap();
-    let base = serve(http::build_router_with(
-        repo,
-        Arc::clone(&mgr),
-        0,
-        Some(extra()),
-    ))
-    .await;
+    let base = serve(http::build_router_with(Arc::clone(&mgr), 0, Some(extra()))).await;
     let client = reqwest::Client::new();
     let get = |key: Option<&'static str>| {
         let mut req = client.get(format!("{base}/api/code/symbols"));
@@ -101,7 +95,7 @@ async fn extra_routes_count_against_the_rate_limit() {
     let mgr = TenantManager::single_tenant(repo.clone());
     // One request a minute, with the floor burst of five: the sixth inside
     // a minute is refused.
-    let base = serve(http::build_router_with(repo, mgr, 1, Some(extra()))).await;
+    let base = serve(http::build_router_with(mgr, 1, Some(extra()))).await;
     let client = reqwest::Client::new();
     let mut statuses = Vec::new();
     for _ in 0..6 {

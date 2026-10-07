@@ -59,7 +59,7 @@ async fn asg_with_proxy(asd: SocketAddr) -> SocketAddr {
     mgr.register_key(ApiKey {
         id: String::new(),
         key: KEY.into(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "test".into(),
         plan: "free".into(),
         enabled: true,
@@ -73,7 +73,6 @@ async fn asg_with_proxy(asd: SocketAddr) -> SocketAddr {
     })
     .unwrap();
     serve(http::build_router_with(
-        repo,
         mgr,
         0,
         Some(http::asd_proxy_router(format!("http://{asd}"))),

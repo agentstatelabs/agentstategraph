@@ -400,7 +400,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     "      --database-url <URL>  Postgres connection URL (required for --storage postgres)"
                 );
                 eprintln!(
-                    "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
+                    "      --tenant <ID>     Tenant this server serves: its Postgres partition, and the tenant non-admin API keys must belong to (default: \"default\")"
                 );
                 eprintln!(
                     "      --namespace <ID>  Default namespace for ref isolation (default: \"default\"; env ASG_NAMESPACE)"
@@ -624,13 +624,14 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         Some(args.keys_file.as_str())
                     };
-                    let tenant_mgr = match TenantManager::multi_tenant(repo.clone(), kf) {
-                        Ok(mgr) => mgr,
-                        Err(e) => {
-                            eprintln!("Error: {e}");
-                            std::process::exit(2);
-                        }
-                    };
+                    let tenant_mgr =
+                        match TenantManager::multi_tenant_for(repo.clone(), kf, &args.tenant_id) {
+                            Ok(mgr) => mgr,
+                            Err(e) => {
+                                eprintln!("Error: {e}");
+                                std::process::exit(2);
+                            }
+                        };
 
                     let provided = args.initial_admin_key.clone();
                     if let Some(k) = provided {
@@ -667,7 +668,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let extra = args.asd_url.map(http::asd_proxy_router);
                 #[cfg(not(feature = "providers"))]
                 let extra = None;
-                let app = http::build_router_with(repo, tenant_mgr, args.rate_limit_rpm, extra);
+                let app = http::build_router_with(tenant_mgr, args.rate_limit_rpm, extra);
                 let app = http::with_origin_policy(app, &origin_policy);
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
