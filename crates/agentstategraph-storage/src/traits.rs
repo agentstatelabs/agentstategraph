@@ -284,6 +284,17 @@ pub struct GcSweep {
     pub deleted_target: i64,
 }
 
+/// Default GC grace period for the SQL backends: a sweep spares unreachable
+/// objects written more recently than this. Every write stores its new
+/// objects before it commits them, so without it a sweep that runs in between
+/// takes a write in flight. See `with_gc_grace` on each backend.
+pub const DEFAULT_GC_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// A stored object that is stored again has its write time refreshed once it
+/// is older than this, so it falls inside any grace period at least this long
+/// (and an object stored over and over isn't rewritten each time).
+pub const GC_FRESHEN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Namespace recorded for a distilled commit whose namespace could not be
 /// established.
 ///

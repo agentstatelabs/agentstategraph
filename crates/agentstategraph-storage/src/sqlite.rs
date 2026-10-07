@@ -19,9 +19,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
-    CommitStore, EpochStore, GcReachability, GcSweep, HISTORY_NAMESPACE_UNKNOWN,
-    HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore, SessionStore, StorageError,
-    StoreShape, TableBytes, TaintStore, VacuumStats,
+    CommitStore, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability, GcSweep,
+    HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
+    SessionStore, StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -37,6 +37,9 @@ pub struct SqliteStorage {
     /// fail loudly on timeout) instead of running inside the sweep's
     /// transaction, where a rollback would discard them after they returned Ok.
     gc_conn: Mutex<Option<Connection>>,
+    /// How recently written an unreachable object must be for a GC sweep to
+    /// spare it. See [`SqliteStorage::with_gc_grace`].
+    gc_grace: std::time::Duration,
 }
 
 impl SqliteStorage {
@@ -71,6 +74,7 @@ impl SqliteStorage {
             conn: Mutex::new(conn),
             path: Some(path),
             gc_conn: Mutex::new(None),
+            gc_grace: DEFAULT_GC_GRACE,
         };
         storage.init_tables()?;
         Ok(storage)
@@ -84,9 +88,27 @@ impl SqliteStorage {
             conn: Mutex::new(conn),
             path: None,
             gc_conn: Mutex::new(None),
+            gc_grace: DEFAULT_GC_GRACE,
         };
         storage.init_tables()?;
         Ok(storage)
+    }
+
+    /// Set how recently written an unreachable object must be for a GC sweep
+    /// to spare it (default [`DEFAULT_GC_GRACE`]).
+    ///
+    /// Every write stores its new objects before it commits them. A sweep
+    /// locks writers out while it runs, but a write that stored its objects
+    /// before the sweep started would find them gone when it commits; the
+    /// grace period spares them. Storing an object again refreshes its write
+    /// time once it is over [`GC_FRESHEN_AFTER`] old, so a write that dedups
+    /// onto an old unreachable object is covered too. A grace under that
+    /// narrows the protection; tests use zero to see garbage go at once. The
+    /// reachability report and dry run ignore the grace: they count every
+    /// unreachable object.
+    pub fn with_gc_grace(mut self, grace: std::time::Duration) -> Self {
+        self.gc_grace = grace;
+        self
     }
 
     fn init_tables(&self) -> Result<(), StorageError> {
@@ -97,9 +119,12 @@ impl SqliteStorage {
 
         conn.execute_batch(
             "
+            -- `written_at` (Unix milliseconds) is when the object was last
+            -- stored; a GC sweep spares recent ones. See with_gc_grace.
             CREATE TABLE IF NOT EXISTS objects (
-                id   BLOB PRIMARY KEY,
-                data BLOB NOT NULL
+                id         BLOB PRIMARY KEY,
+                data       BLOB NOT NULL,
+                written_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS commits (
@@ -335,6 +360,29 @@ impl SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("add milestone git_sha: {}", e)))?;
         }
 
+        // Migration-safe add of objects.written_at. Existing objects read 0,
+        // written long ago, so a sweep treats them exactly as before.
+        let object_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(objects)")
+                .map_err(|e| StorageError::Backend(format!("pragma objects: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| StorageError::Backend(format!("pragma query: {}", e)))?;
+            let mut cols = Vec::new();
+            for r in rows {
+                cols.push(r.map_err(|e| StorageError::Backend(format!("pragma row: {}", e)))?);
+            }
+            cols
+        };
+        if !object_cols.iter().any(|c| c == "written_at") {
+            conn.execute(
+                "ALTER TABLE objects ADD COLUMN written_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| StorageError::Backend(format!("add objects written_at: {}", e)))?;
+        }
+
         // Migration-safe add of leaf_index_refs.root. Sets built before it
         // read NULL, so the repository rebuilds each one on its next search.
         let leaf_ref_cols: Vec<String> = {
@@ -539,8 +587,13 @@ impl ObjectStore for SqliteStorage {
 
         let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT OR IGNORE INTO objects (id, data) VALUES (?1, ?2)",
-            params![id.as_bytes().as_slice(), data],
+            PUT_OBJECT,
+            params![
+                id.as_bytes().as_slice(),
+                data,
+                now_millis(),
+                freshen_after_millis()
+            ],
         )
         .map_err(|e| StorageError::Backend(format!("put object: {}", e)))?;
 
@@ -770,15 +823,21 @@ impl ObjectStore for SqliteStorage {
         let mut ids = Vec::with_capacity(objs.len());
         {
             let mut stmt = tx
-                .prepare_cached("INSERT OR IGNORE INTO objects (id, data) VALUES (?1, ?2)")
+                .prepare_cached(PUT_OBJECT)
                 .map_err(|e| StorageError::Backend(format!("prepare: {}", e)))?;
 
+            let now = now_millis();
             for obj in objs {
                 let id = obj.id();
                 let data = serde_json::to_vec(obj)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                stmt.execute(params![id.as_bytes().as_slice(), data])
-                    .map_err(|e| StorageError::Backend(format!("batch put: {}", e)))?;
+                stmt.execute(params![
+                    id.as_bytes().as_slice(),
+                    data,
+                    now,
+                    freshen_after_millis()
+                ])
+                .map_err(|e| StorageError::Backend(format!("batch put: {}", e)))?;
                 ids.push(id);
             }
         }
@@ -1216,7 +1275,7 @@ impl CommitStore for SqliteStorage {
                 .lock()
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             if let Some(gc_conn) = gc.as_ref() {
-                return gc_sweep_locked(gc_conn, roots, batch);
+                return gc_sweep_locked(gc_conn, roots, batch, self.gc_grace);
             }
         }
         let conn = self.lock_conn()?;
@@ -1232,7 +1291,7 @@ impl CommitStore for SqliteStorage {
             conn.execute_batch("BEGIN IMMEDIATE")
                 .map_err(|e| StorageError::Backend(format!("gc sweep lock: {}", e)))?;
         }
-        let result = gc_sweep_locked(&conn, roots, batch);
+        let result = gc_sweep_locked(&conn, roots, batch, self.gc_grace);
         if own_lock {
             match &result {
                 Ok(_) => conn
@@ -1817,6 +1876,23 @@ impl RefStore for SqliteStorage {
     }
 }
 
+/// Store an object (`?1` id, `?2` data, `?3` now and `?4`
+/// [`GC_FRESHEN_AFTER`], in milliseconds). An
+/// object already stored keeps its row, but its write time is refreshed once
+/// it is older than [`GC_FRESHEN_AFTER`], so a GC sweep's grace period covers
+/// a write that dedups onto it.
+const PUT_OBJECT: &str = "INSERT INTO objects (id, data, written_at) VALUES (?1, ?2, ?3) \
+     ON CONFLICT(id) DO UPDATE SET written_at = excluded.written_at \
+     WHERE objects.written_at < excluded.written_at - ?4";
+
+fn freshen_after_millis() -> i64 {
+    GC_FRESHEN_AFTER.as_millis() as i64
+}
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Max bound parameters per statement — well under SQLite's default
 /// `SQLITE_MAX_VARIABLE_NUMBER` (999) so the GC bulk statements never overflow.
 const GC_SQL_CHUNK: usize = 400;
@@ -1980,12 +2056,16 @@ fn gc_pending_roots(
 }
 
 /// The body of a sweep. The caller holds the write lock, so nothing can commit
-/// between the mark and the last delete.
+/// between the mark and the last delete. Objects written within `grace` of
+/// now are spared: a write that stored its tree before the lock was taken
+/// commits it after the lock is released.
 fn gc_sweep_locked(
     conn: &Connection,
     roots: &[ObjectId],
     batch: i64,
+    grace: std::time::Duration,
 ) -> Result<GcSweep, StorageError> {
+    let cutoff = now_millis().saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
     let total_before: i64 = conn
         .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
         .map_err(|e| StorageError::Backend(format!("gc sweep count: {}", e)))?;
@@ -2002,9 +2082,14 @@ fn gc_sweep_locked(
     gc_build_mark(conn, &roots, batch)?;
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS gc_dead (id BLOB PRIMARY KEY); \
-         DELETE FROM gc_dead; \
-         INSERT INTO gc_dead (id) \
-           SELECT o.id FROM objects o LEFT JOIN gc_mark m ON o.id = m.id WHERE m.id IS NULL;",
+         DELETE FROM gc_dead;",
+    )
+    .map_err(|e| StorageError::Backend(format!("gc dead set: {}", e)))?;
+    conn.execute(
+        "INSERT INTO gc_dead (id) \
+           SELECT o.id FROM objects o LEFT JOIN gc_mark m ON o.id = m.id \
+           WHERE m.id IS NULL AND o.written_at < ?1",
+        params![cutoff],
     )
     .map_err(|e| StorageError::Backend(format!("gc dead set: {}", e)))?;
 
