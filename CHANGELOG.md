@@ -49,6 +49,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **A keys file that couldn't be parsed was ignored, and could then be overwritten.** With `--initial-admin-key`, the server rewrote it holding only the bootstrap key, and every other key was lost. A keys file that can't be read now stops the server with an error, and the file is left as it was.
 - **The keys file was written in place, readable by other users, and its write errors were ignored.** It is now written to a temp file created owner-only (`0600`), flushed and renamed over the old one. A change that can't be saved fails the admin request (`500`) and doesn't happen. Before, it took effect in memory only, so a revoked key came back after a restart.
 
+### Documentation
+- **The docs no longer call namespaces an isolation boundary.** A namespace is a separate set of branches. Namespaces share the store's commits, a commit id reaches across them, and MCP tools work in any namespace. The Namespaces guide now says what a namespace doesn't separate, and how to confine a client to one: an API key bound to the namespace. It also covers tenants. The `namespaces` example shows a commit id reaching across, and a branch-refs-only repository refusing it.
+- **Cross-namespace merge is documented as always refused**, which it is. The docs described it as allowed by policy, and the MCP tool's description said so too; the policy check isn't built yet.
+- **Policy is documented as advisory.** The docs said policy was enforced at commit time. Evaluating it returns a decision for the caller to act on. The built-in gate is MCP `commit_spec`.
+- **The four GC and history MCP tools are documented**, and tool counts are corrected to 77. Binding counts include Swift, and `TAINT_GUIDE.md` no longer says Postgres stores no taints.
+
 ## [v1.2.7] — 2026-10-02
 
 ### Fixed

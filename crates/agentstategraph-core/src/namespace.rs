@@ -1,9 +1,10 @@
-//! Namespace primitive — the storage-layer isolation boundary for branches.
+//! Namespace primitive — a separate set of branches in one store.
 //!
 //! A namespace scopes a set of branches. All ref operations are keyed on
 //! `(namespace, branch_name)` at the storage layer, so two namespaces can
-//! hold branches with the same name without collision, and cross-namespace
-//! access is denied unless a policy explicitly permits it.
+//! hold branches with the same name without collision. Namespaces share the
+//! store's objects and commits, so they partition branches rather than
+//! isolate data; cross-namespace merge is refused for now.
 //!
 //! The `"default"` namespace is the migration target for all pre-namespace
 //! branch data and the fallback for single-namespace deployments.

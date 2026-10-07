@@ -40,7 +40,7 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 73 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 77 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
@@ -120,7 +120,7 @@ OPTIONS:
   -h, --help            Print help with full endpoint list
 ```
 
-## Available Tools (73)
+## Available Tools (77)
 
 The most-used tools are listed below by category. See the full [MCP Tools Reference](/reference/mcp-tools/) for every tool with parameters and example payloads.
 
@@ -163,10 +163,10 @@ The most-used tools are listed below by category. See the full [MCP Tools Refere
 
 | Tool | Description |
 |------|-------------|
-| `agentstategraph_create_namespace` | Create a ref-isolation namespace (idempotent). |
+| `agentstategraph_create_namespace` | Create a namespace: a separate set of branches (idempotent). |
 | `agentstategraph_list_namespaces` | List all namespaces. |
 | `agentstategraph_delete_namespace` | Delete a namespace and its refs (not `default`). |
-| `agentstategraph_cross_namespace_merge` | Policy-gated merge across namespaces (deny-by-default). |
+| `agentstategraph_cross_namespace_merge` | Merge across namespaces (always refused for now). |
 
 ### Epochs
 
@@ -197,6 +197,15 @@ The most-used tools are listed below by category. See the full [MCP Tools Refere
 | `agentstategraph_stats` | Summary statistics: commits, branches, paths, epochs, agents. |
 | `agentstategraph_commit_graph` | Commit DAG with parents, agents, categories for visualization. |
 | `agentstategraph_intent_tree` | Intent decomposition hierarchy across agents. |
+
+### Maintenance
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_history` | Project-history metrics: velocity, intent mix, authorship, milestones. |
+| `agentstategraph_gc_dry_run` | Report what garbage collection would reclaim, changing nothing. |
+| `agentstategraph_gc_sweep` | Sweep under a retention policy; deletes only with `mutate: true`. |
+| `agentstategraph_gc_vacuum` | Compact the store after a sweep. |
 
 ### Plans & Tasks
 

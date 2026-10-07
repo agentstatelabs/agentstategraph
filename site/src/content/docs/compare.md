@@ -25,12 +25,12 @@ They are not competitors to each other. They occupy different layers of the stac
 | **Branching** | Subgraph isolation for parallelism; not a user-facing branch model | None — linear execution | O(1) branches, speculations, merges; first-class |
 | **Intent / reasoning** | No structured field | None | Per-commit: category, description, reasoning, confidence, authority, alternatives |
 | **Blame** | SQL queries over state history | None | Per-path; surfaces who, why, when, and at what confidence |
-| **Governance** | RBAC on the backend | None | Native policy (authorization + cost-of-change gating, Cedar / Rego / WASM evaluators, Ed25519 signing) and taint/quarantine, enforced at commit time |
-| **Multi-tenancy / isolation** | Per-workspace state | None | Namespaces — ref-layer isolation with composite `(namespace, name)` keys; deny-by-default cross-namespace merge |
+| **Governance** | RBAC on the backend | None | Policy (authorization + cost-of-change gating, Cedar / Rego / WASM evaluators, Ed25519 signing), advisory except where a gate uses it; taint/quarantine, enforced at commit time |
+| **Multi-tenancy / isolation** | Per-workspace state | None | Tenants partitioned in a shared Postgres database (one tenant per server). Namespaces give each project its own branches within a store; an API key bound to a namespace confines a client to it |
 | **Audit surface** | Encrypted state at rest, RBAC, history | Optional thread checkpoints | Tamper-evident sealed epochs, archivable and exportable as self-contained audit bundles |
-| **Language / bindings** | Rust + Go, backs the Terraform CLI | Python only | Rust core with Python, TypeScript, Go, WASM, and C FFI bindings |
-| **Primary interface** | `terraform` / `opentofu` CLI | Python library imports | MCP server (73 tools), library calls, HTTP REST, migrate CLI |
-| **Storage backends** | PostgreSQL | Process memory (+ optional checkpointer) | Memory, SQLite, Postgres (multi-tenant), IndexedDB (browser) |
+| **Language / bindings** | Rust + Go, backs the Terraform CLI | Python only | Rust core with Python, TypeScript, Go, Swift, .NET, WASM, and C FFI bindings |
+| **Primary interface** | `terraform` / `opentofu` CLI | Python library imports | MCP server (77 tools), library calls, HTTP REST, migrate CLI |
+| **Storage backends** | PostgreSQL | Process memory (+ optional checkpointer) | Memory, SQLite, Postgres (tenant-partitioned, TLS), IndexedDB (browser) |
 | **Closest analogy** | A better database under Terraform | A state machine inside your agent | Git for agent-era state |
 
 ## Why the differences matter

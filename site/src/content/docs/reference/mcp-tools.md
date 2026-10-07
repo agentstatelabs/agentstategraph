@@ -3,7 +3,7 @@ title: MCP Tools Reference
 description: Complete reference for all AgentStateGraph MCP tools with parameters and examples.
 ---
 
-> **73 tools** — 4 core state · 7 branching/speculation · 10 query/blame/explore · 4 namespaces · 7 epochs · 4 sessions · 10 plans/tasks · 12 policy · 8 taint · 7 reminders. Also available as HTTP REST endpoints via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
+> **77 tools** — 4 core state · 7 branching/speculation · 10 query/blame/explore · 4 namespaces · 7 epochs · 4 sessions · 4 maintenance (GC and history) · 10 plans/tasks · 12 policy · 8 taint · 7 reminders. Also available as HTTP REST endpoints via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
 >
 > **Namespace override:** the 17 ref-touching tools (`get`, `set`, `delete`, `branch`, `list_branches`, `merge`, `log`, `diff`, `speculate`, `query`, `blame`, `list_paths`, `get_tree`, `search`, `stats`, `commit_graph`, `intent_tree`) also accept an optional `namespace` field that overrides the server's configured namespace for that call. See [Namespaces](/guides/namespaces/).
 
@@ -219,7 +219,7 @@ Structured diff between two refs. Returns typed DiffOps, not text diffs.
 
 ## Namespaces
 
-Namespaces are ref-layer isolation boundaries. Branches in different namespaces are invisible to each other and can share names. See the [Namespaces guide](/guides/namespaces/) for the full model.
+Namespaces give each project its own set of branches. Branches in different namespaces can share names, and listing one namespace's branches doesn't show another's. They share the store's commits, so they aren't a security boundary, and MCP tools can work in any namespace. See the [Namespaces guide](/guides/namespaces/) for the full model.
 
 ### agentstategraph_create_namespace
 
@@ -270,7 +270,7 @@ Namespace 'globex' deleted (12 refs removed)
 
 ### agentstategraph_cross_namespace_merge
 
-Merge a branch from another namespace into a branch in the active namespace. Policy-gated and audited — **denied by default** when no `PolicyStore` is configured.
+Merge a branch from another namespace into a branch in the active namespace. **Always refused for now**: the policy check that would allow it isn't built yet.
 
 **Parameters:**
 
@@ -281,9 +281,9 @@ Merge a branch from another namespace into a branch in the active namespace. Pol
 | `target_branch` | string | no | `"main"` | Branch in the active namespace to merge into |
 | `intent_description` | string | yes | | Why this cross-namespace merge |
 
-**Example output (denied):**
+**Example output:**
 ```
-Denied: cross-namespace merge requires an active PolicyStore with a matching grant
+Error: cross-namespace merge denied: no PolicyStore configured
 ```
 
 ---
@@ -956,6 +956,112 @@ Get the intent decomposition tree. Shows how intents are broken down into sub-ta
   ],
   "total_commits": 47
 }
+```
+
+---
+
+## Maintenance
+
+These cover the whole store, every namespace included. Over HTTP, an API key bound to a namespace can't use them.
+
+### agentstategraph_history
+
+Project-history metrics from the distilled history tables: commit velocity, intent mix, authorship, and the milestone timeline.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `by` | string | no | `"day"` | Roll velocity up by `"day"` or `"week"` |
+| `milestones` | number | no | `50` | Max milestones on the timeline |
+| `refresh` | boolean | no | `true` | Distil new commits before reporting; `false` reads the tables as they are |
+| `store` | boolean | no | `false` | Attach the physical store shape (objects, commits, bytes) |
+| `namespace` | string | no | | Restrict every view to one namespace; omit for the whole store |
+
+**Example output:**
+```json
+{
+  "authorship": [{ "agent": "agent/planner", "commits": 3 }],
+  "intent_mix": [{ "category": "Refine", "commits": 3 }],
+  "milestones": [
+    {
+      "agent": "system",
+      "commit": "sg_7b65729bf3af",
+      "day": "2026-10-07",
+      "description": "Initialize empty state",
+      "kind": "checkpoint",
+      "namespace": "unattributed",
+      "timestamp": "2026-10-07T20:47:23.890165+00:00"
+    }
+  ],
+  "namespaces": ["unattributed"],
+  "totals": { "agents": 2, "commits": 4, "cursor": 4, "periods": 1 },
+  "velocity": { "by": "day", "series": [{ "commits": 4, "period": "2026-10-07" }] }
+}
+```
+
+---
+
+### agentstategraph_gc_dry_run
+
+Report what a garbage collection would reclaim, without changing anything. It won't call a sweep safe while any commit is undistilled, because the history tables wouldn't yet hold what the sweep removes.
+
+**Parameters:** none.
+
+**Example output:**
+```json
+{
+  "dry_run": true,
+  "mutates": false,
+  "safe": true,
+  "safety": { "reason": "all commits distilled — reclaimable objects' signal is captured in the history tables", "undistilled_commits": 0 },
+  "objects": { "live": 4, "reclaimable": 6, "reclaimable_pct": 60.0, "total": 10 },
+  "commits": { "total": 4 },
+  "bytes": { "current_total": 217088, "estimated_reclaimable": 2457, "estimated_post_vacuum": 214631, "dbstat_available": true },
+  "roots_walked": 1
+}
+```
+
+---
+
+### agentstategraph_gc_sweep
+
+Sweep under a retention policy. With `mutate: true` it **deletes** object versions no longer reachable from the kept commits. Branch tips, sealed epochs, milestones and the kept history are always preserved. It refuses to delete while any commit is undistilled. Without `mutate`, it previews.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `keep_recent` | number | no | `100` | Keep the N most recent commits' state in full |
+| `checkpoint_every` | number | no | `100` | Among older commits, keep every Kth as a checkpoint (`0` disables) |
+| `keep_milestones` | boolean | no | `true` | Keep milestone snapshots |
+| `mutate` | boolean | no | `false` | Must be `true` to delete; otherwise a preview |
+| `vacuum` | boolean | no | `false` | Compact the store after a deleting sweep |
+
+**Example output (preview):**
+```json
+{
+  "dry_run": true,
+  "mutated": false,
+  "safe": true,
+  "undistilled_commits": 0,
+  "keep_roots": 4,
+  "policy": { "keep_recent": 100, "checkpoint_every": 100, "keep_milestones": true },
+  "would_reclaim": { "live_objects": 9, "reclaimable_objects": 1, "reclaimable_pct": 10.0, "roots_walked": 4, "total_objects": 10 }
+}
+```
+
+---
+
+### agentstategraph_gc_vacuum
+
+Compact the store, returning freed space to the OS. Run it after a sweep.
+
+**Parameters:** none.
+
+**Example output:**
+```json
+{ "bytes_before": 217088, "bytes_after": 201216, "bytes_reclaimed": 15872 }
 ```
 
 ---

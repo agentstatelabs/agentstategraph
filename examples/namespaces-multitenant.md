@@ -1,8 +1,8 @@
-# Example: Multi-tenant isolation with namespaces
+# Example: Per-project branches with namespaces
 
-This walkthrough shows how one AgentStateGraph deployment serves two tenants
-(`acme` and `globex`) whose state is completely isolated, and how a controlled,
-policy-gated merge crosses the boundary.
+This walkthrough shows how one AgentStateGraph store holds two projects
+(`acme` and `globex`), each with its own branches, what namespaces don't
+separate, and how to confine a client to one of them.
 
 All snippets are MCP tool calls — paste them into any MCP-connected agent, or
 translate the tool name + arguments to the HTTP/library equivalent. Namespaces
@@ -30,7 +30,7 @@ agentstategraph-mcp --namespace acme
 ```json
 // agentstategraph_list_namespaces
 {}
-// → ["default", "acme", "globex"]
+// → ["acme", "default", "globex"]
 ```
 
 ## 2. Same branch name, two namespaces, zero collision
@@ -59,8 +59,8 @@ overrides the server default for that one call.
 }
 ```
 
-Reading the same path in each namespace returns each tenant's own value —
-neither can see the other's refs:
+Reading the same path in each namespace returns each project's own value,
+because each namespace has its own `main`:
 
 ```json
 // agentstategraph_get
@@ -71,10 +71,10 @@ neither can see the other's refs:
 { "path": "/billing/plan", "namespace": "globex" } // → "starter"
 ```
 
-## 3. Cross-namespace merge is denied by default
+## 3. Cross-namespace merge is refused
 
-Pulling a branch from another namespace is a privileged operation. Without a
-configured `PolicyStore` and a matching grant, it is refused:
+Merging a branch from another namespace is refused for now: the policy check
+that would allow it isn't built yet.
 
 ```json
 // agentstategraph_cross_namespace_merge
@@ -84,18 +84,30 @@ configured `PolicyStore` and a matching grant, it is refused:
   "target_branch": "main",
   "intent_description": "Reuse Acme's onboarding templates for Globex"
 }
-// → Denied: cross-namespace merge requires an active PolicyStore with a matching grant
+// → Error: cross-namespace merge denied: no PolicyStore configured
 ```
 
-This is the intended default: tenant data never crosses a boundary unless an
-operator has explicitly authorized it through policy. Same-namespace merges
-(`agentstategraph_merge`) never require a policy.
+Same-namespace merges (`agentstategraph_merge`) are plain merges.
+
+## 4. What namespaces don't separate
+
+Both namespaces share the store's objects and commits. A commit id names the
+same commit from any namespace, so a caller who knows one of Acme's commit ids
+can read it while working in `globex`. MCP tools take a per-call `namespace`,
+so an MCP client can work in any namespace: the MCP server trusts its client.
+
+To confine a client to one namespace, serve it over HTTP with an API key bound
+to that namespace (`namespace_id` when an admin creates the key). That key
+reads and writes only its namespace, names refs by branch only (commit ids get
+`403`), and can't use the store-wide GC and history endpoints.
 
 ## Key takeaways
 
-- One deployment, one database, full isolation — branches are keyed on a
+- One store, one set of branches per namespace: branches are keyed on a
   composite `(namespace, name)` primary key.
 - The per-call `namespace` field works on all 17 ref-touching tools.
-- Crossing a namespace boundary is deny-by-default and policy-gated.
+- Namespaces partition branches; they aren't a security boundary. An API key
+  bound to a namespace is what confines a client.
+- Cross-namespace merge is refused for now.
 
 See the [Namespaces guide](https://agentstategraph.dev/guides/namespaces/).
