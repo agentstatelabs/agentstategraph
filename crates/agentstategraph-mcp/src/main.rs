@@ -543,7 +543,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let app = if args.auth_enabled {
+                let tenant_mgr = if args.auth_enabled {
                     let kf = if args.keys_file.is_empty() {
                         None
                     } else {
@@ -582,17 +582,17 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                         );
                         std::process::exit(2);
                     }
-
-                    http::build_router_for_test(repo, tenant_mgr, args.rate_limit_rpm)
+                    tenant_mgr
                 } else {
-                    http::router_with_rate_limit(repo, args.rate_limit_rpm)
+                    TenantManager::single_tenant(repo.clone())
                 };
+                // The ASD proxy goes behind the same auth and rate limit as
+                // the API.
                 #[cfg(feature = "providers")]
-                let app = if let Some(asd_url) = args.asd_url {
-                    app.merge(http::asd_proxy_router(asd_url))
-                } else {
-                    app
-                };
+                let extra = args.asd_url.map(http::asd_proxy_router);
+                #[cfg(not(feature = "providers"))]
+                let extra = None;
+                let app = http::build_router_with(repo, tenant_mgr, args.rate_limit_rpm, extra);
                 let app = http::with_origin_policy(app, &origin_policy);
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;

@@ -90,6 +90,8 @@ build:
 test:
   stage: test
   script:
+    # The ASD proxy is behind the off-by-default `providers` feature.
+    - cargo test --locked -p agentstategraph-mcp --features providers --test asd_proxy
     - cargo test --workspace --locked --exclude agentstategraph-python
 
 # version-guard: on a release tag, prove every version the publish stage will

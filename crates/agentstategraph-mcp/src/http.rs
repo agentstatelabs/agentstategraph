@@ -121,6 +121,18 @@ pub fn build_router_for_test(
 }
 
 fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32) -> Router {
+    build_router_with(repo, tenant_mgr, rpm, None)
+}
+
+/// The API router, plus `extra` routes (the ASD proxy) served behind the
+/// same auth and rate limit as the API. Routes merged onto the router
+/// afterwards would get neither.
+pub fn build_router_with(
+    repo: Arc<Repository>,
+    tenant_mgr: Arc<TenantManager>,
+    rpm: u32,
+    extra: Option<Router>,
+) -> Router {
     // API routes that go through auth middleware
     let api_routes = Router::new()
         // State operations
@@ -172,12 +184,18 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
             tenant_mgr.clone(),
             auth::admin_auth_middleware,
         ))
-        .with_state(tenant_mgr);
+        .with_state(tenant_mgr.clone());
 
     let mut router = Router::new()
         .nest("/api", api_routes)
         .merge(public_routes)
         .merge(admin_routes);
+    if let Some(extra) = extra {
+        router = router.merge(extra.route_layer(middleware::from_fn_with_state(
+            tenant_mgr.clone(),
+            auth::auth_middleware,
+        )));
+    }
 
     // Apply the governor layer LAST so it runs FIRST in the request
     // lifecycle (tower layers execute in reverse insertion order).
@@ -189,6 +207,16 @@ fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32)
     }
 
     router
+}
+
+/// Whether a proxied path could leave ASD's `/api/v1`: URL parsing collapses
+/// `.` and `..` segments (also when percent-encoded) and reads `\` as `/`.
+pub fn escapes_proxy_root(path: &str) -> bool {
+    path.contains('\\')
+        || path.split('/').any(|segment| {
+            let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+            segment == "." || segment == ".."
+        })
 }
 
 // ─── Origins and Host names ─────────────────────────────────
@@ -1070,10 +1098,11 @@ fn parse_category(s: &str) -> IntentCategory {
 
 // ─── ASD Code Proxy ──────────────────────────────────────────
 
-/// Build a router that proxies `GET /api/code/*` to ASD's `<base>/api/v1/*`.
-/// Merge this into the main router when `--asd-url` is configured so the
-/// embedded Lens can reach ASD without CORS issues when both are served from
-/// the same origin (e.g. `your-hub --lens --asd-url http://localhost:8787`).
+/// Build a router that proxies `GET /api/code/*` to ASD's `<base>/api/v1/*`,
+/// so the embedded Lens can reach ASD from the same origin (e.g.
+/// `your-hub --lens --asd-url http://localhost:8787`). Pass it to
+/// [`build_router_with`], which puts it behind the API's auth and rate
+/// limit. No request header is forwarded, so an API key never reaches ASD.
 #[cfg(feature = "providers")]
 pub fn asd_proxy_router(asd_base_url: String) -> Router {
     Router::new()
@@ -1091,6 +1120,13 @@ async fn asd_proxy(
     let stripped = path_and_query
         .strip_prefix("/api/code")
         .unwrap_or(path_and_query);
+    if escapes_proxy_root(uri.path()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the proxied path may not contain . or .. segments or backslashes",
+        )
+            .into_response();
+    }
     let target = format!("{}/api/v1{}", base_url.trim_end_matches('/'), stripped);
     match client.get(&target).send().await {
         Ok(resp) => {
