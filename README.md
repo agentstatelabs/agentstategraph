@@ -172,7 +172,7 @@ and iOS Simulator arm64/x86_64 slices.
 - **Speculative execution** — O(1) branching, instant discard
 - **Multi-agent orchestration** — scoped sessions, delegation, intent trees
 - **Plans & tasks** — shared `agentstategraph-tasks` primitive with state machine, proofs, blockers, agent assignment
-- **Policy** — `agentstategraph-policy` primitive for authorization + cost-of-change gating with fallback actions. Advisory: you evaluate a change and act on the decision; MCP `commit_spec` gates speculation promotion on it
+- **Policy** — `agentstategraph-policy` primitive for authorization + cost-of-change gating with fallback actions. Advisory: you evaluate a change and act on the decision; MCP `commit_spec` gates speculation promotion on it, refusing by default a flagged change (a deletion, say) that no policy covers
 - **Schema-evolution framework** — `/_meta/schema_version` guard + `agentstategraph-migrate` crate + `agentstategraph-mcp migrate` CLI
 - **Epochs** — sealable, tamper-evident audit bundles
 - **Unified query** — composable filters across commits, intents, agents

@@ -8,7 +8,7 @@ Policy is AgentStateGraph's governance primitive. It answers two questions about
 1. **Is this action authorized?** — given a situation, an action, and the agent requesting it.
 2. **Is this change too expensive or too risky to apply unsupervised?** — gating by the *shape* of a change (destructive, schema-altering, large) independent of whether the action itself is authorized.
 
-Every policy is a versioned, blameable commit in the graph. Policy is **advisory**: evaluating it returns a decision, and the caller acts on it. Ordinary commits (library calls, HTTP, MCP `set`) don't consult policy. The built-in gate is MCP `commit_spec`, which promotes a speculation only when policy allows it. Pair policy with hard enforcement (Cedar/OPA/IAM at the perimeter) when you need a runtime kill-switch. The point is that an agent fleet can be governed by data the same way a codebase is governed by tests.
+Every policy is a versioned, blameable commit in the graph. Policy is **advisory**: evaluating it returns a decision, and the caller acts on it. Ordinary commits (library calls, HTTP, MCP `set`) don't consult policy. The built-in gate is MCP `commit_spec`, which promotes a speculation only when policy allows it, or when nothing in the change is flagged for policy. Pair policy with hard enforcement (Cedar/OPA/IAM at the perimeter) when you need a runtime kill-switch. The point is that an agent fleet can be governed by data the same way a codebase is governed by tests.
 
 ## The lifecycle
 
@@ -28,7 +28,7 @@ Evaluation produces a `Decision`:
 - **`Allow`** — the change may proceed.
 - **`Deny`** — the change shouldn't proceed; `commit_spec` refuses it.
 - **`RequireApproval`** — the change needs sign-off; it carries a **fallback action** describing what to do while approval is pending.
-- **`NoPolicyMatch`** — no policy applied. The engine returns this verbatim. The MCP `policy_evaluate` tools report it as a deny by default (the fail-safe, which can be set to allow); `commit_spec` treats it as allowed.
+- **`NoPolicyMatch`** — no policy applied. The engine returns this verbatim. The MCP server applies a fail-safe, `deny` by default (`--policy-fail-safe allow` to change it): the `policy_evaluate` tools report the result as a deny, and `commit_spec` refuses a change that carries tokens (`destructive`, `large`, ...) no policy covers. A change with no tokens can't match any policy, so `commit_spec` promotes it.
 
 Precedence is `deny > require_approval > allow`, so the most restrictive matching policy wins.
 

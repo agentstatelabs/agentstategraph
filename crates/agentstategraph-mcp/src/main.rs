@@ -54,6 +54,10 @@ pub struct ServeArgs {
     /// (0 for none), `--max-concurrent-requests`. Env: `ASG_MAX_BODY_BYTES`,
     /// `ASG_REQUEST_TIMEOUT_SECS`, `ASG_MAX_CONCURRENT_REQUESTS`.
     pub bounds: http::RequestBounds,
+    /// What MCP policy tools and `commit_spec` do when no policy matches:
+    /// `deny` (default) or `allow`. `commit_spec` applies it only to changes
+    /// that carry tokens. CLI: `--policy-fail-safe`. Env: `ASG_POLICY_FAIL_SAFE`.
+    pub policy_fail_safe: String,
 }
 
 /// A number from the environment, if set and valid.
@@ -285,6 +289,10 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         env_number("ASG_MAX_CONCURRENT_REQUESTS").unwrap_or(defaults.max_concurrent);
     let mut cors_origins_cli: Vec<String> = Vec::new();
     let mut allowed_hosts_cli: Vec<String> = Vec::new();
+    let mut policy_fail_safe = std::env::var("ASG_POLICY_FAIL_SAFE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "deny".to_string());
 
     let mut i = 0;
     while i < args.len() {
@@ -414,6 +422,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     max_concurrent = v;
                 }
             }
+            "--policy-fail-safe" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    policy_fail_safe = v.clone();
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -488,6 +502,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 );
                 eprintln!(
                     "      --max-concurrent-requests <N>  Requests handled at once; more get 503 (default: 256; env ASG_MAX_CONCURRENT_REQUESTS)"
+                );
+                eprintln!(
+                    "      --policy-fail-safe <deny|allow>  When no policy matches: MCP policy tools report it, and commit_spec refuses a change with tokens (destructive, large, ...) under deny (default: deny; env ASG_POLICY_FAIL_SAFE)"
                 );
                 eprintln!();
                 eprintln!("LOGGING (stderr):");
@@ -577,12 +594,21 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
             },
             max_concurrent: max_concurrent.max(1),
         },
+        policy_fail_safe,
     }
 }
 
 /// Build the repository and run either the HTTP or MCP server.
 pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
+    // A typo mustn't quietly pick a side.
+    if !matches!(args.policy_fail_safe.as_str(), "deny" | "allow") {
+        return Err(format!(
+            "--policy-fail-safe must be deny or allow, not '{}'",
+            args.policy_fail_safe
+        )
+        .into());
+    }
 
     let repo_namespace = Namespace::new(&args.default_namespace).unwrap_or_else(|_| {
         eprintln!(
@@ -777,7 +803,8 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let mut srv = server::AgentStateGraphServer::new(repo);
+                let mut srv = server::AgentStateGraphServer::new(repo)
+                    .with_fail_safe(args.policy_fail_safe.clone());
                 srv = apply_external_evaluators(srv, &args.external_evaluators);
                 let service = srv
                     .serve(rmcp::transport::stdio())
@@ -982,6 +1009,25 @@ mod tests {
         let parsed = super::parse_args(&args);
         assert!(parsed.http_mode);
         assert_eq!(parsed.http_port, 8080);
+    }
+
+    #[test]
+    fn parse_args_policy_fail_safe() {
+        assert_eq!(super::parse_args(&[]).policy_fail_safe, "deny");
+        let args: Vec<String> = vec!["--policy-fail-safe".into(), "allow".into()];
+        assert_eq!(super::parse_args(&args).policy_fail_safe, "allow");
+    }
+
+    #[test]
+    fn a_misspelt_policy_fail_safe_stops_the_server() {
+        let args: Vec<String> = vec![
+            "--storage".into(),
+            "memory".into(),
+            "--policy-fail-safe".into(),
+            "alow".into(),
+        ];
+        let err = super::cmd_serve(super::parse_args(&args)).expect_err("started anyway");
+        assert!(err.to_string().contains("must be deny or allow"), "{err}");
     }
 
     #[test]

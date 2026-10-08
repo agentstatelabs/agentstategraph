@@ -43,6 +43,7 @@ pub struct AgentStateGraphServer {
     policies: Arc<PolicyStore>,
     /// Fail-safe translation for `Decision::NoPolicyMatch`. "deny" (default)
     /// flips NoPolicyMatch to Deny at the MCP layer; "allow" passes through.
+    /// `commit_spec` applies it to flagged changes only (see there).
     /// Configured via `AgentStateGraphServer::with_fail_safe`.
     policy_fail_safe: String,
     /// Optional policy signer — when set, the `policy_sign` tool uses it
@@ -1151,9 +1152,9 @@ impl AgentStateGraphServer {
     }
 
     /// Override the fail-safe translation applied to `Decision::NoPolicyMatch`
-    /// in the `policy_evaluate` / `policy_evaluate_change` tools. Accepts
-    /// `"deny"` (default) or `"allow"`. Unknown values are coerced to
-    /// `"deny"`.
+    /// in the `policy_evaluate` / `policy_evaluate_change` tools, and in
+    /// `commit_spec` for changes that carry tokens. Accepts `"deny"`
+    /// (default) or `"allow"`. Unknown values are coerced to `"deny"`.
     pub fn with_fail_safe(mut self, mode: impl Into<String>) -> Self {
         let m = mode.into();
         self.policy_fail_safe = if m == "allow" {
@@ -1577,7 +1578,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Promote a speculation to a real commit on its base branch using its numeric handle_id. Before promoting, the speculation's diff is turned into a ChangeProposal (with inferred tokens: destructive, schema-change, ref-rewrite, large, reindex, migration) and evaluated against the policy engine. If the decision is Deny or RequireApproval the speculation is NOT promoted and the Decision JSON is returned so the caller can apply the fallback branch. The speculation is consumed only on Allow / NoPolicyMatch."
+        description = "Promote a speculation to a real commit on its base branch using its numeric handle_id. Before promoting, the speculation's diff is turned into a ChangeProposal (with inferred tokens: destructive, schema-change, ref-rewrite, large, reindex, migration) and evaluated against the policy engine. If the decision is Deny or RequireApproval the speculation is NOT promoted and the Decision JSON is returned so the caller can apply the fallback branch. If the change carries tokens and no policy covers them, the server's fail-safe decides (default: deny, not promoted). A change with no tokens is promoted when no policy matches. The speculation is consumed only when promoted."
     )]
     async fn agentstategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
         let p = params.0;
@@ -1612,6 +1613,28 @@ impl AgentStateGraphServer {
         let eval_ref = p.base_ref.clone().unwrap_or_else(|| "main".to_string());
 
         match self.policies.evaluate_change(&eval_ref, &proposal) {
+            // A flagged change that no policy covers: the fail-safe decides.
+            // An unflagged change can't match any policy (policies match
+            // changes by token), so the fail-safe would refuse every
+            // ordinary promotion; it is promoted.
+            Ok(Decision::NoPolicyMatch)
+                if self.policy_fail_safe == "deny" && !proposal.tokens.is_empty() =>
+            {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "original": { "kind": "no_policy_match" },
+                    "translated": {
+                        "kind": "deny",
+                        "matched_policy": "<fail-safe:deny>",
+                        "reason": format!(
+                            "no policy covers this change's tokens ({}); fail-safe deny applied at MCP layer",
+                            proposal.tokens.join(", ")
+                        ),
+                    },
+                    "fail_safe": "deny",
+                    "tokens": proposal.tokens,
+                }))
+                .unwrap_or_else(|_| "null".to_string())
+            }
             Ok(Decision::Allow { .. }) | Ok(Decision::NoPolicyMatch) => {
                 // Allowed — run the existing promotion path.
                 let category = parse_category(&p.intent_category);
@@ -2733,6 +2756,140 @@ mod tests {
             .await;
         assert!(discarded.contains("discarded"), "{discarded}");
         assert!(modify(in_default, "/again").await.starts_with("Error"));
+    }
+
+    fn commit_spec_params(handle_id: u64) -> CommitSpecParams {
+        CommitSpecParams {
+            handle_id,
+            intent_category: "Refine".into(),
+            intent_description: "promote".into(),
+            reasoning: None,
+            confidence: None,
+            alternatives: None,
+            attached_fields: None,
+            base_ref: None,
+        }
+    }
+
+    /// A repository with `/victim` on main, and a speculation that removes
+    /// it: a change carrying the `destructive` token.
+    fn destructive_speculation() -> (Arc<Repository>, u64) {
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        repo.set_json(
+            "main",
+            "/victim",
+            &serde_json::json!("still here"),
+            CommitOptions::new("seed", IntentCategory::Checkpoint, "seed"),
+        )
+        .unwrap();
+        let handle = repo.speculate("main", None).unwrap();
+        repo.spec_delete(handle, "/victim").unwrap();
+        (repo, handle.id())
+    }
+
+    /// `commit_spec` promoted a change no policy matched, whatever the
+    /// fail-safe said, while the `policy_evaluate` tools reported the same
+    /// result as a deny. Now a flagged change no policy covers follows the
+    /// fail-safe: refused by default, and left to try again.
+    #[tokio::test]
+    async fn commit_spec_refuses_a_flagged_change_no_policy_covers() {
+        let (repo, handle) = destructive_speculation();
+        let server = AgentStateGraphServer::new(Arc::clone(&repo));
+
+        let out = server
+            .agentstategraph_commit_spec(Parameters(commit_spec_params(handle)))
+            .await;
+        let refusal: serde_json::Value =
+            serde_json::from_str(&out).unwrap_or_else(|_| panic!("{out}"));
+        assert_eq!(refusal["translated"]["kind"], "deny");
+        assert_eq!(refusal["original"]["kind"], "no_policy_match");
+        assert_eq!(refusal["tokens"], serde_json::json!(["destructive"]));
+        assert_eq!(
+            repo.get_json("main", "/victim").unwrap(),
+            serde_json::json!("still here")
+        );
+
+        // The speculation is still there to retry or discard.
+        let discarded = server
+            .agentstategraph_discard(Parameters(DiscardParams { handle_id: handle }))
+            .await;
+        assert!(discarded.contains("discarded"), "{discarded}");
+    }
+
+    #[tokio::test]
+    async fn commit_spec_promotes_a_flagged_change_under_fail_safe_allow() {
+        let (repo, handle) = destructive_speculation();
+        let server = AgentStateGraphServer::new(Arc::clone(&repo)).with_fail_safe("allow");
+        let out = server
+            .agentstategraph_commit_spec(Parameters(commit_spec_params(handle)))
+            .await;
+        assert!(out.starts_with("Speculation committed"), "{out}");
+        assert!(repo.get_json("main", "/victim").is_err());
+    }
+
+    /// Policies match changes by token, so no policy can match a change
+    /// without one. Refusing it would refuse every ordinary promotion.
+    #[tokio::test]
+    async fn commit_spec_promotes_an_unflagged_change_when_no_policy_matches() {
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        let server = AgentStateGraphServer::new(Arc::clone(&repo));
+        let handle = repo.speculate("main", None).unwrap();
+        repo.spec_set(handle, "/added", &agentstategraph_core::Object::int(1))
+            .unwrap();
+        let out = server
+            .agentstategraph_commit_spec(Parameters(commit_spec_params(handle.id())))
+            .await;
+        assert!(out.starts_with("Speculation committed"), "{out}");
+        assert_eq!(
+            repo.get_json("main", "/added").unwrap(),
+            serde_json::json!(1)
+        );
+    }
+
+    /// With the default fail-safe, a policy that allows destructive changes
+    /// is how to let them through.
+    #[tokio::test]
+    async fn commit_spec_promotes_a_flagged_change_a_policy_allows() {
+        let (repo, handle) = destructive_speculation();
+        let server = AgentStateGraphServer::new(Arc::clone(&repo));
+        let now = Utc::now().to_rfc3339();
+        let proposed = server
+            .agentstategraph_policy_propose(Parameters(PolicyProposeParams {
+                r#ref: "main".into(),
+                policy: serde_json::json!({
+                    "path": "change-control/destructive",
+                    "version": 0,
+                    "situation": "deletions are reviewed in the speculation",
+                    "situation_selector": { "kind": "always" },
+                    "allow": [{ "action": "promote_speculation" }],
+                    "triggers": ["destructive"],
+                    "proposed_by": "alice",
+                    "proposed_at": now,
+                    "active_from": now,
+                }),
+            }))
+            .await;
+        assert!(!proposed.starts_with("Error"), "{proposed}");
+        let ratified = server
+            .agentstategraph_policy_ratify(Parameters(PolicyRatifyParams {
+                r#ref: "main".into(),
+                path: "change-control/destructive".into(),
+                ratifier: "bob".into(),
+                reasoning: "ok".into(),
+            }))
+            .await;
+        assert!(!ratified.starts_with("Error"), "{ratified}");
+
+        let out = server
+            .agentstategraph_commit_spec(Parameters(commit_spec_params(handle)))
+            .await;
+        assert!(out.starts_with("Speculation committed"), "{out}");
     }
 
     /// The MCP server kept reminders in memory, so a restart lost them
