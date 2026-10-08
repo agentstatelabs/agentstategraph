@@ -1,6 +1,7 @@
 //! Request logs name the API key by id, never by the key (DESIGN.md Plan E
-//! t-007). Its own test binary, because it installs the process's global
-//! log subscriber to capture what the server logs.
+//! t-007), in flat JSON with OpenTelemetry's field names (Plan H t-002). Its
+//! own test binary, because it installs the process's global log subscriber
+//! to capture what the server logs.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -36,9 +37,11 @@ const KEY: &str = "asg_request_log_secret_key_00000000000";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_logs_carry_the_key_id_never_the_key() {
     let captured = Captured::default();
+    // As the server installs it for ASG_LOG_FORMAT=json.
     tracing_subscriber::fmt()
+        .fmt_fields(tracing_subscriber::fmt::format::JsonFields::new())
+        .event_format(agentstategraph_mcp::logging::FlatJson)
         .with_writer(captured.clone())
-        .with_ansi(false)
         .init();
 
     let repo = Arc::new(Repository::new(Box::new(
@@ -63,11 +66,7 @@ async fn request_logs_carry_the_key_id_never_the_key() {
     })
     .unwrap();
     let id = mgr.key_id(KeyRef::Key(KEY)).unwrap();
-    let app = http::with_observability(
-        http::build_router_with(Arc::clone(&mgr), 0, None),
-        mgr,
-        false,
-    );
+    let app = http::with_observability(http::build_router_with(Arc::clone(&mgr), 0, None), None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -91,12 +90,17 @@ async fn request_logs_carry_the_key_id_never_the_key() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
-    let line = log
+    let line: serde_json::Value = log
         .lines()
-        .find(|l| l.contains("path=/api/state/main"))
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .find(|l: &serde_json::Value| l["message"] == "request")
         .unwrap_or_else(|| panic!("no request line in:\n{log}"));
-    assert!(line.contains(&id), "{line}");
-    assert!(line.contains("status=200"), "{line}");
+    assert_eq!(line["http.request.method"], "GET", "{line}");
+    assert_eq!(line["url.path"], "/api/state/main", "{line}");
+    assert_eq!(line["http.route"], "/api/state/{ref_name}", "{line}");
+    assert_eq!(line["http.response.status_code"], 200, "{line}");
+    assert!(line["http.server.request.duration"].is_f64(), "{line}");
+    assert_eq!(line["asg.api_key.id"], id.as_str(), "{line}");
     assert!(!log.contains(KEY), "the key reached the log:\n{log}");
     assert!(
         !log.contains("secret=query"),

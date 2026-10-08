@@ -817,7 +817,7 @@ pub async fn auth_middleware(
             .and_then(|k| tenant_mgr.key_id(KeyRef::Key(k)));
         if let Some(id) = &key_id {
             // The request's span (when a trace layer made one) logs it.
-            tracing::Span::current().record("key_id", id.as_str());
+            tracing::Span::current().record("asg.api_key.id", id.as_str());
         }
         AuthContext {
             commit_agent_id,
@@ -867,7 +867,7 @@ pub async fn admin_auth_middleware(
         return Err(AuthError::InvalidKey);
     }
     if let Some(id) = tenant_mgr.key_id(KeyRef::Key(key)) {
-        tracing::Span::current().record("key_id", id.as_str());
+        tracing::Span::current().record("asg.api_key.id", id.as_str());
     }
     if !tenant_mgr.is_admin(Some(key)) {
         return Err(AuthError::NotAdmin);

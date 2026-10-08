@@ -784,9 +784,13 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let extra = None;
                 let app =
                     http::build_router_with(Arc::clone(&tenant_mgr), args.rate_limit_rpm, extra);
-                let app = http::with_request_bounds(app, &args.bounds);
-                let app = http::with_observability(app, tenant_mgr, args.metrics);
-                let app = http::with_origin_policy(app, &origin_policy);
+                let app = http::with_server_layers(
+                    app,
+                    tenant_mgr,
+                    &args.bounds,
+                    &origin_policy,
+                    args.metrics,
+                );
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 axum::serve(
@@ -832,7 +836,10 @@ fn init_logging(default_level: &str) {
         .with_env_filter(filter)
         .with_writer(std::io::stderr);
     let installed = if std::env::var("ASG_LOG_FORMAT").is_ok_and(|f| f == "json") {
-        builder.json().try_init()
+        builder
+            .fmt_fields(tracing_subscriber::fmt::format::JsonFields::new())
+            .event_format(agentstategraph_mcp::logging::FlatJson)
+            .try_init()
     } else {
         builder
             .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))

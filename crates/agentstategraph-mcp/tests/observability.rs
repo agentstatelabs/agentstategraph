@@ -1,4 +1,5 @@
-//! Health, readiness and metrics (DESIGN.md Plan E t-007). `/api/health` is
+//! Health, readiness and metrics (DESIGN.md Plan E t-007, names from Plan H
+//! t-002). `/api/health` is
 //! liveness and touches nothing; `/api/ready` asks the store; `--metrics`
 //! serves Prometheus text, admin-only when auth is on.
 
@@ -25,6 +26,21 @@ fn repo_at(path: &PathBuf) -> Arc<Repository> {
     )));
     repo.init().unwrap();
     repo
+}
+
+/// The app as `main` assembles it.
+fn observed(mgr: &Arc<TenantManager>, metrics: bool, policy: &http::OriginPolicy) -> Router {
+    http::with_server_layers(
+        http::build_router_with(Arc::clone(mgr), 0, None),
+        Arc::clone(mgr),
+        &http::RequestBounds::default(),
+        policy,
+        metrics,
+    )
+}
+
+fn loopback() -> http::OriginPolicy {
+    http::OriginPolicy::for_bind("127.0.0.1", &[], &[])
 }
 
 async fn serve(app: Router) -> String {
@@ -72,12 +88,7 @@ fn key(raw: &str, admin: bool) -> ApiKey {
 async fn liveness_stays_up_when_the_store_doesnt_answer() {
     let path = scratch_db();
     let mgr = TenantManager::single_tenant(repo_at(&path));
-    let base = serve(http::with_observability(
-        http::build_router_with(Arc::clone(&mgr), 0, None),
-        mgr,
-        false,
-    ))
-    .await;
+    let base = serve(observed(&mgr, false, &loopback())).await;
 
     let (status, body) = get(&base, "/api/health", None).await;
     let health: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -111,12 +122,7 @@ async fn liveness_stays_up_when_the_store_doesnt_answer() {
 async fn metrics_count_requests_by_route_template() {
     let path = scratch_db();
     let mgr = TenantManager::single_tenant(repo_at(&path));
-    let base = serve(http::with_observability(
-        http::build_router_with(Arc::clone(&mgr), 0, None),
-        mgr,
-        true,
-    ))
-    .await;
+    let base = serve(observed(&mgr, true, &loopback())).await;
     get(&base, "/api/state/main?path=/", None).await;
     get(&base, "/api/state/main?path=/", None).await;
     get(&base, "/api/state/no-such-branch?path=/", None).await;
@@ -125,12 +131,13 @@ async fn metrics_count_requests_by_route_template() {
     let (status, text) = get(&base, "/metrics", None).await;
     assert_eq!(status, 200);
     for line in [
-        r#"asg_build_info{version="#,
-        r#"asg_http_requests_total{method="GET",route="/api/state/{ref_name}",status="200"} 2"#,
-        r#"asg_http_requests_total{method="GET",route="unmatched",status="404"} 1"#,
-        r#"asg_http_request_duration_seconds_bucket{method="GET",route="/api/state/{ref_name}",le="+Inf"} 3"#,
-        r#"asg_http_request_duration_seconds_count{method="GET",route="/api/state/{ref_name}"} 3"#,
-        "# TYPE asg_http_request_duration_seconds histogram",
+        r#"target_info{service_name="agentstategraph",service_version="#,
+        r#"http_server_request_duration_seconds_count{http_request_method="GET",url_scheme="http",http_route="/api/state/{ref_name}",http_response_status_code="200"} 2"#,
+        r#"http_server_request_duration_seconds_bucket{http_request_method="GET",url_scheme="http",http_route="/api/state/{ref_name}",http_response_status_code="200",le="+Inf"} 2"#,
+        // A request that matched no route has no route label.
+        r#"http_server_request_duration_seconds_count{http_request_method="GET",url_scheme="http",http_response_status_code="404"} 1"#,
+        "# TYPE http_server_request_duration_seconds histogram",
+        r#"http_server_active_requests{http_request_method="GET",url_scheme="http"} 1"#,
     ] {
         assert!(text.contains(line), "missing {line}:\n{text}");
     }
@@ -153,12 +160,7 @@ async fn metrics_are_admin_only_with_auth_and_absent_without_the_flag() {
         .unwrap();
     mgr.register_key(key("asg_observability_user_0000000000000", false))
         .unwrap();
-    let base = serve(http::with_observability(
-        http::build_router_with(Arc::clone(&mgr), 0, None),
-        Arc::clone(&mgr),
-        true,
-    ))
-    .await;
+    let base = serve(observed(&mgr, true, &loopback())).await;
     assert_eq!(get(&base, "/metrics", None).await.0, 401);
     assert_eq!(
         get(
@@ -183,12 +185,7 @@ async fn metrics_are_admin_only_with_auth_and_absent_without_the_flag() {
     // Health and readiness stay public.
     assert_eq!(get(&base, "/api/ready", None).await.0, 200);
 
-    let off = serve(http::with_observability(
-        http::build_router_with(Arc::clone(&mgr), 0, None),
-        mgr,
-        false,
-    ))
-    .await;
+    let off = serve(observed(&mgr, false, &loopback())).await;
     assert_eq!(
         get(
             &off,
@@ -199,6 +196,43 @@ async fn metrics_are_admin_only_with_auth_and_absent_without_the_flag() {
         .0,
         404
     );
+
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+/// Requests the Host check refuses are logged and counted, and the check
+/// covers `/metrics` (DESIGN.md Plan H t-002). The check used to sit outside
+/// the observability layer, so refused requests left no trace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_hosts_are_counted_and_metrics_stay_behind_the_host_check() {
+    let path = scratch_db();
+    let mgr = TenantManager::single_tenant(repo_at(&path));
+    let base = serve(observed(&mgr, true, &loopback())).await;
+    let client = reqwest::Client::new();
+    let as_host = |path: &str, host: &str| {
+        client
+            .get(format!("{base}{path}"))
+            .header("host", host)
+            .send()
+    };
+
+    let refused = as_host("/api/state/main?path=/", "rebound.example")
+        .await
+        .unwrap();
+    assert_eq!(refused.status().as_u16(), 403);
+    let metrics_elsewhere = as_host("/metrics", "rebound.example").await.unwrap();
+    assert_eq!(
+        metrics_elsewhere.status().as_u16(),
+        403,
+        "/metrics answered a Host the server doesn't serve"
+    );
+
+    let (status, text) = get(&base, "/metrics", None).await;
+    assert_eq!(status, 200);
+    let line = r#"http_server_request_duration_seconds_count{http_request_method="GET",url_scheme="http",http_route="/api/state/{ref_name}",http_response_status_code="403"} 1"#;
+    assert!(text.contains(line), "missing {line}:\n{text}");
 
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
