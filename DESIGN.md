@@ -939,7 +939,7 @@ Verified by reading the code on the Plan E stack.
    - Metrics come from those spans and events, through a layer in the
      telemetry crate, plus gauges read from repository and storage APIs.
 2. **One telemetry crate for every binary.** `agentstategraph-telemetry`
-   owns setup:
+   owns setup, built on oxtel (decision 3):
    - the log subscriber;
    - OpenTelemetry's tracer and meter providers;
    - trace-context propagation;
@@ -948,15 +948,27 @@ Verified by reading the code on the Plan E stack.
 
    The ASG server, ASD and CTXone each call one `init`, and get the same
    names and configuration.
-3. **Export uses OTLP; Prometheus scrapes.**
+3. **Export uses OTLP; Prometheus scrapes; the library is oxtel.**
    - Every major backend accepts OTLP, and Prometheus ingests it natively.
-   - OpenTelemetry's Rust Prometheus exporter is discontinued, so
-     `/metrics` keeps ASG's own text rendering, now fed from the meter
-     provider.
-   - The OTLP exporter needs network crates, so it goes behind an opt-in
-     `otlp` feature, per the guard rail in
-     `agentstategraph-mcp/Cargo.toml`. Release binaries and the Docker image
-     turn it on.
+   - Export goes through **oxtel**
+     (`github.com/agentstatelabs/oxtel`, Apache-2.0). It is an
+     OpenTelemetry-compatible library that AgentStateLabs is building. It
+     reads `tracing` and `metrics` directly and writes OTLP and
+     Prometheus/OpenMetrics.
+   - We chose it over the official crates after reviewing them on
+     2026-10-08:
+     - all of them are pre-1.0, and each release breaks compatibility;
+     - traces are still Beta;
+     - the bridge from `tracing` has effectively one maintainer;
+     - pull readers sit behind experimental features;
+     - there is no declarative config and no OpAMP.
+   - (The official Prometheus exporter is not discontinued, as an earlier
+     draft said. It was revived in 0.32 and is Beta.)
+   - ASG's instrumentation stays on `tracing`, so nothing outside the
+     telemetry crate depends on that choice.
+   - OTLP needs network crates, so it goes behind an opt-in `otlp` feature,
+     per the guard rail in `agentstategraph-mcp/Cargo.toml`. Release binaries
+     and the Docker image turn it on.
 4. **Nothing leaves the process unless an operator sends it.**
    - Export stays off until an endpoint is configured.
    - Nothing reports usage to us. CTXone promises zero telemetry, and that
@@ -1009,7 +1021,7 @@ that no released log or metric format changes.
 |------|-------------|------|
 | t-001 | **Conventions.** Write the telemetry contract in `docs/OBSERVABILITY.md`: the pinned semantic-conventions version; span names; metric names, units and instrument types; the `asg.*` attribute registry; the cardinality and privacy rules; and the configuration. Later tasks implement against it. | 1 |
 | t-002 | **Align Plan E's names before they ship.** JSON logs flatten their fields and use the conventions' names (`http.request.method`, `url.path`, `http.route`, `http.response.status_code`). Metrics follow the OpenTelemetry-to-Prometheus naming: `http_server_request_duration_seconds` with `http_request_method`, `http_route` and `http_response_status_code`. Requests the Host check refuses are logged and counted. — **In review (MR !76, stacked on !75).** The JSON format is now one flat object per event, with span and event fields side by side. The key id is `asg.api_key.id`, and unknown methods are `_OTHER`. The metrics are `http_server_request_duration_seconds` (with the conventions' buckets, and `error_type` for 5xx; its `_count` replaces the request counter), `http_server_active_requests` and `target_info`. To count refused requests without leaving `/metrics` outside the origin policy, the metrics route is now added separately, inside the policy, and `with_server_layers` fixes the order for `main` and the tests. | 1 |
-| t-003 | **`agentstategraph-telemetry`.** One `init` that returns a flush guard. It sets up the log subscriber (text, JSON or ECS); tracer and meter providers whose resource is read from the environment (`service.name`, `service.version`, `service.instance.id`, `asg.tenant.id`); W3C trace-context propagation; the layer that derives metrics from spans; and `/metrics` rendered from the meter provider. OTLP export of traces, metrics and logs sits behind the `otlp` feature and runs only when an endpoint is set. The server switches to the crate. Without features, `cargo tree` shows no network crates. | 1 |
+| t-003 | **`agentstategraph-telemetry`, on oxtel.** One `init` that returns a flush guard, built on oxtel's Phase 1 release. It sets up the log subscriber (text, JSON or ECS); tracer and meter providers whose resource is read from the environment (`service.name`, `service.version`, `service.instance.id`, `asg.tenant.id`); W3C trace-context propagation; the layer that derives metrics from spans; and `/metrics` rendered from the meter provider. OTLP export of traces, metrics and logs sits behind the `otlp` feature and runs only when an endpoint is set. The server switches to the crate. Without features, `cargo tree` shows no network crates. | 1 |
 | t-004 | **Stable error codes.** `RepoError` and `StorageError` get a stable, low-cardinality `code()`, such as `write_conflict`, `not_found`, `commit_ref_not_allowed`, `taint_blocked` or `storage_unavailable`. HTTP error bodies include the code, and statuses follow from it instead of defaulting to 500. MCP tool errors carry it too. It becomes `error.type` on spans and metrics. | 1 |
 | t-005 | **HTTP traces.** Read `traceparent` and `tracestate`. Give each request one server span, named `{method} {route}`, with the HTTP conventions' attributes. The key id goes on the span, never on a metric. Every log line and error body carries the trace id, and `x-request-id` is accepted, or generated, and echoed. A rejection counter is broken down by reason: rate limited, over capacity, timed out, body too large, unauthenticated, forbidden or refused host. | 2 |
 | t-006 | **MCP traces.** One span per tool call, per the MCP conventions, parented on `params._meta.traceparent` when the client sends one. Record `mcp.server.operation.duration`. `error.type` comes from t-004's codes, and is `tool_error` for refusals such as `commit_spec`'s policy gate. Covers stdio. | 2 |
