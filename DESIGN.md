@@ -854,6 +854,239 @@ the public binary.
 
 ---
 
+## Plan H — Observability: OpenTelemetry traces, metrics and logs
+
+Scoped on 2026-10-08, against the Plan D and Plan E stacks (MRs !58–!75).
+
+### Motivation
+
+ASG is becoming a server that teams run (Plans D–G), and it is the
+substrate inside ASD and CTXone. Operators can't see into it:
+
+- Plan E t-007 logs and counts HTTP requests, but nothing below the HTTP
+  layer is visible. A slow commit, a burst of ref retries, a saturated
+  Postgres pool, a refused GC and history extraction falling behind all
+  look the same from outside.
+- MCP tool calls are the main way agents use ASG, and they produce no
+  telemetry at all.
+- Nothing connects a request to the commit it produced.
+
+ASG already records what changed and why: that is its provenance. Plan H
+adds how the work ran, using OpenTelemetry, the vendor-neutral standard
+that every major backend ingests. It also links the two: a trace leads to
+the commits it produced, and a commit leads back to its trace.
+
+### Findings this plan closes
+
+Verified by reading the code on the Plan E stack.
+
+1. **The libraries log nothing.**
+   - Only the MCP binary depends on `tracing` and installs a subscriber
+     (`agentstategraph-mcp/Cargo.toml:49-50`, `main.rs:826-843`).
+   - The one runtime log line in the library is an `eprintln!`
+     (`repo.rs:3180`).
+   - There is no `#[instrument]` anywhere.
+2. **MCP tool calls are invisible.**
+   - The 77 tools run with no span, timing or metric.
+   - Their errors are `"Error: …"` strings.
+   - In stdio mode the default log level is `warn`.
+3. **Hot paths are silent.**
+   - The ref compare-and-swap loops retry up to `MAX_REF_CAS_ATTEMPTS`
+     (256, `repo.rs:188`), then fail with `WriteConflict`. Nothing records
+     how often they retried.
+   - Commit, merge, speculation, history extraction, GC, the taint check
+     and policy evaluation have no spans.
+   - The Rego and Cedar evaluators run as subprocesses with no timeout, and
+     their errors are swallowed (`run_externals` in
+     `agentstategraph-policy/src/store.rs`).
+4. **Storage pressure can't be seen.**
+   - deadpool tracks the Postgres pool's size, available connections and
+     waiters, but only `pool_max_size()` is exposed (`postgres.rs:749` on
+     the Plan D stack).
+   - SQLite serializes every call on one `Mutex<Connection>`
+     (`sqlite.rs:31`), and nothing measures the wait.
+5. **Store health exists only on demand.**
+   - The numbers exist: `stats()`, `history_store_shape`, `gc_dry_run` and
+     the undistilled-commit count.
+   - None is a metric, so no alert can watch history lag or store growth.
+   - Plan B t-007 expected GC to be prompted by a size threshold "surfaced
+     by health". That surface was never built.
+6. **Nothing correlates.**
+   - There is no `traceparent`, request id or trace id anywhere.
+   - A commit can't be tied to the request that made it.
+7. **Errors have no stable codes.**
+   - `RepoError` and `StorageError` carry message strings only.
+   - HTTP maps two variants to 403 and every other error to 500
+     (`http.rs:1535-1566`).
+8. **Plan E's log and metric names are its own.**
+   - Log fields: `method`, `path`, `status`, `latency_ms`, `key_id`.
+   - Metrics: `asg_http_requests_total`,
+     `asg_http_request_duration_seconds` with `route` and `status`.
+   - OpenTelemetry has names for all of these. **None of Plan E has been
+     released**, so renaming costs nothing until the release that ships it.
+9. **Requests the Host check refuses aren't logged or counted.** They are
+   turned away (`http.rs:730`) outside the observability layer.
+
+### Design shape
+
+1. **The libraries emit `tracing` only.**
+   - The library crates gain spans and events through `tracing`: core,
+     storage, `agentstategraph`, policy, taint, reminders and tasks.
+     `tracing` costs almost nothing when nothing listens.
+   - They don't depend on OpenTelemetry. Its Rust crates are pre-1.0 and
+     break on minor releases, and every embedder would have to match ASG's
+     version.
+   - Metrics come from those spans and events, through a layer in the
+     telemetry crate, plus gauges read from repository and storage APIs.
+2. **One telemetry crate for every binary.** `agentstategraph-telemetry`
+   owns setup:
+   - the log subscriber;
+   - OpenTelemetry's tracer and meter providers;
+   - trace-context propagation;
+   - `/metrics`;
+   - OTLP export.
+
+   The ASG server, ASD and CTXone each call one `init`, and get the same
+   names and configuration.
+3. **Export uses OTLP; Prometheus scrapes.**
+   - Every major backend accepts OTLP, and Prometheus ingests it natively.
+   - OpenTelemetry's Rust Prometheus exporter is discontinued, so
+     `/metrics` keeps ASG's own text rendering, now fed from the meter
+     provider.
+   - The OTLP exporter needs network crates, so it goes behind an opt-in
+     `otlp` feature, per the guard rail in
+     `agentstategraph-mcp/Cargo.toml`. Release binaries and the Docker image
+     turn it on.
+4. **Nothing leaves the process unless an operator sends it.**
+   - Export stays off until an endpoint is configured.
+   - Nothing reports usage to us. CTXone promises zero telemetry, and that
+     stays true.
+5. **Standard configuration.**
+   - The standard `OTEL_*` variables: service name, resource attributes,
+     endpoint, protocol, headers, sampler and `OTEL_SDK_DISABLED`.
+   - `ASG_LOG`, `ASG_LOG_FORMAT` and `--metrics` stay.
+6. **OpenTelemetry semantic conventions, pinned.**
+   - HTTP and database telemetry follow the stable conventions.
+   - MCP tool calls follow the MCP conventions, which are still in
+     development:
+     - a span named `tools/call {tool}`;
+     - `mcp.method.name` and `gen_ai.tool.name`;
+     - `error.type`, which is `tool_error` when a tool returns an error;
+     - the `mcp.server.operation.duration` histogram;
+     - trace context read from `params._meta`.
+   - ASG's own names use `asg.*`.
+   - The conventions version is pinned in one place, so a development
+     convention that changes is updated there.
+7. **Cardinality and privacy rules.**
+   - Metric attributes are bounded: methods, route templates, tool names,
+     outcomes and error codes.
+   - Metrics never carry paths, commit ids, agent ids, key ids or branch
+     names. Spans may carry ids.
+   - A process serves one tenant, so the tenant is a resource attribute, not
+     a label.
+   - Telemetry never carries state values, tool arguments or results, keys,
+     or SQL with literals.
+   - State paths are recorded only when an operator opts in.
+8. **Logs carry the trace.**
+   - JSON log lines use the conventions' field names and include
+     `trace_id` and `span_id`.
+   - An `ecs` format writes Elastic Common Schema, for pipelines that expect
+     it.
+   - With the `otlp` feature, logs export over OTLP too.
+9. **Commit-to-trace links stay outside commit content.**
+   - The commit's span records the commit id, which links trace to commit at
+     no cost.
+   - The reverse link, commit to trace, is a side table like the session
+     link (`set_commit_session`), not a commit field. That keeps commit ids
+     and sync bundles independent of telemetry.
+
+**Sequencing:** t-002 should land before the release that ships Plan E, so
+that no released log or metric format changes.
+
+### Task table
+
+| Task | Description | Wave |
+|------|-------------|------|
+| t-001 | **Conventions.** Write the telemetry contract in `docs/OBSERVABILITY.md`: the pinned semantic-conventions version; span names; metric names, units and instrument types; the `asg.*` attribute registry; the cardinality and privacy rules; and the configuration. Later tasks implement against it. | 1 |
+| t-002 | **Align Plan E's names before they ship.** JSON logs flatten their fields and use the conventions' names (`http.request.method`, `url.path`, `http.route`, `http.response.status_code`). Metrics follow the OpenTelemetry-to-Prometheus naming: `http_server_request_duration_seconds` with `http_request_method`, `http_route` and `http_response_status_code`. Requests the Host check refuses are logged and counted. | 1 |
+| t-003 | **`agentstategraph-telemetry`.** One `init` that returns a flush guard. It sets up the log subscriber (text, JSON or ECS); tracer and meter providers whose resource is read from the environment (`service.name`, `service.version`, `service.instance.id`, `asg.tenant.id`); W3C trace-context propagation; the layer that derives metrics from spans; and `/metrics` rendered from the meter provider. OTLP export of traces, metrics and logs sits behind the `otlp` feature and runs only when an endpoint is set. The server switches to the crate. Without features, `cargo tree` shows no network crates. | 1 |
+| t-004 | **Stable error codes.** `RepoError` and `StorageError` get a stable, low-cardinality `code()`, such as `write_conflict`, `not_found`, `commit_ref_not_allowed`, `taint_blocked` or `storage_unavailable`. HTTP error bodies include the code, and statuses follow from it instead of defaulting to 500. MCP tool errors carry it too. It becomes `error.type` on spans and metrics. | 1 |
+| t-005 | **HTTP traces.** Read `traceparent` and `tracestate`. Give each request one server span, named `{method} {route}`, with the HTTP conventions' attributes. The key id goes on the span, never on a metric. Every log line and error body carries the trace id, and `x-request-id` is accepted, or generated, and echoed. A rejection counter is broken down by reason: rate limited, over capacity, timed out, body too large, unauthenticated, forbidden or refused host. | 2 |
+| t-006 | **MCP traces.** One span per tool call, per the MCP conventions, parented on `params._meta.traceparent` when the client sends one. Record `mcp.server.operation.duration`. `error.type` comes from t-004's codes, and is `tool_error` for refusals such as `commit_spec`'s policy gate. Covers stdio. | 2 |
+| t-007 | **Library spans and events.** Spans for repository writes (set, delete, merge, `commit_speculation`), the speculation lifecycle, history extraction, GC (dry run, sweep, vacuum), policy evaluation (local and external) and the taint check. Events for compare-and-swap retries and write conflicts, taint rejections, policy decisions (recording whether the fail-safe applied) and external-evaluator errors, which are swallowed today. External evaluators get a timeout. Reads get spans at debug level only. Metrics are derived from these, such as `asg.commit.duration`, `asg.ref.cas_retries` and `asg.policy.decisions`. | 2 |
+| t-008 | **Storage metrics.** Operation duration per backend, per the database conventions (`db.client.operation.duration`, `db.system.name`). Postgres pool usage, pending requests and wait time (`db.client.connection.*`). Time spent waiting for SQLite's connection lock. Store gauges, read on a slow interval: objects, commits, size, undistilled commits (history lag), and the last GC sweep and what it reclaimed. Measure what the gauges cost on a large store before choosing the interval. | 2 |
+| t-009 | **Commit-to-trace link.** Record the active trace id for each commit in a side table on all four backends. Show it in `log`, `blame` and the HTTP commit output. It can be turned off. | 3 |
+| t-010 | **Provenance events.** Optionally emit each commit as an OpenTelemetry log event (`asg.commit`). The event carries the agent, intent category, confidence, namespace, commit id and trace id, and never values. A log backend or SIEM can then index state changes beside traces. Off by default. | 3 |
+| t-011 | **Overhead budget.** Benchmark HTTP reads and writes and MCP tool calls in three modes: telemetry off, on without export, and exporting to a local collector. Proposed budget with telemetry on but not exporting: no more than 3% added at p50 and 5% at p99. Record the results in this plan. | 3 |
+| t-012 | **Operator kit and docs.** An example OpenTelemetry Collector config. An `observability` compose profile with a collector, Prometheus, Jaeger and Grafana. A Grafana dashboard and Prometheus alert rules as files, covering: not ready, 5xx ratio, p99 latency, rejections, pool saturation, growing history lag, refused GC and write conflicts. A site Observability page with the metric catalogue, and a test that checks the catalogue against the registered instruments. An end-to-end test with an in-memory exporter: one HTTP write makes one trace from request to storage, its log lines carry the trace id, and the commit links back to it. | 3 |
+
+### Rollout to ASD and CTXone
+
+Each product gets its own plan in its own repo. They are listed here so the
+order is visible.
+
+- **Now, independent of ASG:**
+  - Both log requests through tower-http's `TraceLayer`, whose events
+    default to DEBUG under an `info` filter, so neither logs any requests.
+    Fix that.
+  - Neither has a readiness check. Add one.
+- **After an ASG release that includes t-003:**
+  - Bump the ASG pin (ASD is on v1.2.3, CTXone on v1.2.4).
+  - Call `init` in each binary.
+  - Both then inherit ASG's library spans and storage metrics.
+- **ASD:**
+  - Spans and durations for the index pipeline's phases. Nothing times them
+    today.
+  - MCP tool spans.
+  - Its audit chain stays separate: it is an integrity record, not
+    telemetry. ASD Plan I t-037 (SIEM export) is its counterpart.
+- **CTXone:**
+  - Spans for MCP over HTTP, with trace context from `_meta`.
+  - Token usage from `record_llm_usage` as the GenAI usage metrics the
+    conventions define (input, output and cache tokens, by model and
+    provider).
+  - No prompt or response content in telemetry.
+  - Export is opt-in, so its zero-telemetry promise holds.
+
+### Acceptance
+
+- **Export:** with an OTLP endpoint configured, a collector receives traces,
+  metrics and logs from the server.
+- **One write, one trace:** a single HTTP write makes one trace, from the
+  request through the commit to storage. Its log lines carry the trace id,
+  and the commit links to the trace.
+- **MCP:** a client that sends `traceparent` in `_meta` sees ASG's tool span
+  as a child.
+- **Coverage:** `/metrics` covers HTTP, MCP, the repository, policy, storage,
+  GC and history lag, using the catalogue's names.
+- **Off by default:** without configuration, nothing is exported, and the
+  default build has no network crates.
+- **Privacy:** state values, keys, tool arguments and SQL literals never
+  appear in telemetry, and a test checks this.
+- **Overhead:** stays within the budget.
+- **One call:** ASD and CTXone set up the same telemetry with one call.
+
+### What's NOT in this plan
+
+- **A hosted telemetry backend**, or usage reporting to us.
+- **Process and runtime metrics** (CPU, memory, tokio internals). Node
+  exporters and the collector's host metrics cover them.
+- **Profiling.** OpenTelemetry's profiles signal isn't stable.
+- **Browser telemetry** for the explorer or the Lens.
+- **Audit logging.** Commits are ASG's audit record, and ASD's audit chain is
+  its own.
+- **Dashboards for every vendor.** One Grafana dashboard ships, and OTLP
+  carries the data to any backend.
+
+### Done when
+
+An operator can point any OTLP backend, or Prometheus, at ASG, ASD or
+CTXone without code changes. They see requests, tool calls, state changes
+and storage health, with traces tied to logs and commits. Nothing leaves
+the process unless they configure it.
+
+---
+
 ## First-parent surfaces — which are deliberate, which are accidents
 
 `Repository::log` follows `parents[0]`. That is a legitimate thing to offer —
