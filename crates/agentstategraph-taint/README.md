@@ -80,4 +80,4 @@ infrastructure layer.
 
 ## License
 
-BSL-1.1.
+MIT OR Apache-2.0, like the rest of AgentStateGraph.
