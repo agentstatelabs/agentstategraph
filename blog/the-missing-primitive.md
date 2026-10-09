@@ -105,6 +105,8 @@ For enterprise adoption, work can be grouped into **epochs** — bounded, sealab
 
 AgentStateGraph is source-available under [BSL 1.1](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE) (free for all production use; converts to Apache 2.0 after 18 months) and available today:
 
+*Update:* AgentStateGraph has since returned to MIT OR Apache-2.0, and that grant covers the BSL-licensed releases too. See [LICENSING.md](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSING.md).
+
 **As an MCP server** (connect to Claude, GPT, or any MCP agent):
 ```bash
 cargo run -p agentstategraph-mcp

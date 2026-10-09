@@ -143,4 +143,4 @@ layer — see POLICY_V1.md §11 for the full soft-model discussion.
 
 ## License
 
-BSL-1.1.
+MIT OR Apache-2.0, like the rest of AgentStateGraph.

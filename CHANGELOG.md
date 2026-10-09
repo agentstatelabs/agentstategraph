@@ -54,6 +54,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **The docs no longer call namespaces an isolation boundary.** A namespace is a separate set of branches. Namespaces share the store's commits, a commit id reaches across them, and MCP tools work in any namespace. The Namespaces guide now says what a namespace doesn't separate, and how to confine a client to one: an API key bound to the namespace. It also covers tenants. The `namespaces` example shows a commit id reaching across, and a branch-refs-only repository refusing it.
 - **Cross-namespace merge is documented as always refused**, which it is. The docs described it as allowed by policy, and the MCP tool's description said so too; the policy check isn't built yet.
 - **Policy is documented as advisory.** The docs said policy was enforced at commit time. Evaluating it returns a decision for the caller to act on. The built-in gate is MCP `commit_spec`.
+- **The license is stated correctly everywhere.** The site's badge, footer and "Why BSL 1.1?" section, the policy and taint crate READMEs, and the launch blog post still described AgentStateGraph as BSL 1.1. It is MIT OR Apache-2.0, and that grant covers the earlier BSL releases too.
 - **The four GC and history MCP tools are documented**, and tool counts are corrected to 77. Binding counts include Swift, and `TAINT_GUIDE.md` no longer says Postgres stores no taints.
 
 ## [v1.2.7] — 2026-10-02
