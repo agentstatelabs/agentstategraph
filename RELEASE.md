@@ -66,10 +66,30 @@ checksum cannot be known before the artifact is built, which is why
 |---|---|
 | GitHub release + Swift xcframework | `agentstatelabs/agentstategraph` (public) |
 | npm, PyPI, generic swift package | GitLab package registry (internal) |
+| Rust crates | crates.io — published by hand from the tag (below) |
 
-There is **no `cargo publish`** — nothing goes to crates.io, and nothing goes
-to public npm or PyPI. A 404 on those public registries is expected, not a
-failed release.
+Nothing goes to public npm or PyPI. A 404 on those public registries is
+expected, not a failed release.
+
+## Publishing the crates to crates.io
+
+The 15 crates under `crates/` publish to crates.io. `bindings/python` and
+`bindings/typescript` are `publish = false`: they ship as a wheel and an npm
+package, not as crates.
+
+No CI job does this yet. Once the tag pipeline is green, publish from a
+detached checkout of the tag, never from a branch:
+
+```sh
+git worktree add --detach ../asg-v1.0.0 v1.0.0
+cd ../asg-v1.0.0
+cargo publish --workspace --dry-run
+cargo publish --workspace
+```
+
+Cargo 1.90 and later publishes workspace members in dependency order. A
+crates.io version can be yanked but never deleted or re-uploaded, so anything
+wrong with a published crate is fixed by the next patch release.
 
 ## After the release: bump the site strings
 
