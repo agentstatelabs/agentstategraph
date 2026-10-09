@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/agentstategraph-storage"
+keywords.workspace = true
+categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Pluggable storage backends for AgentStateGraph"
@@ -34,3 +36,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 rusqlite = { workspace = true }
 agentstategraph-taint = { workspace = true }
 uuid = { workspace = true }
+
+[package.metadata.docs.rs]
+# Document the optional backends and evaluators too.
+all-features = true
