@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.2.8] — 2026-10-09
+
 ### Changed
 - **The library crates are packaged for crates.io.** Each of the 15 crates under `crates/` now ships the MIT and Apache-2.0 license texts and a README, links its own docs.rs page, and carries keywords and a category. docs.rs builds `agentstategraph-storage`, `agentstategraph-mcp` and `agentstategraph-ffi` with all features, so the Postgres backend and the external evaluators are documented. `agentstategraph-napi` and `agentstategraph-python` are `publish = false`; they ship to npm and PyPI. RELEASE.md describes publishing from the tag.
 - The `agentstategraph-policy-wasm` and `agentstategraph-policy-cedar` descriptions no longer call them stubs.
