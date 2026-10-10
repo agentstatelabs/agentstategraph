@@ -66,7 +66,7 @@ checksum cannot be known before the artifact is built, which is why
 |---|---|
 | GitHub release + Swift xcframework | `agentstatelabs/agentstategraph` (public) |
 | npm, PyPI, generic swift package | GitLab package registry (internal) |
-| Rust crates | crates.io — published by hand from the tag (below) |
+| Rust crates | crates.io — the `publish-crates` job on the tag (below) |
 
 Nothing goes to public npm or PyPI. A 404 on those public registries is
 expected, not a failed release.
@@ -77,19 +77,32 @@ The 15 crates under `crates/` publish to crates.io. `bindings/python` and
 `bindings/typescript` are `publish = false`: they ship as a wheel and an npm
 package, not as crates.
 
-No CI job does this yet. Once the tag pipeline is green, publish from a
-detached checkout of the tag, never from a branch:
+The `publish-crates` job does this on every release tag, once
+`CARGO_REGISTRY_TOKEN` is set. It needs `publish-github`, so it runs only after
+the checks, the tests and the GitHub mirror's leak scan have passed, and it runs
+the leak scan again before `scripts/publish-crates.sh --publish`. Crates already
+on crates.io at the version are skipped, so retrying the job is safe.
+
+`CARGO_REGISTRY_TOKEN` is a masked, protected CI variable (`v*` tags are
+protected, so tag pipelines can read it). Make it a crates.io token scoped to
+`publish-update` and `agentstategraph*`, with an expiry. `publish-update` cannot
+create a crate, so a crate new to the workspace gets its first version
+published by hand. crates.io also rate-limits new crate names (a burst of five,
+then about one every ten minutes), which a re-run of the script waits out.
+
+By hand, from a detached checkout of the tag, never from a branch:
 
 ```sh
 git worktree add --detach ../asg-v1.0.0 v1.0.0
 cd ../asg-v1.0.0
-cargo publish --workspace --dry-run
-cargo publish --workspace
+scripts/publish-crates.sh             # dry run
+scripts/publish-crates.sh --publish   # the real upload (uses `cargo login`)
 ```
 
-Cargo 1.90 and later publishes workspace members in dependency order. A
-crates.io version can be yanked but never deleted or re-uploaded, so anything
-wrong with a published crate is fixed by the next patch release.
+Cargo 1.90 and later verifies every crate before uploading any, then uploads
+in dependency order. A crates.io version can be yanked but never deleted or
+re-uploaded, so anything wrong with a published crate is fixed by the next
+patch release.
 
 ## After the release: bump the site strings
 
