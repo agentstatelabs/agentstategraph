@@ -43,22 +43,7 @@ struct Known {
     flaky: bool,
 }
 
-const KNOWN_FAILURES: &[Known] = &[
-    Known {
-        case: "reminders_round_trip_and_cas",
-        backend: Backend::Memory,
-        owner: "Plan D t-005: MemoryStorage doesn't override update_if_unchanged, so it \
-                uses the trait's non-atomic default",
-        flaky: true,
-    },
-    Known {
-        case: "reminders_round_trip_and_cas",
-        backend: Backend::Postgres,
-        owner: "Plan D t-005: PostgresStorage uses the trait's non-atomic \
-                update_if_unchanged",
-        flaky: true,
-    },
-];
+const KNOWN_FAILURES: &[Known] = &[];
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -313,6 +298,38 @@ fn objects_round_trip(f: &Fixture) {
     let node = Object::map(children);
     let node_id = s.put_object(&node).unwrap();
     assert_eq!(s.get_object(&node_id).unwrap(), Some(node));
+}
+
+/// Enough objects to cross the Postgres batch's chunk size (1,000 rows per
+/// INSERT), with a duplicate and a missing id, all answered in order.
+fn batch_objects_large(f: &Fixture) {
+    let s = f.store();
+    let objs: Vec<Object> = (0..2500)
+        .map(|i| Object::string(format!("obj-{i}")))
+        .collect();
+    let ids = s.batch_put_objects(&objs).unwrap();
+    assert_eq!(
+        ids,
+        objs.iter().map(|o| o.id()).collect::<Vec<_>>(),
+        "ids in input order"
+    );
+    assert_eq!(
+        s.batch_put_objects(&objs[..10]).unwrap(),
+        ids[..10],
+        "a repeated batch is a no-op with the same ids"
+    );
+    let mut ask: Vec<ObjectId> = ids.iter().rev().copied().collect();
+    ask.insert(1234, ObjectId::hash(b"never stored"));
+    let got = s.batch_get_objects(&ask).unwrap();
+    assert_eq!(got.len(), ask.len());
+    assert_eq!(
+        got[1234], None,
+        "a missing id reads back as None in its slot"
+    );
+    assert_eq!(got[0], Some(objs[2499].clone()));
+    assert_eq!(got[2500], Some(objs[0].clone()));
+    assert!(s.batch_get_objects(&[]).unwrap().is_empty());
+    assert!(s.batch_put_objects(&[]).unwrap().is_empty());
 }
 
 fn commits_and_walks(f: &Fixture) {
@@ -644,6 +661,46 @@ fn epochs_commit_membership_and_seal(f: &Fixture) {
     ));
     let sealed = s.get_epoch("locked").unwrap().unwrap();
     assert_eq!(sealed.sealed_commits, vec![a.id, b.id]);
+
+    // Linking a commit twice keeps it a single member.
+    s.create_epoch(&epoch("twice")).unwrap();
+    let c = commit(s, "c", &[]);
+    s.set_commit_epoch(&c.id, "twice").unwrap();
+    s.set_commit_epoch(&c.id, "twice").unwrap();
+    assert_eq!(s.get_epoch("twice").unwrap().unwrap().commits, vec![c.id]);
+}
+
+/// Separate handles race to end one session: exactly one may end it, and the
+/// rest must see `SessionEnded`.
+fn session_end_race_one_wins(f: &Fixture) {
+    const RACERS: usize = 6;
+    for round in 0..5 {
+        let id = format!("end-race-{round}");
+        f.store().create_session(&session(&id)).unwrap();
+        let barrier = Arc::new(Barrier::new(RACERS));
+        let racers: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let (store, barrier, id) = (f.open_another(), Arc::clone(&barrier), id.clone());
+                f.spawn(move || {
+                    barrier.wait();
+                    match store.end_session(&id, SessionStatus::Completed, Utc::now()) {
+                        Ok(()) => true,
+                        Err(StorageError::SessionEnded { .. }) => false,
+                        Err(e) => panic!("unexpected end_session error: {e:?}"),
+                    }
+                })
+            })
+            .collect();
+        let winners = racers
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|w| *w)
+            .count();
+        assert_eq!(
+            winners, 1,
+            "round {round}: {winners} callers ended the session"
+        );
+    }
 }
 
 /// Separate handles race to seal one epoch: exactly one seal may win, and
@@ -798,6 +855,11 @@ fn objects() {
 }
 
 #[test]
+fn objects_batch() {
+    run("batch_objects_large", batch_objects_large);
+}
+
+#[test]
 fn commits() {
     run("commits_and_walks", commits_and_walks);
 }
@@ -846,6 +908,11 @@ fn epochs_membership() {
 #[test]
 fn epochs_seal_race() {
     run("epoch_seal_race_one_wins", epoch_seal_race_one_wins);
+}
+
+#[test]
+fn sessions_end_race() {
+    run("session_end_race_one_wins", session_end_race_one_wins);
 }
 
 #[test]

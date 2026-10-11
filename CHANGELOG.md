@@ -13,7 +13,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
     - `agentstategraph/tests/backend_conformance.rs` runs repository scenarios. These include the v1.2.5 lost-update case, with separate repositories writing concurrently.
   - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
-  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. Currently listed: in-memory and Postgres reminder updates aren't atomic.
+  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. None are listed now.
 - **`PostgresStorage::connect_tenant_blocking`** connects from synchronous code, with or without an async runtime.
 - **TLS for Postgres connections, behind the opt-in `postgres-tls` feature.** Release binaries and the Docker image are built with it. Set it in the connection string, as with libpq: `?sslmode=verify-full&sslrootcert=/path/ca.pem`.
   - **TLS is always verified.** The server certificate must chain to Mozilla's roots or to a certificate in `sslrootcert` (or `PGSSLROOTCERT`), and must match the host name. `require`, `verify-ca` and `verify-full` all mean verified TLS; there is no unverified mode.
@@ -25,6 +25,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **Postgres connection errors now include their cause.** A failed connection used to report only "error performing TLS handshake" (or a similar top-level message). It now carries the reason, such as an untrusted issuer, a host name mismatch, or a refused login.
 
 ### Fixed
+- **Racing writers can no longer both "win" on sessions, reminders or commit links.**
+  - Ending a session is one conditional update on Postgres and SQLite. Before, several processes could end the same session at once.
+  - Reminder `update_if_unchanged` now does its compare and write as one step on Postgres (one transaction with the row locked) and in the in-memory backend. In a 6-way race from one snapshot, Postgres let all 6 win and memory 3; now exactly 1 wins.
+  - Linking a commit to an epoch or session runs in one transaction on Postgres and SQLite, and under the store's lock in memory. A commit can no longer join an epoch or session while it's being sealed or ended.
+- **Multi-step Postgres writes are atomic.**
+  - `delete_namespace` deletes the refs and the namespace together.
+  - `batch_put_objects` writes the whole batch in one transaction, using one multi-row insert per 1,000 objects instead of a round trip per object. Merges rely on this.
+  - `batch_get_objects` reads a batch in one query.
+- **Postgres schema setup no longer takes table locks on every connect.**
+  - The database records its schema version, and the setup only runs when that version is behind this build's.
+  - Before, every connect re-ran `ALTER TABLE … IF NOT EXISTS`, which takes an exclusive table lock even when it changes nothing. A process starting up could deadlock with writers holding locks on several tables.
+  - An existing database is upgraded once on its first connect. A deadlock victim during an upgrade retries.
+- **The in-memory backend listed a commit twice in an epoch** (and in a session) when it was linked twice. One epoch and one session per commit now, as in the SQL backends.
+- **Epoch and session commit counts are a running count.** They used to be recounted with `COUNT(*)` on every commit, a cost that grew with the epoch; sealing still writes the exact count.
 - **The server binary crashed at startup with `--storage postgres`, in both HTTP and MCP modes** ("there is no reactor running"). It connected on a throwaway runtime, dropped that runtime, and then ran `init()` with no runtime at all. The binary has never worked with Postgres; it does now, and a new test starts the real binary each way and writes and reads through it.
 - **`PostgresStorage` works from any calling thread.**
   - Before, it worked only inside a multi-threaded tokio runtime. With no runtime, `Handle::current()` panicked. On a single-threaded runtime, which is what MCP stdio servers use, `block_in_place` panicked.

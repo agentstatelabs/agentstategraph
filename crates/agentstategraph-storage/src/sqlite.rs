@@ -2356,7 +2356,12 @@ impl EpochStore for SqliteStorage {
     }
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
+        // One write transaction, so a seal from another process can't land
+        // between the status check and the association.
+        let conn = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StorageError::Backend(format!("begin assoc: {}", e)))?;
         let status: Option<String> = conn
             .query_row(
                 "SELECT status FROM epochs WHERE id = ?1",
@@ -2379,19 +2384,24 @@ impl EpochStore for SqliteStorage {
             }
             _ => {}
         }
-        conn.execute(
-            "UPDATE commits SET epoch_id = ?1 WHERE id = ?2",
-            params![epoch_id, commit_id.as_bytes().as_slice()],
-        )
-        .map_err(|e| StorageError::Backend(format!("set commit epoch: {}", e)))?;
-        // Keep commit_count in sync — cheap best-effort.
-        conn.execute(
-            "UPDATE epochs SET commit_count = (
-                 SELECT COUNT(*) FROM commits WHERE epoch_id = epochs.id
-             ) WHERE id = ?1",
-            params![epoch_id],
-        )
-        .map_err(|e| StorageError::Backend(format!("update commit_count: {}", e)))?;
+        let joined = conn
+            .execute(
+                "UPDATE commits SET epoch_id = ?1
+                 WHERE id = ?2 AND epoch_id IS NOT ?1",
+                params![epoch_id, commit_id.as_bytes().as_slice()],
+            )
+            .map_err(|e| StorageError::Backend(format!("set commit epoch: {}", e)))?;
+        // A running count, bumped only when the commit actually joins; the old
+        // COUNT(*) per commit grew with the epoch. Sealing writes the exact count.
+        if joined > 0 {
+            conn.execute(
+                "UPDATE epochs SET commit_count = commit_count + 1 WHERE id = ?1",
+                params![epoch_id],
+            )
+            .map_err(|e| StorageError::Backend(format!("update commit_count: {}", e)))?;
+        }
+        conn.commit()
+            .map_err(|e| StorageError::Backend(format!("commit assoc: {}", e)))?;
         Ok(())
     }
 }
@@ -2491,29 +2501,28 @@ impl SessionStore for SqliteStorage {
         ended_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
-        let current: Option<String> = conn
-            .query_row(
-                "SELECT status FROM sessions WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
+        // One conditional UPDATE: a status check followed by a separate write
+        // let several processes all "end" the same session.
+        let ended = conn
+            .execute(
+                "UPDATE sessions SET status = ?1, ended_at = ?2
+                 WHERE id = ?3 AND status = 'Active'",
+                params![status.as_str(), ended_at.to_rfc3339(), id],
             )
+            .map_err(|e| StorageError::Backend(format!("end session: {}", e)))?;
+        if ended > 0 {
+            return Ok(());
+        }
+        let exists: Option<i64> = conn
+            .query_row("SELECT 1 FROM sessions WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
             .optional()
             .map_err(|e| StorageError::Backend(format!("end session lookup: {}", e)))?;
-        match current.as_deref() {
-            None => {
-                return Err(StorageError::Backend(format!("session not found: {}", id)));
-            }
-            Some(s) if s != "Active" => {
-                return Err(StorageError::SessionEnded { id: id.to_string() });
-            }
-            _ => {}
+        match exists {
+            Some(_) => Err(StorageError::SessionEnded { id: id.to_string() }),
+            None => Err(StorageError::Backend(format!("session not found: {}", id))),
         }
-        conn.execute(
-            "UPDATE sessions SET status = ?1, ended_at = ?2 WHERE id = ?3",
-            params![status.as_str(), ended_at.to_rfc3339(), id],
-        )
-        .map_err(|e| StorageError::Backend(format!("end session: {}", e)))?;
-        Ok(())
     }
 
     fn list_sessions(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
@@ -2604,7 +2613,12 @@ impl SessionStore for SqliteStorage {
         commit_id: &ObjectId,
         session_id: &str,
     ) -> Result<(), StorageError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
+        // As set_commit_epoch: one write transaction, so ending the session
+        // from another process can't land between the check and the write.
+        let conn = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StorageError::Backend(format!("begin assoc: {}", e)))?;
         let status: Option<String> = conn
             .query_row(
                 "SELECT status FROM sessions WHERE id = ?1",
@@ -2627,18 +2641,22 @@ impl SessionStore for SqliteStorage {
             }
             _ => {}
         }
-        conn.execute(
-            "UPDATE commits SET session_id = ?1 WHERE id = ?2",
-            params![session_id, commit_id.as_bytes().as_slice()],
-        )
-        .map_err(|e| StorageError::Backend(format!("set commit session: {}", e)))?;
-        conn.execute(
-            "UPDATE sessions SET commit_count = (
-                 SELECT COUNT(*) FROM commits WHERE session_id = sessions.id
-             ) WHERE id = ?1",
-            params![session_id],
-        )
-        .map_err(|e| StorageError::Backend(format!("update session commit_count: {}", e)))?;
+        let joined = conn
+            .execute(
+                "UPDATE commits SET session_id = ?1
+                 WHERE id = ?2 AND session_id IS NOT ?1",
+                params![session_id, commit_id.as_bytes().as_slice()],
+            )
+            .map_err(|e| StorageError::Backend(format!("set commit session: {}", e)))?;
+        if joined > 0 {
+            conn.execute(
+                "UPDATE sessions SET commit_count = commit_count + 1 WHERE id = ?1",
+                params![session_id],
+            )
+            .map_err(|e| StorageError::Backend(format!("update session commit_count: {}", e)))?;
+        }
+        conn.commit()
+            .map_err(|e| StorageError::Backend(format!("commit assoc: {}", e)))?;
         Ok(())
     }
 }
