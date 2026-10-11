@@ -18,8 +18,14 @@ fn scratch(tag: &str) -> std::path::PathBuf {
     ))
 }
 
+/// No GC grace period, so each sweep takes everything unreachable at once and
+/// only the protections under test keep live work.
 fn open(db: &std::path::Path) -> Repository {
-    Repository::new(Box::new(SqliteStorage::open(db).unwrap()))
+    Repository::new(Box::new(
+        SqliteStorage::open(db)
+            .unwrap()
+            .with_gc_grace(std::time::Duration::ZERO),
+    ))
 }
 
 fn opts(d: &str) -> CommitOptions {

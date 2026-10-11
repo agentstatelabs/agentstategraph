@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/agentstategraph-storage"
+keywords.workspace = true
+categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Pluggable storage backends for AgentStateGraph"
@@ -14,6 +16,9 @@ default = ["sqlite"]
 memory = []
 sqlite = ["dep:rusqlite"]
 postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio"]
+# TLS for Postgres connections: rustls, verified against Mozilla's roots plus
+# any `sslrootcert`. Opt-in so the default build stays free of rustls.
+postgres-tls = ["postgres", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
 indexeddb = ["memory"]
 
 [dependencies]
@@ -28,9 +33,16 @@ rusqlite = { workspace = true, optional = true }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"], optional = true }
 deadpool-postgres = { version = "0.14", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 rusqlite = { workspace = true }
 agentstategraph-taint = { workspace = true }
 uuid = { workspace = true }
+
+[package.metadata.docs.rs]
+# Document the optional backends and evaluators too.
+all-features = true
