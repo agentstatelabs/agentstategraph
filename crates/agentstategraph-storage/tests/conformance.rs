@@ -104,12 +104,21 @@ fn sqlite_fixture(case: &str) -> Fixture {
         "asg-conformance-{case}-{}.db",
         uuid::Uuid::new_v4().simple()
     ));
-    let store: Store = Arc::new(SqliteStorage::open(&path).expect("open sqlite"));
+    // No GC grace period, so a sweep takes garbage at once (`sqlite_gc.rs`
+    // tests the grace period).
+    let open = |path: &std::path::Path| -> Store {
+        Arc::new(
+            SqliteStorage::open(path)
+                .expect("open sqlite")
+                .with_gc_grace(std::time::Duration::ZERO),
+        )
+    };
+    let store = open(&path);
     let opened = path.clone();
     Fixture {
         backend: Backend::Sqlite,
         store,
-        opener: Arc::new(move || Arc::new(SqliteStorage::open(&opened).expect("reopen sqlite"))),
+        opener: Arc::new(move || open(&opened)),
         cleanup: Some(path),
     }
 }

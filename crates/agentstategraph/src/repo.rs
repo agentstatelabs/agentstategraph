@@ -6130,7 +6130,12 @@ mod tests {
     #[test]
     fn test_gc_sweep_releases_the_writer_lock_on_every_path() {
         let path = temp_db_path("gc-release");
-        let a = Repository::new(Box::new(SqliteStorage::open(&path).unwrap()));
+        // No grace period, so the sweep below has something to delete.
+        let a = Repository::new(Box::new(
+            SqliteStorage::open(&path)
+                .unwrap()
+                .with_gc_grace(std::time::Duration::ZERO),
+        ));
         a.init().unwrap();
         for i in 0..3 {
             a.set(
@@ -6351,7 +6356,13 @@ mod tests {
 
     #[test]
     fn test_gc_sweep_reclaims_and_preserves_current_state() {
-        let repo = test_repo();
+        // No grace period, so the sweep takes the churn it just wrote.
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory()
+                .unwrap()
+                .with_gc_grace(std::time::Duration::ZERO),
+        ));
+        repo.init().unwrap();
         // Churn: overwrite /a 20 times → old versions become orphaned from the
         // tip, then a final key.
         for i in 0..20 {

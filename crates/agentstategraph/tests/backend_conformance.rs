@@ -32,11 +32,7 @@ struct Known {
     owner: &'static str,
 }
 
-const KNOWN_FAILURES: &[Known] = &[Known {
-    case: "sweep_spares_a_write_in_flight",
-    backend: Backend::Sqlite,
-    owner: "DESIGN.md finding 17: SQLite's sweep has no grace period (follow-up)",
-}];
+const KNOWN_FAILURES: &[Known] = &[];
 
 // ---------------------------------------------------------------------------
 // Harness

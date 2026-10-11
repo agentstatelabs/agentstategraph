@@ -53,10 +53,6 @@ use tokio_postgres::NoTls;
 /// the binary's `--pg-pool-size` flag.
 pub const DEFAULT_POOL_SIZE: usize = 32;
 
-/// Default GC grace period: a sweep spares unreachable objects written more
-/// recently than this. See [`PostgresStorage::with_gc_grace`].
-pub const DEFAULT_GC_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-
 use agentstategraph_core::{
     Commit, Epoch, EpochScope, EpochStatus, IntentCategory, Namespace, Node, Object, ObjectId,
     Session, SessionStatus, TAG_GIT_REVISION, TAG_PIN_STATE,
@@ -64,9 +60,9 @@ use agentstategraph_core::{
 use chrono::{DateTime, Utc};
 
 use crate::traits::{
-    CommitStore, CommitWalk, EpochStore, GcReachability, GcSweep, HISTORY_NAMESPACE_UNKNOWN,
-    HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore, SessionStore, StorageError,
-    StoreShape, TableBytes, TaintStore,
+    CommitStore, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GcReachability, GcSweep,
+    HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
+    SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
 };
 
 /// TLS settings read from a connection string, and the string tokio-postgres

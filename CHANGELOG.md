@@ -13,7 +13,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
     - `agentstategraph/tests/backend_conformance.rs` runs repository scenarios. These include the v1.2.5 lost-update case, with separate repositories writing concurrently.
   - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
-  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. One is listed: on SQLite, a sweep can delete the objects of a write that is in flight when the sweep starts (DESIGN.md finding 17).
+  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. None are listed now.
 - **`PostgresStorage::connect_tenant_blocking`** connects from synchronous code, with or without an async runtime.
 - **TLS for Postgres connections, behind the opt-in `postgres-tls` feature.** Release binaries and the Docker image are built with it. Set it in the connection string, as with libpq: `?sslmode=verify-full&sslrootcert=/path/ca.pem`.
   - **TLS is always verified.** The server certificate must chain to Mozilla's roots or to a certificate in `sslrootcert` (or `PGSSLROOTCERT`), and must match the host name. `require`, `verify-ca` and `verify-full` all mean verified TLS; there is no unverified mode.
@@ -37,6 +37,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - Schema version 3 adds a write time to `objects` and a table for speculation pins. Existing objects count as written long ago, so a sweep can take them as soon as nothing reaches them.
 
 ### Fixed
+- **A GC sweep on SQLite could delete a write that was in flight.** Every write stores its new tree, then its commit, then moves the branch. A sweep that took its lock after the first step deleted the tree; the write then committed, and the branch pointed at a tree with objects missing.
+  - A sweep now spares objects written within a grace period: 10 minutes by default, set with `SqliteStorage::with_gc_grace`. Storing an object again refreshes its write time once it is over a minute old, so a write whose tree reuses an old unreachable object is covered too. Postgres works the same way (`DEFAULT_GC_GRACE` and `GC_FRESHEN_AFTER` are shared).
+  - Objects already in a store count as written long ago, so a sweep reclaims them as before. Garbage written after upgrading waits out the grace period before a sweep takes it. The reachability report and dry run still count every unreachable object.
 - **Search could go on returning a value that had been overwritten.** When writers raced on one branch, their search-index updates could apply out of order, and the index kept the older value until that path was written again. A 4-writer test showed it about once in 200 runs on SQLite. Each index now records the tree it reflects, and an update applies only to the tree it was computed from. A search first brings the index up to the branch's current tree; if it can't, it walks the tree instead. A SQLite index built by an earlier version is rebuilt on its next search.
 - **SQLite search for a one- or two-character query treated `%` and `_` as wildcards.** They now match themselves, as they already did in longer queries.
 - **Racing writers can no longer both "win" on sessions, reminders or commit links.**

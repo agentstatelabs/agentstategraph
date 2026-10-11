@@ -28,7 +28,7 @@ pub use postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
 pub use traits::{
-    CommitStore, CommitWalk, EpochStore, GcReachability, GcSweep, HISTORY_NAMESPACE_UNKNOWN,
-    HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore, SessionStore, Storage,
-    StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
+    CommitStore, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability,
+    GcSweep, HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore,
+    RefStore, SessionStore, Storage, StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
 };
