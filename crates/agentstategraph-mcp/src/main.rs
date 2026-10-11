@@ -291,7 +291,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     "  -p, --path <PATH>     SQLite database path (default: ./agentstategraph.db)"
                 );
                 eprintln!(
-                    "      --database-url <URL>  Postgres connection URL (required for --storage postgres)"
+                    "      --database-url <URL>  Postgres connection URL (required for --storage postgres).\n                            TLS: add ?sslmode=verify-full (and &sslrootcert=<ca.pem> for a\n                            private CA); needs a build with the `postgres-tls` feature"
                 );
                 eprintln!(
                     "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"

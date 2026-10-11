@@ -229,12 +229,15 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

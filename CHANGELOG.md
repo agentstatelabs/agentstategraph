@@ -15,6 +15,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
   - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. Currently listed: in-memory and Postgres reminder updates aren't atomic.
 - **`PostgresStorage::connect_tenant_blocking`** connects from synchronous code, with or without an async runtime.
+- **TLS for Postgres connections, behind the opt-in `postgres-tls` feature.** Release binaries and the Docker image are built with it. Set it in the connection string, as with libpq: `?sslmode=verify-full&sslrootcert=/path/ca.pem`.
+  - **TLS is always verified.** The server certificate must chain to Mozilla's roots or to a certificate in `sslrootcert` (or `PGSSLROOTCERT`), and must match the host name. `require`, `verify-ca` and `verify-full` all mean verified TLS; there is no unverified mode.
+  - **`sslrootcert` is for providers with their own CA,** such as RDS or Cloud SQL.
+  - **`prefer` uses TLS when the server offers it,** and still verifies it.
+  - **No `sslmode` stays plaintext, as before.** Use `require` or `verify-full` for any host that isn't local.
+  - **A build without the feature refuses a TLS request** with an error that names the feature, rather than connecting in plaintext.
+  - **`scripts/test-postgres.sh --tls`** tests against a local server that refuses plaintext, with a certificate from a throwaway CA. GitHub CI runs it.
+- **Postgres connection errors now include their cause.** A failed connection used to report only "error performing TLS handshake" (or a similar top-level message). It now carries the reason, such as an untrusted issuer, a host name mismatch, or a refused login.
 
 ### Fixed
 - **The server binary crashed at startup with `--storage postgres`, in both HTTP and MCP modes** ("there is no reactor running"). It connected on a throwaway runtime, dropped that runtime, and then ran `init()` with no runtime at all. The binary has never worked with Postgres; it does now, and a new test starts the real binary each way and writes and reads through it.

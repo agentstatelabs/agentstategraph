@@ -104,6 +104,8 @@ test:
     ASG_REQUIRE_POSTGRES: "1"
   script:
     - cargo test --workspace --locked --exclude agentstategraph-python
+    # Postgres TLS is opt-in (postgres-tls); compile and unit-test it too.
+    - cargo test --locked -p agentstategraph-storage --features postgres-tls,memory --lib
 
 # version-guard: on a release tag, prove every version the publish stage will
 # stamp agrees with the tag BEFORE anything publishes. This is the backstop for
