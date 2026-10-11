@@ -84,8 +84,7 @@ pub fn router(repo: Arc<Repository>) -> Router {
 
 /// Create a single-tenant router with an explicit rate limit (rpm).
 pub fn router_with_rate_limit(repo: Arc<Repository>, rpm: u32) -> Router {
-    let tenant_mgr = TenantManager::single_tenant(repo.clone());
-    build_router(repo, tenant_mgr, rpm)
+    build_router_with(TenantManager::single_tenant(repo), rpm, None)
 }
 
 /// Create a multi-tenant router with API key authentication. Fails if the
@@ -105,30 +104,27 @@ pub fn router_multi_tenant_with_rate_limit(
     keys_file: Option<&str>,
     rpm: u32,
 ) -> Result<Router, KeyStoreError> {
-    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), keys_file)?;
-    Ok(build_router(repo, tenant_mgr, rpm))
+    let tenant_mgr = TenantManager::multi_tenant(repo, keys_file)?;
+    Ok(build_router_with(tenant_mgr, rpm, None))
 }
 
 /// Test hook: build the router with a pre-constructed `TenantManager`
 /// so integration tests can seed specific API keys without spinning
-/// them through the admin HTTP endpoints.
+/// them through the admin HTTP endpoints. `_repo` is unused: requests work
+/// in the manager's repository, scoped to each request's key.
 pub fn build_router_for_test(
-    repo: Arc<Repository>,
+    _repo: Arc<Repository>,
     tenant_mgr: Arc<TenantManager>,
     rpm: u32,
 ) -> Router {
-    build_router(repo, tenant_mgr, rpm)
-}
-
-fn build_router(repo: Arc<Repository>, tenant_mgr: Arc<TenantManager>, rpm: u32) -> Router {
-    build_router_with(repo, tenant_mgr, rpm, None)
+    build_router_with(tenant_mgr, rpm, None)
 }
 
 /// The API router, plus `extra` routes (the ASD proxy) served behind the
 /// same auth and rate limit as the API. Routes merged onto the router
-/// afterwards would get neither.
+/// afterwards would get neither. Each request works in the repository the
+/// manager gives its key: the default one, or a namespace-bound one.
 pub fn build_router_with(
-    repo: Arc<Repository>,
     tenant_mgr: Arc<TenantManager>,
     rpm: u32,
     extra: Option<Router>,
@@ -165,8 +161,7 @@ pub fn build_router_with(
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::auth_middleware,
-        ))
-        .with_state(repo);
+        ));
 
     // Public health endpoint — no auth.
     let public_routes = Router::new()
@@ -430,8 +425,13 @@ async fn health_with_mgr(State(mgr): State<Arc<TenantManager>>) -> Json<serde_js
 
 #[derive(Deserialize)]
 struct CreateKeyRequest {
-    tenant_id: String,
+    /// Defaults to the tenant this server serves.
+    #[serde(default)]
+    tenant_id: Option<String>,
     name: String,
+    /// Bind the key to a namespace: it then works only there, by branch name.
+    #[serde(default)]
+    namespace_id: Option<String>,
     plan: Option<String>,
     #[serde(default)]
     commit_agent_id: Option<String>,
@@ -483,13 +483,23 @@ async fn create_key(
     let expires_at = req
         .expires_in_days
         .map(|d| chrono::Utc::now() + chrono::Duration::days(d as i64));
+    if let Some(ns) = &req.namespace_id
+        && let Err(e) = agentstategraph_core::Namespace::new(ns)
+    {
+        return Err(AppError {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("invalid namespace_id '{ns}': {e}"),
+        });
+    }
+    let tenant_id = req.tenant_id.unwrap_or_else(|| mgr.tenant_id().to_string());
     let key = mgr
         .create_key_with(
-            &req.tenant_id,
+            &tenant_id,
             &req.name,
             &plan,
             CreateKeyOptions {
                 commit_agent_id: req.commit_agent_id,
+                namespace_id: req.namespace_id,
                 can_migrate,
                 is_admin,
                 expires_at,
@@ -580,7 +590,7 @@ struct PathQuery {
 }
 
 async fn get_state(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -590,7 +600,7 @@ async fn get_state(
 }
 
 async fn list_paths(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -602,7 +612,7 @@ async fn list_paths(
 }
 
 async fn search_values(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -636,7 +646,7 @@ struct SetRequest {
 }
 
 async fn set_value(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Path(ref_name): Path<String>,
     Json(req): Json<SetRequest>,
@@ -670,7 +680,7 @@ struct DeleteRequest {
 }
 
 async fn delete_value(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Path(ref_name): Path<String>,
     Json(req): Json<DeleteRequest>,
@@ -692,7 +702,7 @@ struct LogQuery {
 }
 
 async fn get_log(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -726,7 +736,7 @@ struct BlameQuery {
 }
 
 async fn blame(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Query(q): Query<BlameQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -741,7 +751,7 @@ struct DiffQuery {
 }
 
 async fn diff(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Query(q): Query<DiffQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let ops = repo.diff(&q.ref_a, &q.ref_b)?;
@@ -762,7 +772,7 @@ struct QueryRequest {
 }
 
 async fn query_commits(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Json(req): Json<QueryRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -803,7 +813,7 @@ struct GraphQuery {
 }
 
 async fn commit_graph(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Query(q): Query<GraphQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -822,9 +832,11 @@ struct HistoryQuery {
 }
 
 async fn history(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    store_wide(&ctx)?;
     let report = repo.history_report(
         q.namespace.as_deref(),
         q.by.as_deref().unwrap_or("day"),
@@ -835,7 +847,11 @@ async fn history(
     Ok(Json(report))
 }
 
-async fn gc_dry_run(State(repo): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+async fn gc_dry_run(
+    Extension(repo): Extension<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    store_wide(&ctx)?;
     Ok(Json(repo.gc_dry_run()?))
 }
 
@@ -851,9 +867,11 @@ struct SweepRequest {
 }
 
 async fn gc_sweep(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Json(req): Json<SweepRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    store_wide(&ctx)?;
     let default = RetentionPolicy::default();
     let policy = RetentionPolicy {
         keep_recent: req.keep_recent.unwrap_or(default.keep_recent),
@@ -867,8 +885,26 @@ async fn gc_sweep(
     )?))
 }
 
-async fn gc_vacuum(State(repo): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+async fn gc_vacuum(
+    Extension(repo): Extension<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    store_wide(&ctx)?;
     Ok(Json(repo.gc_vacuum()?))
+}
+
+/// Refuse a store-wide operation (GC, the history report) to a key bound to
+/// a namespace: they read or change every namespace.
+fn store_wide(ctx: &AuthContext) -> Result<(), AppError> {
+    match &ctx.namespace_id {
+        None => Ok(()),
+        Some(ns) => Err(AppError {
+            status: StatusCode::FORBIDDEN,
+            message: format!(
+                "this covers the whole store, and this key is bound to namespace '{ns}'"
+            ),
+        }),
+    }
 }
 
 // ─── Branches ───────────────────────────────────────────────
@@ -879,7 +915,7 @@ struct BranchQuery {
 }
 
 async fn list_branches(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Query(q): Query<BranchQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let branches = repo.list_branches(q.prefix.as_deref())?;
@@ -897,7 +933,7 @@ struct CreateBranchRequest {
 }
 
 async fn create_branch(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Json(req): Json<CreateBranchRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let from = req.from.as_deref().unwrap_or("main");
@@ -918,7 +954,7 @@ struct MergeRequest {
 }
 
 async fn merge_branches(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -939,7 +975,9 @@ async fn merge_branches(
 
 // ─── Epochs ─────────────────────────────────────────────────
 
-async fn list_epochs(State(repo): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+async fn list_epochs(
+    Extension(repo): Extension<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
     let entries = repo.list_epochs()?;
     let json: Vec<serde_json::Value> = entries
         .iter()
@@ -965,7 +1003,7 @@ struct CreateEpochRequest {
 }
 
 async fn create_epoch(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Json(req): Json<CreateEpochRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let epoch = repo.create_epoch(&req.id, &req.description, vec![])?;
@@ -981,7 +1019,7 @@ struct SealEpochRequest {
 }
 
 async fn seal_epoch(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Json(req): Json<SealEpochRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     repo.seal_epoch(&req.id, &req.summary)?;
@@ -991,7 +1029,7 @@ async fn seal_epoch(
 // ─── Stats & Intents ────────────────────────────────────────
 
 async fn stats(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let s = repo.stats(&ref_name)?;
@@ -1004,7 +1042,7 @@ struct IntentQuery {
 }
 
 async fn intent_tree(
-    State(repo): State<AppState>,
+    Extension(repo): Extension<AppState>,
     Path(ref_name): Path<String>,
     Query(q): Query<IntentQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -1035,6 +1073,9 @@ impl From<RepoError> for AppError {
             // Writes to `/_meta/*` without `IntentCategory::Migrate` are
             // a capability violation, not a server fault — surface 403.
             RepoError::ReservedPath(_) => StatusCode::FORBIDDEN,
+            // A namespace-bound key naming a commit, which could reach
+            // another namespace.
+            RepoError::CommitRefNotAllowed(_) => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         AppError {

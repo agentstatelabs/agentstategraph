@@ -70,7 +70,7 @@ async fn expired_key_is_rejected() {
     let expired = ApiKey {
         id: String::new(),
         key: "asg_expired_user".into(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "expired".into(),
         plan: "free".into(),
         enabled: true,
@@ -153,7 +153,7 @@ async fn rotate_key_invalidates_old_and_mints_new() {
     let user = ApiKey {
         id: String::new(),
         key: "asg_rot_user_abcdef".into(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "rotates".into(),
         plan: "free".into(),
         enabled: true,

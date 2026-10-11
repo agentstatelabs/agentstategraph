@@ -171,6 +171,9 @@ pub struct Repository {
     /// Populated eagerly in `set_active_session`; cleared when session is None.
     /// Avoids a storage round-trip on every ref operation.
     active_session_namespace: std::sync::RwLock<Option<Namespace>>,
+    /// Accept only branch names as ref specs. See
+    /// [`Repository::with_branch_refs_only`].
+    branch_refs_only: bool,
 }
 
 /// Default batch size for [`Repository::extract_history`] — how many commits
@@ -421,6 +424,11 @@ pub enum RepoError {
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
 
+    /// A commit id or prefix where this repository accepts only branch names
+    /// (see [`Repository::with_branch_refs_only`]).
+    #[error("'{0}' looks like a commit id; only branch names are accepted here")]
+    CommitRefNotAllowed(String),
+
     #[error("namespace not found: '{0}' — call create_namespace first")]
     NamespaceNotFound(String),
 
@@ -553,6 +561,7 @@ impl Repository {
             active_epoch: std::sync::RwLock::new(None),
             active_session: std::sync::RwLock::new(None),
             epoch_seal_strict: strict,
+            branch_refs_only: false,
         }
     }
 
@@ -586,6 +595,7 @@ impl Repository {
             active_epoch: std::sync::RwLock::new(epoch),
             active_session: std::sync::RwLock::new(session),
             epoch_seal_strict: self.epoch_seal_strict,
+            branch_refs_only: self.branch_refs_only,
             active_session_namespace: std::sync::RwLock::new(session_ns),
         }
     }
@@ -595,6 +605,19 @@ impl Repository {
     /// `scope_namespace` is active — use `active_namespace()` for that.
     pub fn namespace(&self) -> &Namespace {
         &self.namespace
+    }
+
+    /// Accept only branch names where a ref is named, refusing commit ids and
+    /// id prefixes ([`RepoError::CommitRefNotAllowed`]).
+    ///
+    /// Branch names resolve in this repository's namespace, but commit ids
+    /// resolve over every commit in the store, whichever namespace made it.
+    /// A repository that serves one namespace to a caller who mustn't see
+    /// the others (an API key bound to a namespace) is limited this way.
+    /// Forks keep the limit.
+    pub fn with_branch_refs_only(mut self) -> Self {
+        self.branch_refs_only = true;
+        self
     }
 
     /// Return a Repository with epoch-seal enforcement set to the given mode.
@@ -3379,6 +3402,15 @@ impl Repository {
         // 1. Exact branch name — always wins, even if it looks like hex.
         if let Some(id) = self.storage.get_ref(&ns, ref_name)? {
             return Ok(id);
+        }
+        if self.branch_refs_only {
+            let commit_like = ObjectId::from_hex(ref_name).is_some()
+                || ObjectId::normalize_hex_prefix(ref_name).is_some();
+            return Err(if commit_like {
+                RepoError::CommitRefNotAllowed(ref_name.to_string())
+            } else {
+                RepoError::BranchNotFound(ref_name.to_string())
+            });
         }
         // 2 & 3. Commit hash / prefix.
         self.resolve_commit_ref(ref_name)

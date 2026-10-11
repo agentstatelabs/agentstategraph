@@ -52,7 +52,7 @@ async fn authenticated_agent_id_overrides_body_agent() {
     let api_key = ApiKey {
         id: String::new(),
         key: key.clone(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "bound".into(),
         plan: "free".into(),
         enabled: true,
@@ -115,7 +115,7 @@ async fn key_without_can_migrate_cannot_write_meta() {
     let api_key = ApiKey {
         id: String::new(),
         key: key.clone(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "nomigrate".into(),
         plan: "free".into(),
         enabled: true,
@@ -164,7 +164,7 @@ async fn key_with_can_migrate_can_write_meta() {
     let api_key = ApiKey {
         id: String::new(),
         key: key.clone(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "migrator".into(),
         plan: "free".into(),
         enabled: true,

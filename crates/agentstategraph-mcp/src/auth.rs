@@ -31,6 +31,8 @@ use agentstategraph::Repository;
 #[derive(Default)]
 pub struct CreateKeyOptions {
     pub commit_agent_id: Option<String>,
+    /// Bind the key to this namespace (see [`ApiKey::namespace_id`]).
+    pub namespace_id: Option<String>,
     pub can_migrate: bool,
     pub is_admin: bool,
     pub expires_at: Option<DateTime<Utc>>,
@@ -56,9 +58,10 @@ pub struct ApiKey {
     /// commit agent_id).
     #[serde(default)]
     pub commit_agent_id: Option<String>,
-    /// Optional namespace this key is scoped to. When set, the Repository
-    /// is operated in this namespace for requests authenticated with this key.
-    /// `None` means the server's configured default namespace applies.
+    /// Optional namespace this key is bound to. Requests with it work in that
+    /// namespace and name refs by branch only: commit ids reach across
+    /// namespaces, and store-wide endpoints (GC, history) refuse it. `None`
+    /// means the server's configured default namespace, with no limits.
     #[serde(default)]
     pub namespace_id: Option<String>,
     /// Whether this key is allowed to issue commits tagged
@@ -202,10 +205,15 @@ pub struct AuthContext {
 pub struct TenantManager {
     /// Key hash → key.
     keys: RwLock<HashMap<String, StoredKey>>,
-    /// Tenant ID → Repository (cached, for future per-tenant storage)
-    _repos: RwLock<HashMap<String, Arc<Repository>>>,
+    /// Namespace → the repository serving keys bound to it: a fork of the
+    /// default repository, limited to branch names.
+    namespace_repos: RwLock<HashMap<String, Arc<Repository>>>,
     /// Default repo (used when auth is disabled)
     default_repo: Arc<Repository>,
+    /// The tenant this process serves (`--tenant`). A non-admin key for
+    /// another tenant is refused: its data isn't here, and quietly serving
+    /// this tenant's data to it would cross tenants.
+    tenant_id: String,
     /// Whether auth is enabled
     auth_enabled: bool,
     /// Path to API keys file (optional)
@@ -217,8 +225,9 @@ impl TenantManager {
     pub fn single_tenant(repo: Arc<Repository>) -> Arc<Self> {
         Arc::new(Self {
             keys: RwLock::new(HashMap::new()),
-            _repos: RwLock::new(HashMap::new()),
+            namespace_repos: RwLock::new(HashMap::new()),
             default_repo: repo,
+            tenant_id: DEFAULT_TENANT.to_string(),
             auth_enabled: false,
             keys_file: None,
         })
@@ -235,6 +244,16 @@ impl TenantManager {
         default_repo: Arc<Repository>,
         keys_file: Option<&str>,
     ) -> Result<Arc<Self>, KeyStoreError> {
+        Self::multi_tenant_for(default_repo, keys_file, DEFAULT_TENANT)
+    }
+
+    /// [`TenantManager::multi_tenant`] for a process serving `tenant_id`
+    /// (`--tenant`). Non-admin keys must belong to it.
+    pub fn multi_tenant_for(
+        default_repo: Arc<Repository>,
+        keys_file: Option<&str>,
+        tenant_id: &str,
+    ) -> Result<Arc<Self>, KeyStoreError> {
         let keys_file = keys_file.map(PathBuf::from);
         let (keys, migrated) = match &keys_file {
             Some(path) => load_keys(path)?,
@@ -242,8 +261,9 @@ impl TenantManager {
         };
         let mgr = Arc::new(Self {
             keys: RwLock::new(keys),
-            _repos: RwLock::new(HashMap::new()),
+            namespace_repos: RwLock::new(HashMap::new()),
             default_repo,
+            tenant_id: tenant_id.to_string(),
             auth_enabled: true,
             keys_file,
         });
@@ -336,7 +356,7 @@ impl TenantManager {
             plan: plan.to_string(),
             enabled: true,
             created_at: Utc::now().to_rfc3339(),
-            namespace_id: None,
+            namespace_id: opts.namespace_id,
             commit_agent_id: opts.commit_agent_id,
             can_migrate: opts.can_migrate,
             is_admin: opts.is_admin,
@@ -500,20 +520,61 @@ impl TenantManager {
         Some(tenant)
     }
 
-    /// Get the repository for a request. If auth is disabled, returns the default repo.
-    /// If auth is enabled, looks up the API key and returns the tenant's repo.
+    /// The tenant this process serves.
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    /// The repository a request works in. With auth disabled, the default
+    /// repository. With auth enabled, the key must be live and, unless it is
+    /// an admin key, belong to this process's tenant; a key bound to a
+    /// namespace gets a repository in that namespace, limited to branch
+    /// names.
     pub fn get_repo(&self, api_key: Option<&str>) -> Result<Arc<Repository>, AuthError> {
         if !self.auth_enabled {
             return Ok(self.default_repo.clone());
         }
 
         let key = api_key.ok_or(AuthError::MissingKey)?;
-        let _tenant_id = self.resolve_tenant(key).ok_or(AuthError::InvalidKey)?;
+        let tenant = self.resolve_tenant(key).ok_or(AuthError::InvalidKey)?;
+        let stored = self.live(key).ok_or(AuthError::InvalidKey)?;
+        if !stored.is_admin && tenant != self.tenant_id {
+            return Err(AuthError::WrongTenant {
+                key_tenant: tenant,
+                server_tenant: self.tenant_id.clone(),
+            });
+        }
+        match stored.namespace_id.as_deref() {
+            None => Ok(self.default_repo.clone()),
+            Some(ns) => self.namespace_repo(ns),
+        }
+    }
 
-        // For now, all tenants share the same repo instance (Postgres tenant_id
-        // handles isolation at the storage layer). In the future, we could
-        // create per-tenant repos with different storage backends.
-        Ok(self.default_repo.clone())
+    /// The (cached) branch-names-only fork of the default repository in
+    /// namespace `ns`.
+    fn namespace_repo(&self, ns: &str) -> Result<Arc<Repository>, AuthError> {
+        if let Some(repo) = self
+            .namespace_repos
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(ns)
+        {
+            return Ok(Arc::clone(repo));
+        }
+        let namespace =
+            agentstategraph_core::Namespace::new(ns).map_err(|_| AuthError::BadKeyNamespace)?;
+        let repo = Arc::new(
+            self.default_repo
+                .fork_namespace(namespace)
+                .with_branch_refs_only(),
+        );
+        Ok(Arc::clone(
+            self.namespace_repos
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(ns.to_string())
+                .or_insert(repo),
+        ))
     }
 }
 
@@ -663,12 +724,22 @@ fn generate_key_id() -> String {
     format!("key_{}", hex::encode(bytes))
 }
 
+/// The tenant a process serves unless `--tenant` says otherwise.
+pub const DEFAULT_TENANT: &str = "default";
+
 /// Auth errors.
 #[derive(Debug)]
 pub enum AuthError {
     MissingKey,
     InvalidKey,
     NotAdmin,
+    /// A non-admin key for a tenant this process doesn't serve.
+    WrongTenant {
+        key_tenant: String,
+        server_tenant: String,
+    },
+    /// The key's namespace isn't a valid namespace name.
+    BadKeyNamespace,
 }
 
 impl IntoResponse for AuthError {
@@ -676,12 +747,30 @@ impl IntoResponse for AuthError {
         let (status, msg) = match self {
             AuthError::MissingKey => (
                 StatusCode::UNAUTHORIZED,
-                "Missing API key. Pass it as: Authorization: Bearer asg_...",
+                "Missing API key. Pass it as: Authorization: Bearer asg_...".to_string(),
             ),
-            AuthError::InvalidKey => (StatusCode::UNAUTHORIZED, "Invalid or revoked API key."),
+            AuthError::InvalidKey => (
+                StatusCode::UNAUTHORIZED,
+                "Invalid or revoked API key.".to_string(),
+            ),
             AuthError::NotAdmin => (
                 StatusCode::FORBIDDEN,
-                "Admin privilege required for this endpoint.",
+                "Admin privilege required for this endpoint.".to_string(),
+            ),
+            AuthError::WrongTenant {
+                key_tenant,
+                server_tenant,
+            } => (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "This key belongs to tenant '{key_tenant}', but this server serves tenant \
+                     '{server_tenant}'. Use a key for '{server_tenant}', or start the server \
+                     with --tenant {key_tenant}."
+                ),
+            ),
+            AuthError::BadKeyNamespace => (
+                StatusCode::FORBIDDEN,
+                "This key is bound to an invalid namespace name.".to_string(),
             ),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
