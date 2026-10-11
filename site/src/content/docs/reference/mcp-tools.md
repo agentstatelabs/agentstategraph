@@ -3,7 +3,7 @@ title: MCP Tools Reference
 description: Complete reference for all AgentStateGraph MCP tools with parameters and examples.
 ---
 
-> **73 tools** — 4 core state · 7 branching/speculation · 10 query/blame/explore · 4 namespaces · 7 epochs · 4 sessions · 10 plans/tasks · 12 policy · 8 taint · 7 reminders. Also available as HTTP REST endpoints via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
+> **77 tools** — 4 core state · 7 branching/speculation · 10 query/blame/explore · 4 namespaces · 7 epochs · 4 sessions · 4 maintenance (GC and history) · 10 plans/tasks · 12 policy · 8 taint · 7 reminders. Also available as HTTP REST endpoints via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
 >
 > **Namespace override:** the 17 ref-touching tools (`get`, `set`, `delete`, `branch`, `list_branches`, `merge`, `log`, `diff`, `speculate`, `query`, `blame`, `list_paths`, `get_tree`, `search`, `stats`, `commit_graph`, `intent_tree`) also accept an optional `namespace` field that overrides the server's configured namespace for that call. See [Namespaces](/guides/namespaces/).
 
@@ -219,7 +219,7 @@ Structured diff between two refs. Returns typed DiffOps, not text diffs.
 
 ## Namespaces
 
-Namespaces are ref-layer isolation boundaries. Branches in different namespaces are invisible to each other and can share names. See the [Namespaces guide](/guides/namespaces/) for the full model.
+Namespaces give each project its own set of branches. Branches in different namespaces can share names, and listing one namespace's branches doesn't show another's. They share the store's commits, so they aren't a security boundary, and MCP tools can work in any namespace. See the [Namespaces guide](/guides/namespaces/) for the full model.
 
 ### agentstategraph_create_namespace
 
@@ -270,7 +270,7 @@ Namespace 'globex' deleted (12 refs removed)
 
 ### agentstategraph_cross_namespace_merge
 
-Merge a branch from another namespace into a branch in the active namespace. Policy-gated and audited — **denied by default** when no `PolicyStore` is configured.
+Merge a branch from another namespace into a branch in the active namespace. **Always refused for now**: the policy check that would allow it isn't built yet.
 
 **Parameters:**
 
@@ -281,9 +281,9 @@ Merge a branch from another namespace into a branch in the active namespace. Pol
 | `target_branch` | string | no | `"main"` | Branch in the active namespace to merge into |
 | `intent_description` | string | yes | | Why this cross-namespace merge |
 
-**Example output (denied):**
+**Example output:**
 ```
-Denied: cross-namespace merge requires an active PolicyStore with a matching grant
+Error: cross-namespace merge denied: no PolicyStore configured
 ```
 
 ---
@@ -390,7 +390,14 @@ Compare multiple speculations. Returns diffs showing how each diverges from base
 
 ### agentstategraph_commit_spec
 
-Promote a speculation to a real commit on its base branch. The speculation is consumed.
+Promote a speculation to a real commit on its base branch. Before promoting, the speculation's diff is evaluated against policy, with tokens inferred from it (`destructive`, `schema-change`, `ref-rewrite`, `large`, `reindex`, `migration`):
+
+- **Allow** → promoted, and the speculation is consumed.
+- **Deny** or **RequireApproval** → not promoted; the decision JSON is returned.
+- **No policy matched, and the change has tokens** → the server's fail-safe decides. Under `deny` (the default) it isn't promoted, and the response names the tokens. Ratify a policy whose `triggers` include the token and that allows `promote_speculation`, or start the server with `--policy-fail-safe allow`.
+- **No policy matched, and the change has no tokens** → promoted.
+
+A speculation that isn't promoted stays open to change, retry or discard.
 
 **Parameters:**
 
@@ -416,6 +423,20 @@ Promote a speculation to a real commit on its base branch. The speculation is co
 **Example output:**
 ```
 Speculation committed: m3n4o5p6
+```
+
+**Example output (refused by the fail-safe):**
+```json
+{
+  "original": { "kind": "no_policy_match" },
+  "translated": {
+    "kind": "deny",
+    "matched_policy": "<fail-safe:deny>",
+    "reason": "no policy covers this change's tokens (destructive); fail-safe deny applied at MCP layer"
+  },
+  "fail_safe": "deny",
+  "tokens": ["destructive"]
+}
 ```
 
 ---
@@ -960,6 +981,112 @@ Get the intent decomposition tree. Shows how intents are broken down into sub-ta
 
 ---
 
+## Maintenance
+
+These cover the whole store, every namespace included. Over HTTP, an API key bound to a namespace can't use them.
+
+### agentstategraph_history
+
+Project-history metrics from the distilled history tables: commit velocity, intent mix, authorship, and the milestone timeline.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `by` | string | no | `"day"` | Roll velocity up by `"day"` or `"week"` |
+| `milestones` | number | no | `50` | Max milestones on the timeline |
+| `refresh` | boolean | no | `true` | Distil new commits before reporting; `false` reads the tables as they are |
+| `store` | boolean | no | `false` | Attach the physical store shape (objects, commits, bytes) |
+| `namespace` | string | no | | Restrict every view to one namespace; omit for the whole store |
+
+**Example output:**
+```json
+{
+  "authorship": [{ "agent": "agent/planner", "commits": 3 }],
+  "intent_mix": [{ "category": "Refine", "commits": 3 }],
+  "milestones": [
+    {
+      "agent": "system",
+      "commit": "sg_7b65729bf3af",
+      "day": "2026-10-07",
+      "description": "Initialize empty state",
+      "kind": "checkpoint",
+      "namespace": "unattributed",
+      "timestamp": "2026-10-07T20:47:23.890165+00:00"
+    }
+  ],
+  "namespaces": ["unattributed"],
+  "totals": { "agents": 2, "commits": 4, "cursor": 4, "periods": 1 },
+  "velocity": { "by": "day", "series": [{ "commits": 4, "period": "2026-10-07" }] }
+}
+```
+
+---
+
+### agentstategraph_gc_dry_run
+
+Report what a garbage collection would reclaim, without changing anything. It won't call a sweep safe while any commit is undistilled, because the history tables wouldn't yet hold what the sweep removes.
+
+**Parameters:** none.
+
+**Example output:**
+```json
+{
+  "dry_run": true,
+  "mutates": false,
+  "safe": true,
+  "safety": { "reason": "all commits distilled — reclaimable objects' signal is captured in the history tables", "undistilled_commits": 0 },
+  "objects": { "live": 4, "reclaimable": 6, "reclaimable_pct": 60.0, "total": 10 },
+  "commits": { "total": 4 },
+  "bytes": { "current_total": 217088, "estimated_reclaimable": 2457, "estimated_post_vacuum": 214631, "dbstat_available": true },
+  "roots_walked": 1
+}
+```
+
+---
+
+### agentstategraph_gc_sweep
+
+Sweep under a retention policy. With `mutate: true` it **deletes** object versions no longer reachable from the kept commits. Branch tips, sealed epochs, milestones and the kept history are always preserved. It refuses to delete while any commit is undistilled. Without `mutate`, it previews.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `keep_recent` | number | no | `100` | Keep the N most recent commits' state in full |
+| `checkpoint_every` | number | no | `100` | Among older commits, keep every Kth as a checkpoint (`0` disables) |
+| `keep_milestones` | boolean | no | `true` | Keep milestone snapshots |
+| `mutate` | boolean | no | `false` | Must be `true` to delete; otherwise a preview |
+| `vacuum` | boolean | no | `false` | Compact the store after a deleting sweep |
+
+**Example output (preview):**
+```json
+{
+  "dry_run": true,
+  "mutated": false,
+  "safe": true,
+  "undistilled_commits": 0,
+  "keep_roots": 4,
+  "policy": { "keep_recent": 100, "checkpoint_every": 100, "keep_milestones": true },
+  "would_reclaim": { "live_objects": 9, "reclaimable_objects": 1, "reclaimable_pct": 10.0, "roots_walked": 4, "total_objects": 10 }
+}
+```
+
+---
+
+### agentstategraph_gc_vacuum
+
+Compact the store, returning freed space to the OS. Run it after a sweep.
+
+**Parameters:** none.
+
+**Example output:**
+```json
+{ "bytes_before": 217088, "bytes_after": 201216, "bytes_reclaimed": 15872 }
+```
+
+---
+
 ## Tasks
 
 Plans and tasks are stored in AgentStateGraph as structured state. Each plan is a collection of tasks with a strict state machine (`pending → in_progress → done`). Tasks can be assigned to agents, have blockers, carry `Proof` of completion, and are filterable by `IntentCategory::Plan` in log and blame queries.
@@ -1245,7 +1372,7 @@ Get the next highest-priority unblocked task (optionally for a specific agent).
 
 ## Policy
 
-Policies express authorization rules and cost-of-change thresholds. A policy is proposed, ratified, optionally signed (Ed25519), and then active. Changes can be evaluated against the active policy before they are committed, optionally through a pluggable Cedar / Rego / WASM evaluator. Evaluation produces a `Decision` — `Allow`, `Deny`, `RequireApproval` (with a fallback action), or `NoPolicyMatch` — with a fail-safe deny applied by the server when nothing matches. Precedence is `deny > require_approval > allow`. See the [Policy guide](/guides/policy/) for the full model.
+Policies express authorization rules and cost-of-change thresholds. A policy is proposed, ratified, optionally signed (Ed25519), and then active. Changes can be evaluated against the active policy before they are committed, optionally through a pluggable Cedar / Rego / WASM evaluator. Evaluation produces a `Decision` — `Allow`, `Deny`, `RequireApproval` (with a fallback action), or `NoPolicyMatch` — with a fail-safe deny applied by the server when nothing matches (`--policy-fail-safe allow` to change it). Precedence is `deny > require_approval > allow`. See the [Policy guide](/guides/policy/) for the full model.
 
 ### agentstategraph_policy_propose
 

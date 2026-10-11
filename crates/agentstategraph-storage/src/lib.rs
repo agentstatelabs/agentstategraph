@@ -3,7 +3,8 @@
 //! Provides the storage trait definitions and built-in backends:
 //! - `MemoryStorage` — fast, ephemeral, for testing and speculation
 //! - `SqliteStorage` — durable, single-file, the default for production use
-//! - `PostgresStorage` — multi-tenant, connection-pooled, for SaaS and enterprise
+//! - `PostgresStorage` — connection-pooled and shareable: tenants share a database,
+//!   every row partitioned by tenant id, one tenant per handle
 //!
 //! Custom backends can be added by implementing the `Storage` trait
 //! (which is a blanket impl over `ObjectStore + CommitStore + RefStore`).
@@ -28,7 +29,7 @@ pub use postgres::PostgresStorage;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
 pub use traits::{
-    CommitStore, CommitWalk, EpochStore, GcReachability, GcSweep, HISTORY_NAMESPACE_UNKNOWN,
-    HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore, SessionStore, Storage,
-    StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
+    CommitStore, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability,
+    GcSweep, HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore,
+    RefStore, SessionStore, Storage, StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
 };

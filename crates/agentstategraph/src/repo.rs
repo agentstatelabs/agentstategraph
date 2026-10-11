@@ -171,6 +171,9 @@ pub struct Repository {
     /// Populated eagerly in `set_active_session`; cleared when session is None.
     /// Avoids a storage round-trip on every ref operation.
     active_session_namespace: std::sync::RwLock<Option<Namespace>>,
+    /// Accept only branch names as ref specs. See
+    /// [`Repository::with_branch_refs_only`].
+    branch_refs_only: bool,
 }
 
 /// Default batch size for [`Repository::extract_history`] — how many commits
@@ -421,6 +424,11 @@ pub enum RepoError {
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
 
+    /// A commit id or prefix where this repository accepts only branch names
+    /// (see [`Repository::with_branch_refs_only`]).
+    #[error("'{0}' looks like a commit id; only branch names are accepted here")]
+    CommitRefNotAllowed(String),
+
     #[error("namespace not found: '{0}' — call create_namespace first")]
     NamespaceNotFound(String),
 
@@ -553,6 +561,7 @@ impl Repository {
             active_epoch: std::sync::RwLock::new(None),
             active_session: std::sync::RwLock::new(None),
             epoch_seal_strict: strict,
+            branch_refs_only: false,
         }
     }
 
@@ -586,6 +595,7 @@ impl Repository {
             active_epoch: std::sync::RwLock::new(epoch),
             active_session: std::sync::RwLock::new(session),
             epoch_seal_strict: self.epoch_seal_strict,
+            branch_refs_only: self.branch_refs_only,
             active_session_namespace: std::sync::RwLock::new(session_ns),
         }
     }
@@ -595,6 +605,19 @@ impl Repository {
     /// `scope_namespace` is active — use `active_namespace()` for that.
     pub fn namespace(&self) -> &Namespace {
         &self.namespace
+    }
+
+    /// Accept only branch names where a ref is named, refusing commit ids and
+    /// id prefixes ([`RepoError::CommitRefNotAllowed`]).
+    ///
+    /// Branch names resolve in this repository's namespace, but commit ids
+    /// resolve over every commit in the store, whichever namespace made it.
+    /// A repository that serves one namespace to a caller who mustn't see
+    /// the others (an API key bound to a namespace) is limited this way.
+    /// Forks keep the limit.
+    pub fn with_branch_refs_only(mut self) -> Self {
+        self.branch_refs_only = true;
+        self
     }
 
     /// Return a Repository with epoch-seal enforcement set to the given mode.
@@ -2234,18 +2257,25 @@ impl Repository {
         let query_lower = query.to_lowercase();
         let index_fetch = limit.saturating_mul(4).min(tree::LIST_PATHS_MAX_RESULTS);
 
-        if !self.storage.leaf_index_is_built(ns_str, ref_name)? {
-            // One-time backfill. Non-fatal on error — we simply fall back to the
-            // tree walk below and can retry the backfill on a later search.
-            if let Ok(leaves) = tree::tree_collect_leaves(self.storage.as_ref(), &commit.state_root)
-            {
-                let _ = self.storage.leaf_index_build(ns_str, ref_name, &leaves);
+        let current = if self.storage.leaf_index_tracks_roots() {
+            self.leaf_index_catch_up(&ns, ref_name, &commit.state_root)?
+        } else {
+            if !self.storage.leaf_index_is_built(ns_str, ref_name)? {
+                // One-time backfill. Non-fatal on error — we simply fall back to
+                // the tree walk below and can retry the backfill on a later search.
+                if let Ok(leaves) =
+                    tree::tree_collect_leaves(self.storage.as_ref(), &commit.state_root)
+                {
+                    let _ = self.storage.leaf_index_build(ns_str, ref_name, &leaves);
+                }
             }
-        }
+            true
+        };
 
-        if let Some(mut hits) =
-            self.storage
-                .leaf_index_search(ns_str, ref_name, &query_lower, index_fetch)?
+        if current
+            && let Some(mut hits) =
+                self.storage
+                    .leaf_index_search(ns_str, ref_name, &query_lower, index_fetch)?
         {
             hits.retain(|(path, _)| !path_is_secret(path));
             hits.truncate(limit);
@@ -2258,6 +2288,57 @@ impl Repository {
         // Never surface values from the secret sub-prefix.
         results.retain(|(path, _)| !path_is_secret(path));
         Ok(results)
+    }
+
+    /// Bring the `(namespace, ref)` leaf set to the tree at `root`, for a
+    /// backend that records which tree each set reflects, and say whether the
+    /// set can answer for it. An unbuilt set (or one built before roots were
+    /// recorded) is built; one at another tree is moved by the diff from it,
+    /// which repairs a write whose own update was skipped or lost a race. A
+    /// set already at the ref's newest tree, because a write landed after
+    /// `root` was read, answers as it is rather than being moved back.
+    /// Best-effort like all index upkeep: on `false` the caller walks the
+    /// tree instead.
+    fn leaf_index_catch_up(
+        &self,
+        ns: &Namespace,
+        ref_name: &str,
+        root: &ObjectId,
+    ) -> Result<bool, RepoError> {
+        let store = self.storage.as_ref();
+        let namespace = ns.as_str();
+        match store.leaf_index_root(namespace, ref_name)? {
+            Some(indexed) if indexed == *root => return Ok(true),
+            Some(indexed) if self.ref_state_root(ns, ref_name)? == Some(indexed) => {
+                return Ok(true);
+            }
+            Some(indexed) => {
+                if let Ok((removed, added)) = tree::tree_diff_leaves(store, Some(&indexed), root) {
+                    let _ = store
+                        .leaf_index_advance(namespace, ref_name, &indexed, root, &removed, &added);
+                }
+            }
+            None => {
+                if let Ok(leaves) = tree::tree_collect_leaves(store, root) {
+                    let _ = store.leaf_index_build_at(namespace, ref_name, root, &leaves);
+                }
+            }
+        }
+        // Another writer may have moved the set meanwhile; use it only if it
+        // now reflects this tree.
+        Ok(store.leaf_index_root(namespace, ref_name)? == Some(*root))
+    }
+
+    /// The state root `ref_name` points at now, if it is a stored ref.
+    fn ref_state_root(
+        &self,
+        ns: &Namespace,
+        ref_name: &str,
+    ) -> Result<Option<ObjectId>, RepoError> {
+        let Some(head) = self.storage.get_ref(ns, ref_name)? else {
+            return Ok(None);
+        };
+        Ok(self.storage.get_commit(&head)?.map(|c| c.state_root))
     }
 
     /// Get summary statistics for a ref.
@@ -3253,6 +3334,12 @@ impl Repository {
     /// upkeep must never fail a write, and it only runs for a set that has
     /// already been backfilled — otherwise the first search will build it
     /// from the current state anyway.
+    ///
+    /// A backend that records each set's tree applies the diff only if the
+    /// set is still at `old_root`. Writers racing on one ref can reach here
+    /// out of order, and an unconditional apply then leaves an overwritten
+    /// value in the set. A skipped update leaves the set behind, never wrong;
+    /// the next search catches it up.
     fn update_leaf_index(
         &self,
         ns: &Namespace,
@@ -3260,17 +3347,33 @@ impl Repository {
         old_root: Option<&ObjectId>,
         new_target: &ObjectId,
     ) {
-        if self
-            .storage
+        let store = self.storage.as_ref();
+        if !store
             .leaf_index_is_built(ns.as_str(), ref_name)
             .unwrap_or(false)
-            && let Ok(Some(new_commit)) = self.storage.get_commit(new_target)
-            && let Ok((removed, added)) =
-                tree::tree_diff_leaves(self.storage.as_ref(), old_root, &new_commit.state_root)
         {
-            let _ = self
-                .storage
-                .leaf_index_apply(ns.as_str(), ref_name, &removed, &added);
+            return;
+        }
+        let Ok(Some(new_commit)) = store.get_commit(new_target) else {
+            return;
+        };
+        let new_root = new_commit.state_root;
+        if store.leaf_index_tracks_roots() {
+            if let Some(old_root) = old_root
+                && let Ok((removed, added)) =
+                    tree::tree_diff_leaves(store, Some(old_root), &new_root)
+            {
+                let _ = store.leaf_index_advance(
+                    ns.as_str(),
+                    ref_name,
+                    old_root,
+                    &new_root,
+                    &removed,
+                    &added,
+                );
+            }
+        } else if let Ok((removed, added)) = tree::tree_diff_leaves(store, old_root, &new_root) {
+            let _ = store.leaf_index_apply(ns.as_str(), ref_name, &removed, &added);
         }
     }
 
@@ -3299,6 +3402,15 @@ impl Repository {
         // 1. Exact branch name — always wins, even if it looks like hex.
         if let Some(id) = self.storage.get_ref(&ns, ref_name)? {
             return Ok(id);
+        }
+        if self.branch_refs_only {
+            let commit_like = ObjectId::from_hex(ref_name).is_some()
+                || ObjectId::normalize_hex_prefix(ref_name).is_some();
+            return Err(if commit_like {
+                RepoError::CommitRefNotAllowed(ref_name.to_string())
+            } else {
+                RepoError::BranchNotFound(ref_name.to_string())
+            });
         }
         // 2 & 3. Commit hash / prefix.
         self.resolve_commit_ref(ref_name)
@@ -6050,7 +6162,12 @@ mod tests {
     #[test]
     fn test_gc_sweep_releases_the_writer_lock_on_every_path() {
         let path = temp_db_path("gc-release");
-        let a = Repository::new(Box::new(SqliteStorage::open(&path).unwrap()));
+        // No grace period, so the sweep below has something to delete.
+        let a = Repository::new(Box::new(
+            SqliteStorage::open(&path)
+                .unwrap()
+                .with_gc_grace(std::time::Duration::ZERO),
+        ));
         a.init().unwrap();
         for i in 0..3 {
             a.set(
@@ -6271,7 +6388,13 @@ mod tests {
 
     #[test]
     fn test_gc_sweep_reclaims_and_preserves_current_state() {
-        let repo = test_repo();
+        // No grace period, so the sweep takes the churn it just wrote.
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory()
+                .unwrap()
+                .with_gc_grace(std::time::Duration::ZERO),
+        ));
+        repo.init().unwrap();
         // Churn: overwrite /a 20 times → old versions become orphaned from the
         // tip, then a final key.
         for i in 0..20 {

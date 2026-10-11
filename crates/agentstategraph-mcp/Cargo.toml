@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/agentstategraph-mcp"
+keywords.workspace = true
+categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "MCP server for AgentStateGraph — AI-native versioned state store"
@@ -31,6 +33,7 @@ agentstategraph-policy-rego = { workspace = true, optional = true }
 agentstategraph-policy-cedar = { workspace = true, optional = true }
 ed25519-dalek = "2"
 hex = "0.4"
+sha2 = "0.10"
 semver = "1"
 agentstategraph-storage = { workspace = true, features = ["sqlite", "postgres"] }
 rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
@@ -46,6 +49,11 @@ tower-http = { version = "0.6", features = ["cors"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 governor = "0.10"
 tracing = "0.1"
+# Logs, traces and metrics, named as docs/OBSERVABILITY.md says. OTLP export
+# is the opt-in `otlp` feature below, so a default build has no network client.
+oxtel = { version = "0.2", default-features = false, features = ["log", "config"] }
+oxtel-tower = { version = "0.2", features = ["axum"] }
+oxtel-rmcp = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 [features]
@@ -54,12 +62,23 @@ policy-wasm = ["dep:agentstategraph-policy-wasm"]
 policy-rego = ["dep:agentstategraph-policy-rego"]
 policy-cedar = ["dep:agentstategraph-policy-cedar"]
 all-external-evaluators = ["policy-wasm", "policy-rego", "policy-cedar"]
+# TLS for --storage postgres (rustls). Off by default per the guard rail below;
+# release builds and the Docker image turn it on.
+postgres-tls = ["agentstategraph-storage/postgres-tls"]
 # Guard rail: any future external-network provider crate (reqwest, rustls, AI
 # clients) MUST be gated behind this feature so `cargo build` stays lean.
 # Pattern: providers = ["dep:my-providers-crate"]
 # Validate with: cargo build --no-default-features && cargo tree --no-default-features | grep reqwest
 providers = ["dep:reqwest"]
+# Send traces, metrics and logs over OTLP/HTTP once OTEL_EXPORTER_OTLP_ENDPOINT
+# is set. It brings an HTTP client and TLS, so it's opt-in like `providers`.
+otlp = ["oxtel/otlp"]
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 agentstategraph-ffi = { workspace = true }
+rusqlite = { workspace = true }
+
+[package.metadata.docs.rs]
+# Document the optional backends and evaluators too.
+all-features = true

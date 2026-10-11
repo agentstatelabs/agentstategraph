@@ -7,6 +7,130 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **A backend conformance suite now runs the same checks on the in-memory, SQLite and Postgres backends.**
+  - What it covers:
+    - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
+    - `agentstategraph/tests/backend_conformance.rs` runs repository scenarios. These include the v1.2.5 lost-update case, with separate repositories writing concurrently.
+  - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
+  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. None are listed now.
+- **`PostgresStorage::connect_tenant_blocking`** connects from synchronous code, with or without an async runtime.
+- **TLS for Postgres connections, behind the opt-in `postgres-tls` feature.** Release binaries and the Docker image are built with it. Set it in the connection string, as with libpq: `?sslmode=verify-full&sslrootcert=/path/ca.pem`.
+  - **TLS is always verified.** The server certificate must chain to Mozilla's roots or to a certificate in `sslrootcert` (or `PGSSLROOTCERT`), and must match the host name. `require`, `verify-ca` and `verify-full` all mean verified TLS; there is no unverified mode.
+  - **`sslrootcert` is for providers with their own CA,** such as RDS or Cloud SQL.
+  - **`prefer` uses TLS when the server offers it,** and still verifies it.
+  - **No `sslmode` stays plaintext, as before.** Use `require` or `verify-full` for any host that isn't local.
+  - **A build without the feature refuses a TLS request** with an error that names the feature, rather than connecting in plaintext.
+  - **`scripts/test-postgres.sh --tls`** tests against a local server that refuses plaintext, with a certificate from a throwaway CA. GitHub CI runs it.
+- **Postgres connection errors now include their cause.** A failed connection used to report only "error performing TLS handshake" (or a similar top-level message). It now carries the reason, such as an untrusted issuer, a host name mismatch, or a refused login.
+- **History walks, history rollups and value search on Postgres, as on SQLite.**
+  - `list_commits` and `list_commits_dag` (`log` and `log_dag`) are each one recursive query. Before, a walk made one round trip per commit. Walking 200,000 commits takes about a second.
+  - The project-history tables and their extractor, so `extract_history`, the history report, and the GC check that history has been extracted all work on Postgres. With several writers, a commit can become visible after a later one. The extractor reads commits in transaction order, and only from transactions older than any still running, so a commit that commits late is never skipped.
+  - The leaf-value search index. Substring search uses a `pg_trgm` trigram index when the extension can be installed; it is a trusted extension, so a role with `CREATE` on the database can install it. Without it, search scans the ref's rows.
+  - Requires PostgreSQL 13 or later. The schema moves to version 2 on the first connect. That builds an index on `commits`, which holds up commit writes on a large store while it runs.
+- **`ObjectStore::leaf_index_tracks_roots`, `leaf_index_root`, `leaf_index_build_at` and `leaf_index_advance`** let a backend record which tree each search-index set reflects (see Fixed). Each has a default, so other backends are unaffected.
+- **Garbage collection on Postgres.** The sweep, the dry run, the reachability report, speculation pins and the store shape all work there now.
+  - A sweep marks everything reachable from its keep-set, the current ref tips and open speculations. It then deletes the tenant's other objects, in batches. It touches only that tenant's objects, and a tenant runs one sweep at a time.
+  - Writers never wait for a sweep. Instead, a sweep spares objects written within a grace period (10 minutes by default; `PostgresStorage::with_gc_grace`) and anything written since it started. Storing an object again refreshes its write time. Together these keep a write that is in flight safe: every write stores its tree before it commits it.
+  - Every statement in a sweep is short, so a sweep doesn't hold up history extraction for other tenants.
+  - The store shape reports the bytes the tenant's rows take in each table. `gc_vacuum` does nothing on Postgres; autovacuum reclaims the space.
+  - Schema version 3 adds a write time to `objects` and a table for speculation pins. Existing objects count as written long ago, so a sweep can take them as soon as nothing reaches them.
+- **`agentstategraph-mcp healthcheck`** exits 0 if the HTTP server on this machine answers `/api/health`, and 1 otherwise. It reads the same `--port`/`ASG_PORT` and `--bind`/`ASG_BIND` settings as the server, so a container health check needs neither curl nor the server's arguments.
+- **Request limits.**
+  - Bodies over `--max-body-bytes` (default 4 MiB) get `413`.
+  - A request still running after `--request-timeout-secs` (default 30, `0` for none) gets `503`, though a write may still complete after that.
+  - Past `--max-concurrent-requests` (default 256), requests get `503` with `Retry-After: 1` at once rather than queueing. `/api/health` is never turned away.
+  - Each has an environment variable: `ASG_MAX_BODY_BYTES`, `ASG_REQUEST_TIMEOUT_SECS` and `ASG_MAX_CONCURRENT_REQUESTS`.
+- **Logs, traces and metrics, named by OpenTelemetry**, through [oxtel](https://github.com/agentstatelabs/oxtel); [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) is the contract. Before, no log subscriber was installed and every warning was dropped.
+  - Logs go to stderr. Set the level with `ASG_LOG` (or `RUST_LOG`); the default is `info` for HTTP and `warn` for MCP stdio. `ASG_LOG_FORMAT` is `auto` (text on a terminal, one flat JSON object per line otherwise), `text`, `json` or `ecs`.
+  - Each HTTP request gets a span named `{method} {route}`, continuing the caller's W3C trace, and a `request` log line with `http.request.method`, `url.path` (no query), `http.route` (the route template), `http.response.status_code`, `http.server.request.duration` (seconds), `trace_id`, and `asg.api_key.id`, the API key's id, never the key. Requests the Host check refuses are logged too.
+  - Each MCP request over stdio gets a span named like `tools/call commit_spec`, continuing the client's trace from `params._meta`, and `mcp.server.operation.duration`. Tool arguments and results are never recorded.
+  - The opt-in `otlp` feature sends traces, metrics and logs over OTLP once `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A default build has no network client.
+  - On SIGINT or SIGTERM, the HTTP server finishes the requests in flight and exits, so pending telemetry is sent.
+- **`/api/ready`** checks that the store answers, within 3 seconds, and returns `503` if it doesn't. The reason goes to the log, not the response.
+- **`--metrics`** (or `ASG_METRICS=1`) serves `/metrics` as OpenMetrics or Prometheus text, named as OpenTelemetry's metrics are for Prometheus. `http_server_request_duration_seconds` is a histogram by `http_request_method`, `url_scheme`, `network_protocol_version`, `http_route`, `http_response_status_code` and, for 5xx, `error_type`; its `_count` is the request count. `http_server_active_requests` counts requests in progress, and `target_info` carries the version. Requests the Host check refuses are counted. With `--auth`, it needs an admin key.
+- **`agentstategraph-mcp healthcheck`** exits 0 if the HTTP server on this machine answers `/api/ready` (it is serving and its store answers), and 1 otherwise. It reads the same `--port`/`ASG_PORT` and `--bind`/`ASG_BIND` settings as the server, so a container health check needs neither curl nor the server's arguments.
+- **`ASG_PORT`** sets the HTTP port when `--port` isn't given.
+
+### Changed
+- **The HTTP server now lets only pages served from localhost call it from a browser.** Before, it allowed any origin, so any website the user visited could read and write a local store through it. Pages from `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]` (any port) are allowed by default. Allow other origins with `--cors-origin <ORIGIN>` (repeatable) or `ASG_CORS_ORIGINS` (comma-separated); `*` allows any origin, and the server warns if that is set without `--auth`.
+- **Bound to loopback (the default), the HTTP server only answers requests addressed to a loopback name.** A website that points a domain it controls at 127.0.0.1 (DNS rebinding) now gets `403`. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host <HOST>` (repeatable) or `ASG_ALLOWED_HOSTS`; `*` turns the check off. Bound to another address, the server answers any host name unless some are listed.
+- **The router constructors in `agentstategraph_mcp::http` no longer add CORS headers.** Apply the policy with `http::with_origin_policy(router, &OriginPolicy::for_bind(..))`, as the binary now does. That covers the ASD proxy routes too.
+- **API keys are stored as SHA-256 hashes, never as keys.** The keys file (`--keys-file`) used to hold every raw key. Now it holds each key's hash, an id and a short preview (file version 2). The raw key is shown once, when the key is created or rotated. A version 1 file is rewritten with hashes the first time the server loads it; if it can't be rewritten (a read-only mount), the server starts and warns.
+- **Admin revoke and rotate take a key id or the full key, not a prefix.** Pass `key_id` (from `GET /api/admin/keys`) or `key`. A request with `key_prefix` gets `400`, because a prefix could match several keys and the first match was taken. Created and rotated keys' responses include `id`. The listing shows `id`, `is_admin` and `namespace_id`.
+- **Rust API:** `TenantManager::multi_tenant` and `http::router_multi_tenant*` return a `Result`, since loading the keys file can fail. Registering, creating, revoking and rotating keys return a `Result`, since saving can fail. `revoke_key` and `rotate_key` take an id, and `ApiKey` has an `id` field.
+- **Rust API:** `http::build_router_with(repo, tenant_mgr, rpm, extra)` serves extra routes behind the API's auth and rate limit. Pass it `asd_proxy_router(..)` instead of merging the proxy onto a finished router.
+- **The README's `docker run` and the compose file publish the port on `127.0.0.1`,** so only the host machine can reach the server. Anything that can reach the port can read and write the store. The README shows how to serve other machines with `--auth`.
+- **An API key's tenant is enforced.** A non-admin key for a tenant other than the one this server serves (`--tenant`, default `default`) gets `403`, and the message says which tenant it is for. Before, a key's tenant was stored and ignored, so a key for any tenant could read and write this server's store. Admin keys serve the whole process. On SQLite, where the tenant is only a label, start the server with `--tenant <name>` to keep using keys made under that name. Keys created through the admin API now default `tenant_id` to the server's tenant.
+- **A key bound to a namespace works only in that namespace.** Before, `namespace_id` was stored and never read. Requests with such a key now read and write that namespace only. Refs must be branch names: commit ids and prefixes resolve across all namespaces, so they get `403`. Store-wide endpoints (`/api/gc/*`, `/api/history`) also refuse the key. Admins can create one with `namespace_id` in `POST /api/admin/keys`.
+- **With `--auth`, the rate limit applies per API key.** It used to apply per client IP only, so behind a load balancer every client shared one limit. Requests without a valid key still count against their IP, so made-up keys don't get extra allowance. Idle entries are pruned every minute, so the limiter's table doesn't grow with every new client IP.
+- **HTTP handlers run their storage calls on tokio's blocking pool.** Before, a few slow storage calls (a locked SQLite file, a slow database) took every async worker, and the server stopped answering anything, health checks included. The request timeout couldn't fire on them either.
+- **MCP `commit_spec` refuses a flagged change no policy covers, by default.** A change carrying tokens (`destructive`, `large`, `schema-change`, `ref-rewrite`, `reindex`, `migration`) that no policy's triggers match now follows the server's fail-safe. Under `deny`, the default, it isn't promoted, and the response names the tokens. Before, `commit_spec` promoted it, though the `policy_evaluate` tools reported the same result as a deny. To let such changes through, ratify a policy that triggers on the token and allows `promote_speculation`, or start the server with `--policy-fail-safe allow` (env `ASG_POLICY_FAIL_SAFE`), a new flag. A change with no tokens is promoted as before: policies match changes by token, so none could match it. An unknown `--policy-fail-safe` value stops the server.
+- **`/api/health` is now a liveness check.** It no longer reads the store, and no longer reports `branches`. With auth on, it used to build a throwaway in-memory store on every call. `agentstategraph-mcp healthcheck` (and so the compose health check) now uses `/api/ready`.
+- **`AuthContext::key_prefix` is now `key_id`.** Warnings used to log the first 8 characters of the raw key; they log the key's id instead.
+- **Rust API:** `http::with_request_bounds(app, &RequestBounds)`, `http::build_rate_limit_layer(rpm, tenant_mgr)` (keyed by `KeyOrPeerIp`) and `TenantManager::live_key_id`. The router builders now limit by key. `build_governor_layer` (per IP) remains.
+- **Rust API:** `http::with_server_layers(app, tenant_mgr, &bounds, &policy, meters)` puts the server's layers around a router in the order that matters, serving `/metrics` from `meters`, an `oxtel` meter provider, when given. The pieces are `http::with_metrics_endpoint(app, tenant_mgr, meters)`, which goes inside the origin policy so the policy covers `/metrics`, and `http::with_observability(app)`, which goes outside it so refused requests are logged and counted. `cmd_serve_with(args, meters)` runs the server with the process's telemetry. `TenantManager::default_repo` is new.
+- **Rust API:**
+  - `Repository::with_branch_refs_only` and `RepoError::CommitRefNotAllowed`.
+  - `TenantManager::multi_tenant_for(repo, keys_file, tenant)` and `CreateKeyOptions::namespace_id`.
+  - `http::build_router_with(tenant_mgr, rpm, extra)` no longer takes a repository. HTTP handlers use the repository the auth middleware gives each request's key.
+
+### Fixed
+- **MCP speculations made in another namespace couldn't be used.** `agentstategraph_speculate` with a `namespace` created the speculation on a temporary copy of the repository. The copy was dropped when the call ended, so `spec_modify`, `compare`, `commit_spec` and `discard` all reported the speculation not found. The server now keeps that copy until the speculation is committed or discarded, and each tool finds the speculation where it lives. A committed speculation lands in its own namespace, and one `compare` call can cover speculations from different namespaces.
+- **MCP reminders didn't survive a restart.** The MCP server kept them in memory. They're now saved in the store (SQLite or Postgres), like everything else.
+- **The Docker quick start couldn't be reached, and its health check always failed.** The image's server listened on 127.0.0.1 inside the container, so a published port reached nothing. The compose health check called curl, which the image doesn't include. The image now sets `ASG_BIND=0.0.0.0` and `ASG_PORT=3001` as environment variables, so they survive a CMD override such as the README's `--http`. The compose file checks health with `agentstategraph-mcp healthcheck`.
+- **The ASD proxy (`--asd-url`, `providers` feature) skipped auth and rate limiting.** It was added to the server after both, so even with `--auth`, anyone who could reach the server could read ASD through it. It now needs a key like the rest of the API, and counts against the rate limit. It also refuses paths with `.` or `..` segments (plain or percent-encoded) or backslashes, which reached ASD endpoints outside `/api/v1`. It never forwarded the caller's key, and still doesn't.
+- **A keys file that couldn't be parsed was ignored, and could then be overwritten.** With `--initial-admin-key`, the server rewrote it holding only the bootstrap key, and every other key was lost. A keys file that can't be read now stops the server with an error, and the file is left as it was.
+- **The keys file was written in place, readable by other users, and its write errors were ignored.** It is now written to a temp file created owner-only (`0600`), flushed and renamed over the old one. A change that can't be saved fails the admin request (`500`) and doesn't happen. Before, it took effect in memory only, so a revoked key came back after a restart.
+- **A GC sweep on SQLite could delete a write that was in flight.** Every write stores its new tree, then its commit, then moves the branch. A sweep that took its lock after the first step deleted the tree; the write then committed, and the branch pointed at a tree with objects missing.
+  - A sweep now spares objects written within a grace period: 10 minutes by default, set with `SqliteStorage::with_gc_grace`. Storing an object again refreshes its write time once it is over a minute old, so a write whose tree reuses an old unreachable object is covered too. Postgres works the same way (`DEFAULT_GC_GRACE` and `GC_FRESHEN_AFTER` are shared).
+  - Objects already in a store count as written long ago, so a sweep reclaims them as before. Garbage written after upgrading waits out the grace period before a sweep takes it. The reachability report and dry run still count every unreachable object.
+- **Search could go on returning a value that had been overwritten.** When writers raced on one branch, their search-index updates could apply out of order, and the index kept the older value until that path was written again. A 4-writer test showed it about once in 200 runs on SQLite. Each index now records the tree it reflects, and an update applies only to the tree it was computed from. A search first brings the index up to the branch's current tree; if it can't, it walks the tree instead. A SQLite index built by an earlier version is rebuilt on its next search.
+- **SQLite search for a one- or two-character query treated `%` and `_` as wildcards.** They now match themselves, as they already did in longer queries.
+- **Racing writers can no longer both "win" on sessions, reminders or commit links.**
+  - Ending a session is one conditional update on Postgres and SQLite. Before, several processes could end the same session at once.
+  - Reminder `update_if_unchanged` now does its compare and write as one step on Postgres (one transaction with the row locked) and in the in-memory backend. In a 6-way race from one snapshot, Postgres let all 6 win and memory 3; now exactly 1 wins.
+  - Linking a commit to an epoch or session runs in one transaction on Postgres and SQLite, and under the store's lock in memory. A commit can no longer join an epoch or session while it's being sealed or ended.
+- **Multi-step Postgres writes are atomic.**
+  - `delete_namespace` deletes the refs and the namespace together.
+  - `batch_put_objects` writes the whole batch in one transaction, using one multi-row insert per 1,000 objects instead of a round trip per object. Merges rely on this.
+  - `batch_get_objects` reads a batch in one query.
+- **Postgres schema setup no longer takes table locks on every connect.**
+  - The database records its schema version, and the setup only runs when that version is behind this build's.
+  - Before, every connect re-ran `ALTER TABLE … IF NOT EXISTS`, which takes an exclusive table lock even when it changes nothing. A process starting up could deadlock with writers holding locks on several tables.
+  - An existing database is upgraded once on its first connect. A deadlock victim during an upgrade retries.
+- **The in-memory backend listed a commit twice in an epoch** (and in a session) when it was linked twice. One epoch and one session per commit now, as in the SQL backends.
+- **Epoch and session commit counts are a running count.** They used to be recounted with `COUNT(*)` on every commit, a cost that grew with the epoch; sealing still writes the exact count.
+- **The server binary crashed at startup with `--storage postgres`, in both HTTP and MCP modes** ("there is no reactor running"). It connected on a throwaway runtime, dropped that runtime, and then ran `init()` with no runtime at all. The binary has never worked with Postgres; it does now, and a new test starts the real binary each way and writes and reads through it.
+- **`PostgresStorage` works from any calling thread.**
+  - Before, it worked only inside a multi-threaded tokio runtime. With no runtime, `Handle::current()` panicked. On a single-threaded runtime, which is what MCP stdio servers use, `block_in_place` panicked.
+  - A connection opened during setup belonged to the caller's runtime. If that runtime ended, the connection stayed in the pool with nothing driving it.
+  - Every connection is now driven by one runtime the storage owns, and the sync API waits the right way for each kind of caller.
+- **Processes starting at once against one Postgres no longer deadlock.** Every connect runs the schema setup. Two at once could deadlock, and one process then failed to start. Setup is now one transaction behind a database-wide advisory lock, so concurrent startups take turns. This matters for running several servers or hub instances against a shared database.
+- **Epochs work on Postgres.** Before this, every `create_epoch` on Postgres failed with "error serializing parameter 10", because the commit count was bound as a 64-bit integer into an `INTEGER` column. Postgres epochs had never worked.
+  - **Seal enforcement now applies on Postgres.** Postgres also dropped each epoch's namespace, scope and seal digest. Those are now stored and read back. A sealed epoch's namespace binding was inert there; now, as on SQLite, it refuses changes that would discard sealed history in its own namespace and leaves other namespaces alone.
+  - **`get_epoch` returns the epoch's commits.** It ordered them by a `created_at` column that `commits` doesn't have; it now uses the commit timestamp.
+  - **Concurrent seals can't overwrite each other, on Postgres or SQLite.** Sealing is now a single conditional update. On SQLite, separate processes racing to seal one epoch all "succeeded": in a 6-way race, all 6 won, each overwriting the previous seal's commits and digest. Exactly one seal now wins, and the rest get `EpochAlreadySealed`.
+  - **The in-memory backend keeps an epoch's seal digest.** It used to drop it when sealing.
+  - **Existing Postgres databases need nothing.** The three columns are added in place on connect, and no epoch rows could exist there before this fix.
+
+## [v1.2.8] — 2026-10-09
+
+### Changed
+- **The library crates are packaged for crates.io.** Each of the 15 crates under `crates/` now ships the MIT and Apache-2.0 license texts and a README, links its own docs.rs page, and carries keywords and a category. docs.rs builds `agentstategraph-storage`, `agentstategraph-mcp` and `agentstategraph-ffi` with all features, so the Postgres backend and the external evaluators are documented. `agentstategraph-napi` and `agentstategraph-python` are `publish = false`; they ship to npm and PyPI. RELEASE.md describes publishing from the tag.
+- The `agentstategraph-policy-wasm` and `agentstategraph-policy-cedar` descriptions no longer call them stubs.
+
+### Fixed
+- **The `agentstategraph-policy` and `agentstategraph-taint` READMEs gave the license as BSL-1.1.** Both crates are MIT OR Apache-2.0, like the rest of the workspace.
+- `Cargo.lock` pinned `chacha20` 0.10.0, which has been yanked; it now pins 0.10.2.
+
+### Documentation
+- **The docs no longer call namespaces an isolation boundary.** A namespace is a separate set of branches. Namespaces share the store's commits, a commit id reaches across them, and MCP tools work in any namespace. The Namespaces guide now says what a namespace doesn't separate, and how to confine a client to one: an API key bound to the namespace. It also covers tenants. The `namespaces` example shows a commit id reaching across, and a branch-refs-only repository refusing it.
+- **Cross-namespace merge is documented as always refused**, which it is. The docs described it as allowed by policy, and the MCP tool's description said so too; the policy check isn't built yet.
+- **Policy is documented as advisory.** The docs said policy was enforced at commit time. Evaluating it returns a decision for the caller to act on. The built-in gate is MCP `commit_spec`.
+- **The license is stated correctly everywhere.** The site's badge, footer and "Why BSL 1.1?" section, and the launch blog post, still described AgentStateGraph as BSL 1.1 (v1.2.8 fixed the policy and taint crate READMEs). It is MIT OR Apache-2.0, and that grant covers the earlier BSL releases too.
+- **The four GC and history MCP tools are documented**, and tool counts are corrected to 77. Binding counts include Swift, and `TAINT_GUIDE.md` no longer says Postgres stores no taints.
+
 ## [v1.2.7] — 2026-10-02
 
 ### Fixed

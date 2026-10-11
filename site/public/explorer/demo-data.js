@@ -1,5 +1,5 @@
 // Demo data for the AgentStateGraph Explorer.
-// Simulates the output of the 73 MCP tools against a real cluster management scenario.
+// Simulates the output of the 77 MCP tools against a real cluster management scenario.
 
 const DEMO = {
   stats: {

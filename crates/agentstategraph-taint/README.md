@@ -3,8 +3,8 @@
 Taint / quarantine / watch substrate for AgentStateGraph. Dynamic
 runtime markers that bridge passive observation into enforcement.
 
-See `docs/TAINT_GUIDE.md` for the end-user overview and
-`spec/TAINT_SPEC.md` for the design spec.
+See the [taint guide](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/TAINT_GUIDE.md) for the end-user overview
+and the [taint spec](https://github.com/agentstatelabs/agentstategraph/blob/main/spec/TAINT_SPEC.md) for the design.
 
 ## Core types
 
@@ -80,4 +80,5 @@ infrastructure layer.
 
 ## License
 
-BSL-1.1.
+Licensed under either of [Apache License, Version 2.0](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-MIT), at your option.

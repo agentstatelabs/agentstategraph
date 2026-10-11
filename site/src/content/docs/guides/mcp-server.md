@@ -40,11 +40,11 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 73 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 77 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
-The same binary also supports HTTP mode — a REST API with CORS enabled:
+The same binary also supports HTTP mode, a REST API:
 
 ```bash
 cargo run --release -p agentstategraph-mcp -- --http --port 3001
@@ -58,11 +58,53 @@ curl "http://localhost:3001/api/blame/main?path=/cluster/name"
 curl "http://localhost:3001/api/state/main/search?query=mesh"
 ```
 
+### Logs, health and metrics
+
+The server logs to stderr. In HTTP mode it logs each request at `info`. Fields use [OpenTelemetry's names](https://opentelemetry.io/docs/specs/semconv/http/):
+
+- `http.request.method`;
+- `url.path` (no query);
+- `http.route`, the route template;
+- `http.response.status_code`;
+- `http.server.request.duration` (seconds);
+- `asg.api_key.id`, the API key's id, never the key itself.
+
+Set `ASG_LOG` to change the level (`debug`, or a filter like `agentstategraph_mcp=debug`). `ASG_LOG_FORMAT` chooses the form: `auto` (the default: text on a terminal, one flat JSON object per line otherwise, as in a container), `text`, `json` or `ecs` (Elastic Common Schema). A JSON line:
+
+```json
+{"asg.api_key.id":"key_3f9c2a71d04e8b65","http.request.method":"GET","http.response.status_code":200,"http.route":"/api/state/{ref_name}","http.server.request.duration":0.000855667,"level":"INFO","message":"request","network.protocol.version":"1.1","server.address":"localhost","server.port":3001,"span_id":"69a6763a47ef0951","target":"oxtel_tower::server","timestamp":"2026-10-08T15:57:08.711714Z","trace_id":"1b2e39eb15704924f95003629fbcd488","url.path":"/api/state/main","url.scheme":"http"}
+```
+
+`/api/health` reports that the process is serving (liveness). `/api/ready` also checks that the store answers, and returns `503` if it doesn't (readiness). `agentstategraph-mcp healthcheck` checks `/api/ready` from the same machine, for container health checks.
+
+`--metrics` serves Prometheus metrics at `/metrics`, named as OpenTelemetry's HTTP metrics are for Prometheus:
+
+- `http_server_request_duration_seconds` is a histogram by `http_request_method`, `http_route` (the template, so ref names never become labels), `http_response_status_code` and, for server errors, `error_type`. Its `_count` is the request count.
+- `http_server_active_requests` counts requests in progress.
+- `target_info` carries the version.
+
+With `--auth`, scraping it needs an admin key.
+
+With the `otlp` feature built in, set `OTEL_EXPORTER_OTLP_ENDPOINT` to send traces, metrics and these logs to an OpenTelemetry Collector or any OTLP backend. [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md) lists every name.
+
+### Limits
+
+Each request body may be up to 4 MiB (`--max-body-bytes`); a larger one gets `413`. A request still running after 30 seconds (`--request-timeout-secs`, `0` for none) gets `503`; a write may still complete after that, so check before retrying it. At most 256 requests are handled at once (`--max-concurrent-requests`); more get `503` with `Retry-After: 1` rather than queueing. `/api/health` is never turned away.
+
+The rate limit (`--rate-limit-rpm`, default 600 a minute) applies per API key when `--auth` is on, and per client IP otherwise. Requests without a valid key count against their IP. Every setting has an environment variable too; see `--help`.
+
+### Browsers and host names
+
+Browser pages served from localhost (any port) can call the API. To let a page from another origin call it, pass `--cors-origin https://app.example.com` (repeatable, or `ASG_CORS_ORIGINS` as a comma-separated list). `--cors-origin '*'` allows any origin; only do that with `--auth`.
+
+Bound to loopback, as it is by default, the server only answers requests addressed to `localhost`, `127.0.0.1` or `[::1]`. That stops another website from reaching it through DNS rebinding, where the site points a domain it controls at your machine. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host asg.example.com` (or `ASG_ALLOWED_HOSTS`). Bound to another address, the server answers any host name unless you list some.
+
 Full endpoint list:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Health check |
+| GET | `/api/health` | Liveness: the process is serving |
+| GET | `/api/ready` | Readiness: the store answers (`503` if not) |
 | GET | `/api/stats/:ref` | Summary statistics |
 | GET | `/api/state/:ref?path=/x` | Read state value |
 | GET | `/api/state/:ref/paths` | List all paths |
@@ -96,10 +138,12 @@ OPTIONS:
   -p, --path <PATH>     SQLite database path (default: ./agentstategraph.db)
       --http            Run as HTTP REST API instead of MCP stdio
       --port <PORT>     HTTP port (default: 3001, requires --http)
+      --policy-fail-safe <deny|allow>
+                        When no policy matches: deny (default) or allow
   -h, --help            Print help with full endpoint list
 ```
 
-## Available Tools (73)
+## Available Tools (77)
 
 The most-used tools are listed below by category. See the full [MCP Tools Reference](/reference/mcp-tools/) for every tool with parameters and example payloads.
 
@@ -127,7 +171,7 @@ The most-used tools are listed below by category. See the full [MCP Tools Refere
 | `agentstategraph_speculate` | Create a lightweight O(1) speculation from a ref. |
 | `agentstategraph_spec_modify` | Apply set/delete operations within a speculation. |
 | `agentstategraph_compare` | Compare multiple speculations side-by-side. |
-| `agentstategraph_commit_spec` | Promote a speculation to a real commit on its base branch. |
+| `agentstategraph_commit_spec` | Promote a speculation to a real commit on its base branch, if policy allows it. |
 | `agentstategraph_discard` | Discard a speculation. All changes freed immediately. |
 
 ### Query and Audit
@@ -142,10 +186,10 @@ The most-used tools are listed below by category. See the full [MCP Tools Refere
 
 | Tool | Description |
 |------|-------------|
-| `agentstategraph_create_namespace` | Create a ref-isolation namespace (idempotent). |
+| `agentstategraph_create_namespace` | Create a namespace: a separate set of branches (idempotent). |
 | `agentstategraph_list_namespaces` | List all namespaces. |
 | `agentstategraph_delete_namespace` | Delete a namespace and its refs (not `default`). |
-| `agentstategraph_cross_namespace_merge` | Policy-gated merge across namespaces (deny-by-default). |
+| `agentstategraph_cross_namespace_merge` | Merge across namespaces (always refused for now). |
 
 ### Epochs
 
@@ -176,6 +220,15 @@ The most-used tools are listed below by category. See the full [MCP Tools Refere
 | `agentstategraph_stats` | Summary statistics: commits, branches, paths, epochs, agents. |
 | `agentstategraph_commit_graph` | Commit DAG with parents, agents, categories for visualization. |
 | `agentstategraph_intent_tree` | Intent decomposition hierarchy across agents. |
+
+### Maintenance
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_history` | Project-history metrics: velocity, intent mix, authorship, milestones. |
+| `agentstategraph_gc_dry_run` | Report what garbage collection would reclaim, changing nothing. |
+| `agentstategraph_gc_sweep` | Sweep under a retention policy; deletes only with `mutate: true`. |
+| `agentstategraph_gc_vacuum` | Compact the store after a sweep. |
 
 ### Plans & Tasks
 

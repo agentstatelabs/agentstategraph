@@ -199,6 +199,13 @@ policy before promoting. If the decision is `Deny` or `RequireApproval`,
 **promotion does not happen** — the tool returns the `Decision` JSON and
 the caller applies the fallback branch.
 
+If the change carries tokens but no policy's `triggers` match them, the
+MCP fail-safe decides: under `deny` (the default) promotion does not
+happen, so a deletion needs a policy covering `destructive` that allows
+`promote_speculation`. Set `--policy-fail-safe allow` to promote such
+changes instead. A change with no tokens can't match any policy, and is
+promoted.
+
 ## The 9 MCP tools
 
 | Tool | When to use |

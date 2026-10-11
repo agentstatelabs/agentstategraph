@@ -5,7 +5,9 @@ version.workspace = true
 edition = "2021"
 authors.workspace = true
 license.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/agentstategraph-ffi"
+keywords.workspace = true
+categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "C ABI for AgentStateGraph — enables Go, Ruby, Java, C# bindings"
@@ -33,3 +35,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[package.metadata.docs.rs]
+# Document the optional backends and evaluators too.
+all-features = true

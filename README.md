@@ -18,7 +18,7 @@ It is deliberately **not** an application and **not** a framework you have to ad
 - **Batteries for real agent systems** — shared plans & tasks (state machine + proofs + assignment), pull-based reminders, policy + taint/quarantine gating, epochs (tamper-evident audit bundles), and blame/query across all of it.
 - **Connect anything** — MCP tools work with any MCP agent, plus an HTTP REST API and a browser explorer.
 - **Embed anywhere** — language bindings for Rust, Python, TypeScript, Go, Swift, .NET/C#, WASM, and C FFI, over pluggable storage backends (Memory, SQLite, Postgres, IndexedDB) — with more of both on the way.
-- **Multi-tenant & multi-agent by design** — namespace isolation, scoped sessions, delegation, and intent trees.
+- **Multi-agent by design** — scoped sessions, delegation, and intent trees, with namespaces giving each project its own branches in a shared store.
 
 This is what the substrate has to look like when the primary actor touching production systems is no longer a human who can be governed socially (via PRs, code review, Slack threads) but a fleet of agents that must be governed mechanically.
 
@@ -40,9 +40,20 @@ curl http://localhost:3001/api/health
 ### Docker
 
 ```bash
-docker run -p 3001:3001 ghcr.io/agentstatelabs/agentstategraph --http
+docker run -p 127.0.0.1:3001:3001 ghcr.io/agentstatelabs/agentstategraph --http
 # Or with persistent storage:
 docker compose up -d
+curl http://localhost:3001/api/health
+```
+
+These publish the port on `127.0.0.1`, so only your machine can reach it. Anything that can reach the port can read and write the store. To serve other machines, publish it on all interfaces and turn on auth:
+
+```bash
+export ASG_ADMIN_KEY=asg_$(openssl rand -hex 32)   # keep this; it's the admin key
+docker run -p 3001:3001 -v asg-data:/data -e ASG_INITIAL_ADMIN_KEY="$ASG_ADMIN_KEY" \
+  ghcr.io/agentstatelabs/agentstategraph \
+  --http --auth --keys-file /data/keys.json --path /data/agentstategraph.db
+curl -H "Authorization: Bearer $ASG_ADMIN_KEY" http://localhost:3001/api/stats/main
 ```
 
 ### As an MCP Server (connect to Claude Code, GPT, any MCP agent)
@@ -82,7 +93,7 @@ curl http://localhost:3001/api/state/main?path=/
 curl "http://localhost:3001/api/blame/main?path=/cluster/name"
 ```
 
-A CORS-enabled REST API — connect from browsers, scripts, or any HTTP client. See `--help` for the full endpoint list.
+A REST API for scripts and any HTTP client. Browser pages served from localhost can call it too; allow another origin with `--cors-origin`. See `--help` for the full endpoint list.
 
 ### As a Rust Library
 
@@ -144,13 +155,13 @@ and iOS Simulator arm64/x86_64 slices.
 
 ## Features
 
-- **73 MCP tools** — any agent can connect immediately
-- **HTTP REST API** — `--http` mode with CORS for browsers and scripts
+- **77 MCP tools** — any agent can connect immediately
+- **HTTP REST API** — `--http` mode for scripts, and for browser pages on localhost or origins you allow
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **8 language bindings** — Rust, Python, TypeScript, Go, Swift, .NET / C#, WASM, C FFI
-- **4 storage backends** — Memory, SQLite, Postgres (multi-tenant), IndexedDB (browser)
+- **4 storage backends** — Memory, SQLite, Postgres (tenants partitioned in a shared database, with TLS), IndexedDB (browser)
 - **15 crates** — modular core, storage, MCP, policy (+ pluggable Rego / Cedar / WASM evaluators), taint, tasks, reminders, migrate, FFI, and WASM
-- **Namespaces** — ref-layer isolation for multi-project / multi-tenant deployments
+- **Namespaces** — a separate set of branches per project in one store. They partition branches but aren't a security boundary; an API key bound to a namespace confines a client to it
 - **Reminders** — pull-based scheduling with priority, recurrence, and approval gating
 - **Taint & quarantine** — `agentstategraph-taint` mark-and-sweep enforced at commit time
 - **Content-addressed Merkle DAG** — immutable, deduplicated history
@@ -161,7 +172,7 @@ and iOS Simulator arm64/x86_64 slices.
 - **Speculative execution** — O(1) branching, instant discard
 - **Multi-agent orchestration** — scoped sessions, delegation, intent trees
 - **Plans & tasks** — shared `agentstategraph-tasks` primitive with state machine, proofs, blockers, agent assignment
-- **Policy** — `agentstategraph-policy` primitive for authorization + cost-of-change gating with fallback actions (soft enforcement + audit trail)
+- **Policy** — `agentstategraph-policy` primitive for authorization + cost-of-change gating with fallback actions. Advisory: you evaluate a change and act on the decision; MCP `commit_spec` gates speculation promotion on it, refusing by default a flagged change (a deletion, say) that no policy covers
 - **Schema-evolution framework** — `/_meta/schema_version` guard + `agentstategraph-migrate` crate + `agentstategraph-mcp migrate` CLI
 - **Epochs** — sealable, tamper-evident audit bundles
 - **Unified query** — composable filters across commits, intents, agents
@@ -201,9 +212,9 @@ Agents don't execute linear scripts — they explore state spaces. They need a p
 AgentStateGraph/
 ├── crates/
 │   ├── agentstategraph-core/     # Types, diff, merge, schema — zero I/O
-│   ├── agentstategraph-storage/  # Pluggable backends (memory, SQLite, IndexedDB)
+│   ├── agentstategraph-storage/  # Pluggable backends (memory, SQLite, Postgres, IndexedDB)
 │   ├── agentstategraph/          # High-level Repository API
-│   ├── agentstategraph-mcp/      # MCP server (73 tools over stdio) + HTTP + migrate CLI
+│   ├── agentstategraph-mcp/      # MCP server (77 tools over stdio) + HTTP + migrate CLI
 │   ├── agentstategraph-tasks/    # Shared Plan/Task store — state machine, proofs, assignment
 │   ├── agentstategraph-reminders/# Pull-based reminder scheduling with approval gating
 │   ├── agentstategraph-policy/   # Authorization + cost-of-change gating with fallback actions
@@ -274,14 +285,14 @@ cargo run --example agent_workflow -p agentstategraph     # Speculate, compare, 
 cargo run --example multi_agent -p agentstategraph        # Orchestrator + sub-agents
 cargo run --example schema_merge -p agentstategraph       # Schema validation + merge
 cargo run --example epochs_audit -p agentstategraph       # Epochs, blame, query
-cargo run --example namespaces -p agentstategraph         # Multi-tenant namespace isolation
+cargo run --example namespaces -p agentstategraph         # Namespaces: per-project branches
 python3 examples/python_agent.py                          # Python workflow (after `maturin develop` in bindings/python)
 (cd bindings/typescript && npm install && npm run build && node ../../examples/typescript_agent.ts)  # TypeScript workflow
 ```
 
 MCP tool-call walkthroughs for the newer capabilities (work with any MCP-connected agent):
 
-- [`examples/namespaces-multitenant.md`](examples/namespaces-multitenant.md) — multi-tenant isolation + deny-by-default cross-namespace merge
+- [`examples/namespaces-multitenant.md`](examples/namespaces-multitenant.md) — per-project branches in one store, and what namespaces don't separate
 - [`examples/governance-policy-taint.md`](examples/governance-policy-taint.md) — policy + taint gating a sensitive change
 - [`examples/reminders-and-tasks.md`](examples/reminders-and-tasks.md) — pull-based reminders driving a task plan
 

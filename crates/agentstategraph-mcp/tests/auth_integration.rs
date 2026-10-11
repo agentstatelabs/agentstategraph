@@ -26,8 +26,8 @@ async fn boot_with_key(api_key: ApiKey) -> String {
     )));
     repo.init().expect("init repo");
 
-    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), None);
-    tenant_mgr.register_key(api_key);
+    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    tenant_mgr.register_key(api_key).unwrap();
 
     let app = http::build_router_for_test(repo, tenant_mgr, 0);
 
@@ -50,8 +50,9 @@ async fn boot_with_key(api_key: ApiKey) -> String {
 async fn authenticated_agent_id_overrides_body_agent() {
     let key = "asg_test_agent_binding".to_string();
     let api_key = ApiKey {
+        id: String::new(),
         key: key.clone(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "bound".into(),
         plan: "free".into(),
         enabled: true,
@@ -112,8 +113,9 @@ async fn authenticated_agent_id_overrides_body_agent() {
 async fn key_without_can_migrate_cannot_write_meta() {
     let key = "asg_test_no_migrate".to_string();
     let api_key = ApiKey {
+        id: String::new(),
         key: key.clone(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "nomigrate".into(),
         plan: "free".into(),
         enabled: true,
@@ -160,8 +162,9 @@ async fn key_without_can_migrate_cannot_write_meta() {
 async fn key_with_can_migrate_can_write_meta() {
     let key = "asg_test_can_migrate".to_string();
     let api_key = ApiKey {
+        id: String::new(),
         key: key.clone(),
-        tenant_id: "t1".into(),
+        tenant_id: "default".into(),
         name: "migrator".into(),
         plan: "free".into(),
         enabled: true,

@@ -31,6 +31,7 @@ async fn boot(tenant_mgr: Arc<TenantManager>, repo: Arc<Repository>) -> String {
 
 fn non_admin_key(key: &str) -> ApiKey {
     ApiKey {
+        id: String::new(),
         key: key.to_string(),
         tenant_id: "t1".into(),
         name: "ordinary".into(),
@@ -48,6 +49,7 @@ fn non_admin_key(key: &str) -> ApiKey {
 
 fn admin_key(key: &str) -> ApiKey {
     ApiKey {
+        id: String::new(),
         key: key.to_string(),
         tenant_id: "admin".into(),
         name: "admin".into(),
@@ -69,8 +71,8 @@ async fn admin_endpoint_requires_key_in_multi_tenant() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin_bootstrap"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin_bootstrap")).unwrap();
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
 
@@ -92,9 +94,9 @@ async fn admin_endpoint_rejects_non_admin_key() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin"));
-    mgr.register_key(non_admin_key("asg_user"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin")).unwrap();
+    mgr.register_key(non_admin_key("asg_user")).unwrap();
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
 
@@ -117,8 +119,8 @@ async fn admin_endpoint_accepts_admin_key() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin_ok"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin_ok")).unwrap();
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
 
@@ -185,8 +187,8 @@ async fn health_remains_public() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin_health"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin_health")).unwrap();
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
 

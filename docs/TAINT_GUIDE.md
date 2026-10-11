@@ -185,10 +185,10 @@ coexist with new active rows on the same `(path, name, kind)`
 triple — useful for repeated taint-fix-taint cycles where the
 audit trail matters.
 
-`PostgresStorage` ships a stub that returns `Backend` on mutating
-calls; `IndexedDbStorage` delegates to an inner `MemoryStorage`
-(in-session taints; durable snapshotting lands in a later
-milestone).
+`PostgresStorage` keeps taints in a `taints` table of the same shape,
+partitioned by tenant like everything else. `IndexedDbStorage`
+delegates to an inner `MemoryStorage` (in-session taints; durable
+snapshotting lands in a later milestone).
 
 ## Soft enforcement — read this before marketing
 

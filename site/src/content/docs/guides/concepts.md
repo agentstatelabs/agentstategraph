@@ -53,7 +53,7 @@ Branches are named pointers to commits. Creation is O(1). Namespace conventions:
 
 ## Namespaces
 
-A **namespace** is the isolation boundary at the ref layer. Every branch is keyed on a composite `(namespace, name)` primary key, so two namespaces can hold same-named branches without collision and never see each other's refs. One deployment can back many projects or tenants. Cross-namespace merges are deny-by-default and policy-gated. See the [Namespaces guide](/guides/namespaces/).
+A **namespace** is a separate set of branches in one store. Every branch is keyed on a composite `(namespace, name)` primary key, so two namespaces can hold same-named branches without collision. Namespaces share the store's objects and commits, so they partition branches rather than isolate data; an API key bound to a namespace is how to confine a client to one. See the [Namespaces guide](/guides/namespaces/).
 
 ## Speculation
 
@@ -61,10 +61,10 @@ A lightweight, disposable branch optimized for the "try many approaches, pick th
 
 ## Governance: Policy & Taint
 
-Two layers govern what agents are allowed to do, enforced at commit time:
+Two layers govern what agents are allowed to do:
 
-- **[Policy](/guides/policy/)** — authorization plus cost-of-change gating, with pluggable Cedar / Rego / WASM evaluators and Ed25519-signed ratification. Evaluate any proposed change before it lands.
-- **[Taint & Quarantine](/guides/taint/)** — mark-and-sweep markers that block, gate, or hide writes to suspect paths, with a full audit trail.
+- **[Policy](/guides/policy/)** — authorization plus cost-of-change gating, with pluggable Cedar / Rego / WASM evaluators and Ed25519-signed ratification. Policy is advisory: evaluate a proposed change before it lands, and act on the decision. The MCP `commit_spec` tool is the built-in gate: it refuses a speculation that policy denies, and by default one flagged as risky (a deletion, say) that no policy covers.
+- **[Taint & Quarantine](/guides/taint/)** — mark-and-sweep markers that block, gate, or hide writes to suspect paths, enforced at commit time, with a full audit trail.
 
 ## Plans & Tasks
 
