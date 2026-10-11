@@ -33,6 +33,12 @@ pub const LARGE_CHANGE_THRESHOLD: usize = 50;
 #[derive(Clone)]
 pub struct AgentStateGraphServer {
     repo: Arc<Repository>,
+    /// The forked repository holding each speculation made in another
+    /// namespace, by handle id, until it is committed or discarded. A fork
+    /// has its own speculations, so dropping it at the end of the tool call
+    /// would drop the speculation with it. Shared by clones of the server,
+    /// as the server's own repository is.
+    spec_repos: Arc<std::sync::Mutex<std::collections::HashMap<u64, Arc<Repository>>>>,
     tasks: Arc<TaskStore>,
     policies: Arc<PolicyStore>,
     /// Fail-safe translation for `Decision::NoPolicyMatch`. "deny" (default)
@@ -1018,12 +1024,14 @@ pub struct ReminderRecordParams {
 #[tool_router]
 impl AgentStateGraphServer {
     pub fn new(repo: Arc<Repository>) -> Self {
-        use agentstategraph_reminders::MemoryReminderStore;
         let tasks = Arc::new(TaskStore::new(repo.clone(), "/plans", "mcp-agent"));
         let policies = Arc::new(PolicyStore::new(repo.clone(), "/policies", "mcp-agent"));
-        let reminders = Arc::new(ReminderManager::new(Arc::new(MemoryReminderStore::new())));
+        // Reminders live in the store, like everything else, so they survive
+        // a restart.
+        let reminders = Arc::new(ReminderManager::new(repo.clone()));
         Self {
             repo,
+            spec_repos: Default::default(),
             tasks,
             policies,
             reminders,
@@ -1180,6 +1188,25 @@ impl AgentStateGraphServer {
             }
             None => Ok(None),
         }
+    }
+
+    /// The repository holding speculation `handle_id`: the namespace fork it
+    /// was made in, or the server's own repository.
+    fn spec_repo(&self, handle_id: u64) -> Arc<Repository> {
+        self.spec_repos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&handle_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.repo))
+    }
+
+    /// Forget the fork holding a speculation that no longer exists.
+    fn forget_spec(&self, handle_id: u64) {
+        self.spec_repos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&handle_id);
     }
 
     #[tool(
@@ -1455,18 +1482,26 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_speculate(&self, params: Parameters<SpeculateParams>) -> String {
         let p = params.0;
-        let forked = match self.ns_repo(p.namespace.as_deref()) {
-            Ok(r) => r,
+        let repo = match self.ns_repo(p.namespace.as_deref()) {
+            Ok(Some(forked)) => Arc::new(forked),
+            Ok(None) => Arc::clone(&self.repo),
             Err(e) => return format!("Error: {}", e),
         };
-        let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.speculate(&p.from, p.label.clone()) {
-            Ok(handle) => format!(
-                "Speculation created: handle_id={} (from '{}', label: {:?})",
-                handle.id(),
-                p.from,
-                p.label
-            ),
+            Ok(handle) => {
+                if !Arc::ptr_eq(&repo, &self.repo) {
+                    self.spec_repos
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(handle.id(), repo);
+                }
+                format!(
+                    "Speculation created: handle_id={} (from '{}', label: {:?})",
+                    handle.id(),
+                    p.from,
+                    p.label
+                )
+            }
             Err(e) => format!("Error: {}", e),
         }
     }
@@ -1477,6 +1512,7 @@ impl AgentStateGraphServer {
     async fn agentstategraph_spec_modify(&self, params: Parameters<SpecModifyParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
+        let repo = self.spec_repo(p.handle_id);
 
         for op in &p.operations {
             match op.op.as_str() {
@@ -1486,12 +1522,12 @@ impl AgentStateGraphServer {
                     let Some(value) = &op.value else {
                         return "Error: 'set' op requires a 'value'".to_string();
                     };
-                    if let Err(e) = self.repo.spec_set_json(handle, &op.path, value) {
+                    if let Err(e) = repo.spec_set_json(handle, &op.path, value) {
                         return format!("Error: {}", e);
                     }
                 }
                 "delete" => {
-                    if let Err(e) = self.repo.spec_delete(handle, &op.path) {
+                    if let Err(e) = repo.spec_delete(handle, &op.path) {
                         return format!("Error: {}", e);
                     }
                 }
@@ -1511,35 +1547,33 @@ impl AgentStateGraphServer {
     )]
     async fn agentstategraph_compare(&self, params: Parameters<CompareParams>) -> String {
         let p = params.0;
-        let handles: Vec<SpecHandle> = p
-            .handle_ids
-            .iter()
-            .map(|&id| SpecHandle::from_id(id))
-            .collect();
-        match self.repo.compare_speculations(&handles) {
-            Ok(comparison) => {
-                let entries: Vec<serde_json::Value> = comparison
-                    .entries
-                    .iter()
-                    .map(|e| {
-                        // Policy pre-flight: emit the same tokens that
-                        // commit_spec would infer, so an agent can see
-                        // which handles will hit which policies before
-                        // it commits to a promotion.
-                        let tokens = infer_tokens_from_diff(&e.diff_from_base);
-                        serde_json::json!({
-                            "handle": e.handle.id(),
-                            "label": e.label,
-                            "changes": e.diff_from_base.len(),
-                            "tokens": tokens,
-                            "diff": e.diff_from_base,
-                        })
-                    })
-                    .collect();
-                serde_json::to_string_pretty(&entries).unwrap_or_default()
-            }
-            Err(e) => format!("Error: {}", e),
+        // Each handle is compared in the repository that holds it, so one
+        // call can cover speculations from different namespaces.
+        let mut entries = Vec::with_capacity(p.handle_ids.len());
+        for &id in &p.handle_ids {
+            let comparison = match self
+                .spec_repo(id)
+                .compare_speculations(&[SpecHandle::from_id(id)])
+            {
+                Ok(comparison) => comparison,
+                Err(e) => return format!("Error: {}", e),
+            };
+            entries.extend(comparison.entries.iter().map(|e| {
+                // Policy pre-flight: emit the same tokens that
+                // commit_spec would infer, so an agent can see
+                // which handles will hit which policies before
+                // it commits to a promotion.
+                let tokens = infer_tokens_from_diff(&e.diff_from_base);
+                serde_json::json!({
+                    "handle": e.handle.id(),
+                    "label": e.label,
+                    "changes": e.diff_from_base.len(),
+                    "tokens": tokens,
+                    "diff": e.diff_from_base,
+                })
+            }));
         }
+        serde_json::to_string_pretty(&entries).unwrap_or_default()
     }
 
     #[tool(
@@ -1548,9 +1582,10 @@ impl AgentStateGraphServer {
     async fn agentstategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
+        let repo = self.spec_repo(p.handle_id);
 
         // Infer the ChangeProposal from the live speculation diff.
-        let tokens = match infer_change_tokens(&self.repo, handle) {
+        let tokens = match infer_change_tokens(&repo, handle) {
             Ok(t) => t,
             Err(e) => return format!("Error: {}", e),
         };
@@ -1587,8 +1622,11 @@ impl AgentStateGraphServer {
                 if let Some(c) = p.confidence {
                     opts = opts.with_confidence(c);
                 }
-                match self.repo.commit_speculation(handle, opts) {
-                    Ok(commit_id) => format!("Speculation committed: {}", commit_id),
+                match repo.commit_speculation(handle, opts) {
+                    Ok(commit_id) => {
+                        self.forget_spec(p.handle_id);
+                        format!("Speculation committed: {}", commit_id)
+                    }
                     Err(e) => format!("Error: {}", e),
                 }
             }
@@ -1605,8 +1643,11 @@ impl AgentStateGraphServer {
     async fn agentstategraph_discard(&self, params: Parameters<DiscardParams>) -> String {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
-        match self.repo.discard_speculation(handle) {
-            Ok(()) => format!("Speculation {} discarded", p.handle_id),
+        match self.spec_repo(p.handle_id).discard_speculation(handle) {
+            Ok(()) => {
+                self.forget_spec(p.handle_id);
+                format!("Speculation {} discarded", p.handle_id)
+            }
             Err(e) => format!("Error: {}", e),
         }
     }
@@ -2595,6 +2636,152 @@ mod tests {
     use super::*;
     use agentstategraph::{CommitOptions, RepoError, Repository};
     use agentstategraph_storage::SqliteStorage;
+
+    fn handle_from(out: &str) -> u64 {
+        out.split("handle_id=")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no handle in {out:?}"))
+    }
+
+    fn set_op(path: &str, value: serde_json::Value) -> SpecOp {
+        SpecOp {
+            op: "set".into(),
+            path: path.into(),
+            value: Some(value),
+        }
+    }
+
+    /// A speculation in another namespace was made on a forked repository
+    /// that was dropped when the tool call ended, and the other speculation
+    /// tools looked only at the server's own repository, so its handle was
+    /// never found (DESIGN.md Plan E finding 10).
+    #[tokio::test]
+    async fn namespaced_speculations_can_be_used_and_committed_in_place() {
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        repo.create_namespace("team-a").unwrap();
+        let team = repo.fork_namespace(Namespace::new("team-a").unwrap());
+        team.init().unwrap();
+        let server = AgentStateGraphServer::new(Arc::clone(&repo));
+        let speculate = |namespace: Option<&str>| {
+            server.agentstategraph_speculate(Parameters(SpeculateParams {
+                from: "main".into(),
+                label: None,
+                namespace: namespace.map(str::to_string),
+            }))
+        };
+        let modify = |handle_id: u64, path: &str| {
+            server.agentstategraph_spec_modify(Parameters(SpecModifyParams {
+                handle_id,
+                operations: vec![set_op(path, serde_json::json!("from a speculation"))],
+            }))
+        };
+
+        let in_team = handle_from(&speculate(Some("team-a")).await);
+        let in_default = handle_from(&speculate(None).await);
+        let out = modify(in_team, "/team").await;
+        assert!(out.starts_with("Applied"), "{out}");
+        assert!(modify(in_default, "/default").await.starts_with("Applied"));
+
+        // One compare can cover speculations from different namespaces.
+        let compared = server
+            .agentstategraph_compare(Parameters(CompareParams {
+                handle_ids: vec![in_team, in_default],
+            }))
+            .await;
+        let entries: serde_json::Value =
+            serde_json::from_str(&compared).unwrap_or_else(|_| panic!("{compared}"));
+        assert_eq!(entries[0]["handle"], in_team);
+        assert_eq!(entries[0]["changes"], 1);
+        assert_eq!(entries[1]["handle"], in_default);
+
+        let committed = server
+            .agentstategraph_commit_spec(Parameters(CommitSpecParams {
+                handle_id: in_team,
+                intent_category: "Refine".into(),
+                intent_description: "promote".into(),
+                reasoning: None,
+                confidence: None,
+                alternatives: None,
+                attached_fields: None,
+                base_ref: None,
+            }))
+            .await;
+        assert!(
+            committed.starts_with("Speculation committed"),
+            "{committed}"
+        );
+        assert_eq!(
+            team.get_json("main", "/team").unwrap(),
+            serde_json::json!("from a speculation")
+        );
+        assert!(
+            repo.get_json("main", "/team").is_err(),
+            "the commit landed in the default namespace"
+        );
+
+        // A committed or discarded speculation is gone.
+        assert!(modify(in_team, "/again").await.starts_with("Error"));
+        let discarded = server
+            .agentstategraph_discard(Parameters(DiscardParams {
+                handle_id: in_default,
+            }))
+            .await;
+        assert!(discarded.contains("discarded"), "{discarded}");
+        assert!(modify(in_default, "/again").await.starts_with("Error"));
+    }
+
+    /// The MCP server kept reminders in memory, so a restart lost them
+    /// (DESIGN.md Plan E finding 11).
+    #[tokio::test]
+    async fn reminders_survive_a_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "asg-mcp-reminders-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let open = || {
+            Arc::new(Repository::new(Box::new(
+                SqliteStorage::open(&path).expect("open sqlite"),
+            )))
+        };
+        let repo = open();
+        repo.init().unwrap();
+        let created = AgentStateGraphServer::new(repo)
+            .agentstategraph_reminder_create(Parameters(ReminderCreateParams {
+                title: "check the nightly import".into(),
+                instructions: "look at the import log".into(),
+                due_at: "2030-01-01T00:00:00Z".into(),
+                created_by: "agent/test".into(),
+                priority: None,
+                schedule: None,
+                autonomous: None,
+                commands: None,
+                refs: None,
+                tags: None,
+            }))
+            .await;
+        assert!(created.contains("check the nightly import"), "{created}");
+
+        let listed = AgentStateGraphServer::new(open())
+            .agentstategraph_reminder_list(Parameters(ReminderListParams {
+                status: None,
+                created_by: None,
+                ref_id: None,
+                tags: None,
+            }))
+            .await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        assert!(
+            listed.contains("check the nightly import"),
+            "the reminder was lost: {listed}"
+        );
+    }
 
     /// `spec_modify` converted values by hand and stored every object or
     /// array as a string of its JSON, and integers above i64::MAX as floats.
