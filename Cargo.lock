@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "blake3",
  "chrono",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-ffi"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-mcp"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-napi"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-cedar"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-policy",
  "serde_json",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-rego"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-policy",
  "serde_json",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-sign"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-policy",
  "chrono",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-policy-wasm"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-policy",
  "serde_json",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-python"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-reminders"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-taint"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-wasm"
-version = "1.2.7"
+version = "1.2.8"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -538,9 +538,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",

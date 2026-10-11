@@ -204,6 +204,34 @@ publish-github:
   script:
     - bash scripts/publish-to-github.sh
 
+# publish-crates: publish the workspace crates to crates.io from a release tag
+# (scripts/publish-crates.sh). It needs publish-github, so only a tag that
+# passed the checks, the tests and the mirror's fail-closed leak scan gets
+# here, and it runs the leak scan again on the tree it packages. Re-running it
+# is safe: crates already at this version are skipped. resource_group keeps two
+# tag pipelines from publishing at once.
+#
+# Set CARGO_REGISTRY_TOKEN (masked + protected; v* tags are protected): a
+# crates.io token scoped to publish-update and agentstategraph*. Gated on it so
+# the job no-ops until configured. publish-update cannot create a crate, so a
+# crate new to the workspace is published once by hand (RELEASE.md).
+publish-crates:
+  stage: publish
+  needs:
+    - job: publish-github
+      artifacts: false
+  resource_group: crates-io
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/ && $CARGO_REGISTRY_TOKEN'
+  script:
+    - |
+      if [ -z "${LEAKSCAN_LOCAL:-}" ]; then
+        echo "ERROR: LEAKSCAN_LOCAL unset; not publishing without the org leak-scan patterns"; exit 1
+      fi
+      printf '%s' "$LEAKSCAN_LOCAL" > .leakscan.local
+    - bash scripts/leak-scan.sh --tree
+    - bash scripts/publish-crates.sh --publish
+
 # create-release-tag: THE tag authority, and the FINAL act of a release. It runs
 # in the last stage, so everything before it in the release-prep pipeline — the
 # GitHub mirror and the (non-blocking) swift xcframework prep — has already run.
