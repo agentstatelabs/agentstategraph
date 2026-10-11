@@ -23,8 +23,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - **A build without the feature refuses a TLS request** with an error that names the feature, rather than connecting in plaintext.
   - **`scripts/test-postgres.sh --tls`** tests against a local server that refuses plaintext, with a certificate from a throwaway CA. GitHub CI runs it.
 - **Postgres connection errors now include their cause.** A failed connection used to report only "error performing TLS handshake" (or a similar top-level message). It now carries the reason, such as an untrusted issuer, a host name mismatch, or a refused login.
+- **History walks, history rollups and value search on Postgres, as on SQLite.**
+  - `list_commits` and `list_commits_dag` (`log` and `log_dag`) are each one recursive query. Before, a walk made one round trip per commit. Walking 200,000 commits takes about a second.
+  - The project-history tables and their extractor, so `extract_history`, the history report, and the GC check that history has been extracted all work on Postgres. With several writers, a commit can become visible after a later one. The extractor reads commits in transaction order, and only from transactions older than any still running, so a commit that commits late is never skipped.
+  - The leaf-value search index. Substring search uses a `pg_trgm` trigram index when the extension can be installed; it is a trusted extension, so a role with `CREATE` on the database can install it. Without it, search scans the ref's rows.
+  - Requires PostgreSQL 13 or later. The schema moves to version 2 on the first connect. That builds an index on `commits`, which holds up commit writes on a large store while it runs.
+- **`ObjectStore::leaf_index_tracks_roots`, `leaf_index_root`, `leaf_index_build_at` and `leaf_index_advance`** let a backend record which tree each search-index set reflects (see Fixed). Each has a default, so other backends are unaffected.
 
 ### Fixed
+- **Search could go on returning a value that had been overwritten.** When writers raced on one branch, their search-index updates could apply out of order, and the index kept the older value until that path was written again. A 4-writer test showed it about once in 200 runs on SQLite. Each index now records the tree it reflects, and an update applies only to the tree it was computed from. A search first brings the index up to the branch's current tree; if it can't, it walks the tree instead. A SQLite index built by an earlier version is rebuilt on its next search.
+- **SQLite search for a one- or two-character query treated `%` and `_` as wildcards.** They now match themselves, as they already did in longer queries.
 - **Racing writers can no longer both "win" on sessions, reminders or commit links.**
   - Ending a session is one conditional update on Postgres and SQLite. Before, several processes could end the same session at once.
   - Reminder `update_if_unchanged` now does its compare and write as one step on Postgres (one transaction with the row locked) and in the in-memory backend. In a 6-way race from one snapshot, Postgres let all 6 win and memory 3; now exactly 1 wins.

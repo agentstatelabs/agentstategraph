@@ -18,12 +18,12 @@ use std::thread::JoinHandle;
 
 use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Epoch, EpochScope, EpochStatus, Intent, IntentCategory,
-    Namespace, Object, ObjectId, Session, SessionStatus,
+    Namespace, Object, ObjectId, Session, SessionStatus, TAG_GIT_REVISION, TAG_PIN_STATE,
 };
 use agentstategraph_reminders::CreateReminder;
-use agentstategraph_storage::{Storage, StorageError};
+use agentstategraph_storage::{HistoryRollupRow, Storage, StorageError};
 use agentstategraph_taint::{Taint, TaintEffect, TaintKind, TaintMetadata, TaintSeverity};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 type Store = Arc<dyn Storage + Send + Sync>;
 
@@ -386,6 +386,71 @@ fn commits_and_walks(f: &Fixture) {
     assert!(
         expected.is_subset(&all),
         "all_commit_ids lists every commit"
+    );
+}
+
+/// Walks over long and merge-heavy histories, and over a pruned parent.
+fn dag_walks_at_scale(f: &Fixture) {
+    let s = f.store();
+
+    // A long line comes back in order, whole or up to the limit.
+    let mut line = vec![commit(s, "line-0", &[])];
+    for i in 1..1200 {
+        let parent = line[i - 1].id;
+        line.push(commit(s, &format!("line-{i}"), &[parent]));
+    }
+    let tip = line.last().unwrap().id;
+    let newest_first: Vec<ObjectId> = line.iter().rev().map(|c| c.id).collect();
+    let ids = |commits: &[Commit]| commits.iter().map(|c| c.id).collect::<Vec<_>>();
+    assert_eq!(ids(&s.list_commits(&tip, 5000).unwrap()), newest_first);
+    assert_eq!(
+        ids(&s.list_commits(&tip, 100).unwrap()),
+        newest_first[..100]
+    );
+    assert!(s.list_commits(&tip, 0).unwrap().is_empty());
+    let whole = s.list_commits_dag(&tip, 1200).unwrap();
+    assert_eq!(ids(&whole.commits), newest_first, "a line walks in order");
+    assert!(
+        !whole.truncated,
+        "a limit equal to the history is not truncation"
+    );
+    let cut = s.list_commits_dag(&tip, 1199).unwrap();
+    assert_eq!(cut.commits.len(), 1199);
+    assert!(cut.truncated);
+
+    // A ladder of 40 diamonds has 2^40 paths from top to bottom but 121
+    // commits. A walk that revisits shared ancestors never finishes.
+    let bottom = commit(s, "ladder-0", &[]);
+    let mut top = bottom.clone();
+    let mut all: HashSet<ObjectId> = HashSet::from([bottom.id]);
+    for i in 0..40 {
+        let l = commit(s, &format!("ladder-{i}-l"), &[top.id]);
+        let r = commit(s, &format!("ladder-{i}-r"), &[top.id]);
+        top = commit(s, &format!("ladder-{i}-m"), &[l.id, r.id]);
+        all.extend([l.id, r.id, top.id]);
+    }
+    let ladder = s.list_commits_dag(&top.id, 10_000).unwrap();
+    assert_eq!(ladder.commits.len(), all.len(), "each commit appears once");
+    assert_eq!(
+        ids(&ladder.commits).into_iter().collect::<HashSet<_>>(),
+        all
+    );
+    assert!(!ladder.truncated);
+    assert_eq!(ladder.commits.first().unwrap().id, top.id);
+    assert_eq!(
+        ladder.commits.last().unwrap().id,
+        bottom.id,
+        "breadth first: the deepest commit comes last"
+    );
+
+    // A parent that isn't stored ends that edge.
+    let orphan = commit(s, "orphan", &[ObjectId::hash(b"never stored")]);
+    let walk = s.list_commits_dag(&orphan.id, 10).unwrap();
+    assert_eq!(ids(&walk.commits), vec![orphan.id]);
+    assert!(!walk.truncated);
+    assert_eq!(
+        ids(&s.list_commits(&orphan.id, 10).unwrap()),
+        vec![orphan.id]
     );
 }
 
@@ -846,6 +911,438 @@ fn reminders_round_trip_and_cas(f: &Fixture) {
 }
 
 // ---------------------------------------------------------------------------
+// History and search
+//
+// The memory backend keeps neither (the trait defaults: nothing extracted,
+// nothing indexed), so it is held to those defaults and the SQL backends to
+// one contract.
+// ---------------------------------------------------------------------------
+
+fn at(rfc3339: &str) -> DateTime<Utc> {
+    rfc3339.parse().expect("test timestamp")
+}
+
+fn history_commit(
+    s: &Store,
+    tag: &str,
+    agent: &str,
+    category: IntentCategory,
+    tags: &[&str],
+    timestamp: DateTime<Utc>,
+) -> Commit {
+    let root = s.put_object(&Object::string(tag)).unwrap();
+    let mut c = CommitBuilder::new(
+        root,
+        agent,
+        Authority::simple("conformance"),
+        Intent::new(category, tag).with_tags(tags.iter().map(|t| t.to_string()).collect()),
+    )
+    .build();
+    c.timestamp = timestamp;
+    s.put_commit(&c).unwrap();
+    c
+}
+
+fn extract_all(s: &Store, batch: usize) -> usize {
+    let mut total = 0;
+    loop {
+        match s.history_extract_batch(batch).unwrap() {
+            0 => return total,
+            n => total += n,
+        }
+    }
+}
+
+fn bucket(
+    day: &str,
+    namespace: &str,
+    agent: &str,
+    category: &str,
+    commits: i64,
+    first: &str,
+    last: &str,
+) -> HistoryRollupRow {
+    HistoryRollupRow {
+        day: day.into(),
+        namespace: namespace.into(),
+        agent_id: agent.into(),
+        intent_category: category.into(),
+        commit_count: commits,
+        first_ts: at(first).to_rfc3339(),
+        last_ts: at(last).to_rfc3339(),
+    }
+}
+
+fn history_rollup_and_milestones(f: &Fixture) {
+    use IntentCategory::{Checkpoint, Refine};
+    let s = f.store();
+    let pin = TAG_PIN_STATE.to_string();
+    let git = format!("{TAG_GIT_REVISION}abc123");
+    let a1 = history_commit(s, "a1", "agent/a", Refine, &[], at("2026-03-01T09:00:00Z"));
+    history_commit(s, "a2", "agent/a", Refine, &[], at("2026-03-01T10:00:00Z"));
+    let pinned = history_commit(
+        s,
+        "pinned",
+        "agent/b",
+        Checkpoint,
+        &[&pin, &git],
+        at("2026-03-01T11:00:00Z"),
+    );
+    // Same second, one with a fraction: they must order by time, not by
+    // the text's punctuation.
+    let late = history_commit(
+        s,
+        "late",
+        "agent/b",
+        Checkpoint,
+        &[],
+        at("2026-03-02T17:30:00.250Z"),
+    );
+    let early = history_commit(
+        s,
+        "early",
+        "agent/b",
+        Checkpoint,
+        &[],
+        at("2026-03-02T17:30:00Z"),
+    );
+    // A commit in a scoped session is attributed to the session's namespace.
+    let scoped = history_commit(
+        s,
+        "scoped",
+        "agent/a",
+        Refine,
+        &[],
+        at("2026-03-02T08:00:00Z"),
+    );
+    let mut sess = session("sess-team");
+    sess.scope_namespace = Some(Namespace::new("team-a").unwrap());
+    s.create_session(&sess).unwrap();
+    s.set_commit_session(&scoped.id, "sess-team").unwrap();
+
+    if f.backend == Backend::Memory {
+        assert_eq!(s.history_extract_batch(10).unwrap(), 0);
+        assert!(s.history_rollup().unwrap().is_empty());
+        assert!(s.history_milestones(10).unwrap().is_empty());
+        assert_eq!(s.history_cursor().unwrap(), 0);
+        assert_eq!(s.history_undistilled_commit_count().unwrap(), 0);
+        assert!(!s.history_is_commit_distilled(&a1.id).unwrap());
+        return;
+    }
+
+    assert_eq!(s.history_undistilled_commit_count().unwrap(), 6);
+    assert!(!s.history_is_commit_distilled(&a1.id).unwrap());
+    assert_eq!(extract_all(s, 2), 6, "folded in batches of two");
+    assert_eq!(extract_all(s, 2), 0, "a caught-up extractor does nothing");
+    assert!(s.history_cursor().unwrap() > 0);
+    assert!(s.history_is_commit_distilled(&a1.id).unwrap());
+    assert!(
+        !s.history_is_commit_distilled(&ObjectId::hash(b"absent"))
+            .unwrap()
+    );
+    assert_eq!(s.history_undistilled_commit_count().unwrap(), 0);
+
+    assert_eq!(
+        s.history_rollup().unwrap(),
+        vec![
+            bucket(
+                "2026-03-01",
+                "unattributed",
+                "agent/a",
+                "Refine",
+                2,
+                "2026-03-01T09:00:00Z",
+                "2026-03-01T10:00:00Z"
+            ),
+            bucket(
+                "2026-03-01",
+                "unattributed",
+                "agent/b",
+                "Checkpoint",
+                1,
+                "2026-03-01T11:00:00Z",
+                "2026-03-01T11:00:00Z"
+            ),
+            bucket(
+                "2026-03-02",
+                "team-a",
+                "agent/a",
+                "Refine",
+                1,
+                "2026-03-02T08:00:00Z",
+                "2026-03-02T08:00:00Z"
+            ),
+            bucket(
+                "2026-03-02",
+                "unattributed",
+                "agent/b",
+                "Checkpoint",
+                2,
+                "2026-03-02T17:30:00Z",
+                "2026-03-02T17:30:00.250Z"
+            ),
+        ]
+    );
+
+    let milestones = s.history_milestones(10).unwrap();
+    let order: Vec<ObjectId> = milestones.iter().map(|m| m.commit_id).collect();
+    assert_eq!(order, vec![late.id, early.id, pinned.id], "newest first");
+    let first = &milestones[2];
+    assert_eq!(first.kind, "checkpoint");
+    assert_eq!(first.day, "2026-03-01");
+    assert_eq!(first.namespace, "unattributed");
+    assert_eq!(first.agent_id, "agent/b");
+    assert_eq!(first.description, "pinned");
+    assert_eq!(first.timestamp, at("2026-03-01T11:00:00Z").to_rfc3339());
+    assert_eq!(
+        first.state_root,
+        Some(pinned.state_root),
+        "pinned on request"
+    );
+    assert_eq!(first.git_sha.as_deref(), Some("abc123"));
+    assert_eq!(milestones[0].state_root, None, "not pinned by default");
+    assert_eq!(milestones[0].git_sha, None);
+    assert_eq!(s.history_milestones(1).unwrap().len(), 1);
+    assert_eq!(
+        s.history_retained_state_roots().unwrap(),
+        vec![pinned.state_root]
+    );
+
+    // Later commits fold incrementally into the existing buckets.
+    let a3 = history_commit(s, "a3", "agent/a", Refine, &[], at("2026-03-01T12:00:00Z"));
+    history_commit(s, "a0", "agent/a", Refine, &[], at("2026-03-01T08:30:00Z"));
+    assert_eq!(s.history_undistilled_commit_count().unwrap(), 2);
+    assert!(!s.history_is_commit_distilled(&a3.id).unwrap());
+    assert_eq!(extract_all(s, 100), 2);
+    assert_eq!(
+        s.history_rollup().unwrap()[0],
+        bucket(
+            "2026-03-01",
+            "unattributed",
+            "agent/a",
+            "Refine",
+            4,
+            "2026-03-01T08:30:00Z",
+            "2026-03-01T12:00:00Z"
+        )
+    );
+}
+
+/// Extractors running at once fold every commit exactly once. A backend may
+/// make a loser fail rather than wait (SQLite does); it retries.
+fn history_concurrent_extractors_count_once(f: &Fixture) {
+    const COMMITS: usize = 120;
+    const EXTRACTORS: usize = 4;
+    let s = f.store();
+    for i in 0..COMMITS {
+        commit(s, &format!("c{i}"), &[]);
+    }
+    if f.backend == Backend::Memory {
+        return;
+    }
+    let barrier = Arc::new(Barrier::new(EXTRACTORS));
+    let extractors: Vec<_> = (0..EXTRACTORS)
+        .map(|_| {
+            let (store, barrier) = (f.open_another(), Arc::clone(&barrier));
+            f.spawn(move || {
+                barrier.wait();
+                let mut failures = 0;
+                loop {
+                    match store.history_extract_batch(7) {
+                        Ok(0) => return,
+                        Ok(_) => {}
+                        Err(e) => {
+                            failures += 1;
+                            assert!(failures < 1000, "extractor keeps failing: {e}");
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+    for e in extractors {
+        e.join().unwrap();
+    }
+    let folded: i64 = s
+        .history_rollup()
+        .unwrap()
+        .iter()
+        .map(|b| b.commit_count)
+        .sum();
+    assert_eq!(folded, COMMITS as i64, "every commit folded exactly once");
+    assert_eq!(s.history_undistilled_commit_count().unwrap(), 0);
+    assert_eq!(s.history_milestones(1000).unwrap().len(), COMMITS);
+}
+
+fn leaf_index_search(f: &Fixture) {
+    let s = f.store();
+    let leaves = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(p, v)| (p.to_string(), v.to_string()))
+            .collect()
+    };
+    let search = |query: &str| -> HashSet<(String, String)> {
+        s.leaf_index_search("default", "main", query, 50)
+            .unwrap()
+            .expect("the set is built")
+            .into_iter()
+            .collect()
+    };
+    let hits = |pairs: &[(&str, &str)]| -> HashSet<(String, String)> {
+        leaves(pairs).into_iter().collect()
+    };
+
+    assert!(!s.leaf_index_is_built("default", "main").unwrap());
+    assert_eq!(
+        s.leaf_index_search("default", "main", "x", 10).unwrap(),
+        None
+    );
+    s.leaf_index_apply("default", "main", &[], &leaves(&[("/x", "x")]))
+        .unwrap();
+    assert!(
+        !s.leaf_index_is_built("default", "main").unwrap(),
+        "maintaining an unbuilt set builds nothing"
+    );
+    if f.backend == Backend::Memory {
+        s.leaf_index_build("default", "main", &leaves(&[("/a", "a")]))
+            .unwrap();
+        assert!(!s.leaf_index_is_built("default", "main").unwrap());
+        return;
+    }
+
+    s.leaf_index_build(
+        "default",
+        "main",
+        &leaves(&[
+            ("/a", "Hello World"),
+            ("/b", "100% sure"),
+            ("/c", "snake_case"),
+            ("/d", "back\\slash"),
+            ("/e", "other"),
+            ("/f", "ezc"),
+        ]),
+    )
+    .unwrap();
+    s.leaf_index_build("default", "dev", &leaves(&[("/a", "hello dev")]))
+        .unwrap();
+    s.leaf_index_build("team", "main", &leaves(&[("/a", "hello team")]))
+        .unwrap();
+    assert!(s.leaf_index_is_built("default", "main").unwrap());
+
+    // Case-insensitive substrings, from one (namespace, ref) only.
+    assert_eq!(search("hello"), hits(&[("/a", "Hello World")]));
+    assert_eq!(search("lo w"), hits(&[("/a", "Hello World")]));
+    // Wildcard characters match themselves, short queries and long.
+    assert_eq!(search("%"), hits(&[("/b", "100% sure")]));
+    assert_eq!(search("_"), hits(&[("/c", "snake_case")]));
+    assert_eq!(search("e_c"), hits(&[("/c", "snake_case")]));
+    assert_eq!(search("\\"), hits(&[("/d", "back\\slash")]));
+    assert!(search("zzz").is_empty());
+    assert_eq!(
+        s.leaf_index_search("default", "main", "e", 2)
+            .unwrap()
+            .unwrap()
+            .len(),
+        2,
+        "the limit is honoured"
+    );
+
+    // Maintenance removes and adds paths, and replaces a path's value.
+    s.leaf_index_apply(
+        "default",
+        "main",
+        &["/a".to_string(), "/e".to_string()],
+        &leaves(&[("/g", "fresh hello"), ("/e", "renamed")]),
+    )
+    .unwrap();
+    assert_eq!(search("hello"), hits(&[("/g", "fresh hello")]));
+    assert!(search("other").is_empty());
+    assert_eq!(search("renamed"), hits(&[("/e", "renamed")]));
+
+    // A rebuild replaces the whole set.
+    s.leaf_index_build("default", "main", &leaves(&[("/z", "only")]))
+        .unwrap();
+    assert!(search("hello").is_empty());
+    assert_eq!(search("only"), hits(&[("/z", "only")]));
+}
+
+/// A set records the tree it reflects, and a diff applies only to the tree it
+/// was computed from, so updates that arrive out of order can't leave an
+/// overwritten value behind.
+fn leaf_index_roots(f: &Fixture) {
+    let s = f.store();
+    let (r1, r2, r3) = (
+        ObjectId::hash(b"tree 1"),
+        ObjectId::hash(b"tree 2"),
+        ObjectId::hash(b"tree 3"),
+    );
+    let one = |path: &str, value: &str| vec![(path.to_string(), value.to_string())];
+    let found = |query: &str| s.leaf_index_search("default", "main", query, 10).unwrap();
+
+    if f.backend == Backend::Memory {
+        assert!(!s.leaf_index_tracks_roots());
+        s.leaf_index_build_at("default", "main", &r1, &one("/a", "v1"))
+            .unwrap();
+        assert_eq!(s.leaf_index_root("default", "main").unwrap(), None);
+        return;
+    }
+    assert!(s.leaf_index_tracks_roots());
+    assert_eq!(s.leaf_index_root("default", "main").unwrap(), None);
+    assert!(
+        !s.leaf_index_advance("default", "main", &r1, &r2, &[], &[])
+            .unwrap(),
+        "an unbuilt set doesn't move"
+    );
+
+    s.leaf_index_build_at("default", "main", &r1, &one("/a", "v1"))
+        .unwrap();
+    assert!(s.leaf_index_is_built("default", "main").unwrap());
+    assert_eq!(s.leaf_index_root("default", "main").unwrap(), Some(r1));
+
+    // r1 -> r2 applies; a late r1 -> r3 (computed from a tree the set has
+    // left) is refused and changes nothing.
+    assert!(
+        s.leaf_index_advance(
+            "default",
+            "main",
+            &r1,
+            &r2,
+            &["/a".into()],
+            &one("/a", "v2")
+        )
+        .unwrap()
+    );
+    assert_eq!(s.leaf_index_root("default", "main").unwrap(), Some(r2));
+    assert!(
+        !s.leaf_index_advance(
+            "default",
+            "main",
+            &r1,
+            &r3,
+            &["/a".into()],
+            &one("/a", "v3")
+        )
+        .unwrap()
+    );
+    assert_eq!(s.leaf_index_root("default", "main").unwrap(), Some(r2));
+    assert_eq!(found("v"), Some(one("/a", "v2")));
+
+    // Changes made without a root leave the set's tree unknown.
+    s.leaf_index_apply("default", "main", &["/a".into()], &one("/a", "v4"))
+        .unwrap();
+    assert_eq!(s.leaf_index_root("default", "main").unwrap(), None);
+    assert_eq!(found("v"), Some(one("/a", "v4")));
+    s.leaf_index_build_at("default", "main", &r3, &one("/a", "v5"))
+        .unwrap();
+    assert_eq!(s.leaf_index_root("default", "main").unwrap(), Some(r3));
+    s.leaf_index_build("default", "main", &one("/a", "v6"))
+        .unwrap();
+    assert_eq!(s.leaf_index_root("default", "main").unwrap(), None);
+    assert!(s.leaf_index_is_built("default", "main").unwrap());
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -862,6 +1359,11 @@ fn objects_batch() {
 #[test]
 fn commits() {
     run("commits_and_walks", commits_and_walks);
+}
+
+#[test]
+fn commits_dag_scale() {
+    run("dag_walks_at_scale", dag_walks_at_scale);
 }
 
 #[test]
@@ -928,4 +1430,30 @@ fn taints() {
 #[test]
 fn reminders() {
     run("reminders_round_trip_and_cas", reminders_round_trip_and_cas);
+}
+
+#[test]
+fn history() {
+    run(
+        "history_rollup_and_milestones",
+        history_rollup_and_milestones,
+    );
+}
+
+#[test]
+fn history_concurrent_extractors() {
+    run(
+        "history_concurrent_extractors_count_once",
+        history_concurrent_extractors_count_once,
+    );
+}
+
+#[test]
+fn leaf_index() {
+    run("leaf_index_search", leaf_index_search);
+}
+
+#[test]
+fn leaf_index_root_tracking() {
+    run("leaf_index_roots", leaf_index_roots);
 }

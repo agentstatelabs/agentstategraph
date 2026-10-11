@@ -302,6 +302,124 @@ fn sealed_epoch_binds_only_its_namespace(f: &Fixture) {
         .expect("another namespace is not bound by team a's seal");
 }
 
+/// Search answers from the current tree on every backend, whether from an
+/// index (SQLite, Postgres) or a tree walk (memory), and keeps doing so as
+/// writes replace and remove values.
+fn search_follows_writes(f: &Fixture) {
+    let repo = f.open();
+    repo.init().unwrap();
+    repo.set_json("main", "/config/name", &json!("Prod Cluster"), opts("name"))
+        .unwrap();
+    repo.set_json("main", "/config/owner", &json!("team-blue"), opts("owner"))
+        .unwrap();
+    let hits = |repo: &Repository, query: &str| -> Vec<(String, String)> {
+        let mut hits = repo.search_values("main", query, None).unwrap();
+        hits.sort();
+        hits
+    };
+    let one = |path: &str, value: &str| vec![(path.to_string(), value.to_string())];
+
+    // The first search builds the index where there is one.
+    assert_eq!(hits(&repo, "prod"), one("/config/name", "Prod Cluster"));
+    repo.set_json("main", "/config/name", &json!("Staging"), opts("rename"))
+        .unwrap();
+    assert!(hits(&repo, "prod").is_empty(), "a replaced value is gone");
+    assert_eq!(hits(&repo, "stag"), one("/config/name", "Staging"));
+    repo.delete("main", "/config/owner", opts("drop owner"))
+        .unwrap();
+    assert!(hits(&repo, "blue").is_empty(), "a deleted value is gone");
+
+    // Another process sees the same answers.
+    let other = f.open();
+    assert_eq!(hits(&other, "stag"), one("/config/name", "Staging"));
+    assert!(hits(&other, "blue").is_empty());
+}
+
+/// Writers racing on the same paths: once they finish, search reports each
+/// path's current value and nothing older.
+fn search_follows_concurrent_writers(f: &Fixture) {
+    const WRITERS: usize = 4;
+    const PER_WRITER: usize = 10;
+    let repo = f.open();
+    repo.init().unwrap();
+    for slot in 0..3 {
+        repo.set_json(
+            "main",
+            &format!("/slot/s{slot}"),
+            &json!(format!("initial {slot}")),
+            opts("seed"),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        repo.search_values("main", "initial", None).unwrap().len(),
+        3
+    );
+
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let (repo, barrier) = (f.open(), Arc::clone(&barrier));
+            f.spawn(move || {
+                barrier.wait();
+                for i in 0..PER_WRITER {
+                    repo.set_json(
+                        "main",
+                        &format!("/slot/s{}", i % 3),
+                        &json!(format!("w{w} i{i} mark")),
+                        opts("overwrite"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+    for w in writers {
+        w.join().unwrap();
+    }
+
+    let current: std::collections::HashSet<(String, String)> = (0..3)
+        .map(|slot| {
+            let path = format!("/slot/s{slot}");
+            let value = repo.get_json("main", &path).unwrap();
+            (path, value.as_str().unwrap().to_string())
+        })
+        .collect();
+    let found: std::collections::HashSet<(String, String)> = repo
+        .search_values("main", "mark", Some(100))
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(found, current, "search reports exactly the current values");
+}
+
+/// The history extractor folds every commit on the SQL backends; memory keeps
+/// no history.
+fn history_through_the_repository(f: &Fixture) {
+    let repo = f.open();
+    repo.init().unwrap();
+    for i in 0..5 {
+        repo.set_json("main", &format!("/n/k{i}"), &json!(i), opts("count"))
+            .unwrap();
+    }
+    let commits = repo.log_dag("main", 1000).unwrap().commits.len();
+    let report = repo.extract_history(2).unwrap();
+    let folded: i64 = repo
+        .history_rollup()
+        .unwrap()
+        .iter()
+        .map(|b| b.commit_count)
+        .sum();
+    if f.backend == Backend::Memory {
+        assert_eq!(report.commits_processed, 0);
+        assert_eq!(folded, 0);
+        return;
+    }
+    assert_eq!(report.commits_processed, commits);
+    assert_eq!(folded, commits as i64);
+    assert_eq!(repo.extract_history(2).unwrap().commits_processed, 0);
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -325,5 +443,26 @@ fn epoch_namespace_binding() {
     run(
         "sealed_epoch_binds_only_its_namespace",
         sealed_epoch_binds_only_its_namespace,
+    );
+}
+
+#[test]
+fn search() {
+    run("search_follows_writes", search_follows_writes);
+}
+
+#[test]
+fn search_concurrent_writers() {
+    run(
+        "search_follows_concurrent_writers",
+        search_follows_concurrent_writers,
+    );
+}
+
+#[test]
+fn history() {
+    run(
+        "history_through_the_repository",
+        history_through_the_repository,
     );
 }

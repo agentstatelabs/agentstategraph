@@ -1,6 +1,6 @@
-//! Schema setup on Postgres (DESIGN.md Plan D t-004/t-006): the DDL runs once
-//! per schema version, not on every connect, and an older database is
-//! brought up to date. Uses its own throwaway database, so rewinding the
+//! Schema setup on Postgres (DESIGN.md Plan D t-004/t-006/t-008): the DDL
+//! runs once per schema version, not on every connect, and an older database
+//! is brought up to date, its existing commits included. Uses its own throwaway database, so rewinding the
 //! schema can't disturb other tests.
 //!
 //! Skipped unless `TEST_DATABASE_URL` is set (its user needs CREATEDB);
@@ -8,8 +8,10 @@
 
 #![cfg(feature = "postgres")]
 
-use agentstategraph_core::{Epoch, ObjectId};
-use agentstategraph_storage::{EpochStore, PostgresStorage};
+use agentstategraph_core::{
+    Authority, Commit, CommitBuilder, Epoch, Intent, IntentCategory, Object, ObjectId,
+};
+use agentstategraph_storage::{CommitStore, EpochStore, ObjectStore, PostgresStorage};
 use chrono::Utc;
 
 fn url() -> Option<String> {
@@ -72,12 +74,36 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
     admin(&url, &format!("CREATE DATABASE {name}"));
     let db = with_database(&url, &name);
 
-    // A current database, rewound to look like one from before the version
-    // stamp and before epochs had a seal digest.
-    drop(PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap());
+    // A current database with a merge in its history, rewound to look like
+    // one from before the version stamp (version 1), epoch seal digests and
+    // the version 2 history and search tables.
+    let old = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
+    let commit = |tag: &str, parents: &[ObjectId]| -> Commit {
+        let root = old.put_object(&Object::string(tag)).unwrap();
+        let c = CommitBuilder::new(
+            root,
+            "agent/schema",
+            Authority::simple("test"),
+            Intent::new(IntentCategory::Refine, tag),
+        )
+        .parents(parents.to_vec())
+        .build();
+        old.put_commit(&c).unwrap();
+        c
+    };
+    let base = commit("base", &[]);
+    let left = commit("left", &[base.id]);
+    let right = commit("right", &[base.id]);
+    let merge = commit("merge", &[left.id, right.id]);
+    drop(old);
     admin(
         &db,
-        "DROP TABLE asg_schema; ALTER TABLE epochs DROP COLUMN seal_hash;",
+        "DROP TABLE asg_schema;
+         ALTER TABLE epochs DROP COLUMN seal_hash;
+         DROP INDEX idx_commits_data_id;
+         ALTER TABLE commits DROP COLUMN xid;
+         DROP TABLE asg_history_cursor, asg_history_commit_rollup, asg_history_milestone,
+                    leaf_rows, leaf_index_refs;",
     );
 
     let storage = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
@@ -86,7 +112,7 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             &db,
             "SELECT version::BIGINT FROM asg_schema WHERE component = 'postgres'"
         ),
-        1,
+        2,
         "the upgrade stamps the schema version"
     );
     storage
@@ -100,6 +126,23 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
         storage.get_epoch("e").unwrap().unwrap().seal_hash,
         Some(seal),
         "the dropped column is back"
+    );
+
+    // Commits from before the upgrade walk and fold like new ones.
+    let walk = storage.list_commits_dag(&merge.id, 10).unwrap();
+    assert_eq!(walk.commits.len(), 4);
+    assert!(!walk.truncated);
+    assert_eq!(storage.history_undistilled_commit_count().unwrap(), 4);
+    assert_eq!(storage.history_extract_batch(10).unwrap(), 4);
+    assert_eq!(storage.history_undistilled_commit_count().unwrap(), 0);
+    storage
+        .leaf_index_build("default", "main", &[("/a".into(), "found".into())])
+        .unwrap();
+    assert_eq!(
+        storage
+            .leaf_index_search("default", "main", "fou", 10)
+            .unwrap(),
+        Some(vec![("/a".into(), "found".into())])
     );
 
     // Up to date: connecting again runs no DDL. A column dropped by hand stays

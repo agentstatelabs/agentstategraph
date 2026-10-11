@@ -31,6 +31,11 @@
 //! As of 0.6.75-beta.1 this backend persists epochs and sessions too,
 //! with the same schema shape as SQLite (JSON-as-TEXT). Multi-tenant
 //! isolation continues via a `tenant_id` column on every table.
+//!
+//! History walks, the project-history rollups and value search work as they
+//! do on SQLite. Search uses a trigram index when the `pg_trgm` extension can
+//! be installed, and scans the ref's rows when it can't. Requires PostgreSQL
+//! 13 or later.
 
 use deadpool_postgres::{
     Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime as PoolRuntime,
@@ -45,12 +50,14 @@ use tokio_postgres::NoTls;
 pub const DEFAULT_POOL_SIZE: usize = 32;
 
 use agentstategraph_core::{
-    Commit, Epoch, EpochScope, EpochStatus, Namespace, Object, ObjectId, Session, SessionStatus,
+    Commit, Epoch, EpochScope, EpochStatus, IntentCategory, Namespace, Object, ObjectId, Session,
+    SessionStatus, TAG_GIT_REVISION, TAG_PIN_STATE,
 };
 use chrono::{DateTime, Utc};
 
 use crate::traits::{
-    CommitStore, EpochStore, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
+    CommitStore, CommitWalk, EpochStore, HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow,
+    HistoryRollupRow, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
 };
 
 /// TLS settings read from a connection string, and the string tokio-postgres
@@ -285,7 +292,10 @@ mod tls {
 
 /// The schema this build expects. Bump it whenever `SCHEMA_DDL` changes:
 /// databases stamped with an older version re-run the (idempotent) DDL once.
-const SCHEMA_VERSION: i32 = 1;
+///
+/// 2: history walks in one query, the history rollup tables, and the leaf
+/// search index (Plan D t-008).
+const SCHEMA_VERSION: i32 = 2;
 
 /// Every table, column and index, each `IF NOT EXISTS` so it's safe to re-run
 /// over any earlier schema, plus the version stamp table.
@@ -434,7 +444,96 @@ const SCHEMA_DDL: &str = "
                     ON commits(tenant_id, epoch_id);
                 CREATE INDEX IF NOT EXISTS idx_commits_tenant_session
                     ON commits(tenant_id, session_id);
-                
+
+                -- History walks (version 2). A walk follows parent ids from
+                -- the commit JSON to the commits holding them, in one
+                -- recursive query; this index makes each step a lookup.
+                -- Reading the JSON rather than a separate edges table means a
+                -- commit written by an older binary is walkable too.
+                CREATE INDEX IF NOT EXISTS idx_commits_data_id
+                    ON commits USING hash ((data -> 'id'));
+
+                -- The id of the transaction that wrote each commit (version
+                -- 2), which orders commits for the history extractor. Rows
+                -- from before this column read 0, so they come first.
+                ALTER TABLE commits ADD COLUMN IF NOT EXISTS xid BIGINT NOT NULL DEFAULT 0;
+                ALTER TABLE commits
+                    ALTER COLUMN xid SET DEFAULT (pg_current_xact_id()::text::bigint);
+                CREATE INDEX IF NOT EXISTS idx_commits_tenant_xid
+                    ON commits(tenant_id, xid, id);
+
+                -- Distilled project history (version 2), as in the SQLite
+                -- backend. Derived and rebuildable, never authoritative. Text
+                -- columns compare bytewise (COLLATE \"C\"), as SQLite's do, so
+                -- RFC 3339 timestamps order correctly and output order
+                -- matches SQLite's.
+                CREATE TABLE IF NOT EXISTS asg_history_cursor (
+                    tenant_id TEXT PRIMARY KEY,
+                    xid       BIGINT NOT NULL,
+                    commit_id BYTEA NOT NULL,
+                    folded    BIGINT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS asg_history_commit_rollup (
+                    tenant_id       TEXT NOT NULL,
+                    day             TEXT COLLATE \"C\" NOT NULL,
+                    namespace       TEXT COLLATE \"C\" NOT NULL,
+                    agent_id        TEXT COLLATE \"C\" NOT NULL,
+                    intent_category TEXT COLLATE \"C\" NOT NULL,
+                    commit_count    BIGINT NOT NULL DEFAULT 0,
+                    first_ts        TEXT COLLATE \"C\" NOT NULL,
+                    last_ts         TEXT COLLATE \"C\" NOT NULL,
+                    PRIMARY KEY (tenant_id, day, namespace, agent_id, intent_category)
+                );
+                CREATE TABLE IF NOT EXISTS asg_history_milestone (
+                    tenant_id   TEXT NOT NULL,
+                    commit_id   BYTEA NOT NULL,
+                    kind        TEXT NOT NULL,
+                    timestamp   TEXT COLLATE \"C\" NOT NULL,
+                    day         TEXT NOT NULL,
+                    namespace   TEXT NOT NULL,
+                    agent_id    TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    state_root  BYTEA,
+                    git_sha     TEXT,
+                    PRIMARY KEY (tenant_id, commit_id, kind)
+                );
+                CREATE INDEX IF NOT EXISTS idx_asg_history_milestone_ts
+                    ON asg_history_milestone(tenant_id, timestamp);
+
+                -- Leaf-value search index (version 2), as in the SQLite
+                -- backend: the string leaves of a (namespace, ref), kept up to
+                -- date as the ref moves. A path holds one value. `root` is the
+                -- state root the set reflects (NULL when unknown), so a diff
+                -- applies only to the tree it was computed from.
+                CREATE TABLE IF NOT EXISTS leaf_rows (
+                    tenant_id TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    ref       TEXT NOT NULL,
+                    path      TEXT NOT NULL,
+                    value     TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, namespace, ref, path)
+                );
+                CREATE TABLE IF NOT EXISTS leaf_index_refs (
+                    tenant_id TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    ref       TEXT NOT NULL,
+                    root      BYTEA,
+                    PRIMARY KEY (tenant_id, namespace, ref)
+                );
+                -- Substring search uses a trigram index when pg_trgm can be
+                -- installed (it is a trusted extension, so a role with CREATE
+                -- on the database can). Without it, search still works by
+                -- scanning the ref's rows.
+                DO $$
+                BEGIN
+                    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+                    CREATE INDEX IF NOT EXISTS idx_leaf_rows_value_trgm
+                        ON leaf_rows USING gin (value gin_trgm_ops);
+                EXCEPTION WHEN OTHERS THEN
+                    RAISE NOTICE 'leaf search runs without a trigram index: %', SQLERRM;
+                END
+                $$;
+
                 CREATE TABLE IF NOT EXISTS asg_schema (
                     component TEXT PRIMARY KEY,
                     version   INTEGER NOT NULL
@@ -709,6 +808,46 @@ impl PostgresStorage {
     }
 }
 
+impl PostgresStorage {
+    /// Replace the `(namespace, ref)` leaf set with `entries`, marking it
+    /// built at `root` (unknown when `None`). The set's row is written first,
+    /// so a build and an advance on one set lock in the same order.
+    fn leaf_set_replace(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        root: Option<&ObjectId>,
+        entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let root = root.map(|r| r.as_bytes().as_slice());
+        self.block_on(async {
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| leaf_error("build", &e))?;
+            tx.execute(
+                "INSERT INTO leaf_index_refs (tenant_id, namespace, ref, root)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (tenant_id, namespace, ref) DO UPDATE SET root = EXCLUDED.root",
+                &[&self.tenant_id, &namespace, &ref_name, &root],
+            )
+            .await
+            .map_err(|e| leaf_error("build mark", &e))?;
+            tx.execute(
+                "DELETE FROM leaf_rows WHERE tenant_id = $1 AND namespace = $2 AND ref = $3",
+                &[&self.tenant_id, &namespace, &ref_name],
+            )
+            .await
+            .map_err(|e| leaf_error("build clear", &e))?;
+            upsert_leaves(&tx, &self.tenant_id, namespace, ref_name, entries).await?;
+            tx.commit()
+                .await
+                .map_err(|e| leaf_error("build commit", &e))
+        })
+    }
+}
+
 // ─── ObjectStore ────────────────────────────────────────────
 
 impl ObjectStore for PostgresStorage {
@@ -842,6 +981,191 @@ impl ObjectStore for PostgresStorage {
         Ok(wanted.iter().map(|id| found.get(id).cloned()).collect())
     }
 
+    fn leaf_index_is_built(&self, namespace: &str, ref_name: &str) -> Result<bool, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            leaf_set_built(&**client, &self.tenant_id, namespace, ref_name).await
+        })
+    }
+
+    fn leaf_index_build(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        self.leaf_set_replace(namespace, ref_name, None, entries)
+    }
+
+    fn leaf_index_apply(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        removed_paths: &[String],
+        added: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        self.block_on(async {
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| leaf_error("apply", &e))?;
+            // Only a built set is maintained; an unbuilt one is filled from
+            // the current tree on its first search. The set no longer
+            // reflects a known tree, so its root is cleared.
+            let built = tx
+                .execute(
+                    "UPDATE leaf_index_refs SET root = NULL
+                     WHERE tenant_id = $1 AND namespace = $2 AND ref = $3",
+                    &[&self.tenant_id, &namespace, &ref_name],
+                )
+                .await
+                .map_err(|e| leaf_error("apply check", &e))?
+                > 0;
+            if !built {
+                return Ok(());
+            }
+            if !removed_paths.is_empty() {
+                tx.execute(
+                    "DELETE FROM leaf_rows
+                     WHERE tenant_id = $1 AND namespace = $2 AND ref = $3 AND path = ANY($4)",
+                    &[&self.tenant_id, &namespace, &ref_name, &removed_paths],
+                )
+                .await
+                .map_err(|e| leaf_error("apply delete", &e))?;
+            }
+            upsert_leaves(&tx, &self.tenant_id, namespace, ref_name, added).await?;
+            tx.commit()
+                .await
+                .map_err(|e| leaf_error("apply commit", &e))
+        })
+    }
+
+    fn leaf_index_tracks_roots(&self) -> bool {
+        true
+    }
+
+    fn leaf_index_root(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+    ) -> Result<Option<ObjectId>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_opt(
+                    "SELECT root FROM leaf_index_refs
+                     WHERE tenant_id = $1 AND namespace = $2 AND ref = $3",
+                    &[&self.tenant_id, &namespace, &ref_name],
+                )
+                .await
+                .map_err(|e| leaf_error("root", &e))?;
+            Ok(row.and_then(|row| {
+                row.get::<_, Option<&[u8]>>(0)
+                    .and_then(object_id_from_bytes)
+            }))
+        })
+    }
+
+    fn leaf_index_build_at(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        root: &ObjectId,
+        entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        self.leaf_set_replace(namespace, ref_name, Some(root), entries)
+    }
+
+    fn leaf_index_advance(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        from: &ObjectId,
+        to: &ObjectId,
+        removed_paths: &[String],
+        added: &[(String, String)],
+    ) -> Result<bool, StorageError> {
+        self.block_on(async {
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| leaf_error("advance", &e))?;
+            // Moving the root locks the set's row, so racing advances take
+            // turns, and a loser finds the root already moved.
+            let moved = tx
+                .execute(
+                    "UPDATE leaf_index_refs SET root = $5
+                     WHERE tenant_id = $1 AND namespace = $2 AND ref = $3 AND root = $4",
+                    &[
+                        &self.tenant_id,
+                        &namespace,
+                        &ref_name,
+                        &from.as_bytes().as_slice(),
+                        &to.as_bytes().as_slice(),
+                    ],
+                )
+                .await
+                .map_err(|e| leaf_error("advance root", &e))?
+                > 0;
+            if !moved {
+                return Ok(false);
+            }
+            if !removed_paths.is_empty() {
+                tx.execute(
+                    "DELETE FROM leaf_rows
+                     WHERE tenant_id = $1 AND namespace = $2 AND ref = $3 AND path = ANY($4)",
+                    &[&self.tenant_id, &namespace, &ref_name, &removed_paths],
+                )
+                .await
+                .map_err(|e| leaf_error("advance delete", &e))?;
+            }
+            upsert_leaves(&tx, &self.tenant_id, namespace, ref_name, added).await?;
+            tx.commit()
+                .await
+                .map_err(|e| leaf_error("advance commit", &e))?;
+            Ok(true)
+        })
+    }
+
+    /// Case-insensitive substring match. The trigram index serves it when
+    /// pg_trgm is installed; `%`, `_` and `\` in the query match themselves.
+    fn leaf_index_search(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        query_lower: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<(String, String)>>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            if !leaf_set_built(&**client, &self.tenant_id, namespace, ref_name).await? {
+                return Ok(None);
+            }
+            let rows = client
+                .query(
+                    "SELECT path, value FROM leaf_rows
+                     WHERE tenant_id = $1 AND namespace = $2 AND ref = $3 AND value ILIKE $4
+                     LIMIT $5",
+                    &[
+                        &self.tenant_id,
+                        &namespace,
+                        &ref_name,
+                        &like_contains(query_lower),
+                        &sql_count(limit),
+                    ],
+                )
+                .await
+                .map_err(|e| leaf_error("search", &e))?;
+            Ok(Some(
+                rows.iter()
+                    .map(|row| (row.get("path"), row.get("value")))
+                    .collect(),
+            ))
+        })
+    }
+
     fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;
@@ -951,40 +1275,581 @@ impl CommitStore for PostgresStorage {
         })
     }
 
+    /// The first-parent line in one recursive query, instead of one round
+    /// trip per commit.
     fn list_commits(&self, from: &ObjectId, limit: usize) -> Result<Vec<Commit>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;
+            let rows = client
+                .query(
+                    "WITH RECURSIVE line(data, n) AS (
+                         SELECT data, 1::BIGINT FROM commits WHERE tenant_id = $1 AND id = $2
+                       UNION ALL
+                         SELECT parent.data, line.n + 1
+                         FROM line
+                         CROSS JOIN LATERAL (
+                             SELECT c.data FROM commits c
+                             WHERE c.data -> 'id' = line.data -> 'parents' -> 0
+                               AND c.tenant_id = $1
+                             LIMIT 1
+                         ) parent
+                         WHERE line.n < $3
+                     )
+                     SELECT data FROM line ORDER BY n",
+                    &[
+                        &self.tenant_id,
+                        &from.as_bytes().as_slice(),
+                        &sql_count(limit),
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(with_causes("list commits", &e)))?;
+            rows.iter()
+                .map(|row| commit_from_row(row, "data"))
+                .collect()
+        })
+    }
 
-            let mut result = Vec::new();
-            let mut current = Some(*from);
+    /// Every parent edge in one recursive query. `UNION` keeps each commit
+    /// once however many paths reach it, so merge-heavy histories stay
+    /// linear, and the walk stops once it has one commit more than `limit`
+    /// (which is how truncation is detected). Commits come out breadth
+    /// first; order within one generation is unspecified. Each parent is
+    /// looked up through `LATERAL ... LIMIT 1`, which keeps the step an index
+    /// lookup: given a plain join, the planner may hash the tenant's whole
+    /// commit table instead.
+    fn list_commits_dag(&self, from: &ObjectId, limit: usize) -> Result<CommitWalk, StorageError> {
+        let mut commits = self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let rows = client
+                .query(
+                    "WITH RECURSIVE walk(id, parents) AS (
+                         SELECT id, data -> 'parents' FROM commits
+                         WHERE tenant_id = $1 AND id = $2
+                       UNION
+                         SELECT parent.id, parent.parents
+                         FROM walk
+                         CROSS JOIN LATERAL jsonb_array_elements(walk.parents) AS p(id)
+                         CROSS JOIN LATERAL (
+                             SELECT c.id, c.data -> 'parents' AS parents FROM commits c
+                             WHERE c.data -> 'id' = p.id AND c.tenant_id = $1
+                             LIMIT 1
+                         ) parent
+                     ),
+                     reached AS (
+                         SELECT id, row_number() OVER () AS n
+                         FROM (SELECT id FROM walk LIMIT $3) first
+                     )
+                     SELECT c.data
+                     FROM reached JOIN commits c ON c.tenant_id = $1 AND c.id = reached.id
+                     ORDER BY reached.n",
+                    &[
+                        &self.tenant_id,
+                        &from.as_bytes().as_slice(),
+                        &sql_count(limit).saturating_add(1),
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(with_causes("list commits dag", &e)))?;
+            rows.iter()
+                .map(|row| commit_from_row(row, "data"))
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        let truncated = commits.len() > limit;
+        commits.truncate(limit);
+        Ok(CommitWalk { commits, truncated })
+    }
 
-            while let Some(id) = current {
-                if result.len() >= limit {
-                    break;
-                }
+    /// Fold the next commits into the history tables, as the SQLite backend
+    /// does, but ordered by the id of the transaction that wrote each commit
+    /// rather than by insertion order. With several writers, a commit can
+    /// become visible after a later-inserted one has already been folded, and
+    /// an insertion-order cursor would step past it for good. Only commits
+    /// whose transaction is older than every transaction still running are
+    /// read, so no commit can appear behind the cursor later. When commits
+    /// are waiting on an older transaction, this waits up to `HISTORY_WAIT`
+    /// for it to finish; a writing transaction that runs longer than that,
+    /// anywhere on the server, delays history until it ends.
+    fn history_extract_batch(&self, batch_size: usize) -> Result<usize, StorageError> {
+        let batch_size = sql_count(batch_size.max(1));
+        self.block_on(async {
+            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| history_error("begin", &e))?;
+            // The cursor row is the lock: one extractor per tenant at a time,
+            // so concurrent extractors can't fold a commit twice.
+            tx.execute(
+                "INSERT INTO asg_history_cursor (tenant_id, xid, commit_id, folded)
+                 VALUES ($1, 0, ''::BYTEA, 0)
+                 ON CONFLICT (tenant_id) DO NOTHING",
+                &[&self.tenant_id],
+            )
+            .await
+            .map_err(|e| history_error("cursor", &e))?;
+            let cursor = tx
+                .query_one(
+                    "SELECT xid, commit_id FROM asg_history_cursor
+                     WHERE tenant_id = $1 FOR UPDATE",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| history_error("cursor", &e))?;
+            let (after_xid, after_id): (i64, Vec<u8>) = (cursor.get(0), cursor.get(1));
 
-                let row = client
-                    .query_opt(
-                        "SELECT data FROM commits WHERE tenant_id = $1 AND id = $2",
-                        &[&self.tenant_id, &id.as_bytes().as_slice()],
+            // A commit made outside a scoped session is attributed to
+            // HISTORY_NAMESPACE_UNKNOWN, as in SQLite.
+            let deadline = tokio::time::Instant::now() + HISTORY_WAIT;
+            let rows = loop {
+                let rows = tx
+                    .query(
+                        "SELECT c.xid, c.id, c.data, COALESCE(s.scope_namespace, $4) AS namespace
+                         FROM commits c
+                         LEFT JOIN sessions s
+                           ON s.tenant_id = c.tenant_id AND s.id = c.session_id
+                         WHERE c.tenant_id = $1
+                           AND (c.xid, c.id) > ($2, $3)
+                           AND c.xid < pg_snapshot_xmin(pg_current_snapshot())::text::BIGINT
+                         ORDER BY c.xid, c.id
+                         LIMIT $5",
+                        &[
+                            &self.tenant_id,
+                            &after_xid,
+                            &after_id,
+                            &HISTORY_NAMESPACE_UNKNOWN,
+                            &batch_size,
+                        ],
                     )
                     .await
-                    .map_err(|e| StorageError::Backend(format!("list commits: {}", e)))?;
-
-                match row {
-                    Some(row) => {
-                        let data: serde_json::Value = row.get("data");
-                        let commit: Commit = serde_json::from_value(data)
-                            .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                        current = commit.parents.first().copied();
-                        result.push(commit);
-                    }
-                    None => break,
+                    .map_err(|e| history_error("select", &e))?;
+                if !rows.is_empty() {
+                    break rows;
                 }
-            }
+                // Nothing is old enough. If newer commits are waiting on an
+                // older transaction, give it a moment to finish.
+                let waiting: bool = tx
+                    .query_one(
+                        "SELECT EXISTS (SELECT 1 FROM commits
+                                        WHERE tenant_id = $1 AND (xid, id) > ($2, $3))",
+                        &[&self.tenant_id, &after_xid, &after_id],
+                    )
+                    .await
+                    .map_err(|e| history_error("pending", &e))?
+                    .get(0);
+                if !waiting || tokio::time::Instant::now() >= deadline {
+                    return Ok(0);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            };
+            let last = rows.last().expect("a non-empty batch");
+            let (last_xid, last_id): (i64, Vec<u8>) = (last.get("xid"), last.get("id"));
 
-            Ok(result)
+            let mut fold = HistoryFold::default();
+            for row in &rows {
+                let commit = commit_from_row(row, "data")?;
+                fold.add(&commit, row.get("namespace"));
+            }
+            fold.write(&tx, &self.tenant_id).await?;
+
+            // The cursor moves in the same transaction as the rows it covers.
+            tx.execute(
+                "UPDATE asg_history_cursor SET xid = $2, commit_id = $3, folded = folded + $4
+                 WHERE tenant_id = $1",
+                &[&self.tenant_id, &last_xid, &last_id, &(rows.len() as i64)],
+            )
+            .await
+            .map_err(|e| history_error("cursor write", &e))?;
+            tx.commit().await.map_err(|e| history_error("commit", &e))?;
+            Ok(rows.len())
         })
+    }
+
+    /// How many commits have been folded. (SQLite reports its last folded
+    /// rowid; either way it only grows, and 0 means nothing is extracted.)
+    fn history_cursor(&self) -> Result<i64, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_opt(
+                    "SELECT folded FROM asg_history_cursor WHERE tenant_id = $1",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| history_error("cursor read", &e))?;
+            Ok(row.map_or(0, |row| row.get(0)))
+        })
+    }
+
+    fn history_undistilled_commit_count(&self) -> Result<i64, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_one(
+                    "SELECT COUNT(*) FROM commits c
+                     LEFT JOIN asg_history_cursor k ON k.tenant_id = c.tenant_id
+                     WHERE c.tenant_id = $1
+                       AND (c.xid, c.id) > (COALESCE(k.xid, 0), COALESCE(k.commit_id, ''::BYTEA))",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| history_error("undistilled count", &e))?;
+            Ok(row.get(0))
+        })
+    }
+
+    fn history_is_commit_distilled(&self, id: &ObjectId) -> Result<bool, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_one(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM commits c
+                         JOIN asg_history_cursor k ON k.tenant_id = c.tenant_id
+                         WHERE c.tenant_id = $1 AND c.id = $2
+                           AND (c.xid, c.id) <= (k.xid, k.commit_id)
+                     )",
+                    &[&self.tenant_id, &id.as_bytes().as_slice()],
+                )
+                .await
+                .map_err(|e| history_error("distilled", &e))?;
+            Ok(row.get(0))
+        })
+    }
+
+    fn history_rollup(&self) -> Result<Vec<HistoryRollupRow>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let rows = client
+                .query(
+                    "SELECT day, namespace, agent_id, intent_category, commit_count,
+                            first_ts, last_ts
+                     FROM asg_history_commit_rollup
+                     WHERE tenant_id = $1
+                     ORDER BY day, namespace, agent_id, intent_category",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| history_error("rollup read", &e))?;
+            Ok(rows
+                .iter()
+                .map(|row| HistoryRollupRow {
+                    day: row.get(0),
+                    namespace: row.get(1),
+                    agent_id: row.get(2),
+                    intent_category: row.get(3),
+                    commit_count: row.get(4),
+                    first_ts: row.get(5),
+                    last_ts: row.get(6),
+                })
+                .collect())
+        })
+    }
+
+    fn history_milestones(&self, limit: usize) -> Result<Vec<HistoryMilestoneRow>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let rows = client
+                .query(
+                    "SELECT commit_id, kind, timestamp, day, namespace, agent_id, description,
+                            state_root, git_sha
+                     FROM asg_history_milestone
+                     WHERE tenant_id = $1
+                     ORDER BY timestamp DESC
+                     LIMIT $2",
+                    &[&self.tenant_id, &sql_count(limit)],
+                )
+                .await
+                .map_err(|e| history_error("milestones read", &e))?;
+            Ok(rows
+                .iter()
+                .filter_map(|row| {
+                    let commit_id = object_id_from_bytes(row.get(0))?;
+                    let state_root: Option<&[u8]> = row.get(7);
+                    Some(HistoryMilestoneRow {
+                        commit_id,
+                        kind: row.get(1),
+                        timestamp: row.get(2),
+                        day: row.get(3),
+                        namespace: row.get(4),
+                        agent_id: row.get(5),
+                        description: row.get(6),
+                        state_root: state_root.and_then(object_id_from_bytes),
+                        git_sha: row.get(8),
+                    })
+                })
+                .collect())
+        })
+    }
+
+    fn history_retained_state_roots(&self) -> Result<Vec<ObjectId>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let rows = client
+                .query(
+                    "SELECT DISTINCT state_root FROM asg_history_milestone
+                     WHERE tenant_id = $1 AND state_root IS NOT NULL",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| history_error("retained roots", &e))?;
+            Ok(rows
+                .iter()
+                .filter_map(|row| object_id_from_bytes(row.get(0)))
+                .collect())
+        })
+    }
+}
+
+async fn leaf_set_built(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    tenant_id: &str,
+    namespace: &str,
+    ref_name: &str,
+) -> Result<bool, StorageError> {
+    let row = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM leaf_index_refs
+                            WHERE tenant_id = $1 AND namespace = $2 AND ref = $3)",
+            &[&tenant_id, &namespace, &ref_name],
+        )
+        .await
+        .map_err(|e| leaf_error("built check", &e))?;
+    Ok(row.get(0))
+}
+
+/// Write `(path, value)` leaves, replacing any value already at a path. A
+/// path given twice keeps its last value.
+async fn upsert_leaves(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant_id: &str,
+    namespace: &str,
+    ref_name: &str,
+    leaves: &[(String, String)],
+) -> Result<(), StorageError> {
+    const CHUNK: usize = 1000;
+    let latest: std::collections::HashMap<&str, &str> = leaves
+        .iter()
+        .map(|(path, value)| (path.as_str(), value.as_str()))
+        .collect();
+    let latest: Vec<(&str, &str)> = latest.into_iter().collect();
+    for chunk in latest.chunks(CHUNK) {
+        let paths: Vec<&str> = chunk.iter().map(|(p, _)| *p).collect();
+        let values: Vec<&str> = chunk.iter().map(|(_, v)| *v).collect();
+        tx.execute(
+            "INSERT INTO leaf_rows (tenant_id, namespace, ref, path, value)
+             SELECT $1, $2, $3, l.path, l.value FROM unnest($4::TEXT[], $5::TEXT[]) AS l(path, value)
+             ON CONFLICT (tenant_id, namespace, ref, path) DO UPDATE SET value = EXCLUDED.value",
+            &[&tenant_id, &namespace, &ref_name, &paths, &values],
+        )
+        .await
+        .map_err(|e| leaf_error("write", &e))?;
+    }
+    Ok(())
+}
+
+/// An `ILIKE` pattern matching values that contain `needle` literally.
+fn like_contains(needle: &str) -> String {
+    let mut pattern = String::with_capacity(needle.len() + 2);
+    pattern.push('%');
+    for ch in needle.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
+fn leaf_error(step: &str, e: &tokio_postgres::Error) -> StorageError {
+    StorageError::Backend(with_causes(&format!("leaf index {step}"), e))
+}
+
+/// How long the history extractor waits for an older transaction that newer
+/// commits are waiting on. Writes take milliseconds; this only runs out when
+/// some write transaction on the server stays open.
+const HISTORY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A `usize` count or limit as the `BIGINT` Postgres compares it with.
+fn sql_count(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+fn object_id_from_bytes(bytes: &[u8]) -> Option<ObjectId> {
+    <[u8; 32]>::try_from(bytes).ok().map(ObjectId::from_bytes)
+}
+
+fn commit_from_row(row: &tokio_postgres::Row, column: &str) -> Result<Commit, StorageError> {
+    let data: serde_json::Value = row.get(column);
+    serde_json::from_value(data).map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+fn history_error(step: &str, e: &tokio_postgres::Error) -> StorageError {
+    StorageError::Backend(with_causes(&format!("history {step}"), e))
+}
+
+/// A rollup bucket's key: (day, namespace, agent, intent category).
+type BucketKey = (String, String, String, String);
+
+/// A rollup bucket's commit count and first and last timestamps.
+type Bucket = (i64, String, String);
+
+/// One batch of commits folded into rollup buckets and milestones, written
+/// with one statement each.
+#[derive(Default)]
+struct HistoryFold {
+    rollup: std::collections::BTreeMap<BucketKey, Bucket>,
+    milestones: Vec<Milestone>,
+}
+
+struct Milestone {
+    commit_id: Vec<u8>,
+    timestamp: String,
+    day: String,
+    namespace: String,
+    agent_id: String,
+    description: String,
+    state_root: Option<Vec<u8>>,
+    git_sha: Option<String>,
+}
+
+impl HistoryFold {
+    /// The same fields, bucketing and milestone rules as SQLite's extractor.
+    fn add(&mut self, commit: &Commit, namespace: String) {
+        let day = commit.timestamp.format("%Y-%m-%d").to_string();
+        let ts = commit.timestamp.to_rfc3339();
+        let key = (
+            day.clone(),
+            namespace.clone(),
+            commit.agent_id.clone(),
+            format!("{:?}", commit.intent.category),
+        );
+        let bucket = self
+            .rollup
+            .entry(key)
+            .or_insert_with(|| (0, ts.clone(), ts.clone()));
+        bucket.0 += 1;
+        if ts < bucket.1 {
+            bucket.1 = ts.clone();
+        }
+        if ts > bucket.2 {
+            bucket.2 = ts.clone();
+        }
+
+        if commit.intent.category == IntentCategory::Checkpoint {
+            // Pin the snapshot only when the checkpoint asks to (see SQLite).
+            let state_root = commit
+                .intent
+                .tags
+                .iter()
+                .any(|t| t == TAG_PIN_STATE)
+                .then(|| commit.state_root.as_bytes().to_vec());
+            let git_sha = commit
+                .intent
+                .tags
+                .iter()
+                .find_map(|t| t.strip_prefix(TAG_GIT_REVISION))
+                .filter(|sha| !sha.is_empty())
+                .map(str::to_string);
+            self.milestones.push(Milestone {
+                commit_id: commit.id.as_bytes().to_vec(),
+                timestamp: ts,
+                day,
+                namespace,
+                agent_id: commit.agent_id.clone(),
+                description: commit.intent.description.clone(),
+                state_root,
+                git_sha,
+            });
+        }
+    }
+
+    async fn write(
+        self,
+        tx: &deadpool_postgres::Transaction<'_>,
+        tenant_id: &str,
+    ) -> Result<(), StorageError> {
+        let mut days = Vec::new();
+        let mut namespaces = Vec::new();
+        let mut agents = Vec::new();
+        let mut categories = Vec::new();
+        let mut counts = Vec::new();
+        let mut firsts = Vec::new();
+        let mut lasts = Vec::new();
+        for ((day, namespace, agent, category), (count, first, last)) in self.rollup {
+            days.push(day);
+            namespaces.push(namespace);
+            agents.push(agent);
+            categories.push(category);
+            counts.push(count);
+            firsts.push(first);
+            lasts.push(last);
+        }
+        tx.execute(
+            "INSERT INTO asg_history_commit_rollup AS r
+                 (tenant_id, day, namespace, agent_id, intent_category, commit_count,
+                  first_ts, last_ts)
+             SELECT $1, * FROM unnest($2::TEXT[], $3::TEXT[], $4::TEXT[], $5::TEXT[],
+                                      $6::BIGINT[], $7::TEXT[], $8::TEXT[])
+             ON CONFLICT (tenant_id, day, namespace, agent_id, intent_category) DO UPDATE SET
+                 commit_count = r.commit_count + EXCLUDED.commit_count,
+                 first_ts = LEAST(r.first_ts, EXCLUDED.first_ts),
+                 last_ts = GREATEST(r.last_ts, EXCLUDED.last_ts)",
+            &[
+                &tenant_id,
+                &days,
+                &namespaces,
+                &agents,
+                &categories,
+                &counts,
+                &firsts,
+                &lasts,
+            ],
+        )
+        .await
+        .map_err(|e| history_error("rollup upsert", &e))?;
+
+        if self.milestones.is_empty() {
+            return Ok(());
+        }
+        let m = &self.milestones;
+        let ids: Vec<&[u8]> = m.iter().map(|m| m.commit_id.as_slice()).collect();
+        let timestamps: Vec<&str> = m.iter().map(|m| m.timestamp.as_str()).collect();
+        let days: Vec<&str> = m.iter().map(|m| m.day.as_str()).collect();
+        let namespaces: Vec<&str> = m.iter().map(|m| m.namespace.as_str()).collect();
+        let agents: Vec<&str> = m.iter().map(|m| m.agent_id.as_str()).collect();
+        let descriptions: Vec<&str> = m.iter().map(|m| m.description.as_str()).collect();
+        let roots: Vec<Option<&[u8]>> = m.iter().map(|m| m.state_root.as_deref()).collect();
+        let shas: Vec<Option<&str>> = m.iter().map(|m| m.git_sha.as_deref()).collect();
+        tx.execute(
+            "INSERT INTO asg_history_milestone
+                 (tenant_id, commit_id, kind, timestamp, day, namespace, agent_id,
+                  description, state_root, git_sha)
+             SELECT $1, m.id, 'checkpoint', m.ts, m.day, m.ns, m.agent, m.description,
+                    m.root, m.sha
+             FROM unnest($2::BYTEA[], $3::TEXT[], $4::TEXT[], $5::TEXT[], $6::TEXT[],
+                         $7::TEXT[], $8::BYTEA[], $9::TEXT[])
+                  AS m(id, ts, day, ns, agent, description, root, sha)
+             ON CONFLICT DO NOTHING",
+            &[
+                &tenant_id,
+                &ids,
+                &timestamps,
+                &days,
+                &namespaces,
+                &agents,
+                &descriptions,
+                &roots,
+                &shas,
+            ],
+        )
+        .await
+        .map_err(|e| history_error("milestones", &e))?;
+        Ok(())
     }
 }
 
