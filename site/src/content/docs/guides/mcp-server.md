@@ -117,6 +117,8 @@ OPTIONS:
   -p, --path <PATH>     SQLite database path (default: ./agentstategraph.db)
       --http            Run as HTTP REST API instead of MCP stdio
       --port <PORT>     HTTP port (default: 3001, requires --http)
+      --policy-fail-safe <deny|allow>
+                        When no policy matches: deny (default) or allow
   -h, --help            Print help with full endpoint list
 ```
 
@@ -148,7 +150,7 @@ The most-used tools are listed below by category. See the full [MCP Tools Refere
 | `agentstategraph_speculate` | Create a lightweight O(1) speculation from a ref. |
 | `agentstategraph_spec_modify` | Apply set/delete operations within a speculation. |
 | `agentstategraph_compare` | Compare multiple speculations side-by-side. |
-| `agentstategraph_commit_spec` | Promote a speculation to a real commit on its base branch. |
+| `agentstategraph_commit_spec` | Promote a speculation to a real commit on its base branch, if policy allows it. |
 | `agentstategraph_discard` | Discard a speculation. All changes freed immediately. |
 
 ### Query and Audit

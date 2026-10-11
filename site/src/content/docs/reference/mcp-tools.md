@@ -390,7 +390,14 @@ Compare multiple speculations. Returns diffs showing how each diverges from base
 
 ### agentstategraph_commit_spec
 
-Promote a speculation to a real commit on its base branch. The speculation is consumed.
+Promote a speculation to a real commit on its base branch. Before promoting, the speculation's diff is evaluated against policy, with tokens inferred from it (`destructive`, `schema-change`, `ref-rewrite`, `large`, `reindex`, `migration`):
+
+- **Allow** → promoted, and the speculation is consumed.
+- **Deny** or **RequireApproval** → not promoted; the decision JSON is returned.
+- **No policy matched, and the change has tokens** → the server's fail-safe decides. Under `deny` (the default) it isn't promoted, and the response names the tokens. Ratify a policy whose `triggers` include the token and that allows `promote_speculation`, or start the server with `--policy-fail-safe allow`.
+- **No policy matched, and the change has no tokens** → promoted.
+
+A speculation that isn't promoted stays open to change, retry or discard.
 
 **Parameters:**
 
@@ -416,6 +423,20 @@ Promote a speculation to a real commit on its base branch. The speculation is co
 **Example output:**
 ```
 Speculation committed: m3n4o5p6
+```
+
+**Example output (refused by the fail-safe):**
+```json
+{
+  "original": { "kind": "no_policy_match" },
+  "translated": {
+    "kind": "deny",
+    "matched_policy": "<fail-safe:deny>",
+    "reason": "no policy covers this change's tokens (destructive); fail-safe deny applied at MCP layer"
+  },
+  "fail_safe": "deny",
+  "tokens": ["destructive"]
+}
 ```
 
 ---
@@ -1351,7 +1372,7 @@ Get the next highest-priority unblocked task (optionally for a specific agent).
 
 ## Policy
 
-Policies express authorization rules and cost-of-change thresholds. A policy is proposed, ratified, optionally signed (Ed25519), and then active. Changes can be evaluated against the active policy before they are committed, optionally through a pluggable Cedar / Rego / WASM evaluator. Evaluation produces a `Decision` — `Allow`, `Deny`, `RequireApproval` (with a fallback action), or `NoPolicyMatch` — with a fail-safe deny applied by the server when nothing matches. Precedence is `deny > require_approval > allow`. See the [Policy guide](/guides/policy/) for the full model.
+Policies express authorization rules and cost-of-change thresholds. A policy is proposed, ratified, optionally signed (Ed25519), and then active. Changes can be evaluated against the active policy before they are committed, optionally through a pluggable Cedar / Rego / WASM evaluator. Evaluation produces a `Decision` — `Allow`, `Deny`, `RequireApproval` (with a fallback action), or `NoPolicyMatch` — with a fail-safe deny applied by the server when nothing matches (`--policy-fail-safe allow` to change it). Precedence is `deny > require_approval > allow`. See the [Policy guide](/guides/policy/) for the full model.
 
 ### agentstategraph_policy_propose
 

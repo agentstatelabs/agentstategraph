@@ -63,7 +63,7 @@ A lightweight, disposable branch optimized for the "try many approaches, pick th
 
 Two layers govern what agents are allowed to do:
 
-- **[Policy](/guides/policy/)** — authorization plus cost-of-change gating, with pluggable Cedar / Rego / WASM evaluators and Ed25519-signed ratification. Policy is advisory: evaluate a proposed change before it lands, and act on the decision. The MCP `commit_spec` tool is the built-in gate: it promotes a speculation only when policy allows it.
+- **[Policy](/guides/policy/)** — authorization plus cost-of-change gating, with pluggable Cedar / Rego / WASM evaluators and Ed25519-signed ratification. Policy is advisory: evaluate a proposed change before it lands, and act on the decision. The MCP `commit_spec` tool is the built-in gate: it refuses a speculation that policy denies, and by default one flagged as risky (a deletion, say) that no policy covers.
 - **[Taint & Quarantine](/guides/taint/)** — mark-and-sweep markers that block, gate, or hide writes to suspect paths, enforced at commit time, with a full audit trail.
 
 ## Plans & Tasks

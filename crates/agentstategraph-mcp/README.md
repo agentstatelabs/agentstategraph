@@ -38,7 +38,8 @@ The server binds a `PolicyStore` at `/policies` alongside the existing
 
 `Decision::NoPolicyMatch` is translated at the MCP layer before the
 response is returned. The default is `deny` (safe); configure via
-`AgentStateGraphServer::with_fail_safe("allow")` when you want a
+`--policy-fail-safe allow` (env `ASG_POLICY_FAIL_SAFE`), or
+`AgentStateGraphServer::with_fail_safe("allow")` in Rust, when you want a
 permissive default. The original `no_policy_match` kind always appears
 in the response alongside the translated decision so callers can tell
 "authorized by an explicit allow" from "nothing matched, fail-safe
@@ -50,11 +51,19 @@ The existing `commit_spec` tool now builds a `ChangeProposal` from the
 speculation's diff and consults `PolicyStore::evaluate_change` before
 promoting:
 
-- `Allow` or `NoPolicyMatch` → existing promotion path runs.
+- `Allow` → existing promotion path runs.
 - `Deny` or `RequireApproval` → speculation is left untouched and the
   `Decision` JSON is returned so the caller can apply the fallback
   branch (`LowestRiskAlternative`, `PickAlternative`,
   `KeepCurrentState`, `Block`, or `DelegateTo`).
+- `NoPolicyMatch` on a change with tokens → the fail-safe decides. Under
+  `deny` (the default) the speculation is left untouched and the
+  fail-safe JSON is returned, with the tokens no policy covered. To let
+  such changes through, ratify a policy whose `triggers` name the token
+  and that allows `promote_speculation`.
+- `NoPolicyMatch` on a change without tokens → promoted. Policies match
+  changes by token, so none can match it, and a fail-safe deny would
+  refuse every ordinary promotion.
 
 Inferred tokens on the implicit proposal:
 
