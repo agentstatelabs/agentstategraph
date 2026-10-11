@@ -66,6 +66,12 @@ The server logs to stderr. In HTTP mode it logs each request at `info`, with met
 
 `--metrics` serves Prometheus metrics at `/metrics`: request counts by method, route and status, latency histograms, and requests in flight. With `--auth`, scraping it needs an admin key.
 
+### Limits
+
+Each request body may be up to 4 MiB (`--max-body-bytes`); a larger one gets `413`. A request still running after 30 seconds (`--request-timeout-secs`, `0` for none) gets `503`; a write may still complete after that, so check before retrying it. At most 256 requests are handled at once (`--max-concurrent-requests`); more get `503` with `Retry-After: 1` rather than queueing. `/api/health` is never turned away.
+
+The rate limit (`--rate-limit-rpm`, default 600 a minute) applies per API key when `--auth` is on, and per client IP otherwise. Requests without a valid key count against their IP. Every setting has an environment variable too; see `--help`.
+
 ### Browsers and host names
 
 Browser pages served from localhost (any port) can call the API. To let a page from another origin call it, pass `--cors-origin https://app.example.com` (repeatable, or `ASG_CORS_ORIGINS` as a comma-separated list). `--cors-origin '*'` allows any origin; only do that with `--auth`.

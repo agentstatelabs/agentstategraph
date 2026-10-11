@@ -463,6 +463,13 @@ impl TenantManager {
         self.live(api_key)?.namespace_id
     }
 
+    /// The id of `api_key` if it is a live key (enabled, unexpired). The rate
+    /// limiter buckets requests by it, so a made-up key gets no bucket of
+    /// its own.
+    pub fn live_key_id(&self, api_key: &str) -> Option<String> {
+        self.live(api_key).map(|k| k.id)
+    }
+
     /// The repository requests use when auth is off, and keys without a
     /// namespace use when it's on.
     pub fn default_repo(&self) -> &Arc<Repository> {
@@ -869,7 +876,7 @@ pub async fn admin_auth_middleware(
 }
 
 /// Extract API key from Authorization header or query parameter.
-fn extract_api_key(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     // Try Authorization: Bearer <key>
     if let Some(auth) = headers.get("authorization")
         && let Ok(value) = auth.to_str()
