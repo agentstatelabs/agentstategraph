@@ -36,6 +36,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - The store shape reports the bytes the tenant's rows take in each table. `gc_vacuum` does nothing on Postgres; autovacuum reclaims the space.
   - Schema version 3 adds a write time to `objects` and a table for speculation pins. Existing objects count as written long ago, so a sweep can take them as soon as nothing reaches them.
 
+### Changed
+- **The HTTP server now lets only pages served from localhost call it from a browser.** Before, it allowed any origin, so any website the user visited could read and write a local store through it. Pages from `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]` (any port) are allowed by default. Allow other origins with `--cors-origin <ORIGIN>` (repeatable) or `ASG_CORS_ORIGINS` (comma-separated); `*` allows any origin, and the server warns if that is set without `--auth`.
+- **Bound to loopback (the default), the HTTP server only answers requests addressed to a loopback name.** A website that points a domain it controls at 127.0.0.1 (DNS rebinding) now gets `403`. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host <HOST>` (repeatable) or `ASG_ALLOWED_HOSTS`; `*` turns the check off. Bound to another address, the server answers any host name unless some are listed.
+- **The router constructors in `agentstategraph_mcp::http` no longer add CORS headers.** Apply the policy with `http::with_origin_policy(router, &OriginPolicy::for_bind(..))`, as the binary now does. That covers the ASD proxy routes too.
+
 ### Fixed
 - **A GC sweep on SQLite could delete a write that was in flight.** Every write stores its new tree, then its commit, then moves the branch. A sweep that took its lock after the first step deleted the tree; the write then committed, and the branch pointed at a tree with objects missing.
   - A sweep now spares objects written within a grace period: 10 minutes by default, set with `SqliteStorage::with_gc_grace`. Storing an object again refreshes its write time once it is over a minute old, so a write whose tree reuses an old unreachable object is covered too. Postgres works the same way (`DEFAULT_GC_GRACE` and `GC_FRESHEN_AFTER` are shared).

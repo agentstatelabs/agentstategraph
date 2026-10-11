@@ -41,6 +41,25 @@ pub struct ServeArgs {
     pub external_evaluators: Vec<String>,
     /// When set, proxy `GET /api/code/*` to ASD at this URL (`/api/v1/*`).
     pub asd_url: Option<String>,
+    /// Browser origins allowed besides loopback ones (`*` for any). CLI:
+    /// `--cors-origin` (repeatable). Env: `ASG_CORS_ORIGINS`, comma-separated.
+    pub cors_origins: Vec<String>,
+    /// `Host` names served besides loopback ones (`*` for any). CLI:
+    /// `--allowed-host` (repeatable). Env: `ASG_ALLOWED_HOSTS`, comma-separated.
+    pub allowed_hosts: Vec<String>,
+}
+
+/// A comma-separated list from the environment.
+fn env_list(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parse the bind address from CLI args + env.
@@ -174,6 +193,8 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let mut initial_admin_key_cli: Option<String> = None;
     let mut external_evaluators: Vec<String> = Vec::new();
     let mut asd_url: Option<String> = std::env::var("ASG_ASD_URL").ok().filter(|s| !s.is_empty());
+    let mut cors_origins_cli: Vec<String> = Vec::new();
+    let mut allowed_hosts_cli: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -270,6 +291,18 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     asd_url = Some(args[i].clone());
                 }
             }
+            "--cors-origin" => {
+                i += 1;
+                if i < args.len() {
+                    cors_origins_cli.push(args[i].clone());
+                }
+            }
+            "--allowed-host" => {
+                i += 1;
+                if i < args.len() {
+                    allowed_hosts_cli.push(args[i].clone());
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -317,6 +350,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 );
                 eprintln!(
                     "      --asd-url <URL>  Proxy GET /api/code/* to ASD at URL/api/v1/* (env ASG_ASD_URL)"
+                );
+                eprintln!(
+                    "      --cors-origin <ORIGIN>  Also let pages from ORIGIN call the API; loopback pages always can; * for any (repeatable; env ASG_CORS_ORIGINS)"
+                );
+                eprintln!(
+                    "      --allowed-host <HOST>  Also answer to HOST; on a loopback bind only loopback names are served by default; * for any (repeatable; env ASG_ALLOWED_HOSTS)"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -376,6 +415,17 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         initial_admin_key: initial_admin_key_cli.or(initial_admin_key_env),
         external_evaluators,
         asd_url,
+        // CLI values replace the environment's.
+        cors_origins: if cors_origins_cli.is_empty() {
+            env_list("ASG_CORS_ORIGINS")
+        } else {
+            cors_origins_cli
+        },
+        allowed_hosts: if allowed_hosts_cli.is_empty() {
+            env_list("ASG_ALLOWED_HOSTS")
+        } else {
+            allowed_hosts_cli
+        },
     }
 }
 
@@ -470,6 +520,15 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(msg) = tls_advice(&args.bind_addr, false) {
             eprintln!("WARNING: {}", msg);
         }
+        let origin_policy =
+            http::OriginPolicy::for_bind(&args.bind_addr, &args.cors_origins, &args.allowed_hosts);
+        eprintln!("{}", origin_policy.describe());
+        if origin_policy.allows_any_origin() && !args.auth_enabled {
+            eprintln!(
+                "WARNING: any web page the user visits can read and write this store \
+                 (--cors-origin * without --auth)."
+            );
+        }
         eprintln!("Try: curl http://localhost:{}/api/health", args.http_port);
 
         #[cfg(feature = "providers")]
@@ -512,6 +571,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     app
                 };
+                let app = http::with_origin_policy(app, &origin_policy);
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 axum::serve(
@@ -609,6 +669,28 @@ mod tests {
     fn empty_env_bind_falls_back_to_default() {
         let args: Vec<String> = vec![];
         assert_eq!(resolve_bind_addr(&args, Some(String::new())), "127.0.0.1");
+    }
+
+    #[test]
+    fn cors_origins_and_allowed_hosts_repeat() {
+        let args: Vec<String> = [
+            "--http",
+            "--cors-origin",
+            "https://a.example",
+            "--allowed-host",
+            "asg.internal",
+            "--cors-origin",
+            "https://b.example",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let parsed = super::parse_args(&args);
+        assert_eq!(
+            parsed.cors_origins,
+            vec!["https://a.example", "https://b.example"]
+        );
+        assert_eq!(parsed.allowed_hosts, vec!["asg.internal"]);
     }
 
     #[test]
