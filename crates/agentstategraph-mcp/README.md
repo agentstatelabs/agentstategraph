@@ -20,8 +20,7 @@ agentstategraph-mcp --http --port 3001
 ## Policy tools (Phase 3 of the 0.6 milestone)
 
 The server binds a `PolicyStore` at `/policies` alongside the existing
-`TaskStore` at `/plans`. Nine new tools cover the full policy surface
-from POLICY_V1.md §§6 + §22.5:
+`TaskStore` at `/plans`. Nine new tools cover the full policy surface:
 
 | Tool | One-liner |
 |---|---|
@@ -104,3 +103,10 @@ seal_epoch(id="2026-q2-ops", summary="...")
 The same enter/exit pattern applies to sessions; epoch and session
 pointers are independent (clearing one does not touch the other).
 
+
+## License
+
+Licensed under either of
+[Apache License, Version 2.0](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-APACHE)
+or [MIT license](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-MIT),
+at your option.

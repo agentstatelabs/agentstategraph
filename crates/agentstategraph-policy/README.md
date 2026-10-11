@@ -5,8 +5,8 @@ ratification lifecycle + cost-of-change gating. The crate ships the
 `PolicyStore` API and the evaluator; signing, tenant filtering, and
 external-evaluator dispatch all compose through this surface.
 
-See `docs/POLICY_GUIDE.md` for the end-user overview and
-`spec/POLICY_V1.md` (private) for the design rationale.
+See the [policy guide](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/POLICY_GUIDE.md) for the end-user
+overview.
 
 ## Core types
 
@@ -139,8 +139,9 @@ cheap latest-lookup. All writes are committed through the
 ASG cannot physically stop a misbehaving agent; a `Deny` is a
 machine-readable boundary, not a syscall interceptor. Pair with
 OPA / Cedar / cloud IAM for hard enforcement at the infrastructure
-layer — see POLICY_V1.md §11 for the full soft-model discussion.
+layer.
 
 ## License
 
-MIT OR Apache-2.0, like the rest of AgentStateGraph.
+Licensed under either of [Apache License, Version 2.0](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-MIT), at your option.

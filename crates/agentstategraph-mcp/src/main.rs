@@ -452,7 +452,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     "  -p, --path <PATH>     SQLite database path (default: ./agentstategraph.db)"
                 );
                 eprintln!(
-                    "      --database-url <URL>  Postgres connection URL (required for --storage postgres)"
+                    "      --database-url <URL>  Postgres connection URL (required for --storage postgres).\n                            TLS: add ?sslmode=verify-full (and &sslrootcert=<ca.pem> for a\n                            private CA); needs a build with the `postgres-tls` feature"
                 );
                 eprintln!(
                     "      --tenant <ID>     Tenant this server serves: its Postgres partition, and the tenant non-admin API keys must belong to (default: \"default\")"
@@ -651,15 +651,15 @@ pub fn cmd_serve_with(
                 "Storage: postgres (tenant: {}, pool: {})",
                 args.tenant_id, args.pg_pool_size
             );
-            let rt = tokio::runtime::Runtime::new()?;
-            let storage = rt.block_on(async {
-                agentstategraph_storage::PostgresStorage::connect_tenant_with_pool_size(
-                    &args.database_url,
-                    &args.tenant_id,
-                    args.pg_pool_size,
-                )
-                .await
-            })?;
+            // The storage drives its connections on its own runtime, so it can
+            // connect from here and then serve either transport. A throwaway
+            // runtime used to connect, and was dropped with the connection's
+            // driver still on it.
+            let storage = agentstategraph_storage::PostgresStorage::connect_tenant_blocking(
+                &args.database_url,
+                &args.tenant_id,
+                args.pg_pool_size,
+            )?;
             Arc::new(Repository::new(Box::new(storage)).with_namespace(repo_namespace))
         }
         _ => {
