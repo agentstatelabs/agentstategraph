@@ -47,26 +47,6 @@ struct Known {
 
 const KNOWN_FAILURES: &[Known] = &[
     Known {
-        case: "epochs_round_trip",
-        backend: Backend::Memory,
-        owner: "Plan D t-003: MemoryStorage::seal_epoch ignores its seal_hash argument",
-        flaky: false,
-    },
-    Known {
-        case: "epochs_round_trip",
-        backend: Backend::Postgres,
-        owner: "Plan D t-003: create_epoch binds commit_count as i64 into an INTEGER column, \
-                so every create_epoch fails ('error serializing parameter 10')",
-        flaky: false,
-    },
-    Known {
-        case: "epochs_commit_membership_and_seal",
-        backend: Backend::Postgres,
-        owner: "Plan D t-003: create_epoch fails (above); get_epoch then orders by a \
-                commits.created_at column that doesn't exist",
-        flaky: false,
-    },
-    Known {
         case: "reminders_round_trip_and_cas",
         backend: Backend::Memory,
         owner: "Plan D t-005: MemoryStorage doesn't override update_if_unchanged, so it \
@@ -714,6 +694,52 @@ fn epochs_commit_membership_and_seal(f: &Fixture) {
     assert_eq!(sealed.sealed_commits, vec![a.id, b.id]);
 }
 
+/// Separate handles race to seal one epoch: exactly one seal may win, and
+/// every loser must see `EpochAlreadySealed`, never a silent overwrite.
+fn epoch_seal_race_one_wins(f: &Fixture) {
+    const RACERS: usize = 6;
+    for round in 0..5 {
+        let id = format!("race-{round}");
+        f.store().create_epoch(&epoch(&id)).unwrap();
+        let barrier = Arc::new(Barrier::new(RACERS));
+        let racers: Vec<_> = (0..RACERS)
+            .map(|i| {
+                let (store, barrier, id) = (f.open_another(), Arc::clone(&barrier), id.clone());
+                f.spawn(move || {
+                    barrier.wait();
+                    match store.seal_epoch(
+                        &id,
+                        &format!("sealer {i}"),
+                        Utc::now(),
+                        &[],
+                        &zero_hash(),
+                    ) {
+                        Ok(()) => Some(i),
+                        Err(StorageError::EpochAlreadySealed { .. }) => None,
+                        Err(e) => panic!("unexpected seal error: {e:?}"),
+                    }
+                })
+            })
+            .collect();
+        let winners: Vec<usize> = racers
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "round {round}: {} seals won",
+            winners.len()
+        );
+        let summary = f.store().get_epoch(&id).unwrap().unwrap().seal_summary;
+        assert_eq!(
+            summary,
+            Some(format!("sealer {}", winners[0])),
+            "the stored seal is the winner's"
+        );
+    }
+}
+
 fn sessions_round_trip_and_end(f: &Fixture) {
     let s = f.store();
     s.create_session(&session("s1")).unwrap();
@@ -863,6 +889,11 @@ fn epochs_membership() {
         "epochs_commit_membership_and_seal",
         epochs_commit_membership_and_seal,
     );
+}
+
+#[test]
+fn epochs_seal_race() {
+    run("epoch_seal_race_one_wins", epoch_seal_race_one_wins);
 }
 
 #[test]

@@ -415,6 +415,7 @@ impl EpochStore for MemoryStorage {
         epoch.sealed_at = Some(sealed_at);
         epoch.seal_summary = Some(summary.to_string());
         epoch.sealed_commits = sealed_commits.to_vec();
+        epoch.seal_hash = Some(*seal_hash);
         Ok(())
     }
 

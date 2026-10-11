@@ -2138,44 +2138,43 @@ impl EpochStore for SqliteStorage {
         seal_hash: &ObjectId,
     ) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
-        let current: Option<String> = conn
-            .query_row(
-                "SELECT status FROM epochs WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| StorageError::Backend(format!("seal lookup: {}", e)))?;
-        match current.as_deref() {
-            None => {
-                return Err(StorageError::Backend(format!("epoch not found: {}", id)));
-            }
-            Some("Sealed") | Some("Archived") => {
-                return Err(StorageError::EpochAlreadySealed { id: id.to_string() });
-            }
-            _ => {}
-        }
         let sc_json = serde_json::to_string(sealed_commits)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        conn.execute(
-            // commit_count is set here too: it was written once at create time
-            // from the then-empty commit list and never updated, so a sealed
-            // epoch reported 0 for work it demonstrably covered.
-            "UPDATE epochs
-             SET status = 'Sealed', sealed_at = ?1, summary = ?2, sealed_commits = ?3,
-                 seal_hash = ?4, commit_count = ?5
-             WHERE id = ?6",
-            params![
-                sealed_at.to_rfc3339(),
-                summary,
-                sc_json,
-                seal_hash.as_bytes().to_vec(),
-                sealed_commits.len() as i64,
-                id
-            ],
-        )
-        .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
-        Ok(())
+        // One conditional UPDATE. A status check followed by a separate write
+        // let every process racing to seal one epoch "win", each overwriting
+        // the last one's sealed commits and digest.
+        let sealed = conn
+            .execute(
+                // commit_count is set here too: it was written once at create
+                // time from the then-empty commit list and never updated, so a
+                // sealed epoch reported 0 for work it demonstrably covered.
+                "UPDATE epochs
+                 SET status = 'Sealed', sealed_at = ?1, summary = ?2, sealed_commits = ?3,
+                     seal_hash = ?4, commit_count = ?5
+                 WHERE id = ?6 AND status NOT IN ('Sealed', 'Archived')",
+                params![
+                    sealed_at.to_rfc3339(),
+                    summary,
+                    sc_json,
+                    seal_hash.as_bytes().to_vec(),
+                    sealed_commits.len() as i64,
+                    id
+                ],
+            )
+            .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
+        if sealed > 0 {
+            return Ok(());
+        }
+        let exists: Option<i64> = conn
+            .query_row("SELECT 1 FROM epochs WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("seal lookup: {}", e)))?;
+        match exists {
+            Some(_) => Err(StorageError::EpochAlreadySealed { id: id.to_string() }),
+            None => Err(StorageError::Backend(format!("epoch not found: {}", id))),
+        }
     }
 
     fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {

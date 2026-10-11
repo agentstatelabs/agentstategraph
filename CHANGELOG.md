@@ -14,10 +14,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `agentstategraph/tests/backend_conformance.rs` runs repository scenarios. These include the v1.2.5 lost-update case, with separate repositories writing concurrently.
   - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
   - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. Currently listed:
-    - Postgres cannot create an epoch at all.
-    - The in-memory backend drops an epoch's seal hash.
     - In-memory and Postgres reminder updates aren't atomic.
     - Concurrent Postgres connects can deadlock on schema setup.
+
+### Fixed
+- **Epochs work on Postgres.** Before this, every `create_epoch` on Postgres failed with "error serializing parameter 10", because the commit count was bound as a 64-bit integer into an `INTEGER` column. Postgres epochs had never worked.
+  - **Seal enforcement now applies on Postgres.** Postgres also dropped each epoch's namespace, scope and seal digest. Those are now stored and read back. A sealed epoch's namespace binding was inert there; now, as on SQLite, it refuses changes that would discard sealed history in its own namespace and leaves other namespaces alone.
+  - **`get_epoch` returns the epoch's commits.** It ordered them by a `created_at` column that `commits` doesn't have; it now uses the commit timestamp.
+  - **Concurrent seals can't overwrite each other, on Postgres or SQLite.** Sealing is now a single conditional update. On SQLite, separate processes racing to seal one epoch all "succeeded": in a 6-way race, all 6 won, each overwriting the previous seal's commits and digest. Exactly one seal now wins, and the rest get `EpochAlreadySealed`.
+  - **The in-memory backend keeps an epoch's seal digest.** It used to drop it when sealing.
+  - **Existing Postgres databases need nothing.** The three columns are added in place on connect, and no epoch rows could exist there before this fix.
 
 ## [v1.2.8] — 2026-10-09
 
