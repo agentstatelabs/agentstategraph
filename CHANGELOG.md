@@ -13,11 +13,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
     - `agentstategraph/tests/backend_conformance.rs` runs repository scenarios. These include the v1.2.5 lost-update case, with separate repositories writing concurrently.
   - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
-  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. Currently listed:
-    - In-memory and Postgres reminder updates aren't atomic.
-    - Concurrent Postgres connects can deadlock on schema setup.
+  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. Currently listed: in-memory and Postgres reminder updates aren't atomic.
+- **`PostgresStorage::connect_tenant_blocking`** connects from synchronous code, with or without an async runtime.
 
 ### Fixed
+- **The server binary crashed at startup with `--storage postgres`, in both HTTP and MCP modes** ("there is no reactor running"). It connected on a throwaway runtime, dropped that runtime, and then ran `init()` with no runtime at all. The binary has never worked with Postgres; it does now, and a new test starts the real binary each way and writes and reads through it.
+- **`PostgresStorage` works from any calling thread.**
+  - Before, it worked only inside a multi-threaded tokio runtime. With no runtime, `Handle::current()` panicked. On a single-threaded runtime, which is what MCP stdio servers use, `block_in_place` panicked.
+  - A connection opened during setup belonged to the caller's runtime. If that runtime ended, the connection stayed in the pool with nothing driving it.
+  - Every connection is now driven by one runtime the storage owns, and the sync API waits the right way for each kind of caller.
+- **Processes starting at once against one Postgres no longer deadlock.** Every connect runs the schema setup. Two at once could deadlock, and one process then failed to start. Setup is now one transaction behind a database-wide advisory lock, so concurrent startups take turns. This matters for running several servers or hub instances against a shared database.
 - **Epochs work on Postgres.** Before this, every `create_epoch` on Postgres failed with "error serializing parameter 10", because the commit count was bound as a 64-bit integer into an `INTEGER` column. Postgres epochs had never worked.
   - **Seal enforcement now applies on Postgres.** Postgres also dropped each epoch's namespace, scope and seal digest. Those are now stored and read back. A sealed epoch's namespace binding was inert there; now, as on SQLite, it refuses changes that would discard sealed history in its own namespace and leaves other namespaces alone.
   - **`get_epoch` returns the epoch's commits.** It ordered them by a `created_at` column that `commits` doesn't have; it now uses the commit timestamp.

@@ -9,7 +9,7 @@
 //! removed.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Barrier, Mutex, OnceLock};
+use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
 
 use agentstategraph::{CommitOptions, RepoError, Repository};
@@ -41,7 +41,6 @@ const KNOWN_FAILURES: &[Known] = &[];
 struct Fixture {
     backend: Backend,
     opener: Arc<dyn Fn() -> Repository + Send + Sync>,
-    runtime: Option<tokio::runtime::Handle>,
     cleanup: Option<std::path::PathBuf>,
 }
 
@@ -50,12 +49,9 @@ impl Fixture {
         (self.opener)()
     }
 
+    /// A plain thread: every backend, Postgres included, must work from one.
     fn spawn<T: Send + 'static>(&self, f: impl FnOnce() -> T + Send + 'static) -> JoinHandle<T> {
-        let runtime = self.runtime.clone();
-        std::thread::spawn(move || {
-            let _ctx = runtime.as_ref().map(|h| h.enter());
-            f()
-        })
+        std::thread::spawn(f)
     }
 }
 
@@ -69,24 +65,10 @@ impl Drop for Fixture {
     }
 }
 
-fn postgres_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime")
-    })
-}
-
-/// One connect at a time: concurrent connects race on schema DDL (Plan D
-/// t-006), and these scenarios shouldn't depend on that race.
+/// Connects from whatever thread calls it, with no runtime and no lock:
+/// concurrent connects serialize their schema setup in the database.
 fn postgres_connect(url: &str, tenant: &str) -> PostgresStorage {
-    static CONNECT: Mutex<()> = Mutex::new(());
-    let _one_at_a_time = CONNECT.lock().unwrap_or_else(|p| p.into_inner());
-    postgres_runtime()
-        .block_on(PostgresStorage::connect_tenant(url, tenant))
-        .expect("connect to TEST_DATABASE_URL")
+    PostgresStorage::connect_tenant_blocking(url, tenant, 8).expect("connect to TEST_DATABASE_URL")
 }
 
 fn fixtures(case: &str) -> Vec<Fixture> {
@@ -94,7 +76,6 @@ fn fixtures(case: &str) -> Vec<Fixture> {
     let mut all = vec![Fixture {
         backend: Backend::Memory,
         opener: Arc::new(move || Repository::from_shared(Arc::clone(&shared))),
-        runtime: None,
         cleanup: None,
     }];
 
@@ -108,7 +89,6 @@ fn fixtures(case: &str) -> Vec<Fixture> {
         opener: Arc::new(move || {
             Repository::new(Box::new(SqliteStorage::open(&opened).expect("open sqlite")))
         }),
-        runtime: None,
         cleanup: Some(path),
     });
 
@@ -120,7 +100,6 @@ fn fixtures(case: &str) -> Vec<Fixture> {
                 opener: Arc::new(move || {
                     Repository::new(Box::new(postgres_connect(&url, &tenant)))
                 }),
-                runtime: Some(postgres_runtime().handle().clone()),
                 cleanup: None,
             });
         }
@@ -143,10 +122,7 @@ fn run(case: &str, body: fn(&Fixture)) {
     let mut problems = Vec::new();
     for fixture in fixtures(case) {
         let backend = fixture.backend;
-        let outcome = {
-            let _ctx = fixture.runtime.as_ref().map(|h| h.enter());
-            catch_unwind(AssertUnwindSafe(|| body(&fixture)))
-        };
+        let outcome = catch_unwind(AssertUnwindSafe(|| body(&fixture)));
         let known = KNOWN_FAILURES
             .iter()
             .find(|k| k.case == case && k.backend == backend);
