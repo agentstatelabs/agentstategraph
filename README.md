@@ -40,9 +40,20 @@ curl http://localhost:3001/api/health
 ### Docker
 
 ```bash
-docker run -p 3001:3001 ghcr.io/agentstatelabs/agentstategraph --http
+docker run -p 127.0.0.1:3001:3001 ghcr.io/agentstatelabs/agentstategraph --http
 # Or with persistent storage:
 docker compose up -d
+curl http://localhost:3001/api/health
+```
+
+These publish the port on `127.0.0.1`, so only your machine can reach it. Anything that can reach the port can read and write the store. To serve other machines, publish it on all interfaces and turn on auth:
+
+```bash
+export ASG_ADMIN_KEY=asg_$(openssl rand -hex 32)   # keep this; it's the admin key
+docker run -p 3001:3001 -v asg-data:/data -e ASG_INITIAL_ADMIN_KEY="$ASG_ADMIN_KEY" \
+  ghcr.io/agentstatelabs/agentstategraph \
+  --http --auth --keys-file /data/keys.json --path /data/agentstategraph.db
+curl -H "Authorization: Bearer $ASG_ADMIN_KEY" http://localhost:3001/api/stats/main
 ```
 
 ### As an MCP Server (connect to Claude Code, GPT, any MCP agent)

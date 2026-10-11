@@ -2,11 +2,18 @@
 #
 # Usage:
 #   docker build -t agentstategraph .
-#   docker run -p 3001:3001 agentstategraph --http
-#   docker run -p 3001:3001 -v ./data:/data agentstategraph --http --path /data/state.db
+#   docker run -p 127.0.0.1:3001:3001 agentstategraph --http
+#   docker run -p 127.0.0.1:3001:3001 -v ./data:/data agentstategraph --http --path /data/state.db
 #
-# MCP mode (stdio):
-#   docker run -i agentstategraph
+# The server listens on every interface in the container (ASG_BIND below),
+# so a published port reaches it. Anything that can reach that port can read
+# and write the store: publish it on 127.0.0.1 as above, or run with --auth
+# (see README). Change the port with -e ASG_PORT=<port>.
+#
+# Health check (no curl in the image): agentstategraph-mcp healthcheck
+#
+# MCP mode (stdio): any arguments without --http, e.g.
+#   docker run -i agentstategraph --path /data/state.db
 
 FROM rust:1.96-slim AS builder
 
@@ -32,9 +39,14 @@ RUN groupadd --gid 1000 asg \
 
 WORKDIR /data
 
+# Set as environment rather than CMD flags, so they survive a CMD override
+# such as `docker run ... --http`. The healthcheck subcommand reads them too.
+ENV ASG_BIND=0.0.0.0 \
+    ASG_PORT=3001
+
 EXPOSE 3001
 
 USER 1000:1000
 
 ENTRYPOINT ["agentstategraph-mcp"]
-CMD ["--http", "--port", "3001"]
+CMD ["--http"]

@@ -62,6 +62,76 @@ fn env_list(name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The HTTP port from `ASG_PORT`, if set and valid.
+fn env_port() -> Option<u16> {
+    std::env::var("ASG_PORT").ok()?.trim().parse().ok()
+}
+
+/// `agentstategraph-mcp healthcheck [--port N] [--bind ADDR]`: exit 0 if the
+/// HTTP server on this machine answers `GET /api/health` with 200, and 1
+/// otherwise. It finds the server the way `--http` picks its address
+/// (`--port` or `ASG_PORT`, `--bind` or `ASG_BIND`), so a container health
+/// check needs neither curl nor the server's arguments.
+pub fn healthcheck(args: &[String]) -> i32 {
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse().ok())
+        .or_else(env_port)
+        .unwrap_or(3001);
+    let bind = resolve_bind_addr(args, std::env::var("ASG_BIND").ok());
+    let host = healthcheck_host(&bind);
+    match probe_health(&host, port) {
+        Ok(200) => {
+            println!("healthy: {host}:{port}");
+            0
+        }
+        Ok(status) => {
+            eprintln!("unhealthy: {host}:{port}/api/health answered {status}");
+            1
+        }
+        Err(e) => {
+            eprintln!("unhealthy: {host}:{port}: {e}");
+            1
+        }
+    }
+}
+
+/// Where to reach a server bound to `bind` from the same machine.
+pub fn healthcheck_host(bind: &str) -> String {
+    match bind.trim_start_matches('[').trim_end_matches(']') {
+        "0.0.0.0" | "localhost" | "" => "127.0.0.1".to_string(),
+        "::" => "::1".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `GET /api/health` with plain HTTP/1.1 and a 3-second budget per step;
+/// the status code on success.
+fn probe_health(host: &str, port: u16) -> std::io::Result<u16> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+    let timeout = std::time::Duration::from_secs(3);
+    let addr = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no address for host"))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    // `localhost` passes the Host check on any bind.
+    stream
+        .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut head = [0u8; 64];
+    let n = stream.read(&mut head)?;
+    std::str::from_utf8(&head[..n])
+        .ok()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "not an HTTP response"))
+}
+
 /// Parse the bind address from CLI args + env.
 ///
 /// Precedence: `--bind <ADDR>` > `ASG_BIND` env > default `127.0.0.1`.
@@ -176,7 +246,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "default".to_string());
     let mut http_mode = false;
-    let mut http_port: u16 = 3001;
+    let mut http_port: u16 = env_port().unwrap_or(3001);
     let mut auth_enabled = false;
     let mut keys_file = String::new();
     let mut rate_limit_rpm: u32 = std::env::var("ASG_RATE_LIMIT_RPM")
@@ -313,6 +383,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!("  (default)             MCP server over stdio");
                 eprintln!("  --http                HTTP REST API server");
                 eprintln!(
+                    "  healthcheck           Exit 0 if this machine's HTTP server is healthy (for container health checks)"
+                );
+                eprintln!(
                     "  migrate [...]         One-shot schema migration (see `migrate --help`)"
                 );
                 eprintln!();
@@ -332,7 +405,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "      --namespace <ID>  Default namespace for ref isolation (default: \"default\"; env ASG_NAMESPACE)"
                 );
-                eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
+                eprintln!(
+                    "      --port <PORT>     HTTP port (default: 3001, requires --http; env ASG_PORT)"
+                );
                 eprintln!(
                     "      --bind <ADDR>     Bind address (default: 127.0.0.1; pass 0.0.0.0 for LAN; env ASG_BIND)"
                 );
@@ -633,6 +708,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rest: Vec<String> = args.iter().skip(2).cloned().collect();
         std::process::exit(migrate::run(&rest));
     }
+    if args.get(1).map(String::as_str) == Some("healthcheck") {
+        std::process::exit(healthcheck(&args[2..]));
+    }
 
     cmd_serve(parse_args(&args[1..]))
 }
@@ -691,6 +769,50 @@ mod tests {
     fn empty_env_bind_falls_back_to_default() {
         let args: Vec<String> = vec![];
         assert_eq!(resolve_bind_addr(&args, Some(String::new())), "127.0.0.1");
+    }
+
+    #[test]
+    fn healthcheck_reaches_the_server_from_this_machine() {
+        assert_eq!(super::healthcheck_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(super::healthcheck_host("localhost"), "127.0.0.1");
+        assert_eq!(super::healthcheck_host("::"), "::1");
+        assert_eq!(super::healthcheck_host("[::]"), "::1");
+        assert_eq!(super::healthcheck_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(super::healthcheck_host("10.0.0.5"), "10.0.0.5");
+    }
+
+    /// A one-shot server answering every connection with `status`.
+    fn answer_with(status: &'static str) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 512];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n").as_bytes(),
+                );
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn healthcheck_exit_codes() {
+        let args = |port: u16| vec!["--port".to_string(), port.to_string()];
+        assert_eq!(super::healthcheck(&args(answer_with("200 OK"))), 0);
+        assert_eq!(
+            super::healthcheck(&args(answer_with("503 Service Unavailable"))),
+            1
+        );
+        // Nothing listening.
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert_eq!(super::healthcheck(&args(closed)), 1);
     }
 
     #[test]
