@@ -13,7 +13,7 @@ FROM rust:1.96-slim AS builder
 WORKDIR /build
 COPY . .
 
-RUN cargo build --release -p agentstategraph-mcp && \
+RUN cargo build --release -p agentstategraph-mcp --features postgres-tls && \
     strip target/release/agentstategraph-mcp
 
 FROM debian:bookworm-slim

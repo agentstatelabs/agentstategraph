@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/agentstategraph-mcp"
+keywords.workspace = true
+categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "MCP server for AgentStateGraph — AI-native versioned state store"
@@ -54,6 +56,9 @@ policy-wasm = ["dep:agentstategraph-policy-wasm"]
 policy-rego = ["dep:agentstategraph-policy-rego"]
 policy-cedar = ["dep:agentstategraph-policy-cedar"]
 all-external-evaluators = ["policy-wasm", "policy-rego", "policy-cedar"]
+# TLS for --storage postgres (rustls). Off by default per the guard rail below;
+# release builds and the Docker image turn it on.
+postgres-tls = ["agentstategraph-storage/postgres-tls"]
 # Guard rail: any future external-network provider crate (reqwest, rustls, AI
 # clients) MUST be gated behind this feature so `cargo build` stays lean.
 # Pattern: providers = ["dep:my-providers-crate"]
@@ -63,3 +68,7 @@ providers = ["dep:reqwest"]
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 agentstategraph-ffi = { workspace = true }
+
+[package.metadata.docs.rs]
+# Document the optional backends and evaluators too.
+all-features = true

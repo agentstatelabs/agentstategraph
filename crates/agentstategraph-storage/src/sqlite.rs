@@ -19,9 +19,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
-    CommitStore, EpochStore, GcReachability, GcSweep, HISTORY_NAMESPACE_UNKNOWN,
-    HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore, SessionStore, StorageError,
-    StoreShape, TableBytes, TaintStore, VacuumStats,
+    CommitStore, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability, GcSweep,
+    HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
+    SessionStore, StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -37,6 +37,9 @@ pub struct SqliteStorage {
     /// fail loudly on timeout) instead of running inside the sweep's
     /// transaction, where a rollback would discard them after they returned Ok.
     gc_conn: Mutex<Option<Connection>>,
+    /// How recently written an unreachable object must be for a GC sweep to
+    /// spare it. See [`SqliteStorage::with_gc_grace`].
+    gc_grace: std::time::Duration,
 }
 
 impl SqliteStorage {
@@ -71,6 +74,7 @@ impl SqliteStorage {
             conn: Mutex::new(conn),
             path: Some(path),
             gc_conn: Mutex::new(None),
+            gc_grace: DEFAULT_GC_GRACE,
         };
         storage.init_tables()?;
         Ok(storage)
@@ -84,9 +88,27 @@ impl SqliteStorage {
             conn: Mutex::new(conn),
             path: None,
             gc_conn: Mutex::new(None),
+            gc_grace: DEFAULT_GC_GRACE,
         };
         storage.init_tables()?;
         Ok(storage)
+    }
+
+    /// Set how recently written an unreachable object must be for a GC sweep
+    /// to spare it (default [`DEFAULT_GC_GRACE`]).
+    ///
+    /// Every write stores its new objects before it commits them. A sweep
+    /// locks writers out while it runs, but a write that stored its objects
+    /// before the sweep started would find them gone when it commits; the
+    /// grace period spares them. Storing an object again refreshes its write
+    /// time once it is over [`GC_FRESHEN_AFTER`] old, so a write that dedups
+    /// onto an old unreachable object is covered too. A grace under that
+    /// narrows the protection; tests use zero to see garbage go at once. The
+    /// reachability report and dry run ignore the grace: they count every
+    /// unreachable object.
+    pub fn with_gc_grace(mut self, grace: std::time::Duration) -> Self {
+        self.gc_grace = grace;
+        self
     }
 
     fn init_tables(&self) -> Result<(), StorageError> {
@@ -97,9 +119,12 @@ impl SqliteStorage {
 
         conn.execute_batch(
             "
+            -- `written_at` (Unix milliseconds) is when the object was last
+            -- stored; a GC sweep spares recent ones. See with_gc_grace.
             CREATE TABLE IF NOT EXISTS objects (
-                id   BLOB PRIMARY KEY,
-                data BLOB NOT NULL
+                id         BLOB PRIMARY KEY,
+                data       BLOB NOT NULL,
+                written_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS commits (
@@ -221,9 +246,12 @@ impl SqliteStorage {
             CREATE TRIGGER IF NOT EXISTS leaf_rows_ad AFTER DELETE ON leaf_rows BEGIN
                 INSERT INTO leaf_fts(leaf_fts, rowid, value) VALUES ('delete', old.id, old.value);
             END;
+            -- `root` is the state root the set reflects (NULL when unknown),
+            -- so a diff applies only to the tree it was computed from.
             CREATE TABLE IF NOT EXISTS leaf_index_refs (
                 namespace TEXT NOT NULL,
                 ref       TEXT NOT NULL,
+                root      BLOB,
                 PRIMARY KEY (namespace, ref)
             );
             -- Roots of uncommitted work (open speculations) that a GC sweep
@@ -330,6 +358,49 @@ impl SqliteStorage {
                 [],
             )
             .map_err(|e| StorageError::Backend(format!("add milestone git_sha: {}", e)))?;
+        }
+
+        // Migration-safe add of objects.written_at. Existing objects read 0,
+        // written long ago, so a sweep treats them exactly as before.
+        let object_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(objects)")
+                .map_err(|e| StorageError::Backend(format!("pragma objects: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| StorageError::Backend(format!("pragma query: {}", e)))?;
+            let mut cols = Vec::new();
+            for r in rows {
+                cols.push(r.map_err(|e| StorageError::Backend(format!("pragma row: {}", e)))?);
+            }
+            cols
+        };
+        if !object_cols.iter().any(|c| c == "written_at") {
+            conn.execute(
+                "ALTER TABLE objects ADD COLUMN written_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| StorageError::Backend(format!("add objects written_at: {}", e)))?;
+        }
+
+        // Migration-safe add of leaf_index_refs.root. Sets built before it
+        // read NULL, so the repository rebuilds each one on its next search.
+        let leaf_ref_cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(leaf_index_refs)")
+                .map_err(|e| StorageError::Backend(format!("pragma leaf_index_refs: {}", e)))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(|e| StorageError::Backend(format!("pragma query: {}", e)))?;
+            let mut cols = Vec::new();
+            for r in rows {
+                cols.push(r.map_err(|e| StorageError::Backend(format!("pragma row: {}", e)))?);
+            }
+            cols
+        };
+        if !leaf_ref_cols.iter().any(|c| c == "root") {
+            conn.execute("ALTER TABLE leaf_index_refs ADD COLUMN root BLOB", [])
+                .map_err(|e| StorageError::Backend(format!("add leaf_index_refs root: {}", e)))?;
         }
 
         // Migration-safe add of commits.epoch_id / commits.session_id.
@@ -516,8 +587,13 @@ impl ObjectStore for SqliteStorage {
 
         let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT OR IGNORE INTO objects (id, data) VALUES (?1, ?2)",
-            params![id.as_bytes().as_slice(), data],
+            PUT_OBJECT,
+            params![
+                id.as_bytes().as_slice(),
+                data,
+                now_millis(),
+                freshen_after_millis()
+            ],
         )
         .map_err(|e| StorageError::Backend(format!("put object: {}", e)))?;
 
@@ -544,28 +620,7 @@ impl ObjectStore for SqliteStorage {
         let tx = conn
             .transaction()
             .map_err(|e| StorageError::Backend(format!("leaf_index_build tx: {}", e)))?;
-        // Idempotent rebuild: clear any prior rows for this (ns, ref) first.
-        tx.execute(
-            "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2",
-            params![namespace, ref_name],
-        )
-        .map_err(|e| StorageError::Backend(format!("leaf_index_build clear: {}", e)))?;
-        {
-            let mut stmt = tx
-                .prepare_cached(
-                    "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(|e| StorageError::Backend(format!("leaf_index_build prep: {}", e)))?;
-            for (path, value) in entries {
-                stmt.execute(params![namespace, ref_name, path, value])
-                    .map_err(|e| StorageError::Backend(format!("leaf_index_build row: {}", e)))?;
-            }
-        }
-        tx.execute(
-            "INSERT OR IGNORE INTO leaf_index_refs (namespace, ref) VALUES (?1, ?2)",
-            params![namespace, ref_name],
-        )
-        .map_err(|e| StorageError::Backend(format!("leaf_index_build mark: {}", e)))?;
+        leaf_set_replace(&tx, namespace, ref_name, None, entries)?;
         tx.commit()
             .map_err(|e| StorageError::Backend(format!("leaf_index_build commit: {}", e)))
     }
@@ -583,43 +638,93 @@ impl ObjectStore for SqliteStorage {
             .map_err(|e| StorageError::Backend(format!("leaf_index_apply tx: {}", e)))?;
         // Only maintain a set that has actually been built; otherwise the
         // eventual backfill reads the current state and this diff would be lost.
-        let built: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM leaf_index_refs WHERE namespace = ?1 AND ref = ?2)",
+        // The set no longer reflects a known tree, so its root is cleared.
+        let built = tx
+            .execute(
+                "UPDATE leaf_index_refs SET root = NULL WHERE namespace = ?1 AND ref = ?2",
                 params![namespace, ref_name],
-                |row| row.get(0),
             )
-            .map_err(|e| StorageError::Backend(format!("leaf_index_apply check: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply check: {}", e)))?
+            > 0;
         if built {
-            {
-                let mut del = tx
-                    .prepare_cached(
-                        "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2 AND path = ?3",
-                    )
-                    .map_err(|e| {
-                        StorageError::Backend(format!("leaf_index_apply del prep: {}", e))
-                    })?;
-                for path in removed_paths {
-                    del.execute(params![namespace, ref_name, path])
-                        .map_err(|e| {
-                            StorageError::Backend(format!("leaf_index_apply del: {}", e))
-                        })?;
-                }
-                let mut ins = tx
-                    .prepare_cached(
-                        "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
-                    )
-                    .map_err(|e| StorageError::Backend(format!("leaf_index_apply ins prep: {}", e)))?;
-                for (path, value) in added {
-                    ins.execute(params![namespace, ref_name, path, value])
-                        .map_err(|e| {
-                            StorageError::Backend(format!("leaf_index_apply ins: {}", e))
-                        })?;
-                }
-            }
+            leaf_set_apply(&tx, namespace, ref_name, removed_paths, added)?;
         }
         tx.commit()
             .map_err(|e| StorageError::Backend(format!("leaf_index_apply commit: {}", e)))
+    }
+
+    fn leaf_index_tracks_roots(&self) -> bool {
+        true
+    }
+
+    fn leaf_index_root(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+    ) -> Result<Option<ObjectId>, StorageError> {
+        let conn = self.lock_conn()?;
+        let root: Option<Option<Vec<u8>>> = conn
+            .query_row(
+                "SELECT root FROM leaf_index_refs WHERE namespace = ?1 AND ref = ?2",
+                params![namespace, ref_name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_root: {}", e)))?;
+        Ok(root.flatten().as_deref().and_then(object_id_from_bytes))
+    }
+
+    fn leaf_index_build_at(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        root: &ObjectId,
+        entries: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build tx: {}", e)))?;
+        leaf_set_replace(&tx, namespace, ref_name, Some(root), entries)?;
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build commit: {}", e)))
+    }
+
+    fn leaf_index_advance(
+        &self,
+        namespace: &str,
+        ref_name: &str,
+        from: &ObjectId,
+        to: &ObjectId,
+        removed_paths: &[String],
+        added: &[(String, String)],
+    ) -> Result<bool, StorageError> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_advance tx: {}", e)))?;
+        // Moving the root first takes the write lock, so the check and the
+        // rows change together.
+        let moved = tx
+            .execute(
+                "UPDATE leaf_index_refs SET root = ?4 \
+                 WHERE namespace = ?1 AND ref = ?2 AND root = ?3",
+                params![
+                    namespace,
+                    ref_name,
+                    from.as_bytes().as_slice(),
+                    to.as_bytes().as_slice()
+                ],
+            )
+            .map_err(|e| StorageError::Backend(format!("leaf_index_advance root: {}", e)))?
+            > 0;
+        if !moved {
+            return Ok(false);
+        }
+        leaf_set_apply(&tx, namespace, ref_name, removed_paths, added)?;
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("leaf_index_advance commit: {}", e)))?;
+        Ok(true)
     }
 
     fn leaf_index_search(
@@ -643,7 +748,9 @@ impl ObjectStore for SqliteStorage {
         // Trigram FTS5 gives substring MATCH for needles >= 3 chars. Quote the
         // needle as a phrase and escape embedded quotes so punctuation in the
         // query can't be read as FTS syntax. Shorter needles can't use the
-        // trigram index, so fall back to a scan-assisted LIKE on the base rows.
+        // trigram index, so fall back to a scan-assisted LIKE on the base rows,
+        // with `%`, `_` and `\` escaped so they match themselves, as they do in
+        // the trigram path.
         let mut out = Vec::new();
         if query_lower.chars().count() >= 3 {
             let match_expr = format!("\"{}\"", query_lower.replace('"', "\"\""));
@@ -667,11 +774,18 @@ impl ObjectStore for SqliteStorage {
                 );
             }
         } else {
-            let pattern = format!("%{}%", query_lower);
+            let mut pattern = String::from("%");
+            for ch in query_lower.chars() {
+                if matches!(ch, '%' | '_' | '\\') {
+                    pattern.push('\\');
+                }
+                pattern.push(ch);
+            }
+            pattern.push('%');
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT path, value FROM leaf_rows \
-                     WHERE namespace = ?1 AND ref = ?2 AND value LIKE ?3 LIMIT ?4",
+                     WHERE namespace = ?1 AND ref = ?2 AND value LIKE ?3 ESCAPE '\\' LIMIT ?4",
                 )
                 .map_err(|e| StorageError::Backend(format!("leaf_index_search prep2: {}", e)))?;
             let rows = stmt
@@ -709,15 +823,21 @@ impl ObjectStore for SqliteStorage {
         let mut ids = Vec::with_capacity(objs.len());
         {
             let mut stmt = tx
-                .prepare_cached("INSERT OR IGNORE INTO objects (id, data) VALUES (?1, ?2)")
+                .prepare_cached(PUT_OBJECT)
                 .map_err(|e| StorageError::Backend(format!("prepare: {}", e)))?;
 
+            let now = now_millis();
             for obj in objs {
                 let id = obj.id();
                 let data = serde_json::to_vec(obj)
                     .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                stmt.execute(params![id.as_bytes().as_slice(), data])
-                    .map_err(|e| StorageError::Backend(format!("batch put: {}", e)))?;
+                stmt.execute(params![
+                    id.as_bytes().as_slice(),
+                    data,
+                    now,
+                    freshen_after_millis()
+                ])
+                .map_err(|e| StorageError::Backend(format!("batch put: {}", e)))?;
                 ids.push(id);
             }
         }
@@ -727,6 +847,65 @@ impl ObjectStore for SqliteStorage {
 
         Ok(ids)
     }
+}
+
+/// Replace the `(namespace, ref)` leaf set with `entries`, marking it built
+/// at `root` (unknown when `None`).
+fn leaf_set_replace(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+    ref_name: &str,
+    root: Option<&ObjectId>,
+    entries: &[(String, String)],
+) -> Result<(), StorageError> {
+    tx.execute(
+        "INSERT INTO leaf_index_refs (namespace, ref, root) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(namespace, ref) DO UPDATE SET root = excluded.root",
+        params![namespace, ref_name, root.map(|r| r.as_bytes().to_vec())],
+    )
+    .map_err(|e| StorageError::Backend(format!("leaf_index_build mark: {}", e)))?;
+    tx.execute(
+        "DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2",
+        params![namespace, ref_name],
+    )
+    .map_err(|e| StorageError::Backend(format!("leaf_index_build clear: {}", e)))?;
+    let mut stmt = tx
+        .prepare_cached(
+            "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(|e| StorageError::Backend(format!("leaf_index_build prep: {}", e)))?;
+    for (path, value) in entries {
+        stmt.execute(params![namespace, ref_name, path, value])
+            .map_err(|e| StorageError::Backend(format!("leaf_index_build row: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Delete the rows at `removed_paths` and insert `added`.
+fn leaf_set_apply(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+    ref_name: &str,
+    removed_paths: &[String],
+    added: &[(String, String)],
+) -> Result<(), StorageError> {
+    let mut del = tx
+        .prepare_cached("DELETE FROM leaf_rows WHERE namespace = ?1 AND ref = ?2 AND path = ?3")
+        .map_err(|e| StorageError::Backend(format!("leaf_index_apply del prep: {}", e)))?;
+    for path in removed_paths {
+        del.execute(params![namespace, ref_name, path])
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply del: {}", e)))?;
+    }
+    let mut ins = tx
+        .prepare_cached(
+            "INSERT INTO leaf_rows (namespace, ref, path, value) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(|e| StorageError::Backend(format!("leaf_index_apply ins prep: {}", e)))?;
+    for (path, value) in added {
+        ins.execute(params![namespace, ref_name, path, value])
+            .map_err(|e| StorageError::Backend(format!("leaf_index_apply ins: {}", e)))?;
+    }
+    Ok(())
 }
 
 impl CommitStore for SqliteStorage {
@@ -1096,7 +1275,7 @@ impl CommitStore for SqliteStorage {
                 .lock()
                 .map_err(|e| StorageError::Backend(e.to_string()))?;
             if let Some(gc_conn) = gc.as_ref() {
-                return gc_sweep_locked(gc_conn, roots, batch);
+                return gc_sweep_locked(gc_conn, roots, batch, self.gc_grace);
             }
         }
         let conn = self.lock_conn()?;
@@ -1112,7 +1291,7 @@ impl CommitStore for SqliteStorage {
             conn.execute_batch("BEGIN IMMEDIATE")
                 .map_err(|e| StorageError::Backend(format!("gc sweep lock: {}", e)))?;
         }
-        let result = gc_sweep_locked(&conn, roots, batch);
+        let result = gc_sweep_locked(&conn, roots, batch, self.gc_grace);
         if own_lock {
             match &result {
                 Ok(_) => conn
@@ -1697,6 +1876,23 @@ impl RefStore for SqliteStorage {
     }
 }
 
+/// Store an object (`?1` id, `?2` data, `?3` now and `?4`
+/// [`GC_FRESHEN_AFTER`], in milliseconds). An
+/// object already stored keeps its row, but its write time is refreshed once
+/// it is older than [`GC_FRESHEN_AFTER`], so a GC sweep's grace period covers
+/// a write that dedups onto it.
+const PUT_OBJECT: &str = "INSERT INTO objects (id, data, written_at) VALUES (?1, ?2, ?3) \
+     ON CONFLICT(id) DO UPDATE SET written_at = excluded.written_at \
+     WHERE objects.written_at < excluded.written_at - ?4";
+
+fn freshen_after_millis() -> i64 {
+    GC_FRESHEN_AFTER.as_millis() as i64
+}
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Max bound parameters per statement — well under SQLite's default
 /// `SQLITE_MAX_VARIABLE_NUMBER` (999) so the GC bulk statements never overflow.
 const GC_SQL_CHUNK: usize = 400;
@@ -1860,12 +2056,16 @@ fn gc_pending_roots(
 }
 
 /// The body of a sweep. The caller holds the write lock, so nothing can commit
-/// between the mark and the last delete.
+/// between the mark and the last delete. Objects written within `grace` of
+/// now are spared: a write that stored its tree before the lock was taken
+/// commits it after the lock is released.
 fn gc_sweep_locked(
     conn: &Connection,
     roots: &[ObjectId],
     batch: i64,
+    grace: std::time::Duration,
 ) -> Result<GcSweep, StorageError> {
+    let cutoff = now_millis().saturating_sub(i64::try_from(grace.as_millis()).unwrap_or(i64::MAX));
     let total_before: i64 = conn
         .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
         .map_err(|e| StorageError::Backend(format!("gc sweep count: {}", e)))?;
@@ -1882,9 +2082,14 @@ fn gc_sweep_locked(
     gc_build_mark(conn, &roots, batch)?;
     conn.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS gc_dead (id BLOB PRIMARY KEY); \
-         DELETE FROM gc_dead; \
-         INSERT INTO gc_dead (id) \
-           SELECT o.id FROM objects o LEFT JOIN gc_mark m ON o.id = m.id WHERE m.id IS NULL;",
+         DELETE FROM gc_dead;",
+    )
+    .map_err(|e| StorageError::Backend(format!("gc dead set: {}", e)))?;
+    conn.execute(
+        "INSERT INTO gc_dead (id) \
+           SELECT o.id FROM objects o LEFT JOIN gc_mark m ON o.id = m.id \
+           WHERE m.id IS NULL AND o.written_at < ?1",
+        params![cutoff],
     )
     .map_err(|e| StorageError::Backend(format!("gc dead set: {}", e)))?;
 
@@ -2138,44 +2343,43 @@ impl EpochStore for SqliteStorage {
         seal_hash: &ObjectId,
     ) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
-        let current: Option<String> = conn
-            .query_row(
-                "SELECT status FROM epochs WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| StorageError::Backend(format!("seal lookup: {}", e)))?;
-        match current.as_deref() {
-            None => {
-                return Err(StorageError::Backend(format!("epoch not found: {}", id)));
-            }
-            Some("Sealed") | Some("Archived") => {
-                return Err(StorageError::EpochAlreadySealed { id: id.to_string() });
-            }
-            _ => {}
-        }
         let sc_json = serde_json::to_string(sealed_commits)
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
-        conn.execute(
-            // commit_count is set here too: it was written once at create time
-            // from the then-empty commit list and never updated, so a sealed
-            // epoch reported 0 for work it demonstrably covered.
-            "UPDATE epochs
-             SET status = 'Sealed', sealed_at = ?1, summary = ?2, sealed_commits = ?3,
-                 seal_hash = ?4, commit_count = ?5
-             WHERE id = ?6",
-            params![
-                sealed_at.to_rfc3339(),
-                summary,
-                sc_json,
-                seal_hash.as_bytes().to_vec(),
-                sealed_commits.len() as i64,
-                id
-            ],
-        )
-        .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
-        Ok(())
+        // One conditional UPDATE. A status check followed by a separate write
+        // let every process racing to seal one epoch "win", each overwriting
+        // the last one's sealed commits and digest.
+        let sealed = conn
+            .execute(
+                // commit_count is set here too: it was written once at create
+                // time from the then-empty commit list and never updated, so a
+                // sealed epoch reported 0 for work it demonstrably covered.
+                "UPDATE epochs
+                 SET status = 'Sealed', sealed_at = ?1, summary = ?2, sealed_commits = ?3,
+                     seal_hash = ?4, commit_count = ?5
+                 WHERE id = ?6 AND status NOT IN ('Sealed', 'Archived')",
+                params![
+                    sealed_at.to_rfc3339(),
+                    summary,
+                    sc_json,
+                    seal_hash.as_bytes().to_vec(),
+                    sealed_commits.len() as i64,
+                    id
+                ],
+            )
+            .map_err(|e| StorageError::Backend(format!("seal epoch: {}", e)))?;
+        if sealed > 0 {
+            return Ok(());
+        }
+        let exists: Option<i64> = conn
+            .query_row("SELECT 1 FROM epochs WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| StorageError::Backend(format!("seal lookup: {}", e)))?;
+        match exists {
+            Some(_) => Err(StorageError::EpochAlreadySealed { id: id.to_string() }),
+            None => Err(StorageError::Backend(format!("epoch not found: {}", id))),
+        }
     }
 
     fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {
@@ -2357,7 +2561,12 @@ impl EpochStore for SqliteStorage {
     }
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
+        // One write transaction, so a seal from another process can't land
+        // between the status check and the association.
+        let conn = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StorageError::Backend(format!("begin assoc: {}", e)))?;
         let status: Option<String> = conn
             .query_row(
                 "SELECT status FROM epochs WHERE id = ?1",
@@ -2380,19 +2589,24 @@ impl EpochStore for SqliteStorage {
             }
             _ => {}
         }
-        conn.execute(
-            "UPDATE commits SET epoch_id = ?1 WHERE id = ?2",
-            params![epoch_id, commit_id.as_bytes().as_slice()],
-        )
-        .map_err(|e| StorageError::Backend(format!("set commit epoch: {}", e)))?;
-        // Keep commit_count in sync — cheap best-effort.
-        conn.execute(
-            "UPDATE epochs SET commit_count = (
-                 SELECT COUNT(*) FROM commits WHERE epoch_id = epochs.id
-             ) WHERE id = ?1",
-            params![epoch_id],
-        )
-        .map_err(|e| StorageError::Backend(format!("update commit_count: {}", e)))?;
+        let joined = conn
+            .execute(
+                "UPDATE commits SET epoch_id = ?1
+                 WHERE id = ?2 AND epoch_id IS NOT ?1",
+                params![epoch_id, commit_id.as_bytes().as_slice()],
+            )
+            .map_err(|e| StorageError::Backend(format!("set commit epoch: {}", e)))?;
+        // A running count, bumped only when the commit actually joins; the old
+        // COUNT(*) per commit grew with the epoch. Sealing writes the exact count.
+        if joined > 0 {
+            conn.execute(
+                "UPDATE epochs SET commit_count = commit_count + 1 WHERE id = ?1",
+                params![epoch_id],
+            )
+            .map_err(|e| StorageError::Backend(format!("update commit_count: {}", e)))?;
+        }
+        conn.commit()
+            .map_err(|e| StorageError::Backend(format!("commit assoc: {}", e)))?;
         Ok(())
     }
 }
@@ -2492,29 +2706,28 @@ impl SessionStore for SqliteStorage {
         ended_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         let conn = self.lock_conn()?;
-        let current: Option<String> = conn
-            .query_row(
-                "SELECT status FROM sessions WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
+        // One conditional UPDATE: a status check followed by a separate write
+        // let several processes all "end" the same session.
+        let ended = conn
+            .execute(
+                "UPDATE sessions SET status = ?1, ended_at = ?2
+                 WHERE id = ?3 AND status = 'Active'",
+                params![status.as_str(), ended_at.to_rfc3339(), id],
             )
+            .map_err(|e| StorageError::Backend(format!("end session: {}", e)))?;
+        if ended > 0 {
+            return Ok(());
+        }
+        let exists: Option<i64> = conn
+            .query_row("SELECT 1 FROM sessions WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
             .optional()
             .map_err(|e| StorageError::Backend(format!("end session lookup: {}", e)))?;
-        match current.as_deref() {
-            None => {
-                return Err(StorageError::Backend(format!("session not found: {}", id)));
-            }
-            Some(s) if s != "Active" => {
-                return Err(StorageError::SessionEnded { id: id.to_string() });
-            }
-            _ => {}
+        match exists {
+            Some(_) => Err(StorageError::SessionEnded { id: id.to_string() }),
+            None => Err(StorageError::Backend(format!("session not found: {}", id))),
         }
-        conn.execute(
-            "UPDATE sessions SET status = ?1, ended_at = ?2 WHERE id = ?3",
-            params![status.as_str(), ended_at.to_rfc3339(), id],
-        )
-        .map_err(|e| StorageError::Backend(format!("end session: {}", e)))?;
-        Ok(())
     }
 
     fn list_sessions(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
@@ -2605,7 +2818,12 @@ impl SessionStore for SqliteStorage {
         commit_id: &ObjectId,
         session_id: &str,
     ) -> Result<(), StorageError> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
+        // As set_commit_epoch: one write transaction, so ending the session
+        // from another process can't land between the check and the write.
+        let conn = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| StorageError::Backend(format!("begin assoc: {}", e)))?;
         let status: Option<String> = conn
             .query_row(
                 "SELECT status FROM sessions WHERE id = ?1",
@@ -2628,18 +2846,22 @@ impl SessionStore for SqliteStorage {
             }
             _ => {}
         }
-        conn.execute(
-            "UPDATE commits SET session_id = ?1 WHERE id = ?2",
-            params![session_id, commit_id.as_bytes().as_slice()],
-        )
-        .map_err(|e| StorageError::Backend(format!("set commit session: {}", e)))?;
-        conn.execute(
-            "UPDATE sessions SET commit_count = (
-                 SELECT COUNT(*) FROM commits WHERE session_id = sessions.id
-             ) WHERE id = ?1",
-            params![session_id],
-        )
-        .map_err(|e| StorageError::Backend(format!("update session commit_count: {}", e)))?;
+        let joined = conn
+            .execute(
+                "UPDATE commits SET session_id = ?1
+                 WHERE id = ?2 AND session_id IS NOT ?1",
+                params![session_id, commit_id.as_bytes().as_slice()],
+            )
+            .map_err(|e| StorageError::Backend(format!("set commit session: {}", e)))?;
+        if joined > 0 {
+            conn.execute(
+                "UPDATE sessions SET commit_count = commit_count + 1 WHERE id = ?1",
+                params![session_id],
+            )
+            .map_err(|e| StorageError::Backend(format!("update session commit_count: {}", e)))?;
+        }
+        conn.commit()
+            .map_err(|e| StorageError::Backend(format!("commit assoc: {}", e)))?;
         Ok(())
     }
 }
