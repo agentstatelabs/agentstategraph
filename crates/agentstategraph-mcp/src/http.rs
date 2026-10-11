@@ -25,13 +25,13 @@ use tower_governor::GovernorLayer;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
 use agentstategraph_core::IntentCategory;
 
 use crate::auth::{self, AuthContext, CreateKeyOptions, KeyRef, KeyStoreError, TenantManager};
+use oxtel::sdk::metrics::MeterProvider;
 
 /// Compiled config for per-peer-IP governor.
 pub type PeerIpGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
@@ -394,63 +394,34 @@ async fn bound_request(
 
 // ─── Observability ──────────────────────────────────────────
 //
-// Names follow the OpenTelemetry semantic conventions for HTTP servers
-// (DESIGN.md Plan H): `http.request.method`, `url.path`, `http.route`,
-// `http.response.status_code`, and the `http.server.request.duration` and
-// `http.server.active_requests` metrics, written for Prometheus as
-// `http_server_request_duration_seconds` and `http_server_active_requests`.
+// Spans, request logs and metrics come from oxtel-tower, named by the
+// OpenTelemetry semantic conventions for HTTP servers; docs/OBSERVABILITY.md
+// lists them.
 
-/// Request logging, and metrics when `metrics` is given, for a finished app.
+/// A span, a log line and metrics for every request, as
+/// docs/OBSERVABILITY.md describes.
 ///
 /// Apply it last, outside [`with_origin_policy`], so that requests the
 /// policy refuses are logged and counted too, and serve the metrics with
 /// [`with_metrics_endpoint`] before the policy, so the policy covers it.
 /// [`with_server_layers`] does both in that order.
 ///
-/// Each request is logged when it finishes, at `info`, with
-/// `http.request.method`, `url.path` (no query), `http.route` (the router's
-/// template, when one matched), `http.response.status_code`,
-/// `http.server.request.duration` in seconds, and `asg.api_key.id`, the id
-/// of the API key it used, recorded by the auth middleware, never the key.
-/// Server errors log at `error`.
-pub fn with_observability(app: Router, metrics: Option<Arc<HttpMetrics>>) -> Router {
-    let app = match metrics {
-        Some(metrics) => app.layer(middleware::from_fn_with_state(metrics, record_metrics)),
-        None => app,
-    };
+/// Each request gets a server span named `{method} {route}` that continues
+/// the caller's W3C trace, and logs `request` when it finishes, at `info`,
+/// or at `error` for a 5xx, with its status and duration. The span carries
+/// `asg.api_key.id`, the id of the API key used, recorded by the auth
+/// middleware, never the key. Metrics go to the process's `metrics`
+/// recorder, which `main` installs.
+pub fn with_observability(app: Router) -> Router {
     app.layer(
-        TraceLayer::new_for_http()
-            .make_span_with(|req: &axum::extract::Request| {
-                let (method, original) = method_name(req.method());
-                tracing::info_span!(
-                    "http",
-                    http.request.method = method,
-                    http.request.method_original = original,
-                    url.path = %req.uri().path(),
-                    http.route = req
-                        .extensions()
-                        .get::<axum::extract::MatchedPath>()
-                        .map(|m| m.as_str()),
-                    asg.api_key.id = tracing::field::Empty,
-                )
-            })
-            .on_request(())
-            .on_response(
-                |res: &axum::response::Response,
-                 latency: std::time::Duration,
-                 _: &tracing::Span| {
-                    info!(
-                        http.response.status_code = res.status().as_u16(),
-                        http.server.request.duration = latency.as_secs_f64(),
-                        "request"
-                    );
-                },
-            ),
+        oxtel_tower::HttpServerLayer::new().with_span(|info| {
+            oxtel_tower::server_span!(info, asg.api_key.id = tracing::field::Empty)
+        }),
     )
 }
 
 /// Everything the server puts around its router, in the order that matters:
-/// request bounds; the metrics route, when `metrics` is set; the origin
+/// request bounds; the metrics route, when `meters` is set; the origin
 /// policy, which then covers that route; and logging and metrics outermost,
 /// so they see requests the policy refuses.
 pub fn with_server_layers(
@@ -458,227 +429,41 @@ pub fn with_server_layers(
     tenant_mgr: Arc<TenantManager>,
     bounds: &RequestBounds,
     policy: &OriginPolicy,
-    metrics: bool,
+    meters: Option<MeterProvider>,
 ) -> Router {
     let app = with_request_bounds(app, bounds);
-    let metrics = metrics.then(Arc::<HttpMetrics>::default);
-    let app = match &metrics {
-        Some(metrics) => with_metrics_endpoint(app, tenant_mgr, Arc::clone(metrics)),
+    let app = match meters {
+        Some(meters) => with_metrics_endpoint(app, tenant_mgr, meters),
         None => app,
     };
     let app = with_origin_policy(app, policy);
-    with_observability(app, metrics)
+    with_observability(app)
 }
 
-/// Serve `metrics` at `GET /metrics` as Prometheus text. When auth is on, it
+/// Serve the metrics `meters` holds at `GET /metrics`, as OpenMetrics or
+/// Prometheus text, whichever the scraper asks for. When auth is on, it
 /// needs an admin key. Add it before [`with_origin_policy`], which then
-/// covers it, and pass the same `metrics` to [`with_observability`].
+/// covers it.
 ///
-/// The metrics: `http_server_request_duration_seconds`, a histogram by
-/// `http_request_method`, `url_scheme`, `http_route`,
-/// `http_response_status_code` and, for 5xx, `error_type`; its `_count` is
-/// the request count. `http_server_active_requests`, by method and scheme.
-/// `target_info`, with `service_name` and `service_version`. Routes are
+/// Names follow OpenTelemetry's rules for Prometheus:
+/// `http_server_request_duration_seconds`, `http_server_active_requests`,
+/// and `target_info` with the service's name and version. Routes are
 /// templates (`/api/state/{ref_name}`), so label sets stay bounded; a
 /// request that matched no route has no `http_route`.
 pub fn with_metrics_endpoint(
     app: Router,
     tenant_mgr: Arc<TenantManager>,
-    metrics: Arc<HttpMetrics>,
+    meters: MeterProvider,
 ) -> Router {
+    let resource = meters.resource().clone();
+    let exporter = oxtel::prometheus::PrometheusExporter::new(meters, resource);
     app.merge(
         Router::new()
-            .route("/metrics", get(render_metrics))
+            .route_service("/metrics", oxtel_tower::MetricsService::new(exporter))
             .route_layer(middleware::from_fn_with_state(
                 tenant_mgr,
                 auth::admin_auth_middleware,
-            ))
-            .with_state(metrics),
-    )
-}
-
-/// The method as the conventions name it: one of the HTTP methods, or
-/// `_OTHER` with the method as sent, so made-up methods can't grow label sets.
-fn method_name(method: &axum::http::Method) -> (&'static str, Option<&str>) {
-    use axum::http::Method;
-    let known = [
-        Method::GET,
-        Method::HEAD,
-        Method::POST,
-        Method::PUT,
-        Method::DELETE,
-        Method::CONNECT,
-        Method::OPTIONS,
-        Method::TRACE,
-        Method::PATCH,
-    ];
-    match known.iter().find(|m| *m == method) {
-        Some(m) => (static_method(m), None),
-        None => ("_OTHER", Some(method.as_str())),
-    }
-}
-
-fn static_method(method: &axum::http::Method) -> &'static str {
-    use axum::http::Method;
-    match *method {
-        Method::GET => "GET",
-        Method::HEAD => "HEAD",
-        Method::POST => "POST",
-        Method::PUT => "PUT",
-        Method::DELETE => "DELETE",
-        Method::CONNECT => "CONNECT",
-        Method::OPTIONS => "OPTIONS",
-        Method::TRACE => "TRACE",
-        _ => "PATCH",
-    }
-}
-
-/// Bucket bounds (seconds) the conventions advise for
-/// `http.server.request.duration`.
-const DURATION_BUCKETS: [f64; 14] = [
-    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
-];
-
-/// The server only speaks plain HTTP; TLS ends at a proxy in front of it.
-const URL_SCHEME: &str = "http";
-
-/// A request's method, route template (if one matched) and status.
-type RequestKey = (&'static str, Option<String>, u16);
-
-/// Counters behind `/metrics`.
-#[derive(Default)]
-pub struct HttpMetrics {
-    durations: Mutex<std::collections::BTreeMap<RequestKey, Histogram>>,
-    /// method -> requests being handled.
-    active: Mutex<std::collections::BTreeMap<&'static str, i64>>,
-}
-
-#[derive(Default)]
-struct Histogram {
-    buckets: [u64; DURATION_BUCKETS.len()],
-    sum: f64,
-    count: u64,
-}
-
-impl HttpMetrics {
-    fn record(&self, method: &'static str, route: Option<String>, status: u16, seconds: f64) {
-        let mut durations = self.durations.lock().unwrap_or_else(|e| e.into_inner());
-        let h = durations.entry((method, route, status)).or_default();
-        for (bucket, bound) in h.buckets.iter_mut().zip(DURATION_BUCKETS) {
-            if seconds <= bound {
-                *bucket += 1;
-            }
-        }
-        h.sum += seconds;
-        h.count += 1;
-    }
-
-    fn active(&self, method: &'static str, delta: i64) {
-        *self
-            .active
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(method)
-            .or_default() += delta;
-    }
-
-    /// Prometheus text exposition format.
-    pub fn render(&self) -> String {
-        use std::fmt::Write;
-        let label = |v: &str| {
-            v.replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-        };
-        let mut out = String::new();
-        let _ = writeln!(
-            out,
-            "# HELP target_info Target metadata\n# TYPE target_info gauge\n\
-             target_info{{service_name=\"agentstategraph\",service_version=\"{}\"}} 1",
-            env!("CARGO_PKG_VERSION")
-        );
-        let _ = writeln!(
-            out,
-            "# HELP http_server_active_requests Number of active HTTP server requests.\n\
-             # TYPE http_server_active_requests gauge"
-        );
-        for (method, n) in self.active.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-            let _ = writeln!(
-                out,
-                "http_server_active_requests{{http_request_method=\"{method}\",\
-                 url_scheme=\"{URL_SCHEME}\"}} {n}"
-            );
-        }
-        let _ = writeln!(
-            out,
-            "# HELP http_server_request_duration_seconds Duration of HTTP server requests.\n\
-             # TYPE http_server_request_duration_seconds histogram"
-        );
-        for ((method, route, status), h) in self
-            .durations
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            let mut labels =
-                format!("http_request_method=\"{method}\",url_scheme=\"{URL_SCHEME}\"");
-            if let Some(route) = route {
-                let _ = write!(labels, ",http_route=\"{}\"", label(route));
-            }
-            let _ = write!(labels, ",http_response_status_code=\"{status}\"");
-            // Server errors are errors; 4xx are the client's.
-            if *status >= 500 {
-                let _ = write!(labels, ",error_type=\"{status}\"");
-            }
-            for (bound, n) in DURATION_BUCKETS.iter().zip(h.buckets) {
-                let _ = writeln!(
-                    out,
-                    "http_server_request_duration_seconds_bucket{{{labels},le=\"{bound}\"}} {n}"
-                );
-            }
-            let _ = writeln!(
-                out,
-                "http_server_request_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {}\n\
-                 http_server_request_duration_seconds_sum{{{labels}}} {}\n\
-                 http_server_request_duration_seconds_count{{{labels}}} {}",
-                h.count, h.sum, h.count
-            );
-        }
-        out
-    }
-}
-
-async fn record_metrics(
-    State(metrics): State<Arc<HttpMetrics>>,
-    req: axum::extract::Request,
-    next: middleware::Next,
-) -> axum::response::Response {
-    let (method, _) = method_name(req.method());
-    // The route template, not the path, so ref names don't become labels.
-    let route = req
-        .extensions()
-        .get::<axum::extract::MatchedPath>()
-        .map(|m| m.as_str().to_string());
-    let started = std::time::Instant::now();
-    metrics.active(method, 1);
-    let res = next.run(req).await;
-    metrics.active(method, -1);
-    metrics.record(
-        method,
-        route,
-        res.status().as_u16(),
-        started.elapsed().as_secs_f64(),
-    );
-    res
-}
-
-async fn render_metrics(State(metrics): State<Arc<HttpMetrics>>) -> impl IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        metrics.render(),
+            )),
     )
 }
 

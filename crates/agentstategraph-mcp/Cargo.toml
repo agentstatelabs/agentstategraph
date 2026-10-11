@@ -43,11 +43,15 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 rand = "0.9"
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 governor = "0.10"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Logs, traces and metrics, named as docs/OBSERVABILITY.md says. OTLP export
+# is the opt-in `otlp` feature below, so a default build has no network client.
+oxtel = { version = "0.2", default-features = false, features = ["log", "config"] }
+oxtel-tower = { version = "0.2", features = ["axum"] }
+oxtel-rmcp = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 [features]
@@ -61,6 +65,9 @@ all-external-evaluators = ["policy-wasm", "policy-rego", "policy-cedar"]
 # Pattern: providers = ["dep:my-providers-crate"]
 # Validate with: cargo build --no-default-features && cargo tree --no-default-features | grep reqwest
 providers = ["dep:reqwest"]
+# Send traces, metrics and logs over OTLP/HTTP once OTEL_EXPORTER_OTLP_ENDPOINT
+# is set. It brings an HTTP client and TLS, so it's opt-in like `providers`.
+otlp = ["oxtel/otlp"]
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
