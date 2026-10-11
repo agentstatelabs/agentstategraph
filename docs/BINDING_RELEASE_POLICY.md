@@ -58,13 +58,15 @@ must classify the same capability groups.
    [RELEASE.md](../RELEASE.md)).
 7. Build and smoke-test published artifacts, including the Swift XCFramework,
    before creating the final tag.
-8. **After the release lands, bump the site strings.** Nothing derives them
-   from this repo — see [RELEASE.md](../RELEASE.md).
+8. **After the release lands, check the site's version strings.** CI updates
+   the live version; the no-JS fallback and the SwiftPM pin are edited by hand
+   — see [RELEASE.md](../RELEASE.md).
 
 ## After the release
 
-The marketing site carries version strings that nothing derives from this
-repo. That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
+The marketing site's version strings are partly automatic (CI publishes the
+current version) and partly hand-edited (the no-JS fallback and the SwiftPM
+pin). That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
 mechanics, not binding policy.
 
 ## Current audit — 1.2.5 (retrospective)
