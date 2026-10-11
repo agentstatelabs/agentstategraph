@@ -66,37 +66,82 @@ checksum cannot be known before the artifact is built, which is why
 |---|---|
 | GitHub release + Swift xcframework | `agentstatelabs/agentstategraph` (public) |
 | npm, PyPI, generic swift package | GitLab package registry (internal) |
+| Rust crates | crates.io — the `publish-crates` job on the tag (below) |
 
-There is **no `cargo publish`** — nothing goes to crates.io, and nothing goes
-to public npm or PyPI. A 404 on those public registries is expected, not a
-failed release.
+Nothing goes to public npm or PyPI. A 404 on those public registries is
+expected, not a failed release.
 
-## After the release: bump the site strings
+## Publishing the crates to crates.io
 
-`AgentStateGraph-site` hardcodes the version in three places in
-`site/src/pages/index.astro`, plus a SwiftPM pin in two:
+The 15 crates under `crates/` publish to crates.io. `bindings/python` and
+`bindings/typescript` are `publish = false`: they ship as a wheel and an npm
+package, not as crates.
+
+The `publish-crates` job does this on every release tag, once
+`CARGO_REGISTRY_TOKEN` is set. It needs `publish-github`, so it runs only after
+the checks, the tests and the GitHub mirror's leak scan have passed, and it runs
+the leak scan again before `scripts/publish-crates.sh --publish`. Crates already
+on crates.io at the version are skipped, so retrying the job is safe.
+
+`CARGO_REGISTRY_TOKEN` is a masked, protected CI variable (`v*` tags are
+protected, so tag pipelines can read it). Make it a crates.io token scoped to
+`publish-update` and `agentstategraph*`, with an expiry. `publish-update` cannot
+create a crate, so a crate new to the workspace gets its first version
+published by hand. crates.io also rate-limits new crate names (a burst of five,
+then about one every ten minutes), which a re-run of the script waits out.
+
+By hand, from a detached checkout of the tag, never from a branch:
+
+```sh
+git worktree add --detach ../asg-v1.0.0 v1.0.0
+cd ../asg-v1.0.0
+scripts/publish-crates.sh             # dry run
+scripts/publish-crates.sh --publish   # the real upload (uses `cargo login`)
+```
+
+Cargo 1.90 and later verifies every crate before uploading any, then uploads
+in dependency order. A crates.io version can be yanked but never deleted or
+re-uploaded, so anything wrong with a published crate is fixed by the next
+patch release.
+
+## After the release: the site's version strings
+
+The tag pipeline's `site-version` job records the release in
+`agentstatelabs.com/releases.json` (`scripts/publish-site-version.sh`, which
+only ever moves a version forward). agentstategraph.dev reads that file at page
+load for its hero badge, footer and terminal demo, so the site shows the new
+version without a site change or deploy. The job runs 10 minutes after
+`publish-github`, so the site never advertises a release GitHub has not built,
+and it does nothing if `SITE_RELEASES_TOKEN` is unset.
+
+Two things in `AgentStateGraph-site` are still edited by hand, through an MR
+there:
 
 | What | Where | When |
 |---|---|---|
-| Hero eyebrow | `index.astro` | Immediately — it is a version claim |
-| Footer line | `index.astro` | Immediately |
-| Terminal animation output | `index.astro` | Immediately |
-| SwiftPM `from: "X.Y.Z"` | `index.astro` + `guides/swift.md` | **Only after the package publishes** |
+| Fallback version in the hero badge, footer and terminal demo | `site/src/pages/index.astro` | After the release. It is what crawlers, no-JS visitors and a failed fetch see. |
+| SwiftPM `from: "X.Y.Z"` | `index.astro` + `site/src/content/docs/guides/swift.md` | **Only after the Swift package publishes** |
 
 The SwiftPM pin is a dependency coordinate, not a version claim. Bumping it
-before the release exists hands visitors a snippet that fails, so it moves
-*after* the tag pipeline completes — separately from the other three.
+before the release exists hands visitors a snippet that fails, so move it only
+once `agentstategraph-swift-vX.Y.Z.xcframework.zip` downloads from the GitHub
+release.
 
 Leave alone: `bindings/capabilities.json` `reviewed_core_version` (that belongs
 to the binding review), and the `0.9.x` mentions in the epochs, tasks and
 capabilities docs, which are illustrative examples and factual records rather
 than version claims.
 
-The site deploys in two hops (GitLab CI mirrors to GitHub, GitHub Actions
-builds Pages), so **confirm the live page, not the pipeline** — a green
-pipeline only means the mirror landed. This is not hypothetical: the site
+**Confirm the live page, not the pipeline.** The site deploys in two hops
+(GitLab CI mirrors to GitHub, GitHub Actions builds Pages), so a green pipeline
+only means the mirror landed. This is not hypothetical: the site once
 advertised `0.9.21` while the real release was `0.9.24`, stale by three
 patches, because this step had no home in a checklist.
+
+```sh
+curl -s https://agentstatelabs.com/releases.json          # "agentstategraph": "vX.Y.Z"
+curl -s https://agentstategraph.dev/ | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort | uniq -c  # fallback text
+```
 
 ## Verifying a release actually landed
 
