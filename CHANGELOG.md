@@ -13,7 +13,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
     - `agentstategraph/tests/backend_conformance.rs` runs repository scenarios. These include the v1.2.5 lost-update case, with separate repositories writing concurrently.
   - Where it runs: CI now provides a Postgres service on GitHub Actions and GitLab. Locally, `scripts/test-postgres.sh` starts a throwaway Postgres, in Docker or from a local `initdb`.
-  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. None are listed now.
+  - Known failures: each case a backend fails today is listed with the DESIGN.md Plan D task that will fix it, and the suite fails once a listed case starts passing. One is listed: on SQLite, a sweep can delete the objects of a write that is in flight when the sweep starts (DESIGN.md finding 17).
 - **`PostgresStorage::connect_tenant_blocking`** connects from synchronous code, with or without an async runtime.
 - **TLS for Postgres connections, behind the opt-in `postgres-tls` feature.** Release binaries and the Docker image are built with it. Set it in the connection string, as with libpq: `?sslmode=verify-full&sslrootcert=/path/ca.pem`.
   - **TLS is always verified.** The server certificate must chain to Mozilla's roots or to a certificate in `sslrootcert` (or `PGSSLROOTCERT`), and must match the host name. `require`, `verify-ca` and `verify-full` all mean verified TLS; there is no unverified mode.
@@ -29,6 +29,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - The leaf-value search index. Substring search uses a `pg_trgm` trigram index when the extension can be installed; it is a trusted extension, so a role with `CREATE` on the database can install it. Without it, search scans the ref's rows.
   - Requires PostgreSQL 13 or later. The schema moves to version 2 on the first connect. That builds an index on `commits`, which holds up commit writes on a large store while it runs.
 - **`ObjectStore::leaf_index_tracks_roots`, `leaf_index_root`, `leaf_index_build_at` and `leaf_index_advance`** let a backend record which tree each search-index set reflects (see Fixed). Each has a default, so other backends are unaffected.
+- **Garbage collection on Postgres.** The sweep, the dry run, the reachability report, speculation pins and the store shape all work there now.
+  - A sweep marks everything reachable from its keep-set, the current ref tips and open speculations. It then deletes the tenant's other objects, in batches. It touches only that tenant's objects, and a tenant runs one sweep at a time.
+  - Writers never wait for a sweep. Instead, a sweep spares objects written within a grace period (10 minutes by default; `PostgresStorage::with_gc_grace`) and anything written since it started. Storing an object again refreshes its write time. Together these keep a write that is in flight safe: every write stores its tree before it commits it.
+  - Every statement in a sweep is short, so a sweep doesn't hold up history extraction for other tenants.
+  - The store shape reports the bytes the tenant's rows take in each table. `gc_vacuum` does nothing on Postgres; autovacuum reclaims the space.
+  - Schema version 3 adds a write time to `objects` and a table for speculation pins. Existing objects count as written long ago, so a sweep can take them as soon as nothing reaches them.
 
 ### Fixed
 - **Search could go on returning a value that had been overwritten.** When writers raced on one branch, their search-index updates could apply out of order, and the index kept the older value until that path was written again. A 4-writer test showed it about once in 200 runs on SQLite. Each index now records the tree it reflects, and an update applies only to the tree it was computed from. A search first brings the index up to the branch's current tree; if it can't, it walks the tree instead. A SQLite index built by an earlier version is rebuilt on its next search.

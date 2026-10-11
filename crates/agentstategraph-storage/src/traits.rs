@@ -242,6 +242,8 @@ pub struct TableBytes {
 /// bytes, and where they live. `tables` is populated from SQLite's `dbstat`
 /// virtual table when the build exposes it; otherwise only `total_bytes`
 /// (page_count × page_size) is available and `dbstat_available` is false.
+/// Postgres always reports per-table sizes (`dbstat_available` is true): the
+/// bytes the tenant's rows take, since the tables are shared by tenants.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StoreShape {
     pub objects: i64,
@@ -475,8 +477,11 @@ pub trait CommitStore: Send + Sync {
     /// (Plan B t-003). Destructive; callers gate it (dry-run default, safety
     /// predicate). Backends without object storage report an empty sweep.
     ///
-    /// Must exclude other writers from the mark to the last delete, or a commit
-    /// landing mid-sweep loses its objects. The SQLite backend runs the whole
+    /// Must keep other writers' work safe from the mark to the last delete, or
+    /// a commit landing mid-sweep loses its objects. A backend can exclude
+    /// writers, or spare recent writes; Postgres does the latter (a grace
+    /// period on each object's write time, refreshed when an object is stored
+    /// again), so its writers never wait for a sweep. The SQLite backend runs the whole
     /// sweep as one write transaction — deletes are still issued in bounded
     /// chunks, but a crash rolls the sweep back rather than leaving it half done
     /// — and joins the caller's transaction when
@@ -493,6 +498,8 @@ pub trait CommitStore: Send + Sync {
 
     /// Take the store's write lock for a GC sweep, held until
     /// [`history_gc_unlock_writers`](Self::history_gc_unlock_writers).
+    /// (On Postgres it is a lock against a second sweep only; writers are
+    /// kept safe by the grace period instead, and don't wait.)
     ///
     /// A sweep is only correct if nothing commits between the moment its
     /// keep-set is computed and its last delete, so the caller takes this

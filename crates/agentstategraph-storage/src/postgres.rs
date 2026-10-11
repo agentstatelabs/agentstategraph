@@ -36,6 +36,10 @@
 //! do on SQLite. Search uses a trigram index when the `pg_trgm` extension can
 //! be installed, and scans the ref's rows when it can't. Requires PostgreSQL
 //! 13 or later.
+//!
+//! GC sweeps one tenant at a time and never makes writers wait: a sweep
+//! spares objects written within a grace period (see
+//! [`PostgresStorage::with_gc_grace`]) instead of locking writers out.
 
 use deadpool_postgres::{
     Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime as PoolRuntime,
@@ -49,15 +53,20 @@ use tokio_postgres::NoTls;
 /// the binary's `--pg-pool-size` flag.
 pub const DEFAULT_POOL_SIZE: usize = 32;
 
+/// Default GC grace period: a sweep spares unreachable objects written more
+/// recently than this. See [`PostgresStorage::with_gc_grace`].
+pub const DEFAULT_GC_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 use agentstategraph_core::{
-    Commit, Epoch, EpochScope, EpochStatus, IntentCategory, Namespace, Object, ObjectId, Session,
-    SessionStatus, TAG_GIT_REVISION, TAG_PIN_STATE,
+    Commit, Epoch, EpochScope, EpochStatus, IntentCategory, Namespace, Node, Object, ObjectId,
+    Session, SessionStatus, TAG_GIT_REVISION, TAG_PIN_STATE,
 };
 use chrono::{DateTime, Utc};
 
 use crate::traits::{
-    CommitStore, CommitWalk, EpochStore, HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow,
-    HistoryRollupRow, ObjectStore, RefStore, SessionStore, StorageError, TaintStore,
+    CommitStore, CommitWalk, EpochStore, GcReachability, GcSweep, HISTORY_NAMESPACE_UNKNOWN,
+    HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore, SessionStore, StorageError,
+    StoreShape, TableBytes, TaintStore,
 };
 
 /// TLS settings read from a connection string, and the string tokio-postgres
@@ -295,7 +304,8 @@ mod tls {
 ///
 /// 2: history walks in one query, the history rollup tables, and the leaf
 /// search index (Plan D t-008).
-const SCHEMA_VERSION: i32 = 2;
+/// 3: GC: object write times and speculation pins (Plan D t-009).
+const SCHEMA_VERSION: i32 = 3;
 
 /// Every table, column and index, each `IF NOT EXISTS` so it's safe to re-run
 /// over any earlier schema, plus the version stamp table.
@@ -534,6 +544,24 @@ const SCHEMA_DDL: &str = "
                 END
                 $$;
 
+                -- GC (version 3). When each object was last written: a sweep
+                -- spares unreachable objects written within its grace period,
+                -- which is what keeps a write in flight safe (it stores its
+                -- objects before committing them). Rows from before read
+                -- -infinity, so they can go as soon as nothing reaches them.
+                ALTER TABLE objects
+                    ADD COLUMN IF NOT EXISTS written_at TIMESTAMPTZ NOT NULL DEFAULT '-infinity';
+                ALTER TABLE objects ALTER COLUMN written_at SET DEFAULT now();
+                -- Roots of uncommitted work (open speculations) that a sweep
+                -- must keep, from any process. See gc_pin_root.
+                CREATE TABLE IF NOT EXISTS gc_pending_roots (
+                    tenant_id  TEXT NOT NULL,
+                    key        TEXT NOT NULL,
+                    root       BYTEA NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (tenant_id, key)
+                );
+
                 CREATE TABLE IF NOT EXISTS asg_schema (
                     component TEXT PRIMARY KEY,
                     version   INTEGER NOT NULL
@@ -566,6 +594,15 @@ fn conn_error(e: impl std::error::Error) -> StorageError {
     StorageError::Backend(msg)
 }
 
+/// What storing an object that already exists does: refresh its write time
+/// if it is over a minute old. A sweep spares recently written objects, so an
+/// object a writer has just stored (or stored again, since content addressing
+/// dedups) can't be taken before the writer commits it. The conflicting row is
+/// locked whether or not it is updated, and the sweep re-checks the write
+/// time when it deletes, so the two can't interleave.
+const FRESHEN_ON_CONFLICT: &str = "ON CONFLICT (tenant_id, id) DO UPDATE SET written_at = now()
+                         WHERE objects.written_at < now() - interval '1 minute'";
+
 /// Advisory-lock key that serializes schema setup across every process using
 /// a database ("asg-sch" as bytes).
 const SCHEMA_LOCK_KEY: i64 = 0x6173_672d_7363_68;
@@ -592,6 +629,12 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 pub struct PostgresStorage {
     pool: Pool,
     tenant_id: String,
+    /// How recently written an unreachable object must be for a GC sweep to
+    /// spare it. See [`PostgresStorage::with_gc_grace`].
+    gc_grace: std::time::Duration,
+    /// The connection holding this tenant's sweep lock, between
+    /// `history_gc_lock_writers` and `history_gc_unlock_writers`.
+    gc_conn: std::sync::Mutex<Option<deadpool_postgres::Object>>,
 }
 
 impl PostgresStorage {
@@ -621,6 +664,8 @@ impl PostgresStorage {
         let setup = Self {
             pool: storage.pool.clone(),
             tenant_id: storage.tenant_id.clone(),
+            gc_grace: storage.gc_grace,
+            gc_conn: std::sync::Mutex::new(None),
         };
         runtime()
             .spawn(async move { setup.init_tables().await })
@@ -683,7 +728,25 @@ impl PostgresStorage {
         Ok(Self {
             pool,
             tenant_id: tenant_id.to_string(),
+            gc_grace: DEFAULT_GC_GRACE,
+            gc_conn: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Set how recently written an unreachable object must be for a GC sweep
+    /// to spare it (default [`DEFAULT_GC_GRACE`]).
+    ///
+    /// Writers don't wait for a sweep here; the grace period protects them
+    /// instead. A write stores its new objects before it commits them, and an
+    /// object stored again refreshes its write time (at most a minute old
+    /// after any write), so a sweep never takes an object a write in flight
+    /// is about to commit. A sweep spares everything written since it started,
+    /// whatever the grace. A grace under a minute narrows the protection for
+    /// writes already in flight when a sweep starts; tests use zero to see
+    /// garbage go at once.
+    pub fn with_gc_grace(mut self, grace: std::time::Duration) -> Self {
+        self.gc_grace = grace;
+        self
     }
 
     /// Return the configured pool's maximum size. Useful for tests.
@@ -885,8 +948,10 @@ impl ObjectStore for PostgresStorage {
 
             client
                 .execute(
-                    "INSERT INTO objects (tenant_id, id, data) VALUES ($1, $2, $3)
-                     ON CONFLICT (tenant_id, id) DO NOTHING",
+                    &format!(
+                        "INSERT INTO objects (tenant_id, id, data) VALUES ($1, $2, $3)
+                         {FRESHEN_ON_CONFLICT}"
+                    ),
                     &[&self.tenant_id, &id.as_bytes().as_slice(), &data],
                 )
                 .await
@@ -903,11 +968,16 @@ impl ObjectStore for PostgresStorage {
         // Each row is two parameters ($1 is the tenant), well under Postgres's
         // 65,535 per statement.
         const CHUNK: usize = 1000;
+        let ids: Vec<ObjectId> = objs.iter().map(Object::id).collect();
+        // One row per id: an upsert may not touch a row twice in a statement.
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
         let rows: Vec<(ObjectId, serde_json::Value)> = objs
             .iter()
-            .map(|obj| {
+            .zip(&ids)
+            .filter(|(_, id)| seen.insert(**id))
+            .map(|(obj, id)| {
                 serde_json::to_value(obj)
-                    .map(|data| (obj.id(), data))
+                    .map(|data| (*id, data))
                     .map_err(|e| StorageError::Serialization(e.to_string()))
             })
             .collect::<Result<_, _>>()?;
@@ -937,7 +1007,7 @@ impl ObjectStore for PostgresStorage {
                 tx.execute(
                     &format!(
                         "INSERT INTO objects (tenant_id, id, data) VALUES {}
-                         ON CONFLICT (tenant_id, id) DO NOTHING",
+                         {FRESHEN_ON_CONFLICT}",
                         values.join(", ")
                     ),
                     &params,
@@ -950,7 +1020,7 @@ impl ObjectStore for PostgresStorage {
                 .map_err(|e| StorageError::Backend(format!("commit batch put: {e}")))?;
             Ok(())
         })?;
-        Ok(rows.into_iter().map(|(id, _)| id).collect())
+        Ok(ids)
     }
 
     /// One query for the whole batch, results in the order asked.
@@ -1602,6 +1672,446 @@ impl CommitStore for PostgresStorage {
                 .collect())
         })
     }
+
+    fn history_gc_reachability(
+        &self,
+        roots: &[ObjectId],
+        batch: usize,
+    ) -> Result<GcReachability, StorageError> {
+        let batch = sql_count(batch.max(1));
+        self.block_on(async {
+            // The mark lives in temp tables, so it runs on a connection of
+            // its own that is closed afterwards rather than pooled.
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let result = async {
+                gc_mark(&client, &self.tenant_id, roots, batch).await?;
+                let row = client
+                    .query_one(
+                        "SELECT (SELECT count(*) FROM gc_mark),
+                                (SELECT count(*) FROM objects WHERE tenant_id = $1)",
+                        &[&self.tenant_id],
+                    )
+                    .await
+                    .map_err(|e| gc_error("counts", &e))?;
+                Ok::<_, StorageError>((row.get::<_, i64>(0), row.get::<_, i64>(1)))
+            }
+            .await;
+            drop(deadpool_postgres::Object::take(client));
+            let (live, total) = result?;
+            Ok(GcReachability {
+                total_objects: total,
+                live_objects: live,
+                reclaimable_objects: (total - live).max(0),
+                roots_walked: roots.len(),
+            })
+        })
+    }
+
+    /// Mark everything reachable from `roots`, the current ref tips and the
+    /// pinned roots, then delete this tenant's other objects in batches, each
+    /// its own transaction. Writers keep going meanwhile: whatever was written
+    /// since the sweep started, or within the grace period before it, is
+    /// spared, and each delete re-checks the write time, so an object stored
+    /// again mid-sweep stays. `deleted_target` can therefore exceed
+    /// `objects_deleted`.
+    fn history_gc_sweep(&self, roots: &[ObjectId], batch: usize) -> Result<GcSweep, StorageError> {
+        let batch = sql_count(batch.max(1));
+        let held = self
+            .gc_conn
+            .lock()
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .take();
+        self.block_on(async {
+            let (client, own) = match held {
+                Some(client) => (client, false),
+                None => (self.gc_lock().await?, true),
+            };
+            let result = gc_sweep(
+                &client,
+                &self.tenant_id,
+                roots,
+                batch,
+                self.gc_grace.as_secs_f64(),
+            )
+            .await;
+            if own {
+                gc_release(client).await;
+            } else {
+                *self
+                    .gc_conn
+                    .lock()
+                    .map_err(|e| StorageError::Backend(e.to_string()))? = Some(client);
+            }
+            result
+        })
+    }
+
+    /// Take this tenant's sweep lock, so two sweeps can't run at once. Unlike
+    /// SQLite's, it doesn't hold writers off: the grace period keeps their
+    /// work safe (see [`PostgresStorage::with_gc_grace`]).
+    fn history_gc_lock_writers(&self) -> Result<(), StorageError> {
+        let mut held = self
+            .gc_conn
+            .lock()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        if held.is_some() {
+            return Err(StorageError::Backend(
+                "gc lock writers: a sweep already holds the lock".into(),
+            ));
+        }
+        *held = Some(self.block_on(self.gc_lock())?);
+        Ok(())
+    }
+
+    /// Release the sweep lock. A sweep's deletes are already committed batch
+    /// by batch, so `commit` changes nothing here.
+    fn history_gc_unlock_writers(&self, _commit: bool) -> Result<(), StorageError> {
+        let held = self
+            .gc_conn
+            .lock()
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .take();
+        if let Some(client) = held {
+            self.block_on(async {
+                gc_release(client).await;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn gc_pin_root(&self, key: &str, root: &ObjectId) -> Result<(), StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            client
+                .execute(
+                    "INSERT INTO gc_pending_roots (tenant_id, key, root, updated_at)
+                     VALUES ($1, $2, $3, now())
+                     ON CONFLICT (tenant_id, key)
+                     DO UPDATE SET root = EXCLUDED.root, updated_at = now()",
+                    &[&self.tenant_id, &key, &root.as_bytes().as_slice()],
+                )
+                .await
+                .map_err(|e| gc_error("pin root", &e))?;
+            Ok(())
+        })
+    }
+
+    fn gc_unpin_root(&self, key: &str) -> Result<(), StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            client
+                .execute(
+                    "DELETE FROM gc_pending_roots WHERE tenant_id = $1 AND key = $2",
+                    &[&self.tenant_id, &key],
+                )
+                .await
+                .map_err(|e| gc_error("unpin root", &e))?;
+            Ok(())
+        })
+    }
+
+    fn gc_pinned_roots(&self, max_age: std::time::Duration) -> Result<Vec<ObjectId>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            gc_pinned(&**client, &self.tenant_id, max_age.as_secs_f64()).await
+        })
+    }
+
+    /// Newest first, by the order the commits' transactions got ids (commits
+    /// from before that was recorded come last, newest first by timestamp).
+    fn commit_state_roots_recent_first(&self) -> Result<Vec<ObjectId>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let rows = client
+                .query(
+                    "SELECT data -> 'state_root' FROM commits WHERE tenant_id = $1
+                     ORDER BY xid DESC, timestamp DESC, id DESC",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| gc_error("commit roots", &e))?;
+            rows.iter()
+                .map(|row| {
+                    serde_json::from_value(row.get(0))
+                        .map_err(|e| StorageError::Serialization(e.to_string()))
+                })
+                .collect()
+        })
+    }
+
+    /// This tenant's object and commit counts, and the bytes its rows take
+    /// in each table (before indexes and free space; the tables are shared
+    /// with other tenants). Reads every row, so it is slow on a large store.
+    fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_one(
+                    "SELECT (SELECT count(*) FROM objects WHERE tenant_id = $1),
+                            (SELECT count(*) FROM commits WHERE tenant_id = $1),
+                            (SELECT COALESCE(sum(pg_column_size(o.*)), 0)::BIGINT
+                               FROM objects o WHERE tenant_id = $1),
+                            (SELECT COALESCE(sum(pg_column_size(c.*)), 0)::BIGINT
+                               FROM commits c WHERE tenant_id = $1)",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| gc_error("store shape", &e))?;
+            let (objects_bytes, commits_bytes): (i64, i64) = (row.get(2), row.get(3));
+            let mut tables = vec![
+                TableBytes {
+                    name: "objects".into(),
+                    bytes: objects_bytes,
+                },
+                TableBytes {
+                    name: "commits".into(),
+                    bytes: commits_bytes,
+                },
+            ];
+            tables.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+            Ok(StoreShape {
+                objects: row.get(0),
+                commits: row.get(1),
+                total_bytes: objects_bytes + commits_bytes,
+                tables,
+                dbstat_available: true,
+            })
+        })
+    }
+}
+
+impl PostgresStorage {
+    /// A connection holding this tenant's sweep lock (a session advisory
+    /// lock). Fails at once if another sweep holds it. Closing the connection
+    /// releases the lock, so it is never returned to the pool.
+    async fn gc_lock(&self) -> Result<deadpool_postgres::Object, StorageError> {
+        let client = self.pool.get().await.map_err(conn_error)?;
+        let locked: bool = client
+            .query_one(
+                "SELECT pg_try_advisory_lock(hashtextextended('asg-gc:' || $1, 0))",
+                &[&self.tenant_id],
+            )
+            .await
+            .map_err(|e| gc_error("lock", &e))?
+            .get(0);
+        if !locked {
+            return Err(StorageError::Backend(
+                "gc lock writers: another sweep is running on this store".into(),
+            ));
+        }
+        Ok(client)
+    }
+}
+
+/// Release a sweep connection: unlock, then close it rather than pool it, so
+/// its temp tables go too. The explicit unlock matters: the server only
+/// notices a closed connection a moment later, and a sweep starting in that
+/// moment would find the lock still held. (If the unlock fails, the
+/// connection is broken and the server releases the lock with it.)
+async fn gc_release(client: deadpool_postgres::Object) {
+    let _ = client
+        .batch_execute("SELECT pg_advisory_unlock_all()")
+        .await;
+    drop(deadpool_postgres::Object::take(client));
+}
+
+/// Fill the temp table `gc_mark` with every object of `tenant_id` reachable
+/// from `roots`, breadth first in batches of `batch`, so the mark set lives in
+/// the database rather than in memory. Each statement commits on its own: a
+/// long transaction would hold back every tenant's history extraction.
+async fn gc_mark(
+    client: &deadpool_postgres::Object,
+    tenant_id: &str,
+    roots: &[ObjectId],
+    batch: i64,
+) -> Result<(), StorageError> {
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE IF NOT EXISTS gc_mark (id BYTEA PRIMARY KEY);
+             CREATE TEMP TABLE IF NOT EXISTS gc_frontier (id BYTEA PRIMARY KEY);
+             TRUNCATE gc_mark, gc_frontier;",
+        )
+        .await
+        .map_err(|e| gc_error("mark setup", &e))?;
+    // Marks only ids that are stored objects, so the mark is a subset of the
+    // tenant's objects; each newly marked id joins the frontier.
+    let mark = "WITH marked AS (
+                    INSERT INTO gc_mark (id)
+                    SELECT o.id FROM objects o WHERE o.tenant_id = $1 AND o.id = ANY($2)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                )
+                INSERT INTO gc_frontier (id) SELECT id FROM marked";
+    let seeds: Vec<&[u8]> = roots.iter().map(|r| r.as_bytes().as_slice()).collect();
+    client
+        .execute(mark, &[&tenant_id, &seeds])
+        .await
+        .map_err(|e| gc_error("mark roots", &e))?;
+    loop {
+        let rows = client
+            .query(
+                "WITH next AS (
+                     DELETE FROM gc_frontier
+                     WHERE id IN (SELECT id FROM gc_frontier LIMIT $2)
+                     RETURNING id
+                 )
+                 SELECT o.data FROM next
+                 LEFT JOIN objects o ON o.tenant_id = $1 AND o.id = next.id",
+                &[&tenant_id, &batch],
+            )
+            .await
+            .map_err(|e| gc_error("mark frontier", &e))?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut children = std::collections::HashSet::new();
+        for row in &rows {
+            let Some(data) = row.get::<_, Option<serde_json::Value>>(0) else {
+                continue;
+            };
+            let obj: Object = serde_json::from_value(data)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            children.extend(child_ids(&obj));
+        }
+        let children: Vec<&[u8]> = children.iter().map(|c| c.as_bytes().as_slice()).collect();
+        client
+            .execute(mark, &[&tenant_id, &children])
+            .await
+            .map_err(|e| gc_error("mark children", &e))?;
+    }
+}
+
+/// The body of [`PostgresStorage::history_gc_sweep`], on a connection that
+/// holds the tenant's sweep lock.
+async fn gc_sweep(
+    client: &deadpool_postgres::Object,
+    tenant_id: &str,
+    roots: &[ObjectId],
+    batch: i64,
+    grace_secs: f64,
+) -> Result<GcSweep, StorageError> {
+    // Fixed before anything is read: everything written after this time, or
+    // within the grace period before it, is spared.
+    let cutoff: DateTime<Utc> = client
+        .query_one("SELECT now() - make_interval(secs => $1)", &[&grace_secs])
+        .await
+        .map_err(|e| gc_error("cutoff", &e))?
+        .get(0);
+    let count = || async {
+        client
+            .query_one(
+                "SELECT count(*) FROM objects WHERE tenant_id = $1",
+                &[&tenant_id],
+            )
+            .await
+            .map(|row| row.get::<_, i64>(0))
+            .map_err(|e| gc_error("count", &e))
+    };
+    let objects_before = count().await?;
+
+    // Whatever the caller's roots, keep every current ref tip and every
+    // open speculation.
+    let mut keep = roots.to_vec();
+    let tips = client
+        .query(
+            "SELECT c.data -> 'state_root' FROM refs r
+             JOIN commits c ON c.tenant_id = r.tenant_id AND c.id = r.target
+             WHERE r.tenant_id = $1",
+            &[&tenant_id],
+        )
+        .await
+        .map_err(|e| gc_error("ref tips", &e))?;
+    for row in &tips {
+        keep.push(
+            serde_json::from_value(row.get(0))
+                .map_err(|e| StorageError::Serialization(e.to_string()))?,
+        );
+    }
+    keep.extend(gc_pinned(&***client, tenant_id, GC_PIN_MAX_AGE.as_secs_f64()).await?);
+
+    gc_mark(client, tenant_id, &keep, batch).await?;
+
+    // Walk the tenant's objects in key order, a batch of unmarked ones at a
+    // time, and delete each batch on its own. Each statement is short, so no
+    // long write transaction holds back history extraction (every tenant's).
+    // The delete re-checks the write time: an object stored again since the
+    // batch was read stays.
+    let mut after: Vec<u8> = Vec::new();
+    let (mut deleted_target, mut objects_deleted) = (0, 0);
+    loop {
+        let dead: Vec<Vec<u8>> = client
+            .query(
+                "SELECT o.id FROM objects o
+                 WHERE o.tenant_id = $1 AND o.id > $2 AND o.written_at < $3
+                   AND NOT EXISTS (SELECT 1 FROM gc_mark m WHERE m.id = o.id)
+                 ORDER BY o.id
+                 LIMIT $4",
+                &[&tenant_id, &after, &cutoff, &batch],
+            )
+            .await
+            .map_err(|e| gc_error("dead batch", &e))?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let Some(last) = dead.last() else {
+            break;
+        };
+        after = last.clone();
+        deleted_target += dead.len() as i64;
+        objects_deleted += client
+            .execute(
+                "DELETE FROM objects
+                 WHERE tenant_id = $1 AND id = ANY($2) AND written_at < $3",
+                &[&tenant_id, &dead, &cutoff],
+            )
+            .await
+            .map_err(|e| gc_error("delete", &e))? as i64;
+    }
+
+    Ok(GcSweep {
+        objects_before,
+        objects_deleted,
+        objects_after: count().await?,
+        deleted_target,
+    })
+}
+
+async fn gc_pinned(
+    client: &(impl tokio_postgres::GenericClient + Sync),
+    tenant_id: &str,
+    max_age_secs: f64,
+) -> Result<Vec<ObjectId>, StorageError> {
+    let rows = client
+        .query(
+            "SELECT root FROM gc_pending_roots
+             WHERE tenant_id = $1 AND updated_at >= now() - make_interval(secs => $2)",
+            &[&tenant_id, &max_age_secs],
+        )
+        .await
+        .map_err(|e| gc_error("pinned roots", &e))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| object_id_from_bytes(row.get(0)))
+        .collect())
+}
+
+/// The child object ids a node references (none for atoms): the edges the
+/// GC mark follows.
+fn child_ids(obj: &Object) -> Vec<ObjectId> {
+    match obj {
+        Object::Node(Node::Map(entries)) => entries.values().copied().collect(),
+        Object::Node(Node::List(items)) | Object::Node(Node::Set(items)) => items.clone(),
+        Object::Atom(_) => Vec::new(),
+    }
+}
+
+/// How long an open speculation's pin protects its objects without being
+/// refreshed, as in SQLite.
+const GC_PIN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+fn gc_error(step: &str, e: &tokio_postgres::Error) -> StorageError {
+    StorageError::Backend(with_causes(&format!("gc {step}"), e))
 }
 
 async fn leaf_set_built(

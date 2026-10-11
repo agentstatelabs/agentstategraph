@@ -75,8 +75,8 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
     let db = with_database(&url, &name);
 
     // A current database with a merge in its history, rewound to look like
-    // one from before the version stamp (version 1), epoch seal digests and
-    // the version 2 history and search tables.
+    // one from before the version stamp (version 1), epoch seal digests, the
+    // version 2 history and search tables, and the version 3 GC columns.
     let old = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
     let commit = |tag: &str, parents: &[ObjectId]| -> Commit {
         let root = old.put_object(&Object::string(tag)).unwrap();
@@ -103,7 +103,8 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
          DROP INDEX idx_commits_data_id;
          ALTER TABLE commits DROP COLUMN xid;
          DROP TABLE asg_history_cursor, asg_history_commit_rollup, asg_history_milestone,
-                    leaf_rows, leaf_index_refs;",
+                    leaf_rows, leaf_index_refs, gc_pending_roots;
+         ALTER TABLE objects DROP COLUMN written_at;",
     );
 
     let storage = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
@@ -112,7 +113,7 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             &db,
             "SELECT version::BIGINT FROM asg_schema WHERE component = 'postgres'"
         ),
-        2,
+        3,
         "the upgrade stamps the schema version"
     );
     storage
@@ -143,6 +144,13 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             .leaf_index_search("default", "main", "fou", 10)
             .unwrap(),
         Some(vec![("/a".into(), "found".into())])
+    );
+
+    // Objects from before the upgrade have no write time, so no grace period
+    // spares them: no ref reaches these four, and a sweep takes them at once.
+    assert_eq!(
+        storage.history_gc_sweep(&[], 100).unwrap().objects_deleted,
+        4
     );
 
     // Up to date: connecting again runs no DDL. A column dropped by hand stays

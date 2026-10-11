@@ -12,8 +12,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
 
-use agentstategraph::{CommitOptions, RepoError, Repository};
-use agentstategraph_core::{EpochStatus, IntentCategory, Namespace};
+use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
+use agentstategraph_core::{
+    Authority, CommitBuilder, EpochStatus, Intent, IntentCategory, Namespace, Object,
+};
 use agentstategraph_storage::{MemoryStorage, PostgresStorage, SqliteStorage, Storage};
 use serde_json::json;
 
@@ -30,7 +32,11 @@ struct Known {
     owner: &'static str,
 }
 
-const KNOWN_FAILURES: &[Known] = &[];
+const KNOWN_FAILURES: &[Known] = &[Known {
+    case: "sweep_spares_a_write_in_flight",
+    backend: Backend::Sqlite,
+    owner: "DESIGN.md finding 17: SQLite's sweep has no grace period (follow-up)",
+}];
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -41,12 +47,18 @@ const KNOWN_FAILURES: &[Known] = &[];
 struct Fixture {
     backend: Backend,
     opener: Arc<dyn Fn() -> Repository + Send + Sync>,
+    storage: Arc<dyn Fn() -> Arc<dyn Storage + Send + Sync> + Send + Sync>,
     cleanup: Option<std::path::PathBuf>,
 }
 
 impl Fixture {
     fn open(&self) -> Repository {
         (self.opener)()
+    }
+
+    /// A storage handle onto the same store, below the repository.
+    fn storage(&self) -> Arc<dyn Storage + Send + Sync> {
+        (self.storage)()
     }
 
     /// A plain thread: every backend, Postgres included, must work from one.
@@ -73,9 +85,11 @@ fn postgres_connect(url: &str, tenant: &str) -> PostgresStorage {
 
 fn fixtures(case: &str) -> Vec<Fixture> {
     let shared: Arc<dyn Storage + Send + Sync> = Arc::new(MemoryStorage::new());
+    let raw = Arc::clone(&shared);
     let mut all = vec![Fixture {
         backend: Backend::Memory,
         opener: Arc::new(move || Repository::from_shared(Arc::clone(&shared))),
+        storage: Arc::new(move || Arc::clone(&raw)),
         cleanup: None,
     }];
 
@@ -83,23 +97,26 @@ fn fixtures(case: &str) -> Vec<Fixture> {
         "asg-backend-conformance-{case}-{}.db",
         uuid::Uuid::new_v4().simple()
     ));
-    let opened = path.clone();
+    let (opened, raw) = (path.clone(), path.clone());
     all.push(Fixture {
         backend: Backend::Sqlite,
         opener: Arc::new(move || {
             Repository::new(Box::new(SqliteStorage::open(&opened).expect("open sqlite")))
         }),
+        storage: Arc::new(move || Arc::new(SqliteStorage::open(&raw).expect("open sqlite"))),
         cleanup: Some(path),
     });
 
     match std::env::var("TEST_DATABASE_URL") {
         Ok(url) if !url.is_empty() => {
             let tenant = format!("repo-conformance-{case}-{}", uuid::Uuid::new_v4().simple());
+            let (raw_url, raw_tenant) = (url.clone(), tenant.clone());
             all.push(Fixture {
                 backend: Backend::Postgres,
                 opener: Arc::new(move || {
                     Repository::new(Box::new(postgres_connect(&url, &tenant)))
                 }),
+                storage: Arc::new(move || Arc::new(postgres_connect(&raw_url, &raw_tenant))),
                 cleanup: None,
             });
         }
@@ -420,6 +437,86 @@ fn history_through_the_repository(f: &Fixture) {
     assert_eq!(repo.extract_history(2).unwrap().commits_processed, 0);
 }
 
+fn keep_only_tips() -> RetentionPolicy {
+    RetentionPolicy {
+        keep_recent: 1,
+        checkpoint_every: 0,
+        keep_milestones: false,
+    }
+}
+
+/// A sweep through the repository leaves every branch readable, and a later
+/// merge still finds its base.
+fn sweep_keeps_every_branch_readable(f: &Fixture) {
+    let repo = f.open();
+    repo.init().unwrap();
+    for i in 0..4 {
+        repo.set_json("main", &format!("/a/k{i}"), &json!(i), opts("main"))
+            .unwrap();
+    }
+    repo.branch("feature", "main").unwrap();
+    repo.set_json("feature", "/f", &json!("feature"), opts("feature"))
+        .unwrap();
+    repo.set_json("main", "/m", &json!("main"), opts("main"))
+        .unwrap();
+    repo.extract_history(1000).unwrap();
+
+    let report = repo.gc_sweep(keep_only_tips(), true, false).unwrap();
+    assert_eq!(report["mutated"], json!(true), "{report}");
+    for branch in ["main", "feature"] {
+        let head = repo.head(branch).unwrap();
+        assert_eq!(repo.first_missing_object(&head).unwrap(), None, "{branch}");
+    }
+    repo.merge(
+        "feature",
+        "main",
+        CommitOptions::new("agent/conformance", IntentCategory::Merge, "merge"),
+    )
+    .unwrap();
+    assert_eq!(repo.get_json("main", "/f").unwrap(), json!("feature"));
+    assert_eq!(repo.get_json("main", "/a/k3").unwrap(), json!(3));
+}
+
+/// Every write stores its new tree, then its commit, then moves the ref. A
+/// sweep that runs after the first step must not take the tree, or the ref
+/// lands on a tree with objects missing.
+fn sweep_spares_a_write_in_flight(f: &Fixture) {
+    let repo = f.open();
+    repo.init().unwrap();
+    for i in 0..3 {
+        repo.set_json("main", "/v", &json!(i), opts("edit"))
+            .unwrap();
+    }
+    repo.extract_history(1000).unwrap();
+    let head = repo.head("main").unwrap();
+
+    // A writer has stored its tree...
+    let store = f.storage();
+    let leaf = store.put_object(&Object::string("in flight")).unwrap();
+    let root = store
+        .put_object(&Object::map([("v".to_string(), leaf)].into()))
+        .unwrap();
+    // ...when a sweep runs.
+    let report = repo.gc_sweep(keep_only_tips(), true, false).unwrap();
+    assert_eq!(report["mutated"], json!(true), "{report}");
+    // Then it commits.
+    let c = CommitBuilder::new(
+        root,
+        "agent/conformance",
+        Authority::simple("conformance"),
+        Intent::new(IntentCategory::Refine, "in flight"),
+    )
+    .parents(vec![head])
+    .build();
+    store.put_commit(&c).unwrap();
+    repo.set_ref("main", c.id).unwrap();
+    assert_eq!(
+        repo.first_missing_object(&c.id).unwrap(),
+        None,
+        "the sweep took a write in flight"
+    );
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -464,5 +561,21 @@ fn history() {
     run(
         "history_through_the_repository",
         history_through_the_repository,
+    );
+}
+
+#[test]
+fn gc_sweep() {
+    run(
+        "sweep_keeps_every_branch_readable",
+        sweep_keeps_every_branch_readable,
+    );
+}
+
+#[test]
+fn gc_write_in_flight() {
+    run(
+        "sweep_spares_a_write_in_flight",
+        sweep_spares_a_write_in_flight,
     );
 }
