@@ -415,6 +415,7 @@ impl EpochStore for MemoryStorage {
         epoch.sealed_at = Some(sealed_at);
         epoch.seal_summary = Some(summary.to_string());
         epoch.sealed_commits = sealed_commits.to_vec();
+        epoch.seal_hash = Some(*seal_hash);
         Ok(())
     }
 
@@ -486,26 +487,28 @@ impl EpochStore for MemoryStorage {
     }
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
-        // Enforce seal semantics first.
-        {
-            let epochs = self
-                .epochs
-                .read()
-                .map_err(|e| StorageError::Backend(e.to_string()))?;
-            let epoch = epochs
-                .iter()
-                .find(|e| e.id == epoch_id)
-                .ok_or_else(|| StorageError::Backend(format!("epoch not found: {}", epoch_id)))?;
-            if epoch.status == EpochStatus::Sealed || epoch.status == EpochStatus::Archived {
-                return Err(StorageError::EpochAlreadySealed {
-                    id: epoch_id.to_string(),
-                });
-            }
+        // The status check holds the epochs lock until the association is
+        // written, so a seal (which needs the write lock) can't land between.
+        let epochs = self
+            .epochs
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let epoch = epochs
+            .iter()
+            .find(|e| e.id == epoch_id)
+            .ok_or_else(|| StorageError::Backend(format!("epoch not found: {}", epoch_id)))?;
+        if epoch.status == EpochStatus::Sealed || epoch.status == EpochStatus::Archived {
+            return Err(StorageError::EpochAlreadySealed {
+                id: epoch_id.to_string(),
+            });
         }
         let mut assoc = self
             .commit_epoch
             .write()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
+        // One epoch per commit, as in the SQL backends; linking twice used to
+        // list the commit twice.
+        assoc.retain(|(c, _)| c != commit_id);
         assoc.push((*commit_id, epoch_id.to_string()));
         Ok(())
     }
@@ -567,24 +570,25 @@ impl SessionStore for MemoryStorage {
         commit_id: &ObjectId,
         session_id: &str,
     ) -> Result<(), StorageError> {
-        {
-            let sessions = self
-                .sessions
-                .read()
-                .map_err(|e| StorageError::Backend(e.to_string()))?;
-            let session = sessions.get(session_id).ok_or_else(|| {
-                StorageError::Backend(format!("session not found: {}", session_id))
-            })?;
-            if session.status != SessionStatus::Active {
-                return Err(StorageError::SessionEnded {
-                    id: session_id.to_string(),
-                });
-            }
+        // As set_commit_epoch: hold the sessions lock through the write, and
+        // keep one session per commit.
+        let sessions = self
+            .sessions
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| StorageError::Backend(format!("session not found: {}", session_id)))?;
+        if session.status != SessionStatus::Active {
+            return Err(StorageError::SessionEnded {
+                id: session_id.to_string(),
+            });
         }
         let mut assoc = self
             .commit_session
             .write()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
+        assoc.retain(|(c, _)| c != commit_id);
         assoc.push((*commit_id, session_id.to_string()));
         Ok(())
     }
@@ -732,6 +736,16 @@ impl ReminderStore for MemoryStorage {
     }
     fn update(&self, reminder: &Reminder) -> Result<(), ReminderError> {
         self.reminders.update(reminder)
+    }
+
+    // Forwarded: without it the trait's non-atomic default applied, and
+    // racing updates from one snapshot could all win.
+    fn update_if_unchanged(
+        &self,
+        expected: &Reminder,
+        new: &Reminder,
+    ) -> Result<bool, ReminderError> {
+        self.reminders.update_if_unchanged(expected, new)
     }
     fn delete(&self, id: &str) -> Result<bool, ReminderError> {
         self.reminders.delete(id)
