@@ -1,5 +1,7 @@
 [package]
 name = "agentstategraph-napi"
+# Ships to PyPI/npm, not crates.io.
+publish = false
 version.workspace = true
 edition = "2024"
 description = "TypeScript/Node.js bindings for AgentStateGraph via napi-rs"
