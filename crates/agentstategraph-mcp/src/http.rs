@@ -25,13 +25,13 @@ use tower_governor::GovernorLayer;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
 use agentstategraph_core::IntentCategory;
 
 use crate::auth::{self, AuthContext, CreateKeyOptions, KeyRef, KeyStoreError, TenantManager};
+use oxtel::sdk::metrics::MeterProvider;
 
 /// Compiled config for per-peer-IP governor.
 pub type PeerIpGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
@@ -393,201 +393,77 @@ async fn bound_request(
 }
 
 // ─── Observability ──────────────────────────────────────────
+//
+// Spans, request logs and metrics come from oxtel-tower, named by the
+// OpenTelemetry semantic conventions for HTTP servers; docs/OBSERVABILITY.md
+// lists them.
 
-/// Request logging, and metrics when `metrics` is set, for a finished app.
+/// A span, a log line and metrics for every request, as
+/// docs/OBSERVABILITY.md describes.
 ///
-/// Each request is logged when it finishes, at `info`, with its method, path
-/// (no query), status, latency and the id of the API key it used (recorded
-/// by the auth middleware), never the key. Server errors log at `error`.
+/// Apply it last, outside [`with_origin_policy`], so that requests the
+/// policy refuses are logged and counted too, and serve the metrics with
+/// [`with_metrics_endpoint`] before the policy, so the policy covers it.
+/// [`with_server_layers`] does both in that order.
 ///
-/// With `metrics`, `GET /metrics` serves Prometheus text: requests by
-/// method, route and status, latency histograms by method and route, and
-/// requests in flight. Routes are the router's templates (`/api/state/{ref_name}`),
-/// so label sets stay bounded. When auth is on, it needs an admin key.
-pub fn with_observability(app: Router, tenant_mgr: Arc<TenantManager>, metrics: bool) -> Router {
-    let app = if metrics {
-        let recorder = Arc::new(HttpMetrics::default());
-        let endpoint = Router::new()
-            .route("/metrics", get(render_metrics))
-            .route_layer(middleware::from_fn_with_state(
-                tenant_mgr,
-                auth::admin_auth_middleware,
-            ))
-            .with_state(Arc::clone(&recorder));
-        app.merge(endpoint)
-            .layer(middleware::from_fn_with_state(recorder, record_metrics))
-    } else {
-        app
-    };
+/// Each request gets a server span named `{method} {route}` that continues
+/// the caller's W3C trace, and logs `request` when it finishes, at `info`,
+/// or at `error` for a 5xx, with its status and duration. The span carries
+/// `asg.api_key.id`, the id of the API key used, recorded by the auth
+/// middleware, never the key. Metrics go to the process's `metrics`
+/// recorder, which `main` installs.
+pub fn with_observability(app: Router) -> Router {
     app.layer(
-        TraceLayer::new_for_http()
-            .make_span_with(|req: &axum::extract::Request| {
-                tracing::info_span!(
-                    "http",
-                    method = %req.method(),
-                    path = %req.uri().path(),
-                    key_id = tracing::field::Empty,
-                )
-            })
-            .on_request(())
-            .on_response(
-                |res: &axum::response::Response,
-                 latency: std::time::Duration,
-                 _: &tracing::Span| {
-                    info!(
-                        status = res.status().as_u16(),
-                        latency_ms = latency.as_millis() as u64,
-                        "request"
-                    );
-                },
-            ),
+        oxtel_tower::HttpServerLayer::new().with_span(|info| {
+            oxtel_tower::server_span!(info, asg.api_key.id = tracing::field::Empty)
+        }),
     )
 }
 
-/// Upper bounds (seconds) of the request latency histogram buckets.
-const LATENCY_BUCKETS: [f64; 11] = [
-    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-];
-
-/// Counters behind `/metrics`.
-#[derive(Default)]
-pub struct HttpMetrics {
-    /// (method, route, status) -> requests.
-    requests: Mutex<std::collections::BTreeMap<(String, String, u16), u64>>,
-    /// (method, route) -> latency histogram.
-    latency: Mutex<std::collections::BTreeMap<(String, String), Histogram>>,
-    in_flight: std::sync::atomic::AtomicI64,
+/// Everything the server puts around its router, in the order that matters:
+/// request bounds; the metrics route, when `meters` is set; the origin
+/// policy, which then covers that route; and logging and metrics outermost,
+/// so they see requests the policy refuses.
+pub fn with_server_layers(
+    app: Router,
+    tenant_mgr: Arc<TenantManager>,
+    bounds: &RequestBounds,
+    policy: &OriginPolicy,
+    meters: Option<MeterProvider>,
+) -> Router {
+    let app = with_request_bounds(app, bounds);
+    let app = match meters {
+        Some(meters) => with_metrics_endpoint(app, tenant_mgr, meters),
+        None => app,
+    };
+    let app = with_origin_policy(app, policy);
+    with_observability(app)
 }
 
-#[derive(Default)]
-struct Histogram {
-    buckets: [u64; LATENCY_BUCKETS.len()],
-    sum: f64,
-    count: u64,
-}
-
-impl HttpMetrics {
-    fn record(&self, method: &str, route: &str, status: u16, seconds: f64) {
-        *self
-            .requests
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry((method.to_string(), route.to_string(), status))
-            .or_default() += 1;
-        let mut latency = self.latency.lock().unwrap_or_else(|e| e.into_inner());
-        let h = latency
-            .entry((method.to_string(), route.to_string()))
-            .or_default();
-        for (bucket, bound) in h.buckets.iter_mut().zip(LATENCY_BUCKETS) {
-            if seconds <= bound {
-                *bucket += 1;
-            }
-        }
-        h.sum += seconds;
-        h.count += 1;
-    }
-
-    /// Prometheus text exposition format.
-    pub fn render(&self) -> String {
-        use std::fmt::Write;
-        let label = |v: &str| {
-            v.replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-        };
-        let mut out = String::new();
-        let _ = writeln!(
-            out,
-            "# HELP asg_build_info Build information.\n# TYPE asg_build_info gauge\n\
-             asg_build_info{{version=\"{}\"}} 1",
-            env!("CARGO_PKG_VERSION")
-        );
-        let _ = writeln!(
-            out,
-            "# HELP asg_http_requests_in_flight HTTP requests being handled.\n\
-             # TYPE asg_http_requests_in_flight gauge\nasg_http_requests_in_flight {}",
-            self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
-        );
-        let _ = writeln!(
-            out,
-            "# HELP asg_http_requests_total HTTP requests handled, by method, route and status.\n\
-             # TYPE asg_http_requests_total counter"
-        );
-        for ((method, route, status), n) in self
-            .requests
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            let _ = writeln!(
-                out,
-                "asg_http_requests_total{{method=\"{}\",route=\"{}\",status=\"{status}\"}} {n}",
-                label(method),
-                label(route)
-            );
-        }
-        let _ = writeln!(
-            out,
-            "# HELP asg_http_request_duration_seconds HTTP request latency, by method and route.\n\
-             # TYPE asg_http_request_duration_seconds histogram"
-        );
-        for ((method, route), h) in self
-            .latency
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            let labels = format!("method=\"{}\",route=\"{}\"", label(method), label(route));
-            for (bound, n) in LATENCY_BUCKETS.iter().zip(h.buckets) {
-                let _ = writeln!(
-                    out,
-                    "asg_http_request_duration_seconds_bucket{{{labels},le=\"{bound}\"}} {n}"
-                );
-            }
-            let _ = writeln!(
-                out,
-                "asg_http_request_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {}\n\
-                 asg_http_request_duration_seconds_sum{{{labels}}} {}\n\
-                 asg_http_request_duration_seconds_count{{{labels}}} {}",
-                h.count, h.sum, h.count
-            );
-        }
-        out
-    }
-}
-
-async fn record_metrics(
-    State(metrics): State<Arc<HttpMetrics>>,
-    req: axum::extract::Request,
-    next: middleware::Next,
-) -> axum::response::Response {
-    use std::sync::atomic::Ordering;
-    let method = req.method().to_string();
-    // The route template, not the path, so ref names don't become labels.
-    let route = req
-        .extensions()
-        .get::<axum::extract::MatchedPath>()
-        .map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
-    let started = std::time::Instant::now();
-    metrics.in_flight.fetch_add(1, Ordering::Relaxed);
-    let res = next.run(req).await;
-    metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
-    metrics.record(
-        &method,
-        &route,
-        res.status().as_u16(),
-        started.elapsed().as_secs_f64(),
-    );
-    res
-}
-
-async fn render_metrics(State(metrics): State<Arc<HttpMetrics>>) -> impl IntoResponse {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        metrics.render(),
+/// Serve the metrics `meters` holds at `GET /metrics`, as OpenMetrics or
+/// Prometheus text, whichever the scraper asks for. When auth is on, it
+/// needs an admin key. Add it before [`with_origin_policy`], which then
+/// covers it.
+///
+/// Names follow OpenTelemetry's rules for Prometheus:
+/// `http_server_request_duration_seconds`, `http_server_active_requests`,
+/// and `target_info` with the service's name and version. Routes are
+/// templates (`/api/state/{ref_name}`), so label sets stay bounded; a
+/// request that matched no route has no `http_route`.
+pub fn with_metrics_endpoint(
+    app: Router,
+    tenant_mgr: Arc<TenantManager>,
+    meters: MeterProvider,
+) -> Router {
+    let resource = meters.resource().clone();
+    let exporter = oxtel::prometheus::PrometheusExporter::new(meters, resource);
+    app.merge(
+        Router::new()
+            .route_service("/metrics", oxtel_tower::MetricsService::new(exporter))
+            .route_layer(middleware::from_fn_with_state(
+                tenant_mgr,
+                auth::admin_auth_middleware,
+            )),
     )
 }
 

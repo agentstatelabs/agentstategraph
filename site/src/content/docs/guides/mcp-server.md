@@ -60,11 +60,32 @@ curl "http://localhost:3001/api/state/main/search?query=mesh"
 
 ### Logs, health and metrics
 
-The server logs to stderr. In HTTP mode it logs each request at `info`, with method, path, status, latency and the API key's id, never the key itself. Set `ASG_LOG` to change the level (`debug`, or a filter like `agentstategraph_mcp=debug`) and `ASG_LOG_FORMAT=json` for one JSON object per line.
+The server logs to stderr. In HTTP mode it logs each request at `info`. Fields use [OpenTelemetry's names](https://opentelemetry.io/docs/specs/semconv/http/):
+
+- `http.request.method`;
+- `url.path` (no query);
+- `http.route`, the route template;
+- `http.response.status_code`;
+- `http.server.request.duration` (seconds);
+- `asg.api_key.id`, the API key's id, never the key itself.
+
+Set `ASG_LOG` to change the level (`debug`, or a filter like `agentstategraph_mcp=debug`). `ASG_LOG_FORMAT` chooses the form: `auto` (the default: text on a terminal, one flat JSON object per line otherwise, as in a container), `text`, `json` or `ecs` (Elastic Common Schema). A JSON line:
+
+```json
+{"asg.api_key.id":"key_3f9c2a71d04e8b65","http.request.method":"GET","http.response.status_code":200,"http.route":"/api/state/{ref_name}","http.server.request.duration":0.000855667,"level":"INFO","message":"request","network.protocol.version":"1.1","server.address":"localhost","server.port":3001,"span_id":"69a6763a47ef0951","target":"oxtel_tower::server","timestamp":"2026-10-08T15:57:08.711714Z","trace_id":"1b2e39eb15704924f95003629fbcd488","url.path":"/api/state/main","url.scheme":"http"}
+```
 
 `/api/health` reports that the process is serving (liveness). `/api/ready` also checks that the store answers, and returns `503` if it doesn't (readiness). `agentstategraph-mcp healthcheck` checks `/api/ready` from the same machine, for container health checks.
 
-`--metrics` serves Prometheus metrics at `/metrics`: request counts by method, route and status, latency histograms, and requests in flight. With `--auth`, scraping it needs an admin key.
+`--metrics` serves Prometheus metrics at `/metrics`, named as OpenTelemetry's HTTP metrics are for Prometheus:
+
+- `http_server_request_duration_seconds` is a histogram by `http_request_method`, `http_route` (the template, so ref names never become labels), `http_response_status_code` and, for server errors, `error_type`. Its `_count` is the request count.
+- `http_server_active_requests` counts requests in progress.
+- `target_info` carries the version.
+
+With `--auth`, scraping it needs an admin key.
+
+With the `otlp` feature built in, set `OTEL_EXPORTER_OTLP_ENDPOINT` to send traces, metrics and these logs to an OpenTelemetry Collector or any OTLP backend. [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md) lists every name.
 
 ### Limits
 
