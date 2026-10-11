@@ -29,6 +29,7 @@ async fn boot(tenant_mgr: Arc<TenantManager>, repo: Arc<Repository>) -> String {
 /// Update this helper when ApiKey gains fields so call sites stay stable.
 fn make_api_key(key: &str, tenant_id: &str) -> ApiKey {
     ApiKey {
+        id: String::new(),
         key: key.to_string(),
         tenant_id: tenant_id.to_string(),
         name: "test-key".into(),
@@ -62,11 +63,12 @@ async fn expired_key_is_rejected() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin_expiry"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin_expiry")).unwrap();
 
     // Seed an already-expired user key (backdated).
     let expired = ApiKey {
+        id: String::new(),
         key: "asg_expired_user".into(),
         tenant_id: "t1".into(),
         name: "expired".into(),
@@ -80,7 +82,7 @@ async fn expired_key_is_rejected() {
         expires_at: Some(chrono::Utc::now() - chrono::Duration::minutes(1)),
         last_used_at: None,
     };
-    mgr.register_key(expired);
+    mgr.register_key(expired).unwrap();
 
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
@@ -105,8 +107,8 @@ async fn create_key_with_expires_in_days_applies_expiry() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin_create_exp"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin_create_exp")).unwrap();
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
 
@@ -145,10 +147,11 @@ async fn rotate_key_invalidates_old_and_mints_new() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin_rotate"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin_rotate")).unwrap();
     // Seed a known user key we'll rotate.
     let user = ApiKey {
+        id: String::new(),
         key: "asg_rot_user_abcdef".into(),
         tenant_id: "t1".into(),
         name: "rotates".into(),
@@ -162,7 +165,7 @@ async fn rotate_key_invalidates_old_and_mints_new() {
         expires_at: None,
         last_used_at: None,
     };
-    mgr.register_key(user);
+    let user_id = mgr.register_key(user).unwrap();
 
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
@@ -183,7 +186,7 @@ async fn rotate_key_invalidates_old_and_mints_new() {
     let rotated: serde_json::Value = client
         .post(format!("{}/api/admin/keys/rotate", base))
         .bearer_auth("asg_admin_rotate")
-        .json(&serde_json::json!({ "key_prefix": "asg_rot_user_abc" }))
+        .json(&serde_json::json!({ "key_id": user_id }))
         .send()
         .await
         .unwrap()
@@ -241,8 +244,8 @@ async fn created_key_entropy_matches_asg_hex64() {
         SqliteStorage::in_memory().expect("in-memory sqlite"),
     )));
     repo.init().unwrap();
-    let mgr = TenantManager::multi_tenant(repo.clone(), None);
-    mgr.register_key(admin_key("asg_admin_entropy"));
+    let mgr = TenantManager::multi_tenant(repo.clone(), None).unwrap();
+    mgr.register_key(admin_key("asg_admin_entropy")).unwrap();
     let base = boot(mgr, repo).await;
     let client = reqwest::Client::new();
 

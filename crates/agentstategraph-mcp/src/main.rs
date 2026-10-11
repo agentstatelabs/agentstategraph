@@ -342,6 +342,10 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "      --pg-pool-size <N>  Max Postgres connections (default: 32; env ASG_PG_POOL_SIZE)"
                 );
+                eprintln!("      --auth            Require an API key on every request");
+                eprintln!(
+                    "      --keys-file <PATH>  Where API keys are kept, as hashes in an owner-only file (implies --auth)"
+                );
                 eprintln!(
                     "      --initial-admin-key <KEY>  Bootstrap admin key (multi-tenant; env ASG_INITIAL_ADMIN_KEY)"
                 );
@@ -545,12 +549,30 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         Some(args.keys_file.as_str())
                     };
-                    let tenant_mgr = TenantManager::multi_tenant(repo.clone(), kf);
+                    let tenant_mgr = match TenantManager::multi_tenant(repo.clone(), kf) {
+                        Ok(mgr) => mgr,
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(2);
+                        }
+                    };
 
                     let provided = args.initial_admin_key.clone();
                     if let Some(k) = provided {
-                        if tenant_mgr.register_admin_key(k, "bootstrap-admin") {
-                            eprintln!("Auth: registered bootstrap admin key");
+                        if k.len() < 32 {
+                            eprintln!(
+                                "WARNING: the bootstrap admin key is short. Keys are stored as \
+                                 SHA-256 hashes, which protect long random keys; use one like \
+                                 those the server generates (asg_ and 64 hex characters)."
+                            );
+                        }
+                        match tenant_mgr.register_admin_key(k, "bootstrap-admin") {
+                            Ok(true) => eprintln!("Auth: registered bootstrap admin key"),
+                            Ok(false) => {}
+                            Err(e) => {
+                                eprintln!("Error: can't register the bootstrap admin key: {e}");
+                                std::process::exit(2);
+                            }
                         }
                     } else if !tenant_mgr.has_admin_key() {
                         eprintln!(
