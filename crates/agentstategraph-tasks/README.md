@@ -97,3 +97,10 @@ let sub = repo.watches().subscribe(
 ## Links
 
 - [AgentStateGraph](https://github.com/agentstatelabs/agentstategraph)
+
+## License
+
+Licensed under either of
+[Apache License, Version 2.0](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-APACHE)
+or [MIT license](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-MIT),
+at your option.

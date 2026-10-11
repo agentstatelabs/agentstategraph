@@ -19,6 +19,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
     - In-memory and Postgres reminder updates aren't atomic.
     - Concurrent Postgres connects can deadlock on schema setup.
 
+## [v1.2.8] — 2026-10-09
+
+### Changed
+- **The library crates are packaged for crates.io.** Each of the 15 crates under `crates/` now ships the MIT and Apache-2.0 license texts and a README, links its own docs.rs page, and carries keywords and a category. docs.rs builds `agentstategraph-storage`, `agentstategraph-mcp` and `agentstategraph-ffi` with all features, so the Postgres backend and the external evaluators are documented. `agentstategraph-napi` and `agentstategraph-python` are `publish = false`; they ship to npm and PyPI. RELEASE.md describes publishing from the tag.
+- The `agentstategraph-policy-wasm` and `agentstategraph-policy-cedar` descriptions no longer call them stubs.
+
+### Fixed
+- **The `agentstategraph-policy` and `agentstategraph-taint` READMEs gave the license as BSL-1.1.** Both crates are MIT OR Apache-2.0, like the rest of the workspace.
+- `Cargo.lock` pinned `chacha20` 0.10.0, which has been yanked; it now pins 0.10.2.
+
 ## [v1.2.7] — 2026-10-02
 
 ### Fixed
