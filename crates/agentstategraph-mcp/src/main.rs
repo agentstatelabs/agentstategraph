@@ -511,7 +511,12 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "  ASG_LOG=<filter>      Level or filter, e.g. debug or agentstategraph_mcp=debug (else RUST_LOG; default info, or warn for MCP stdio)"
                 );
-                eprintln!("  ASG_LOG_FORMAT=json   One JSON object per line");
+                eprintln!(
+                    "  ASG_LOG_FORMAT=<fmt>  auto (text on a terminal, JSON otherwise), text, json or ecs"
+                );
+                eprintln!(
+                    "  OTEL_EXPORTER_OTLP_ENDPOINT=<url>  Send traces, metrics and logs over OTLP (built with --features otlp)"
+                );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
                 eprintln!("HTTP API ENDPOINTS:");
@@ -600,6 +605,15 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
 
 /// Build the repository and run either the HTTP or MCP server.
 pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_serve_with(args, None)
+}
+
+/// [`cmd_serve`], serving `/metrics` (with `--metrics`) from `meters`, the
+/// meter provider of the process's telemetry.
+pub fn cmd_serve_with(
+    args: ServeArgs,
+    meters: Option<oxtel::sdk::metrics::MeterProvider>,
+) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
     // A typo mustn't quietly pick a side.
     if !matches!(args.policy_fail_safe.as_str(), "deny" | "allow") {
@@ -706,7 +720,11 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
             http::OriginPolicy::for_bind(&args.bind_addr, &args.cors_origins, &args.allowed_hosts);
         eprintln!("{}", origin_policy.describe());
         eprintln!("{}", args.bounds.describe());
-        if args.metrics {
+        if args.metrics && meters.is_none() {
+            eprintln!(
+                "Warning: --metrics is off: another telemetry setup is installed in this process"
+            );
+        } else if args.metrics {
             eprintln!(
                 "Metrics: /metrics{}",
                 if args.auth_enabled {
@@ -789,7 +807,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     tenant_mgr,
                     &args.bounds,
                     &origin_policy,
-                    args.metrics,
+                    if args.metrics { meters } else { None },
                 );
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -797,6 +815,7 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                     listener,
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
+                .with_graceful_shutdown(shutdown_signal())
                 .await?;
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
@@ -810,12 +829,18 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let mut srv = server::AgentStateGraphServer::new(repo)
                     .with_fail_safe(args.policy_fail_safe.clone());
                 srv = apply_external_evaluators(srv, &args.external_evaluators);
-                let service = srv
+                let service = oxtel_rmcp::Instrumented::new(srv)
+                    .with_transport("pipe")
                     .serve(rmcp::transport::stdio())
                     .await
                     .map_err(|e| format!("MCP server error: {}", e))?;
 
-                service.waiting().await?;
+                tokio::select! {
+                    done = service.waiting() => {
+                        done?;
+                    }
+                    () = shutdown_signal() => {}
+                }
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
     }
@@ -824,50 +849,104 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Install the log subscriber: stderr (stdout is the MCP stdio channel),
-/// filtered by `ASG_LOG`, else `RUST_LOG`, else `default_level`, as text or,
-/// with `ASG_LOG_FORMAT=json`, one JSON object per line.
-fn init_logging(default_level: &str) {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("ASG_LOG")
-        .or_else(|_| EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr);
-    let installed = if std::env::var("ASG_LOG_FORMAT").is_ok_and(|f| f == "json") {
-        builder
-            .fmt_fields(tracing_subscriber::fmt::format::JsonFields::new())
-            .event_format(agentstategraph_mcp::logging::FlatJson)
-            .try_init()
-    } else {
-        builder
-            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-            .try_init()
+/// Set up logs, traces and metrics as docs/OBSERVABILITY.md describes. Log
+/// lines go to stderr (stdout is the MCP stdio channel) at `ASG_LOG`, else
+/// `RUST_LOG`, else `default_level`, in the form `ASG_LOG_FORMAT` names.
+/// With the `otlp` feature, everything is also sent over OTLP once
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Serving HTTP keeps metrics in
+/// memory for `/metrics`.
+///
+/// `None` when an embedding host has installed its own subscriber, which
+/// stays in charge. Keep the guard until `main` returns: dropping it sends
+/// what's pending.
+fn init_telemetry(
+    default_level: &str,
+    serving_http: bool,
+) -> Result<Option<oxtel::Guard>, oxtel::Error> {
+    use oxtel::sdk::logs::LocalFormat;
+    let level = std::env::var("ASG_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .ok()
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| default_level.to_string());
+    let mut builder = oxtel::builder()
+        .with_default_service_name("agentstategraph")
+        .with_resource_attribute(oxtel::KeyValue::new(
+            "service.version",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_logs_filter(level);
+    match std::env::var("ASG_LOG_FORMAT")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "auto" => {}
+        "text" => builder = builder.with_local_logs(LocalFormat::Text),
+        "json" => builder = builder.with_local_logs(LocalFormat::Json),
+        "ecs" => builder = builder.with_local_logs(LocalFormat::Ecs),
+        other => {
+            eprintln!("Warning: ASG_LOG_FORMAT={other} isn't auto, text, json or ecs; using auto")
+        }
+    }
+    if serving_http {
+        builder = builder.with_pull_metrics();
+    }
+    match builder.install() {
+        Ok(guard) => Ok(Some(guard)),
+        Err(oxtel::Error::SubscriberAlreadySet | oxtel::Error::RecorderAlreadySet) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM, which container
+/// runtimes send to stop a server. The server then finishes what's in
+/// flight and `main` returns, so pending telemetry is sent.
+async fn shutdown_signal() {
+    let interrupt = async {
+        let _ = tokio::signal::ctrl_c().await;
     };
-    // A subscriber already set (by an embedding host) stays in charge.
-    let _ = installed;
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = interrupt => {}
+        () = terminate => {}
+    }
+    tracing::info!("shutting down");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     // HTTP serving logs each request at info; an MCP stdio server stays
     // quiet unless something is wrong.
-    init_logging(if args.iter().any(|a| a == "--http") {
-        "info"
-    } else {
-        "warn"
-    });
+    let serving_http = args.iter().any(|a| a == "--http");
+    let telemetry = init_telemetry(if serving_http { "info" } else { "warn" }, serving_http)?;
 
     if args.get(1).map(String::as_str) == Some("migrate") {
         let rest: Vec<String> = args.iter().skip(2).cloned().collect();
-        std::process::exit(migrate::run(&rest));
+        let code = migrate::run(&rest);
+        drop(telemetry);
+        std::process::exit(code);
     }
     if args.get(1).map(String::as_str) == Some("healthcheck") {
-        std::process::exit(healthcheck(&args[2..]));
+        let code = healthcheck(&args[2..]);
+        drop(telemetry);
+        std::process::exit(code);
     }
 
-    cmd_serve(parse_args(&args[1..]))
+    let meters = telemetry.as_ref().and_then(|t| t.meter_provider().cloned());
+    cmd_serve_with(parse_args(&args[1..]), meters)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Request logs name the API key by id, never by the key (DESIGN.md Plan E
-//! t-007), in flat JSON with OpenTelemetry's field names (Plan H t-002). Its
-//! own test binary, because it installs the process's global log subscriber
-//! to capture what the server logs.
+//! t-007), in flat JSON with OpenTelemetry's field names
+//! (docs/OBSERVABILITY.md). Its own test binary, because it installs the
+//! process's telemetry to capture what the server logs.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -25,24 +25,18 @@ impl std::io::Write for Captured {
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-    type Writer = Captured;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
 const KEY: &str = "asg_request_log_secret_key_00000000000";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_logs_carry_the_key_id_never_the_key() {
     let captured = Captured::default();
-    // As the server installs it for ASG_LOG_FORMAT=json.
-    tracing_subscriber::fmt()
-        .fmt_fields(tracing_subscriber::fmt::format::JsonFields::new())
-        .event_format(agentstategraph_mcp::logging::FlatJson)
-        .with_writer(captured.clone())
-        .init();
+    // As the server installs it for ASG_LOG_FORMAT=json, writing here.
+    let _telemetry = oxtel::builder()
+        .without_env_exporters()
+        .with_local_logs(oxtel::sdk::logs::LocalFormat::Json)
+        .with_local_logs_writer(captured.clone())
+        .install()
+        .expect("install telemetry");
 
     let repo = Arc::new(Repository::new(Box::new(
         SqliteStorage::in_memory().expect("in-memory sqlite"),
@@ -66,7 +60,7 @@ async fn request_logs_carry_the_key_id_never_the_key() {
     })
     .unwrap();
     let id = mgr.key_id(KeyRef::Key(KEY)).unwrap();
-    let app = http::with_observability(http::build_router_with(Arc::clone(&mgr), 0, None), None);
+    let app = http::with_observability(http::build_router_with(Arc::clone(&mgr), 0, None));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     tokio::spawn(async move {

@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use agentstategraph::Repository;
 use agentstategraph_mcp::auth::{ApiKey, TenantManager};
@@ -28,14 +28,41 @@ fn repo_at(path: &PathBuf) -> Arc<Repository> {
     repo
 }
 
+/// The process's telemetry, as `main` installs it with `--http`: metrics
+/// kept in memory for `/metrics`, nothing exported and no log lines. Tests
+/// share it, as requests share the `metrics` recorder, so each test counts
+/// label sets of its own.
+fn meters() -> oxtel::sdk::metrics::MeterProvider {
+    static TELEMETRY: OnceLock<oxtel::Guard> = OnceLock::new();
+    TELEMETRY
+        .get_or_init(|| {
+            oxtel::builder()
+                .with_default_service_name("agentstategraph")
+                .with_resource_attribute(oxtel::KeyValue::new(
+                    "service.version",
+                    env!("CARGO_PKG_VERSION"),
+                ))
+                .without_env_exporters()
+                .without_local_logs()
+                .with_pull_metrics()
+                .install()
+                .expect("install telemetry")
+        })
+        .meter_provider()
+        .expect("a meter provider for /metrics")
+        .clone()
+}
+
 /// The app as `main` assembles it.
 fn observed(mgr: &Arc<TenantManager>, metrics: bool, policy: &http::OriginPolicy) -> Router {
+    // Before the layers, which describe their metrics to the recorder.
+    let meters = meters();
     http::with_server_layers(
         http::build_router_with(Arc::clone(mgr), 0, None),
         Arc::clone(mgr),
         &http::RequestBounds::default(),
         policy,
-        metrics,
+        metrics.then_some(meters),
     )
 }
 
@@ -126,21 +153,40 @@ async fn metrics_count_requests_by_route_template() {
     get(&base, "/api/state/main?path=/", None).await;
     get(&base, "/api/state/main?path=/", None).await;
     get(&base, "/api/state/no-such-branch?path=/", None).await;
-    assert_eq!(get(&base, "/no/such/route", None).await.0, 404);
+    // A POST, so its label set is this test's alone: the tests share one
+    // recorder, and another one GETs a missing route.
+    let missing = reqwest::Client::new()
+        .post(format!("{base}/no/such/route"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status().as_u16(), 404);
 
     let (status, text) = get(&base, "/metrics", None).await;
     assert_eq!(status, 200);
     for line in [
-        r#"target_info{service_name="agentstategraph",service_version="#,
-        r#"http_server_request_duration_seconds_count{http_request_method="GET",url_scheme="http",http_route="/api/state/{ref_name}",http_response_status_code="200"} 2"#,
-        r#"http_server_request_duration_seconds_bucket{http_request_method="GET",url_scheme="http",http_route="/api/state/{ref_name}",http_response_status_code="200",le="+Inf"} 2"#,
+        r#"http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="200",http_route="/api/state/{ref_name}",network_protocol_version="1.1",url_scheme="http",otel_scope_name="oxtel_tower"} 2"#,
+        r#"http_server_request_duration_seconds_bucket{http_request_method="GET",http_response_status_code="200",http_route="/api/state/{ref_name}",network_protocol_version="1.1",url_scheme="http",otel_scope_name="oxtel_tower",le="+Inf"} 2"#,
         // A request that matched no route has no route label.
-        r#"http_server_request_duration_seconds_count{http_request_method="GET",url_scheme="http",http_response_status_code="404"} 1"#,
+        r#"http_server_request_duration_seconds_count{http_request_method="POST",http_response_status_code="404",network_protocol_version="1.1",url_scheme="http",otel_scope_name="oxtel_tower"} 1"#,
         "# TYPE http_server_request_duration_seconds histogram",
-        r#"http_server_active_requests{http_request_method="GET",url_scheme="http"} 1"#,
+        // Other tests' requests may be in flight too.
+        r#"http_server_active_requests{http_request_method="GET",url_scheme="http",otel_scope_name="oxtel_tower"} "#,
     ] {
         assert!(text.contains(line), "missing {line}:\n{text}");
     }
+    let target = text
+        .lines()
+        .find(|l| l.starts_with("target_info{"))
+        .unwrap_or_else(|| panic!("no target_info:\n{text}"));
+    assert!(
+        target.contains(r#"service_name="agentstategraph""#)
+            && target.contains(&format!(
+                r#"service_version="{}""#,
+                env!("CARGO_PKG_VERSION")
+            )),
+        "{target}"
+    );
     assert!(
         !text.contains("no-such-branch"),
         "a path became a label:\n{text}"
@@ -231,7 +277,7 @@ async fn refused_hosts_are_counted_and_metrics_stay_behind_the_host_check() {
 
     let (status, text) = get(&base, "/metrics", None).await;
     assert_eq!(status, 200);
-    let line = r#"http_server_request_duration_seconds_count{http_request_method="GET",url_scheme="http",http_route="/api/state/{ref_name}",http_response_status_code="403"} 1"#;
+    let line = r#"http_server_request_duration_seconds_count{http_request_method="GET",http_response_status_code="403",http_route="/api/state/{ref_name}",network_protocol_version="1.1",url_scheme="http",otel_scope_name="oxtel_tower"} 1"#;
     assert!(text.contains(line), "missing {line}:\n{text}");
 
     for suffix in ["", "-wal", "-shm"] {
