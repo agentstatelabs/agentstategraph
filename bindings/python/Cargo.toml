@@ -1,5 +1,7 @@
 [package]
 name = "agentstategraph-python"
+# Ships to PyPI/npm, not crates.io.
+publish = false
 version.workspace = true
 edition = "2024"
 description = "Python bindings for AgentStateGraph — AI-native versioned state store"

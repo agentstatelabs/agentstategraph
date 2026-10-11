@@ -97,3 +97,10 @@ is expected to:
 - Produce at most one commit tagged `IntentCategory::Migrate`.
 - Bump `/_meta/schema_version` to its declared `to_version()` in that
   same commit. Use `spec_set_json` + `commit_speculation` for atomicity.
+
+## License
+
+Licensed under either of
+[Apache License, Version 2.0](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-APACHE)
+or [MIT license](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE-MIT),
+at your option.
