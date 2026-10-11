@@ -69,7 +69,7 @@ Optional schema annotations for validation and merge behavior.
 
 How AgentStateGraph exposes itself as an MCP server.
 
-- **7.1 Tools** -- All 73 tools: 36 core (state, branching, speculation, query/audit, namespaces, epochs, sessions, explorer), 10 tasks, 12 policy, 8 taint, 7 reminders. Full parameter schemas, descriptions, and example inputs/outputs documented in the [MCP Tools Reference](/reference/mcp-tools).
+- **7.1 Tools** -- All 77 tools: 40 core (state, branching, speculation, query/audit, namespaces, epochs, sessions, explorer, GC and history), 10 tasks, 12 policy, 8 taint, 7 reminders. Full parameter schemas, descriptions, and example inputs/outputs documented in the [MCP Tools Reference](/reference/mcp-tools).
 - **7.2 Resources** -- MCP resource endpoints for state at paths.
 - **7.3 Events** -- MCP event notifications for state changes.
 
@@ -111,7 +111,7 @@ Implementation structure.
   - `agentstategraph-core` — types, diff, merge, BLAKE3 content addressing, `Namespace`
   - `agentstategraph-storage` — pluggable storage backends (Memory, SQLite, Postgres, IndexedDB); 7-trait `Storage` supertrait
   - `agentstategraph` — high-level Repository API
-  - `agentstategraph-mcp` — MCP server (73 tools) + HTTP REST API + `migrate` CLI
+  - `agentstategraph-mcp` — MCP server (77 tools) + HTTP REST API + `migrate` CLI
   - `agentstategraph-ffi` — C ABI / CGo bindings layer
   - `agentstategraph-tasks` — shared Plan/Task state machine, proofs, assignment, CAS-safe writes
   - `agentstategraph-migrate` — schema-evolution framework and migration registry
@@ -151,7 +151,7 @@ Implementation details and test coverage.
 
 - **14.1 Principles** -- Correctness over performance, content-addressed everything, zero unsafe.
 - **14.2 Rust Reference Library** -- The `agentstategraph` crate with Repository API.
-- **14.3 MCP Server** -- The `agentstategraph-mcp` crate with all 73 tools plus the `migrate` subcommand.
+- **14.3 MCP Server** -- The `agentstategraph-mcp` crate with all 77 tools plus the `migrate` subcommand.
 - **14.4 Getting Started Example** -- End-to-end code walkthrough.
 - **14.5 Implementation Test Suite** -- A comprehensive test suite across 15 crates covering all operations, storage backends, namespace isolation, policy engines, taint propagation, and reminder lifecycle.
 

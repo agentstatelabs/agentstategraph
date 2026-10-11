@@ -117,11 +117,15 @@ Policy says what's allowed; taint says what's gone wrong. Compose them in a sing
 
 ### Namespaces: One Substrate, Many Tenants
 
-A single AgentStateGraph deployment can back many projects or tenants without giving each its own database. A **namespace** keys every branch on a composite `(namespace, name)` primary key across all four storage backends, so two tenants can hold same-named branches in complete isolation. Crossing a namespace boundary is deny-by-default and policy-gated -- tenant data never leaks unless an operator explicitly authorizes it.
+A single AgentStateGraph deployment can back many projects without giving each its own database. A **namespace** keys every branch on a composite `(namespace, name)` primary key across all four storage backends, so two projects can hold same-named branches without colliding. On Postgres, tenants share a database with every row partitioned by tenant.
+
+*Updated October 2026:* this post first described namespaces as complete isolation. They partition branches, but share the store's commits; an API key bound to a namespace is what confines a client to it. See the [Namespaces guide](/guides/namespaces/).
 
 ## Try It Now
 
 AgentStateGraph is source-available under [BSL 1.1](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSE) (free for all production use; converts to Apache 2.0 after 18 months) and available today:
+
+*Update:* AgentStateGraph has since returned to MIT OR Apache-2.0, and that grant covers the BSL-licensed releases too. See [LICENSING.md](https://github.com/agentstatelabs/agentstategraph/blob/main/LICENSING.md).
 
 **As an MCP server** (connect to Claude, GPT, or any MCP agent):
 ```bash

@@ -1315,7 +1315,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Create a namespace. Namespaces are isolation boundaries for refs — each namespace has its own branch set. Returns success even if the namespace already exists."
+        description = "Create a namespace. Each namespace has its own set of branches; namespaces share the store's commits. Returns success even if the namespace already exists."
     )]
     async fn agentstategraph_create_namespace(
         &self,
@@ -1357,7 +1357,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Merge a branch from another namespace into a branch in the active namespace. Cross-namespace merges are policy-gated and audited. Currently requires PolicyStore integration."
+        description = "Merge a branch from another namespace into a branch in the active namespace. Always refused for now: the policy check that would allow it isn't built yet."
     )]
     async fn agentstategraph_cross_namespace_merge(
         &self,

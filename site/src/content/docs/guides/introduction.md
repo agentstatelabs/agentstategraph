@@ -37,13 +37,13 @@ Every state change in AgentStateGraph captures the **full provenance chain**:
 - **Schema-aware merge** — CRDT-inspired conflict resolution
 - **Speculative execution** — O(1) branching, instant discard
 - **Multi-agent orchestration** — scoped sessions, delegation, intent trees
-- **Namespaces** — ref-layer isolation for multi-project / multi-tenant deployments, with deny-by-default cross-namespace merge
+- **Namespaces** — a separate set of branches per project in one store; an API key bound to a namespace confines a client to it
 - **Epochs** — sealable, tamper-evident audit bundles you can archive and export
-- **73 MCP tools** — any agent can connect immediately
+- **77 MCP tools** — any agent can connect immediately
 - **HTTP REST API** — run with `--http`
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
-- **7 language bindings** — Rust, Python, TypeScript, Go, .NET / C#, WASM, C FFI
-- **4 storage backends** — in-memory, SQLite, Postgres (multi-tenant), and IndexedDB in the browser
+- **8 language bindings** — Rust, Python, TypeScript, Go, Swift, .NET / C#, WASM, C FFI
+- **4 storage backends** — in-memory, SQLite, Postgres (tenants partitioned in a shared database, with TLS), and IndexedDB in the browser
 - **Plans & Tasks** — shared `agentstategraph-tasks` primitive with state machine, proofs, blockers, agent assignment, and process-safe CAS writes
 - **Reminders** — `agentstategraph-reminders` pull-based scheduling with priority, recurrence, and approval gating
 - **Policy** — `agentstategraph-policy` for authorization + cost-of-change gating with fallback actions and pluggable Cedar / Rego / WASM evaluators; Ed25519-signed ratification via `agentstategraph-policy-sign`
