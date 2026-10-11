@@ -47,6 +47,9 @@ pub struct ServeArgs {
     /// `Host` names served besides loopback ones (`*` for any). CLI:
     /// `--allowed-host` (repeatable). Env: `ASG_ALLOWED_HOSTS`, comma-separated.
     pub allowed_hosts: Vec<String>,
+    /// Serve Prometheus metrics at `/metrics`. CLI: `--metrics`. Env:
+    /// `ASG_METRICS=1`.
+    pub metrics: bool,
 }
 
 /// A comma-separated list from the environment.
@@ -68,8 +71,8 @@ fn env_port() -> Option<u16> {
 }
 
 /// `agentstategraph-mcp healthcheck [--port N] [--bind ADDR]`: exit 0 if the
-/// HTTP server on this machine answers `GET /api/health` with 200, and 1
-/// otherwise. It finds the server the way `--http` picks its address
+/// HTTP server on this machine answers `GET /api/ready` with 200 (it is
+/// serving and its store answers), and 1 otherwise. It finds the server the way `--http` picks its address
 /// (`--port` or `ASG_PORT`, `--bind` or `ASG_BIND`), so a container health
 /// check needs neither curl nor the server's arguments.
 pub fn healthcheck(args: &[String]) -> i32 {
@@ -88,7 +91,7 @@ pub fn healthcheck(args: &[String]) -> i32 {
             0
         }
         Ok(status) => {
-            eprintln!("unhealthy: {host}:{port}/api/health answered {status}");
+            eprintln!("unhealthy: {host}:{port}/api/ready answered {status}");
             1
         }
         Err(e) => {
@@ -107,12 +110,14 @@ pub fn healthcheck_host(bind: &str) -> String {
     }
 }
 
-/// `GET /api/health` with plain HTTP/1.1 and a 3-second budget per step;
+/// `GET /api/ready` with plain HTTP/1.1 and a 5-second budget per step;
 /// the status code on success.
 fn probe_health(host: &str, port: u16) -> std::io::Result<u16> {
     use std::io::{Read, Write};
     use std::net::ToSocketAddrs;
-    let timeout = std::time::Duration::from_secs(3);
+    // Longer than the server's own 3-second readiness timeout, so a slow
+    // store reads as "not ready" rather than as no answer.
+    let timeout = std::time::Duration::from_secs(5);
     let addr = (host, port)
         .to_socket_addrs()?
         .next()
@@ -121,8 +126,7 @@ fn probe_health(host: &str, port: u16) -> std::io::Result<u16> {
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     // `localhost` passes the Host check on any bind.
-    stream
-        .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    stream.write_all(b"GET /api/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
     let mut head = [0u8; 64];
     let n = stream.read(&mut head)?;
     std::str::from_utf8(&head[..n])
@@ -263,6 +267,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let mut initial_admin_key_cli: Option<String> = None;
     let mut external_evaluators: Vec<String> = Vec::new();
     let mut asd_url: Option<String> = std::env::var("ASG_ASD_URL").ok().filter(|s| !s.is_empty());
+    let mut metrics = std::env::var("ASG_METRICS").is_ok_and(|v| !v.is_empty() && v != "0");
     let mut cors_origins_cli: Vec<String> = Vec::new();
     let mut allowed_hosts_cli: Vec<String> = Vec::new();
 
@@ -373,6 +378,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     allowed_hosts_cli.push(args[i].clone());
                 }
             }
+            "--metrics" => {
+                metrics = true;
+            }
             "--help" | "-h" => {
                 eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
@@ -436,10 +444,22 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "      --allowed-host <HOST>  Also answer to HOST; on a loopback bind only loopback names are served by default; * for any (repeatable; env ASG_ALLOWED_HOSTS)"
                 );
+                eprintln!(
+                    "      --metrics         Serve Prometheus metrics at /metrics (admin key needed with --auth; env ASG_METRICS=1)"
+                );
+                eprintln!();
+                eprintln!("LOGGING (stderr):");
+                eprintln!(
+                    "  ASG_LOG=<filter>      Level or filter, e.g. debug or agentstategraph_mcp=debug (else RUST_LOG; default info, or warn for MCP stdio)"
+                );
+                eprintln!("  ASG_LOG_FORMAT=json   One JSON object per line");
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
                 eprintln!("HTTP API ENDPOINTS:");
-                eprintln!("  GET  /api/health                  Health check");
+                eprintln!("  GET  /api/health                  Liveness: the process is serving");
+                eprintln!(
+                    "  GET  /api/ready                   Readiness: the store answers (503 if not)"
+                );
                 eprintln!("  GET  /api/stats/:ref              Summary statistics");
                 eprintln!("  GET  /api/state/:ref?path=/x      Read state value");
                 eprintln!("  GET  /api/state/:ref/paths        List all paths");
@@ -505,6 +525,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
         } else {
             allowed_hosts_cli
         },
+        metrics,
     }
 }
 
@@ -602,6 +623,16 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         let origin_policy =
             http::OriginPolicy::for_bind(&args.bind_addr, &args.cors_origins, &args.allowed_hosts);
         eprintln!("{}", origin_policy.describe());
+        if args.metrics {
+            eprintln!(
+                "Metrics: /metrics{}",
+                if args.auth_enabled {
+                    " (admin key)"
+                } else {
+                    ""
+                }
+            );
+        }
         if origin_policy.allows_any_origin() && !args.auth_enabled {
             eprintln!(
                 "WARNING: any web page the user visits can read and write this store \
@@ -668,7 +699,9 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let extra = args.asd_url.map(http::asd_proxy_router);
                 #[cfg(not(feature = "providers"))]
                 let extra = None;
-                let app = http::build_router_with(tenant_mgr, args.rate_limit_rpm, extra);
+                let app =
+                    http::build_router_with(Arc::clone(&tenant_mgr), args.rate_limit_rpm, extra);
+                let app = http::with_observability(app, tenant_mgr, args.metrics);
                 let app = http::with_origin_policy(app, &origin_policy);
                 let addr = format!("{}:{}", args.bind_addr, args.http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -702,8 +735,37 @@ pub fn cmd_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Install the log subscriber: stderr (stdout is the MCP stdio channel),
+/// filtered by `ASG_LOG`, else `RUST_LOG`, else `default_level`, as text or,
+/// with `ASG_LOG_FORMAT=json`, one JSON object per line.
+fn init_logging(default_level: &str) {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_env("ASG_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr);
+    let installed = if std::env::var("ASG_LOG_FORMAT").is_ok_and(|f| f == "json") {
+        builder.json().try_init()
+    } else {
+        builder
+            .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+            .try_init()
+    };
+    // A subscriber already set (by an embedding host) stays in charge.
+    let _ = installed;
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    // HTTP serving logs each request at info; an MCP stdio server stays
+    // quiet unless something is wrong.
+    init_logging(if args.iter().any(|a| a == "--http") {
+        "info"
+    } else {
+        "warn"
+    });
 
     if args.get(1).map(String::as_str) == Some("migrate") {
         let rest: Vec<String> = args.iter().skip(2).cloned().collect();

@@ -25,6 +25,7 @@ use tower_governor::GovernorLayer;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
@@ -56,19 +57,19 @@ pub fn build_governor_layer(rpm: u32) -> Option<PeerIpGovernorLayer> {
     Some(GovernorLayer::new(config))
 }
 
-/// Track per-key-prefix warning state so we only warn once per key when
-/// it falls back to the body-supplied agent field.
+/// Track per-key warning state so we only warn once per key when it falls
+/// back to the body-supplied agent field.
 static AGENT_FALLBACK_WARNED: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
-fn warn_agent_fallback_once(key_prefix: &Option<String>) {
-    let prefix = key_prefix.clone().unwrap_or_else(|| "<anon>".to_string());
+fn warn_agent_fallback_once(key_id: &Option<String>) {
+    let key = key_id.clone().unwrap_or_else(|| "<anon>".to_string());
     let mut guard = AGENT_FALLBACK_WARNED
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let set = guard.get_or_insert_with(std::collections::HashSet::new);
-    if set.insert(prefix.clone()) {
+    if set.insert(key.clone()) {
         warn!(
-            key_prefix = %prefix,
+            key_id = %key,
             "commit agent_id not bound to API key; falling back to body-supplied `agent` field (set `commit_agent_id` on the key to enforce authenticated agent identity)"
         );
     }
@@ -165,7 +166,8 @@ pub fn build_router_with(
 
     // Public health endpoint — no auth.
     let public_routes = Router::new()
-        .route("/api/health", get(health_with_mgr))
+        .route("/api/health", get(health))
+        .route("/api/ready", get(ready))
         .with_state(tenant_mgr.clone());
 
     // Admin routes (key management) — gated behind admin_auth_middleware.
@@ -212,6 +214,205 @@ pub fn escapes_proxy_root(path: &str) -> bool {
             let segment = segment.to_ascii_lowercase().replace("%2e", ".");
             segment == "." || segment == ".."
         })
+}
+
+// ─── Observability ──────────────────────────────────────────
+
+/// Request logging, and metrics when `metrics` is set, for a finished app.
+///
+/// Each request is logged when it finishes, at `info`, with its method, path
+/// (no query), status, latency and the id of the API key it used (recorded
+/// by the auth middleware), never the key. Server errors log at `error`.
+///
+/// With `metrics`, `GET /metrics` serves Prometheus text: requests by
+/// method, route and status, latency histograms by method and route, and
+/// requests in flight. Routes are the router's templates (`/api/state/{ref_name}`),
+/// so label sets stay bounded. When auth is on, it needs an admin key.
+pub fn with_observability(app: Router, tenant_mgr: Arc<TenantManager>, metrics: bool) -> Router {
+    let app = if metrics {
+        let recorder = Arc::new(HttpMetrics::default());
+        let endpoint = Router::new()
+            .route("/metrics", get(render_metrics))
+            .route_layer(middleware::from_fn_with_state(
+                tenant_mgr,
+                auth::admin_auth_middleware,
+            ))
+            .with_state(Arc::clone(&recorder));
+        app.merge(endpoint)
+            .layer(middleware::from_fn_with_state(recorder, record_metrics))
+    } else {
+        app
+    };
+    app.layer(
+        TraceLayer::new_for_http()
+            .make_span_with(|req: &axum::extract::Request| {
+                tracing::info_span!(
+                    "http",
+                    method = %req.method(),
+                    path = %req.uri().path(),
+                    key_id = tracing::field::Empty,
+                )
+            })
+            .on_request(())
+            .on_response(
+                |res: &axum::response::Response,
+                 latency: std::time::Duration,
+                 _: &tracing::Span| {
+                    info!(
+                        status = res.status().as_u16(),
+                        latency_ms = latency.as_millis() as u64,
+                        "request"
+                    );
+                },
+            ),
+    )
+}
+
+/// Upper bounds (seconds) of the request latency histogram buckets.
+const LATENCY_BUCKETS: [f64; 11] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
+/// Counters behind `/metrics`.
+#[derive(Default)]
+pub struct HttpMetrics {
+    /// (method, route, status) -> requests.
+    requests: Mutex<std::collections::BTreeMap<(String, String, u16), u64>>,
+    /// (method, route) -> latency histogram.
+    latency: Mutex<std::collections::BTreeMap<(String, String), Histogram>>,
+    in_flight: std::sync::atomic::AtomicI64,
+}
+
+#[derive(Default)]
+struct Histogram {
+    buckets: [u64; LATENCY_BUCKETS.len()],
+    sum: f64,
+    count: u64,
+}
+
+impl HttpMetrics {
+    fn record(&self, method: &str, route: &str, status: u16, seconds: f64) {
+        *self
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry((method.to_string(), route.to_string(), status))
+            .or_default() += 1;
+        let mut latency = self.latency.lock().unwrap_or_else(|e| e.into_inner());
+        let h = latency
+            .entry((method.to_string(), route.to_string()))
+            .or_default();
+        for (bucket, bound) in h.buckets.iter_mut().zip(LATENCY_BUCKETS) {
+            if seconds <= bound {
+                *bucket += 1;
+            }
+        }
+        h.sum += seconds;
+        h.count += 1;
+    }
+
+    /// Prometheus text exposition format.
+    pub fn render(&self) -> String {
+        use std::fmt::Write;
+        let label = |v: &str| {
+            v.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        };
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "# HELP asg_build_info Build information.\n# TYPE asg_build_info gauge\n\
+             asg_build_info{{version=\"{}\"}} 1",
+            env!("CARGO_PKG_VERSION")
+        );
+        let _ = writeln!(
+            out,
+            "# HELP asg_http_requests_in_flight HTTP requests being handled.\n\
+             # TYPE asg_http_requests_in_flight gauge\nasg_http_requests_in_flight {}",
+            self.in_flight.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "# HELP asg_http_requests_total HTTP requests handled, by method, route and status.\n\
+             # TYPE asg_http_requests_total counter"
+        );
+        for ((method, route, status), n) in self
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
+            let _ = writeln!(
+                out,
+                "asg_http_requests_total{{method=\"{}\",route=\"{}\",status=\"{status}\"}} {n}",
+                label(method),
+                label(route)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP asg_http_request_duration_seconds HTTP request latency, by method and route.\n\
+             # TYPE asg_http_request_duration_seconds histogram"
+        );
+        for ((method, route), h) in self
+            .latency
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
+            let labels = format!("method=\"{}\",route=\"{}\"", label(method), label(route));
+            for (bound, n) in LATENCY_BUCKETS.iter().zip(h.buckets) {
+                let _ = writeln!(
+                    out,
+                    "asg_http_request_duration_seconds_bucket{{{labels},le=\"{bound}\"}} {n}"
+                );
+            }
+            let _ = writeln!(
+                out,
+                "asg_http_request_duration_seconds_bucket{{{labels},le=\"+Inf\"}} {}\n\
+                 asg_http_request_duration_seconds_sum{{{labels}}} {}\n\
+                 asg_http_request_duration_seconds_count{{{labels}}} {}",
+                h.count, h.sum, h.count
+            );
+        }
+        out
+    }
+}
+
+async fn record_metrics(
+    State(metrics): State<Arc<HttpMetrics>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    use std::sync::atomic::Ordering;
+    let method = req.method().to_string();
+    // The route template, not the path, so ref names don't become labels.
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or_else(|| "unmatched".to_string(), |m| m.as_str().to_string());
+    let started = std::time::Instant::now();
+    metrics.in_flight.fetch_add(1, Ordering::Relaxed);
+    let res = next.run(req).await;
+    metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+    metrics.record(
+        &method,
+        &route,
+        res.status().as_u16(),
+        started.elapsed().as_secs_f64(),
+    );
+    res
+}
+
+async fn render_metrics(State(metrics): State<Arc<HttpMetrics>>) -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        metrics.render(),
+    )
 }
 
 // ─── Origins and Host names ─────────────────────────────────
@@ -403,22 +604,41 @@ pub fn is_loopback_bind(bind_addr: &str) -> bool {
 
 // ─── Health ─────────────────────────────────────────────────
 
-async fn health_with_mgr(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Value> {
-    // Get repo via manager (no auth needed for health)
-    let repo = mgr.get_repo(None).unwrap_or_else(|_| {
-        // If auth is enabled, health still works — just report status
-        mgr.get_repo(None).unwrap_or_else(|_| {
-            Arc::new(Repository::new(Box::new(
-                agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
-            )))
-        })
-    });
-    let branches = repo.list_branches(None).unwrap_or_default();
+/// Liveness: the process is up and serving. Touches nothing else, so a slow
+/// or unreachable store doesn't get a healthy process restarted; that's
+/// what `/api/ready` reports.
+async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
-        "branches": branches.len(),
     }))
+}
+
+/// How long `/api/ready` waits for the store.
+const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Readiness: the store answers. 503 when it errors or takes longer than
+/// [`READY_TIMEOUT`]. The endpoint is public, so the reason is logged, not
+/// returned (a storage error can name hosts).
+async fn ready(State(mgr): State<Arc<TenantManager>>) -> impl IntoResponse {
+    let repo = Arc::clone(mgr.default_repo());
+    let check = tokio::task::spawn_blocking(move || repo.list_namespaces().map(|_| ()));
+    let failure = match tokio::time::timeout(READY_TIMEOUT, check).await {
+        Ok(Ok(Ok(()))) => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "ready" })),
+            );
+        }
+        Ok(Ok(Err(e))) => e.to_string(),
+        Ok(Err(e)) => format!("check panicked: {e}"),
+        Err(_) => format!("no answer within {}s", READY_TIMEOUT.as_secs()),
+    };
+    warn!(reason = %failure, "not ready: the store isn't answering");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "status": "not ready" })),
+    )
 }
 
 // ─── Admin: Key Management ──────────────────────────────────
@@ -1104,7 +1324,7 @@ fn resolve_agent(ctx: &AuthContext, body_agent: Option<String>) -> String {
     if let Some(ref bound) = ctx.commit_agent_id {
         return bound.clone();
     }
-    warn_agent_fallback_once(&ctx.key_prefix);
+    warn_agent_fallback_once(&ctx.key_id);
     body_agent.unwrap_or_else(|| "http".to_string())
 }
 
@@ -1115,7 +1335,7 @@ fn resolve_agent(ctx: &AuthContext, body_agent: Option<String>) -> String {
 fn enforce_migrate_capability(category: IntentCategory, ctx: &AuthContext) -> IntentCategory {
     if matches!(category, IntentCategory::Migrate) && !ctx.can_migrate {
         warn!(
-            key_prefix = ?ctx.key_prefix,
+            key_id = ?ctx.key_id,
             "rejecting Migrate category from key without `can_migrate`; downgrading to Custom(\"Migrate-claimed\")"
         );
         return IntentCategory::Custom("Migrate-claimed".to_string());

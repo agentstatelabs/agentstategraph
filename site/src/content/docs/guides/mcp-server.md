@@ -58,6 +58,14 @@ curl "http://localhost:3001/api/blame/main?path=/cluster/name"
 curl "http://localhost:3001/api/state/main/search?query=mesh"
 ```
 
+### Logs, health and metrics
+
+The server logs to stderr. In HTTP mode it logs each request at `info`, with method, path, status, latency and the API key's id, never the key itself. Set `ASG_LOG` to change the level (`debug`, or a filter like `agentstategraph_mcp=debug`) and `ASG_LOG_FORMAT=json` for one JSON object per line.
+
+`/api/health` reports that the process is serving (liveness). `/api/ready` also checks that the store answers, and returns `503` if it doesn't (readiness). `agentstategraph-mcp healthcheck` checks `/api/ready` from the same machine, for container health checks.
+
+`--metrics` serves Prometheus metrics at `/metrics`: request counts by method, route and status, latency histograms, and requests in flight. With `--auth`, scraping it needs an admin key.
+
 ### Browsers and host names
 
 Browser pages served from localhost (any port) can call the API. To let a page from another origin call it, pass `--cors-origin https://app.example.com` (repeatable, or `ASG_CORS_ORIGINS` as a comma-separated list). `--cors-origin '*'` allows any origin; only do that with `--auth`.
@@ -68,7 +76,8 @@ Full endpoint list:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Health check |
+| GET | `/api/health` | Liveness: the process is serving |
+| GET | `/api/ready` | Readiness: the store answers (`503` if not) |
 | GET | `/api/stats/:ref` | Summary statistics |
 | GET | `/api/state/:ref?path=/x` | Read state value |
 | GET | `/api/state/:ref/paths` | List all paths |

@@ -36,6 +36,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - The store shape reports the bytes the tenant's rows take in each table. `gc_vacuum` does nothing on Postgres; autovacuum reclaims the space.
   - Schema version 3 adds a write time to `objects` and a table for speculation pins. Existing objects count as written long ago, so a sweep can take them as soon as nothing reaches them.
 - **`agentstategraph-mcp healthcheck`** exits 0 if the HTTP server on this machine answers `/api/health`, and 1 otherwise. It reads the same `--port`/`ASG_PORT` and `--bind`/`ASG_BIND` settings as the server, so a container health check needs neither curl nor the server's arguments.
+- **Logging.** The server now installs a log subscriber, writing to stderr; before, no subscriber was installed and every warning was dropped. In HTTP mode each request is logged at `info` with method, path (no query), status, latency and the API key's id, never the key. Set the level with `ASG_LOG` (or `RUST_LOG`); the default is `info` for HTTP and `warn` for MCP stdio. Set `ASG_LOG_FORMAT=json` for one JSON object per line.
+- **`/api/ready`** checks that the store answers, within 3 seconds, and returns `503` if it doesn't. The reason goes to the log, not the response.
+- **`--metrics`** (or `ASG_METRICS=1`) serves Prometheus metrics at `/metrics`: requests by method, route template and status, latency histograms, requests in flight, and build info. With `--auth`, it needs an admin key.
+- **`agentstategraph-mcp healthcheck`** exits 0 if the HTTP server on this machine answers `/api/ready` (it is serving and its store answers), and 1 otherwise. It reads the same `--port`/`ASG_PORT` and `--bind`/`ASG_BIND` settings as the server, so a container health check needs neither curl nor the server's arguments.
 - **`ASG_PORT`** sets the HTTP port when `--port` isn't given.
 
 ### Changed
@@ -49,6 +53,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **The README's `docker run` and the compose file publish the port on `127.0.0.1`,** so only the host machine can reach the server. Anything that can reach the port can read and write the store. The README shows how to serve other machines with `--auth`.
 - **An API key's tenant is enforced.** A non-admin key for a tenant other than the one this server serves (`--tenant`, default `default`) gets `403`, and the message says which tenant it is for. Before, a key's tenant was stored and ignored, so a key for any tenant could read and write this server's store. Admin keys serve the whole process. On SQLite, where the tenant is only a label, start the server with `--tenant <name>` to keep using keys made under that name. Keys created through the admin API now default `tenant_id` to the server's tenant.
 - **A key bound to a namespace works only in that namespace.** Before, `namespace_id` was stored and never read. Requests with such a key now read and write that namespace only. Refs must be branch names: commit ids and prefixes resolve across all namespaces, so they get `403`. Store-wide endpoints (`/api/gc/*`, `/api/history`) also refuse the key. Admins can create one with `namespace_id` in `POST /api/admin/keys`.
+- **`/api/health` is now a liveness check.** It no longer reads the store, and no longer reports `branches`. With auth on, it used to build a throwaway in-memory store on every call. `agentstategraph-mcp healthcheck` (and so the compose health check) now uses `/api/ready`.
+- **`AuthContext::key_prefix` is now `key_id`.** Warnings used to log the first 8 characters of the raw key; they log the key's id instead.
+- **Rust API:** `http::with_observability(app, tenant_mgr, metrics)` adds request logging, plus metrics when `metrics` is set. `TenantManager::default_repo` is new.
 - **Rust API:**
   - `Repository::with_branch_refs_only` and `RepoError::CommitRefNotAllowed`.
   - `TenantManager::multi_tenant_for(repo, keys_file, tenant)` and `CreateKeyOptions::namespace_id`.
