@@ -103,6 +103,8 @@ test:
     # Fail rather than skip if the database is ever missing.
     ASG_REQUIRE_POSTGRES: "1"
   script:
+    # The ASD proxy is behind the off-by-default `providers` feature.
+    - cargo test --locked -p agentstategraph-mcp --features providers --test asd_proxy
     - cargo test --workspace --locked --exclude agentstategraph-python
     # Postgres TLS is opt-in (postgres-tls); compile and unit-test it too.
     - cargo test --locked -p agentstategraph-storage --features postgres-tls,memory --lib

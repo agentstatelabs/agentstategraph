@@ -74,6 +74,10 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
+      # The ASD proxy is behind the off-by-default `providers` feature.
+      - name: ASD proxy
+        run: cargo test --locked -p agentstategraph-mcp --features providers --test asd_proxy
+
       - name: Test
         run: cargo test --workspace --locked --exclude agentstategraph-python
 
