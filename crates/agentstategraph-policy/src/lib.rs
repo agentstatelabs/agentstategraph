@@ -1,8 +1,8 @@
 //! Policy primitive for AgentStateGraph.
 //!
 //! Fourth-primitive sibling crate, parallel to `agentstategraph-tasks`.
-//! Implements the authorization + change-cost primitive described in
-//! `/strategy/POLICY_V1.md` (v1.1, §§2-7 and §22). Ships the engine
+//! Implements the authorization + change-cost primitive of the Policy v1
+//! design (§§2-7 and §22; user guide: `docs/POLICY_GUIDE.md`). Ships the engine
 //! surface only — MCP tools, CLI, and Lens UI live in their respective
 //! consumer crates.
 //!

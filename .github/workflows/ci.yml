@@ -27,6 +27,26 @@ jobs:
   test:
     name: check + test
     runs-on: ubuntu-latest
+    # Postgres for the backend conformance suites (DESIGN.md Plan D t-001).
+    # Without TEST_DATABASE_URL their Postgres legs skip.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: asg
+          POSTGRES_PASSWORD: asg
+          POSTGRES_DB: asg_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U asg -d asg_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://asg:asg@localhost:5432/asg_test
+      # Fail rather than skip if the database is ever missing.
+      ASG_REQUIRE_POSTGRES: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +80,20 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked --exclude agentstategraph-python
+
+      # Postgres TLS is opt-in (postgres-tls). Run it against a local server
+      # that refuses plaintext, with a certificate from a throwaway CA.
+      - name: Postgres TLS
+        env:
+          ASG_REQUIRE_POSTGRES_TLS: "1"
+        run: |
+          PGBIN="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$PGBIN" ]; then
+            sudo apt-get install -y --no-install-recommends postgresql
+            PGBIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
+          fi
+          cargo test --locked -p agentstategraph-storage --features postgres-tls,memory --lib
+          PATH="$PGBIN:$PATH" scripts/test-postgres.sh --tls
 
   swift:
     name: swift binding (macOS)
