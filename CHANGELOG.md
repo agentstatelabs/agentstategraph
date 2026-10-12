@@ -8,6 +8,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- **The storage backends record every statement as telemetry, through oxtel-sql 0.3** (Plan H t-008, first part). Each statement is a client span named by its query summary (`SELECT objects`, `INSERT refs`), with `db.system.name` and the statement's text with every literal replaced by `?`, and adds to `db.client.operation.duration`.
+  - On Postgres, spans also carry the database and server, a failed statement's SQLSTATE as `error.type`, and the rows a query returned; `BEGIN`, `COMMIT` and `ROLLBACK` are spans too.
+  - The Postgres pool records `db.client.connection.*`: connections in use and idle, callers waiting, wait and use times, and timeouts. These are still in development in the conventions.
+  - See `docs/OBSERVABILITY.md`. The telemetry crates move to oxtel 0.3.
 - **A backend conformance suite now runs the same checks on the in-memory, SQLite and Postgres backends.**
   - What it covers:
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.

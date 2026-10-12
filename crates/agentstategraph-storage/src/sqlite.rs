@@ -58,6 +58,9 @@ impl SqliteStorage {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path)
             .map_err(|e| StorageError::Backend(format!("sqlite open: {}", e)))?;
+        // Every statement becomes a database span and a
+        // `db.client.operation.duration` measurement.
+        oxtel_sql::rusqlite::instrument(&conn);
         // Best-effort: a pragma failure leaves the slower-but-correct default.
         // `journal_mode` returns the new mode as a row, so it needs a query
         // rather than `pragma_update` (which rejects result rows).
@@ -84,6 +87,7 @@ impl SqliteStorage {
     pub fn in_memory() -> Result<Self, StorageError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| StorageError::Backend(format!("sqlite open: {}", e)))?;
+        oxtel_sql::rusqlite::instrument(&conn);
         let storage = Self {
             conn: Mutex::new(conn),
             path: None,
@@ -1354,6 +1358,7 @@ impl CommitStore for SqliteStorage {
         }
         let conn = Connection::open(path)
             .map_err(|e| StorageError::Backend(format!("gc lock connection: {}", e)))?;
+        oxtel_sql::rusqlite::instrument(&conn);
         // Wait out an in-flight writer rather than failing the sweep at once.
         let _ = conn.busy_timeout(std::time::Duration::from_secs(30));
         conn.execute_batch("BEGIN IMMEDIATE")

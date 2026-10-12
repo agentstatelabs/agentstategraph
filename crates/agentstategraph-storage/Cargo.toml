@@ -14,8 +14,17 @@ description = "Pluggable storage backends for AgentStateGraph"
 [features]
 default = ["sqlite"]
 memory = []
-sqlite = ["dep:rusqlite"]
-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio"]
+# Each backend records its queries as database spans and metrics through
+# oxtel-sql, which uses the `tracing` and `metrics` facades only.
+sqlite = ["dep:rusqlite", "dep:oxtel-sql", "oxtel-sql/rusqlite"]
+postgres = [
+    "dep:tokio-postgres",
+    "dep:deadpool-postgres",
+    "dep:tokio",
+    "dep:oxtel-sql",
+    "oxtel-sql/postgres",
+    "oxtel-sql/deadpool-postgres",
+]
 # TLS for Postgres connections: rustls, verified against Mozilla's roots plus
 # any `sslrootcert`. Opt-in so the default build stays free of rustls.
 postgres-tls = ["postgres", "dep:rustls", "dep:tokio-rustls", "dep:webpki-roots"]
@@ -32,6 +41,7 @@ chrono = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"], optional = true }
 deadpool-postgres = { version = "0.14", optional = true }
+oxtel-sql = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
@@ -39,6 +49,11 @@ webpki-roots = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# tests/telemetry.rs records the backends' spans and metrics in memory.
+oxtel-sdk = "0.3"
+metrics = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 rusqlite = { workspace = true }
 agentstategraph-taint = { workspace = true }
 uuid = { workspace = true }

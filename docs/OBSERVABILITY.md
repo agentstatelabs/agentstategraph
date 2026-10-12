@@ -68,6 +68,29 @@ Each request and notification gets a span named `{mcp.method.name} {target}`, su
 
 Tool arguments and results are never recorded.
 
+### Database
+
+Each statement the storage backend runs gets a client span, through oxtel-sql, named by its query summary: the operations and tables it touches, such as `SELECT objects` or `INSERT refs`. On Postgres, a transaction's `BEGIN`, `COMMIT` and `ROLLBACK` are spans too.
+
+| Attribute | Notes |
+|---|---|
+| `db.system.name` | `sqlite` or `postgresql` |
+| `db.query.summary` | the operations and tables, as the conventions define it |
+| `db.query.text` | the statement with every literal replaced by `?`; values are bound parameters, so none reach telemetry |
+| `db.namespace`, `server.address`, `server.port` | Postgres: the database and server, from the connection string |
+| `db.response.status_code`, `error.type` | Postgres: the SQLSTATE of a failed statement, such as `23505`. SQLite's trace hooks don't report failures |
+| `db.response.returned_rows` | Postgres: the rows a query returned |
+
+| Metric | Instrument and unit | Labels |
+|---|---|---|
+| `db.client.operation.duration` | histogram, `s` | `db.system.name`, `db.query.summary`, `db.namespace`, `server.address`, `server.port`, and on failure `error.type` and `db.response.status_code` |
+| `db.client.connection.count` | gauge | Postgres pool: `db.client.connection.pool.name`, `db.client.connection.state` (`idle` or `used`) |
+| `db.client.connection.max`, `db.client.connection.pending_requests` | gauge | `db.client.connection.pool.name` |
+| `db.client.connection.wait_time`, `db.client.connection.use_time` | histogram, `s` | `db.client.connection.pool.name` |
+| `db.client.connection.timeouts` | counter | `db.client.connection.pool.name` |
+
+The pool's name is `host:port/database`. The `db.client.connection.*` metrics are still in development in the conventions, so their names may change.
+
 ### Log lines
 
 Each line carries `timestamp`, `level`, `target` and `message`. Inside a span it also carries `trace_id` and `span_id`, then the fields of the enclosing spans and of the event, under their OpenTelemetry names. In text, a span appears by its name, such as `GET /state/{ref_name}`. The `ecs` format writes the Elastic Common Schema. With OTLP, the same events are exported as log records that carry their span's context.
@@ -79,7 +102,7 @@ DESIGN.md Plan H adds, under the rules below:
 - spans for repository writes, merges, speculations, history extraction, garbage collection, policy evaluation and taint checks;
 - events for write conflicts, policy decisions and taint rejections;
 - metrics such as `asg.commit.duration`, `asg.ref.cas_retries` and `asg.policy.decisions`;
-- database client metrics (`db.client.operation.duration`, pool usage) and store gauges;
+- the time spent waiting for SQLite's single connection, and store gauges;
 - stable error codes as `error.type`;
 - links from commits to their traces.
 
@@ -103,7 +126,7 @@ A metric label must have a small, bounded set of values. Never use as a label:
 - branch, ref or namespace names;
 - free text: error messages, user agents.
 
-Allowed: methods, route templates, status codes, `error.type` codes, schemes, protocol versions, MCP method names and tool names, which the server defines. A tenant is a resource attribute, never a label: one process per tenant, or none. High-cardinality detail belongs on spans and log lines, where it costs nothing to aggregate.
+Allowed: methods, route templates, status codes, `error.type` codes, schemes, protocol versions, MCP method names and tool names, which the server defines; query summaries, which name only the operations and tables in the server's own statements; and the database system, its name and the pool's. A tenant is a resource attribute, never a label: one process per tenant, or none. High-cardinality detail belongs on spans and log lines, where it costs nothing to aggregate.
 
 ## Privacy
 
