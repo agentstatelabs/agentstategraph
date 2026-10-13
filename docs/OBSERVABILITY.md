@@ -125,7 +125,7 @@ External evaluators that run as processes, Rego and Cedar, are killed after 10 s
 
 ### Database
 
-Each statement the storage backend runs gets a client span, through oxtel-sql, named by its query summary: the operations and tables it touches, such as `SELECT objects` or `INSERT refs`. On Postgres, a transaction's `BEGIN`, `COMMIT` and `ROLLBACK` are spans too.
+Each statement the storage backend runs is recorded through oxtel-sql in `db.client.operation.duration`. With `ASG_SQL_SPANS=on`, each also gets a client span, named by its query summary: the operations and tables it touches, such as `SELECT objects` or `INSERT refs`. On Postgres, a transaction's `BEGIN`, `COMMIT` and `ROLLBACK` are spans too. The spans are off by default because a small read runs several statements, and a span for each cost it more than anything else telemetry does (DESIGN.md Plan H t-011). An explicit `RUST_LOG` sets the trace filter instead, so `RUST_LOG=info` turns them on too.
 
 | Attribute | Notes |
 |---|---|

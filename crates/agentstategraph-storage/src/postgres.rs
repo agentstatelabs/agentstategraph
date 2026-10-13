@@ -1274,6 +1274,45 @@ impl ObjectStore for PostgresStorage {
 // ─── CommitStore ────────────────────────────────────────────
 
 impl CommitStore for PostgresStorage {
+    fn put_commit_traced(
+        &self,
+        commit: &Commit,
+        trace: Option<&CommitTrace>,
+    ) -> Result<(), StorageError> {
+        let Some(trace) = trace else {
+            return self.put_commit(commit);
+        };
+        let data =
+            serde_json::to_value(commit).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let timestamp = commit.timestamp;
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            // One statement, so one round trip.
+            client
+                .execute(
+                    "WITH stored AS (
+                         INSERT INTO commits (tenant_id, id, data, timestamp)
+                         VALUES ($1, $2, $3, $4)
+                         ON CONFLICT (tenant_id, id) DO NOTHING
+                     )
+                     INSERT INTO commit_traces (tenant_id, commit_id, trace_id, span_id)
+                     VALUES ($1, $2, $5, $6)
+                     ON CONFLICT (tenant_id, commit_id) DO NOTHING",
+                    &[
+                        &self.tenant_id,
+                        &commit.id.as_bytes().as_slice(),
+                        &data,
+                        &timestamp,
+                        &trace.trace_id,
+                        &trace.span_id,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("put commit: {}", e)))?;
+            Ok(())
+        })
+    }
+
     fn set_commit_trace(
         &self,
         commit_id: &ObjectId,

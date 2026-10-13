@@ -3725,7 +3725,16 @@ impl Repository {
         }
 
         let commit = builder.build();
-        self.storage.put_commit(&commit)?;
+        // With its trace in the same write. If that fails, the commit is
+        // stored on its own: losing the link mustn't fail the write.
+        let trace = telemetry::current_trace();
+        if let Err(e) = self.storage.put_commit_traced(&commit, trace.as_ref()) {
+            if trace.is_none() {
+                return Err(e.into());
+            }
+            tracing::warn!(error.type = e.code(), "couldn't record the commit's trace");
+            self.storage.put_commit(&commit)?;
+        }
         // Associate with the active epoch/session if any. Association
         // errors are surfaced — a sealed active epoch shouldn't silently
         // drop its mark. Callers can unset the active epoch before
@@ -3735,13 +3744,6 @@ impl Repository {
         }
         if let Some(session_id) = self.active_session()? {
             self.storage.set_commit_session(&commit.id, &session_id)?;
-        }
-        if let Some(trace) = telemetry::current_trace() {
-            // The link is for finding the trace later; losing it mustn't
-            // fail the write.
-            if let Err(e) = self.storage.set_commit_trace(&commit.id, &trace) {
-                tracing::warn!(error.type = e.code(), "couldn't record the commit's trace");
-            }
         }
         Ok(commit)
     }

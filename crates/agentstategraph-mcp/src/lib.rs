@@ -24,6 +24,25 @@ pub fn current_trace() -> Option<agentstategraph::CommitTrace> {
         })
 }
 
+/// The server's trace filter (DESIGN.md Plan H t-011). Spans at `info`, but
+/// not one per SQL statement: that cost a small read more than anything else
+/// telemetry does. `ASG_SQL_SPANS=on` adds them back, and `RUST_LOG`, when
+/// set, replaces the whole filter. `db.client.operation.duration` records
+/// either way.
+pub fn traces_filter() -> String {
+    if let Some(directives) = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+    {
+        return directives;
+    }
+    let sql_spans = std::env::var("ASG_SQL_SPANS").unwrap_or_default();
+    match sql_spans.trim().to_ascii_lowercase().as_str() {
+        "1" | "on" | "true" | "yes" => "info".to_string(),
+        _ => "info,oxtel_sql=warn".to_string(),
+    }
+}
+
 /// Whether each commit is logged as an `asg.commit` event (DESIGN.md Plan H
 /// t-010): only when `ASG_COMMIT_EVENTS` is `1`, `on`, `true` or `yes`.
 pub fn commit_events_from_env() -> bool {
