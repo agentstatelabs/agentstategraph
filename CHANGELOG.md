@@ -12,6 +12,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - HTTP error responses carry it beside the message: `{"error": ..., "code": ...}`.
   - MCP tool errors start with it: `Error [write_conflict]: ...`. They still start with `Error`.
   - The codes and their statuses are listed in the MCP server guide, under Errors. Spans and metrics take them as `error.type` in later Plan H work.
+- **MCP tool failures are error results** (Plan H t-006). A tool that fails now answers with `isError` set, as MCP asks, so clients and telemetry see the failure: the tool's span and `mcp.server.operation.duration` get `error.type` `tool_error`. Before, every tool answered as a success, with the error only in its text. The text is unchanged.
 - **Request ids, trace ids in error bodies, and rejections counted by reason** (Plan H t-005).
   - Every HTTP response carries `x-request-id`: the one the request sent, if it's 1 to 128 visible ASCII characters, or a new UUID. The request's span records it as `http.request.header.x-request-id`.
   - Error bodies carry the request's `trace_id` beside `error` and `code`, and the request's span records the code as `asg.error.code`, so its log line shows it.
@@ -77,6 +78,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **`ASG_PORT`** sets the HTTP port when `--port` isn't given.
 
 ### Changed
+- **`agentstategraph_commit_spec` answers a policy refusal as an error result.** When policy or the fail-safe refuses a promotion, the Decision JSON comes back with `isError` set. Clients that read the JSON still can; clients that only check `isError` now see that nothing was promoted.
 - **Rejections answer like other errors.** The rate limit, request limits, authentication and Host check used to answer with their own bodies: plain text from the rate limit, the body limit and the Host check, and `{"error": ...}` without a code from the others. They now answer `{"error", "code", "trace_id"}`, with the reason as the code. Statuses and `Retry-After` are unchanged.
 - **HTTP errors get the status their code calls for**, where before everything but a reserved path and a namespace-bound key's commit reference was a `500`. A missing branch, ref, commit or path is now `404`; a write conflict, merge conflict or existing branch `409`; an invalid request `400`; a taint or policy refusal `403`; too many speculations `429`. Server failures stay `500`. Clients that treated any failure as a `500` should check the status or the new `code`.
 - **The HTTP server now lets only pages served from localhost call it from a browser.** Before, it allowed any origin, so any website the user visited could read and write a local store through it. Pages from `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]` (any port) are allowed by default. Allow other origins with `--cors-origin <ORIGIN>` (repeatable) or `ASG_CORS_ORIGINS` (comma-separated); `*` allows any origin, and the server warns if that is set without `--auth`.

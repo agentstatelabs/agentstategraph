@@ -78,6 +78,8 @@ otlp = ["oxtel/otlp"]
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+# tests/mcp_tool_errors.rs connects a client over an in-memory pipe.
+rmcp = { version = "1", features = ["client"] }
 agentstategraph-ffi = { workspace = true }
 rusqlite = { workspace = true }
 
