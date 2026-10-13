@@ -976,6 +976,21 @@ pub enum TreeError {
     Storage(#[from] StorageError),
 }
 
+impl TreeError {
+    /// A stable code for this kind of error; see `RepoError::code`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            TreeError::ObjectNotFound(_) => "object_not_found",
+            TreeError::PathNotFound(_) => "path_not_found",
+            TreeError::IndexOutOfBounds { .. } => "index_out_of_bounds",
+            TreeError::TypeMismatch { .. } => "type_mismatch",
+            TreeError::CannotNavigateAtom(_) => "not_a_container",
+            TreeError::InvalidJson(_) => "invalid_json",
+            TreeError::Storage(e) => e.code(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

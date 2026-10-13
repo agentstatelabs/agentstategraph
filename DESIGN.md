@@ -929,15 +929,18 @@ Verified by reading the code on the Plan E stack.
 
 ### Design shape
 
-1. **The libraries emit `tracing` only.**
+1. **The libraries use the `tracing` and `metrics` facades only.**
    - The library crates gain spans and events through `tracing`: core,
      storage, `agentstategraph`, policy, taint, reminders and tasks.
      `tracing` costs almost nothing when nothing listens.
    - They don't depend on OpenTelemetry. Its Rust crates are pre-1.0 and
      break on minor releases, and every embedder would have to match ASG's
      version.
-   - Metrics come from those spans and events, through oxtel, plus gauges
-     read from repository and storage APIs.
+   - Metrics are recorded through the `metrics` facade at the same points
+     as those spans and events, plus gauges read from repository and storage
+     APIs. Like `tracing`, it costs almost nothing without a recorder, and
+     oxtel reads both. (Revised in t-007: deriving metrics from spans would
+     have tied them to the trace filter and sampling.)
 2. **One way to set up telemetry: oxtel.** No ASG-specific telemetry
    crate (decided 2026-10-10). oxtel (decision 3) already does the setup:
    - the log subscriber, writing text, JSON or ECS;
@@ -1026,7 +1029,7 @@ that no released log or metric format changes.
 | t-004 | **Stable error codes.** `RepoError` and `StorageError` get a stable, low-cardinality `code()`, such as `write_conflict`, `not_found`, `commit_ref_not_allowed`, `taint_blocked` or `storage_unavailable`. HTTP error bodies include the code, and statuses follow from it instead of defaulting to 500. MCP tool errors carry it too. It becomes `error.type` on spans and metrics. | 1 |
 | t-005 | **HTTP traces.** Read `traceparent` and `tracestate`. Give each request one server span, named `{method} {route}`, with the HTTP conventions' attributes. The key id goes on the span, never on a metric. Every log line and error body carries the trace id, and `x-request-id` is accepted, or generated, and echoed. A rejection counter is broken down by reason: rate limited, over capacity, timed out, body too large, unauthenticated, forbidden or refused host. | 2 |
 | t-006 | **MCP traces.** One span per tool call, per the MCP conventions, parented on `params._meta.traceparent` when the client sends one. Record `mcp.server.operation.duration`. `error.type` comes from t-004's codes, and is `tool_error` for refusals such as `commit_spec`'s policy gate. Covers stdio. | 2 |
-| t-007 | **Library spans and events.** Spans for repository writes (set, delete, merge, `commit_speculation`), the speculation lifecycle, history extraction, GC (dry run, sweep, vacuum), policy evaluation (local and external) and the taint check. Events for compare-and-swap retries and write conflicts, taint rejections, policy decisions (recording whether the fail-safe applied) and external-evaluator errors, which are swallowed today. External evaluators get a timeout. Reads get spans at debug level only. Metrics are derived from these, such as `asg.commit.duration`, `asg.ref.cas_retries` and `asg.policy.decisions`. | 2 |
+| t-007 | **Library spans and events.** Spans for repository writes (set, delete, merge, `commit_speculation`), the speculation lifecycle, history extraction, GC (dry run, sweep, vacuum), policy evaluation (local and external) and the taint check. Events for compare-and-swap retries and write conflicts, taint rejections, policy decisions (recording whether the fail-safe applied) and external-evaluator errors, which are swallowed today. External evaluators get a timeout. Reads get spans at debug level only. Metrics are derived from these, such as `asg.commit.duration`, `asg.ref.cas_retries` and `asg.policy.decisions`. — **Ready locally on `feat/library-spans`, stacked on !83 for its error codes; MR to follow.** The names are in docs/OBSERVABILITY.md. A write's span carries `asg.commit.id`, so a trace already leads to its commit; t-009 adds the reverse link. Metrics also include `asg.policy.evaluator.errors`, for the failures that were swallowed. The fail-safe's event is logged by the server, which is where the fail-safe applies. Rego and Cedar processes are killed after 10 seconds unless the runner sets another limit. Durations aren't measured in the browser build, where there's no clock to read. | 2 |
 | t-008 | **Storage metrics.** Operation duration per backend, per the database conventions (`db.client.operation.duration`, `db.system.name`). Postgres pool usage, pending requests and wait time (`db.client.connection.*`). Time spent waiting for SQLite's connection lock. Store gauges, read on a slow interval: objects, commits, size, undistilled commits (history lag), and the last GC sweep and what it reclaimed. Measure what the gauges cost on a large store before choosing the interval. | 2 |
 | t-009 | **Commit-to-trace link.** Record the active trace id for each commit in a side table on all four backends. Show it in `log`, `blame` and the HTTP commit output. It can be turned off. | 3 |
 | t-010 | **Provenance events.** Optionally emit each commit as an OpenTelemetry log event (`asg.commit`). The event carries the agent, intent category, confidence, namespace, commit id and trace id, and never values. A log backend or SIEM can then index state changes beside traces. Off by default. | 3 |

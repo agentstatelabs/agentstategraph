@@ -8,6 +8,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- **Stable error codes** (Plan H t-004). `RepoError`, `StorageError`, `TreeError` and `SpecError` each have `code()`, a short snake_case name such as `write_conflict`, `branch_not_found` or `taint_blocked`, for clients to branch on instead of the message.
+  - HTTP error responses carry it beside the message: `{"error": ..., "code": ...}`.
+  - MCP tool errors start with it: `Error [write_conflict]: ...`. They still start with `Error`.
+  - The codes and their statuses are listed in the MCP server guide, under Errors. Spans and metrics take them as `error.type` in later Plan H work.
+- **The library records its own work as spans, events and metrics** (Plan H t-007), through the `tracing` and `metrics` facades, so an embedding binary decides where they go. docs/OBSERVABILITY.md lists every name.
+  - Spans at `info` for writes (`asg.repo.set`, `asg.repo.delete`, `asg.repo.merge`), the speculation lifecycle, history extraction, garbage collection, the taint check and policy evaluation. A write's span carries the commit it made, which ties a trace to its commit. Reads get spans at `debug` only.
+  - A failed operation's span has an error status and `error.type`, the error's stable code. Messages aren't recorded, since they can name state paths.
+  - Events when a write rebuilds on a moved ref (`debug`) or gives up (`warn`), when a taint refuses a write, when the server's fail-safe decides because no policy matched, and when an external evaluator fails.
+  - Metrics: `asg.commit.duration`, `asg.ref.cas_retries`, `asg.policy.decisions` and `asg.policy.evaluator.errors`.
+- **External policy evaluators have a time limit.** Rego and Cedar processes are killed after 10 seconds, or the limit set with `RegoEvaluator::with_timeout` or `CedarEvaluator::with_timeout`, and the evaluation fails with `TimedOut`. Before, a hung evaluator held the write waiting on it indefinitely. `agentstategraph_policy::external::wait_with_timeout` does this for any runner that starts a process.
+- **`ExternalError::code()`, `PolicyError::code()` and `Decision::kind()`** give stable names for telemetry and clients.
 - **The storage backends record every statement as telemetry, through oxtel-sql 0.3** (Plan H t-008, first part). Each statement is a client span named by its query summary (`SELECT objects`, `INSERT refs`), with `db.system.name` and the statement's text with every literal replaced by `?`, and adds to `db.client.operation.duration`.
   - On Postgres, spans also carry the database and server, a failed statement's SQLSTATE as `error.type`, and the rows a query returned; `BEGIN`, `COMMIT` and `ROLLBACK` are spans too.
   - The Postgres pool records `db.client.connection.*`: connections in use and idle, callers waiting, wait and use times, and timeouts. These are still in development in the conventions.
@@ -62,6 +73,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **`ASG_PORT`** sets the HTTP port when `--port` isn't given.
 
 ### Changed
+- **HTTP errors get the status their code calls for**, where before everything but a reserved path and a namespace-bound key's commit reference was a `500`. A missing branch, ref, commit or path is now `404`; a write conflict, merge conflict or existing branch `409`; an invalid request `400`; a taint or policy refusal `403`; too many speculations `429`. Server failures stay `500`. Clients that treated any failure as a `500` should check the status or the new `code`.
 - **The HTTP server now lets only pages served from localhost call it from a browser.** Before, it allowed any origin, so any website the user visited could read and write a local store through it. Pages from `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]` (any port) are allowed by default. Allow other origins with `--cors-origin <ORIGIN>` (repeatable) or `ASG_CORS_ORIGINS` (comma-separated); `*` allows any origin, and the server warns if that is set without `--auth`.
 - **Bound to loopback (the default), the HTTP server only answers requests addressed to a loopback name.** A website that points a domain it controls at 127.0.0.1 (DNS rebinding) now gets `403`. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host <HOST>` (repeatable) or `ASG_ALLOWED_HOSTS`; `*` turns the check off. Bound to another address, the server answers any host name unless some are listed.
 - **The router constructors in `agentstategraph_mcp::http` no longer add CORS headers.** Apply the policy with `http::with_origin_policy(router, &OriginPolicy::for_bind(..))`, as the binary now does. That covers the ASD proxy routes too.

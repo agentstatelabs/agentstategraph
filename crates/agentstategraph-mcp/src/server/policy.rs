@@ -18,7 +18,7 @@ impl AgentStateGraphServer {
         };
         match self.policies.propose(&p.r#ref, policy) {
             Ok(handle) => format!("Proposed {}", handle),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -28,7 +28,7 @@ impl AgentStateGraphServer {
             .ratify(&p.r#ref, &p.path, &p.ratifier, &p.reasoning)
         {
             Ok(()) => format!("Ratified {} by {}", p.path, p.ratifier),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -39,7 +39,7 @@ impl AgentStateGraphServer {
         };
         match self.policies.supersede(&p.r#ref, &p.old_path, new_policy) {
             Ok(handle) => format!("Superseded → {}", handle),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -60,21 +60,21 @@ impl AgentStateGraphServer {
         };
         match result {
             Ok(policies) => serde_json::to_string_pretty(&policies).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
     pub(super) fn impl_policy_show(&self, p: PolicyShowParams) -> String {
         match self.policies.get(&p.r#ref, &p.path, p.version) {
             Ok(policy) => serde_json::to_string_pretty(&policy).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
     pub(super) fn impl_policy_history(&self, p: PolicyHistoryParams) -> String {
         match self.policies.history(&p.r#ref, &p.path) {
             Ok(chain) => serde_json::to_string_pretty(&chain).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -88,7 +88,7 @@ impl AgentStateGraphServer {
             p.tenant_filter.as_deref(),
         ) {
             Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -102,7 +102,7 @@ impl AgentStateGraphServer {
             .evaluate_change_scoped(&p.r#ref, &proposal, p.tenant_filter.as_deref())
         {
             Ok(decision) => render_decision_with_fail_safe(&decision, &self.policy_fail_safe),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -135,7 +135,7 @@ impl AgentStateGraphServer {
                     .collect();
                 serde_json::to_string_pretty(&matches).unwrap_or_default()
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 

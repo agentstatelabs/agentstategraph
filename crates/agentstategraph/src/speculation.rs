@@ -104,6 +104,18 @@ pub enum SpecError {
     Storage(#[from] agentstategraph_storage::StorageError),
 }
 
+impl SpecError {
+    /// A stable code for this kind of error; see `RepoError::code`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SpecError::NotFound(_) => "speculation_not_found",
+            SpecError::TooMany { .. } => "too_many_speculations",
+            SpecError::Tree(e) => e.code(),
+            SpecError::Storage(e) => e.code(),
+        }
+    }
+}
+
 impl Default for SpeculationManager {
     fn default() -> Self {
         Self::new()

@@ -722,10 +722,7 @@ async fn list_keys(State(mgr): State<Arc<TenantManager>>) -> Json<serde_json::Va
 
 /// A key change the keys file couldn't record: the change didn't happen.
 fn key_store_error(e: KeyStoreError) -> AppError {
-    AppError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        message: e.to_string(),
-    }
+    AppError::new("key_store_failed", e.to_string())
 }
 
 /// The JSON for a newly issued key, the only time its raw value is shown.
@@ -758,10 +755,10 @@ async fn create_key(
     if let Some(ns) = &req.namespace_id
         && let Err(e) = agentstategraph_core::Namespace::new(ns)
     {
-        return Err(AppError {
-            status: StatusCode::BAD_REQUEST,
-            message: format!("invalid namespace_id '{ns}': {e}"),
-        });
+        return Err(AppError::new(
+            "invalid_request",
+            format!("invalid namespace_id '{ns}': {e}"),
+        ));
     }
     let tenant_id = req.tenant_id.unwrap_or_else(|| mgr.tenant_id().to_string());
     let key = mgr
@@ -803,24 +800,21 @@ impl KeySelector {
             (Some(id), _, _) => KeyRef::Id(id),
             (None, Some(key), _) => KeyRef::Key(key),
             (None, None, Some(_)) => {
-                return Err(AppError {
-                    status: StatusCode::BAD_REQUEST,
-                    message: "key_prefix is no longer accepted: a prefix can match more than one \
-                              key. Pass key_id (from GET /api/admin/keys) or the full key."
-                        .into(),
-                });
+                return Err(AppError::new(
+                    "invalid_request",
+                    "key_prefix is no longer accepted: a prefix can match more than one \
+                     key. Pass key_id (from GET /api/admin/keys) or the full key.",
+                ));
             }
             (None, None, None) => {
-                return Err(AppError {
-                    status: StatusCode::BAD_REQUEST,
-                    message: "pass key_id (from GET /api/admin/keys) or the full key".into(),
-                });
+                return Err(AppError::new(
+                    "invalid_request",
+                    "pass key_id (from GET /api/admin/keys) or the full key",
+                ));
             }
         };
-        mgr.key_id(key_ref).ok_or_else(|| AppError {
-            status: StatusCode::NOT_FOUND,
-            message: "no such key".into(),
-        })
+        mgr.key_id(key_ref)
+            .ok_or_else(|| AppError::new("key_not_found", "no such key"))
     }
 }
 
@@ -834,10 +828,7 @@ async fn rotate_key(
             &k,
             "Save this key — it will not be shown again. The old key has been revoked.",
         ))),
-        None => Err(AppError {
-            status: StatusCode::NOT_FOUND,
-            message: "no such key".into(),
-        }),
+        None => Err(AppError::new("key_not_found", "no such key")),
     }
 }
 
@@ -1216,12 +1207,10 @@ async fn gc_vacuum(
 fn store_wide(ctx: &AuthContext) -> Result<(), AppError> {
     match &ctx.namespace_id {
         None => Ok(()),
-        Some(ns) => Err(AppError {
-            status: StatusCode::FORBIDDEN,
-            message: format!(
-                "this covers the whole store, and this key is bound to namespace '{ns}'"
-            ),
-        }),
+        Some(ns) => Err(AppError::new(
+            "key_bound_to_namespace",
+            format!("this covers the whole store, and this key is bound to namespace '{ns}'"),
+        )),
     }
 }
 
@@ -1404,24 +1393,80 @@ async fn blocking<T: Send + 'static>(
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || span.in_scope(work))
         .await
-        .map_err(|e| AppError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("the request failed: {e}"),
-        })?
+        .map_err(|e| AppError::new("internal", format!("the request failed: {e}")))?
 }
 
 // ─── Error handling ─────────────────────────────────────────
 
+/// An error response: `{"error": message, "code": code}`. The code is
+/// stable (DESIGN.md Plan H t-004) and the status follows from it; clients
+/// can branch on the code, while messages may change.
 struct AppError {
     status: StatusCode,
+    code: &'static str,
     message: String,
+}
+
+impl AppError {
+    /// An error with `code`, at the status that code calls for.
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        AppError {
+            status: status_for(code),
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// The HTTP status for an error code: 404 for what doesn't exist, 409 for
+/// what conflicts with the store's state, 400 for a request that can't be
+/// carried out as asked, 403 for what the key or a policy doesn't allow,
+/// 429 and 503 for what may work later, and 500 for the server's own
+/// failures.
+fn status_for(code: &str) -> StatusCode {
+    match code {
+        "branch_not_found"
+        | "ref_not_found"
+        | "commit_not_found"
+        | "namespace_not_found"
+        | "object_not_found"
+        | "path_not_found"
+        | "speculation_not_found"
+        | "key_not_found" => StatusCode::NOT_FOUND,
+        "branch_already_exists"
+        | "namespace_already_exists"
+        | "ref_already_exists"
+        | "write_conflict"
+        | "merge_conflict"
+        | "merge_would_delete"
+        | "epoch_sealed"
+        | "session_ended" => StatusCode::CONFLICT,
+        "invalid_request"
+        | "invalid_operation"
+        | "invalid_json"
+        | "ambiguous_commit_prefix"
+        | "type_mismatch"
+        | "not_a_container"
+        | "index_out_of_bounds" => StatusCode::BAD_REQUEST,
+        // `/_meta/*` without `IntentCategory::Migrate`; a namespace-bound
+        // key naming a commit, or asking for the whole store; a policy or a
+        // taint saying no.
+        "reserved_path"
+        | "commit_ref_not_allowed"
+        | "key_bound_to_namespace"
+        | "cross_namespace_denied"
+        | "taint_blocked" => StatusCode::FORBIDDEN,
+        "too_many_speculations" => StatusCode::TOO_MANY_REQUESTS,
+        "not_initialized" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         (
             self.status,
-            Json(serde_json::json!({ "error": self.message })),
+            Json(serde_json::json!({ "error": self.message, "code": self.code })),
         )
             .into_response()
     }
@@ -1429,29 +1474,14 @@ impl IntoResponse for AppError {
 
 impl From<RepoError> for AppError {
     fn from(err: RepoError) -> Self {
-        let status = match err {
-            // Writes to `/_meta/*` without `IntentCategory::Migrate` are
-            // a capability violation, not a server fault — surface 403.
-            RepoError::ReservedPath(_) => StatusCode::FORBIDDEN,
-            // A namespace-bound key naming a commit, which could reach
-            // another namespace.
-            RepoError::CommitRefNotAllowed(_) => StatusCode::FORBIDDEN,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        AppError {
-            status,
-            message: err.to_string(),
-        }
+        AppError::new(err.code(), err.to_string())
     }
 }
 
 // Generic fallback for non-RepoError error types produced by handlers.
 impl From<Box<dyn std::error::Error>> for AppError {
     fn from(err: Box<dyn std::error::Error>) -> Self {
-        AppError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: err.to_string(),
-        }
+        AppError::new("internal", err.to_string())
     }
 }
 

@@ -19,6 +19,7 @@ pub mod repo;
 pub mod session;
 pub mod speculation;
 pub mod taint;
+mod telemetry;
 pub mod tree;
 pub mod watch;
 

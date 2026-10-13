@@ -23,6 +23,58 @@ use crate::verifier::SignatureVerifier;
 /// giving up with a write conflict (matches the task store).
 const MAX_CAS_RETRIES: u32 = 32;
 
+/// The span of a policy evaluation, named `$name`, with the fields
+/// [`evaluation`] records and any given.
+macro_rules! evaluation_span {
+    ($name:literal $(, $($fields:tt)*)?) => {
+        tracing::info_span!(
+            $name,
+            asg.policy.decision = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            $($($fields)*)?
+        )
+    };
+}
+
+/// Describe the metrics to the recorder, before the first is recorded.
+fn describe_metrics() {
+    static DESCRIBED: std::sync::Once = std::sync::Once::new();
+    DESCRIBED.call_once(|| {
+        metrics::describe_counter!(
+            "asg.policy.decisions",
+            "Policy evaluations, by the decision they reached."
+        );
+        metrics::describe_counter!(
+            "asg.policy.evaluator.errors",
+            "External policy evaluations that failed, so that their policies were skipped."
+        );
+    });
+}
+
+/// Run an evaluation in its span, recording its decision or how it failed,
+/// and count the decision in `asg.policy.decisions`.
+fn evaluation(
+    span: tracing::Span,
+    evaluate: impl FnOnce() -> Result<Decision, PolicyError>,
+) -> Result<Decision, PolicyError> {
+    let _entered = span.enter();
+    let result = evaluate();
+    describe_metrics();
+    match &result {
+        Ok(decision) => {
+            span.record("asg.policy.decision", decision.kind());
+            metrics::counter!("asg.policy.decisions", "asg.policy.decision" => decision.kind())
+                .increment(1);
+        }
+        Err(e) => {
+            span.record("error.type", e.code());
+            span.record("otel.status_code", "error");
+        }
+    }
+    result
+}
+
 /// Handle bound to a `Repository` + path prefix. Mirrors the
 /// `agentstategraph-tasks` `TaskStore` pattern.
 pub struct PolicyStore {
@@ -534,13 +586,15 @@ impl PolicyStore {
         agent_id: &str,
         tenant_filter: Option<&str>,
     ) -> Result<Decision, PolicyError> {
-        let matched = self.policies_for_situation_scoped(ref_name, situation, tenant_filter)?;
-        let (locals, externals) = self.partition_for_dispatch(&matched);
+        evaluation(evaluation_span!("asg.policy.evaluate"), || {
+            let matched = self.policies_for_situation_scoped(ref_name, situation, tenant_filter)?;
+            let (locals, externals) = self.partition_for_dispatch(&matched);
 
-        let external_decisions = self.run_externals(&externals, situation, action, agent_id);
-        let local_decision = evaluator::evaluate_matched(&locals, action, agent_id);
+            let external_decisions = self.run_externals(&externals, situation, action, agent_id);
+            let local_decision = evaluator::evaluate_matched(&locals, action, agent_id);
 
-        Ok(combine_decisions(external_decisions, local_decision))
+            Ok(combine_decisions(external_decisions, local_decision))
+        })
     }
 
     /// Change-proposal evaluation — POLICY_V1.md §22.2.
@@ -570,23 +624,25 @@ impl PolicyStore {
         proposal: &ChangeProposal,
         tenant_filter: Option<&str>,
     ) -> Result<Decision, PolicyError> {
-        let actives = self.active_scoped(ref_name, None, tenant_filter)?;
-        let (locals, externals) = self.partition_for_dispatch(&actives);
+        evaluation(evaluation_span!("asg.policy.evaluate_change"), || {
+            let actives = self.active_scoped(ref_name, None, tenant_filter)?;
+            let (locals, externals) = self.partition_for_dispatch(&actives);
 
-        // External runners don't consume `ChangeProposal` (that's a
-        // policy-crate-specific concept). Route them through
-        // `evaluate(action, agent_id)` against an empty situation; this
-        // mirrors what a Rego / Cedar runner would see in §4b.
-        let empty_situation = Situation::new();
-        let external_decisions = self.run_externals(
-            &externals,
-            &empty_situation,
-            &proposal.action,
-            &proposal.agent_id,
-        );
-        let local_decision = evaluator::evaluate_change(&locals, proposal);
+            // External runners don't consume `ChangeProposal` (that's a
+            // policy-crate-specific concept). Route them through
+            // `evaluate(action, agent_id)` against an empty situation; this
+            // mirrors what a Rego / Cedar runner would see in §4b.
+            let empty_situation = Situation::new();
+            let external_decisions = self.run_externals(
+                &externals,
+                &empty_situation,
+                &proposal.action,
+                &proposal.agent_id,
+            );
+            let local_decision = evaluator::evaluate_change(&locals, proposal);
 
-        Ok(combine_decisions(external_decisions, local_decision))
+            Ok(combine_decisions(external_decisions, local_decision))
+        })
     }
 
     // -----------------------------------------------------------------
@@ -630,10 +686,10 @@ impl PolicyStore {
     }
 
     /// Invoke each external policy's runner and collect the decisions.
-    /// Runner failures are swallowed: a policy whose runner errors is
-    /// treated like an unregistered kind (skipped), preserving the
-    /// POLICY_V1.md §11 soft-model guarantee that a misbehaving
-    /// runner never crashes evaluation.
+    /// A policy whose runner errors is treated like an unregistered kind
+    /// (skipped), preserving the POLICY_V1.md §11 soft-model guarantee that
+    /// a misbehaving runner never crashes evaluation; the error is logged
+    /// and counted in `asg.policy.evaluator.errors`.
     fn run_externals(
         &self,
         policies: &[&Policy],
@@ -653,11 +709,33 @@ impl PolicyStore {
                 continue;
             };
             let source = external_source(ref_);
+            let kind = runner.kind();
+            let span = evaluation_span!("asg.policy.external", asg.policy.evaluator = kind);
+            let _entered = span.enter();
             match runner.evaluate(source, situation, action, agent_id) {
-                Ok(d) => out.push(d),
-                // Runner errors: skip this policy. Future work (§4c)
-                // may surface these through a structured log.
-                Err(_) => continue,
+                Ok(d) => {
+                    span.record("asg.policy.decision", d.kind());
+                    out.push(d);
+                }
+                // Skip this policy. The error's message isn't recorded: an
+                // evaluator's output can echo its input.
+                Err(e) => {
+                    span.record("error.type", e.code());
+                    span.record("otel.status_code", "error");
+                    describe_metrics();
+                    metrics::counter!(
+                        "asg.policy.evaluator.errors",
+                        "asg.policy.evaluator" => kind,
+                        "error.type" => e.code()
+                    )
+                    .increment(1);
+                    tracing::warn!(
+                        asg.policy.evaluator = kind,
+                        asg.policy.id = %p.handle(),
+                        error.type = e.code(),
+                        "an external policy evaluator failed, so its policy was skipped"
+                    );
+                }
             }
         }
         out

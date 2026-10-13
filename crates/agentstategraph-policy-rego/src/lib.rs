@@ -41,10 +41,12 @@
 //! - [`EvaluatorSource::CommitRef`] — unsupported; returns
 //!   [`ExternalError::SourceResolution`].
 
-use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
-use agentstategraph_policy::external::{ExternalError, ExternalEvaluator};
+use agentstategraph_policy::external::{
+    DEFAULT_TIMEOUT, ExternalError, ExternalEvaluator, wait_with_timeout,
+};
 use agentstategraph_policy::selector::Situation;
 use agentstategraph_policy::types::{Decision, EvaluatorSource};
 
@@ -53,14 +55,14 @@ pub struct RegoEvaluator {
     /// Path (or bare name) of the OPA binary. Defaults to `"opa"`
     /// (resolved against `$PATH`).
     opa_path: String,
+    /// How long `opa eval` may run before it's killed.
+    timeout: Duration,
 }
 
 impl RegoEvaluator {
     /// Construct with the default `"opa"` binary (resolved on `$PATH`).
     pub fn new() -> Self {
-        Self {
-            opa_path: "opa".into(),
-        }
+        Self::with_opa_path("opa")
     }
 
     /// Override the OPA binary path. Useful for tests and for servers
@@ -68,7 +70,16 @@ impl RegoEvaluator {
     pub fn with_opa_path(opa_path: impl Into<String>) -> Self {
         Self {
             opa_path: opa_path.into(),
+            timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// How long `opa eval` may run before it's killed and the evaluation
+    /// fails with [`agentstategraph_policy::external::TimedOut`].
+    /// [`DEFAULT_TIMEOUT`] unless set.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -119,8 +130,8 @@ impl ExternalEvaluator for RegoEvaluator {
         let input_bytes = serde_json::to_vec(&input)
             .map_err(|e| ExternalError::Execution(format!("input serialize: {e}")))?;
 
-        // 4. Spawn `opa eval`.
-        let mut child = Command::new(&self.opa_path)
+        // 4. Spawn `opa eval`, give it the input, and wait.
+        let child = Command::new(&self.opa_path)
             .arg("eval")
             .arg("--data")
             .arg(tmp.path())
@@ -137,20 +148,7 @@ impl ExternalEvaluator for RegoEvaluator {
                     self.opa_path
                 ))
             })?;
-
-        // 5. Write input and wait.
-        {
-            let stdin = child
-                .stdin
-                .as_mut()
-                .ok_or_else(|| ExternalError::Execution("failed to open opa stdin".into()))?;
-            stdin
-                .write_all(&input_bytes)
-                .map_err(|e| ExternalError::Execution(format!("write stdin: {e}")))?;
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|e| ExternalError::Execution(format!("wait opa: {e}")))?;
+        let output = wait_with_timeout(child, Some(input_bytes), self.timeout)?;
 
         if !output.status.success() {
             return Err(ExternalError::Execution(format!(

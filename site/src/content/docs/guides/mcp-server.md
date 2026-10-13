@@ -87,6 +87,30 @@ With `--auth`, scraping it needs an admin key.
 
 With the `otlp` feature built in, set `OTEL_EXPORTER_OTLP_ENDPOINT` to send traces, metrics and these logs to an OpenTelemetry Collector or any OTLP backend. [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md) lists every name.
 
+### Errors
+
+An error response is JSON with a message and a stable code:
+
+```json
+{"error": "branch already exists: main", "code": "branch_already_exists"}
+```
+
+Branch on the code; the message is for people and may change. The status follows from the code:
+
+| Status | Codes |
+|---|---|
+| `404` | `branch_not_found`, `ref_not_found`, `commit_not_found`, `namespace_not_found`, `object_not_found`, `path_not_found`, `speculation_not_found`, `key_not_found` |
+| `409` | `write_conflict`, `merge_conflict`, `merge_would_delete`, `branch_already_exists`, `namespace_already_exists`, `ref_already_exists`, `epoch_sealed`, `session_ended` |
+| `400` | `invalid_request`, `invalid_operation`, `invalid_json`, `ambiguous_commit_prefix`, `type_mismatch`, `not_a_container`, `index_out_of_bounds` |
+| `403` | `reserved_path`, `commit_ref_not_allowed`, `key_bound_to_namespace`, `cross_namespace_denied`, `taint_blocked` |
+| `429` | `too_many_speculations` |
+| `503` | `not_initialized` |
+| `500` | `storage_error`, `serialization_error`, `integrity_violation`, `key_store_failed`, `internal` |
+
+A `write_conflict` means another writer moved the branch first; it's safe to retry. MCP tools report the same codes at the start of their error text: `Error [write_conflict]: …`.
+
+The limits and authentication below answer before a request reaches the API, with their own statuses (`401`, `413`, `429`, `503`) and no code yet.
+
 ### Limits
 
 Each request body may be up to 4 MiB (`--max-body-bytes`); a larger one gets `413`. A request still running after 30 seconds (`--request-timeout-secs`, `0` for none) gets `503`; a write may still complete after that, so check before retrying it. At most 256 requests are handled at once (`--max-concurrent-requests`); more get `503` with `Retry-After: 1` rather than queueing. `/api/health` is never turned away.

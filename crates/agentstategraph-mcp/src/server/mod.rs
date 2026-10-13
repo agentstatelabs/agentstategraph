@@ -26,6 +26,24 @@ use agentstategraph_reminders::ReminderManager;
 use agentstategraph_tasks::TaskStore;
 use chrono::{DateTime, Utc};
 
+/// A tool's error text: `Error [code]: message`, with the error's stable
+/// code (DESIGN.md Plan H t-004) when it has one, such as `write_conflict`.
+/// It still starts with `Error`, as callers check.
+pub(crate) fn tool_error<E: std::fmt::Display + 'static>(e: &E) -> String {
+    let any = e as &dyn std::any::Any;
+    let code = any
+        .downcast_ref::<agentstategraph::RepoError>()
+        .map(agentstategraph::RepoError::code)
+        .or_else(|| {
+            any.downcast_ref::<agentstategraph_storage::StorageError>()
+                .map(agentstategraph_storage::StorageError::code)
+        });
+    match code {
+        Some(code) => format!("Error [{code}]: {e}"),
+        None => format!("Error: {e}"),
+    }
+}
+
 /// Threshold above which a change is tagged `large` in token inference.
 pub const LARGE_CHANGE_THRESHOLD: usize = 50;
 
@@ -1217,14 +1235,14 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.get_json(&p.r#ref, &p.path) {
             Ok(value) => {
                 serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string())
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1235,7 +1253,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         let category = parse_category(&p.intent_category);
@@ -1256,7 +1274,7 @@ impl AgentStateGraphServer {
 
         match repo.set_json(&p.r#ref, &p.path, &p.value, opts) {
             Ok(commit_id) => format!("Committed: {}", commit_id),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1265,14 +1283,14 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         let category = parse_category(&p.intent_category);
         let opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
         match repo.delete(&p.r#ref, &p.path, opts) {
             Ok(commit_id) => format!("Deleted and committed: {}", commit_id),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1283,12 +1301,12 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.branch(&p.name, &p.from) {
             Ok(id) => format!("Branch '{}' created at {}", p.name, id.short()),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1300,7 +1318,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.list_branches(p.prefix.as_deref()) {
@@ -1311,7 +1329,7 @@ impl AgentStateGraphServer {
                     .collect();
                 format!("{} branches:\n{}", branches.len(), lines.join("\n"))
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1324,7 +1342,7 @@ impl AgentStateGraphServer {
     ) -> String {
         match self.repo.create_namespace(&params.0.name) {
             Ok(()) => format!("Namespace '{}' ready.", params.0.name),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1339,7 +1357,7 @@ impl AgentStateGraphServer {
                     names.join("\n")
                 }
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1353,7 +1371,7 @@ impl AgentStateGraphServer {
         match self.repo.delete_namespace(&params.0.name) {
             Ok(true) => format!("Namespace '{}' deleted.", params.0.name),
             Ok(false) => format!("Namespace '{}' not found.", params.0.name),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1387,7 +1405,7 @@ impl AgentStateGraphServer {
                     serde_json::to_string_pretty(&conflicts).unwrap_or_default()
                 )
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1398,7 +1416,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         let mut opts =
@@ -1415,7 +1433,7 @@ impl AgentStateGraphServer {
                     serde_json::to_string_pretty(&conflicts).unwrap_or_default()
                 )
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1426,7 +1444,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.log(&p.r#ref, p.limit) {
@@ -1451,7 +1469,7 @@ impl AgentStateGraphServer {
                     .collect();
                 serde_json::to_string_pretty(&entries).unwrap_or_default()
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1462,7 +1480,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.diff(&p.ref_a, &p.ref_b) {
@@ -1474,7 +1492,7 @@ impl AgentStateGraphServer {
                     serde_json::to_string_pretty(&ops).unwrap_or_default()
                 )
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1486,7 +1504,7 @@ impl AgentStateGraphServer {
         let repo = match self.ns_repo(p.namespace.as_deref()) {
             Ok(Some(forked)) => Arc::new(forked),
             Ok(None) => Arc::clone(&self.repo),
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         match repo.speculate(&p.from, p.label.clone()) {
             Ok(handle) => {
@@ -1503,7 +1521,7 @@ impl AgentStateGraphServer {
                     p.label
                 )
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1524,12 +1542,12 @@ impl AgentStateGraphServer {
                         return "Error: 'set' op requires a 'value'".to_string();
                     };
                     if let Err(e) = repo.spec_set_json(handle, &op.path, value) {
-                        return format!("Error: {}", e);
+                        return crate::server::tool_error(&e);
                     }
                 }
                 "delete" => {
                     if let Err(e) = repo.spec_delete(handle, &op.path) {
-                        return format!("Error: {}", e);
+                        return crate::server::tool_error(&e);
                     }
                 }
                 other => return format!("Error: unknown op '{}'", other),
@@ -1557,7 +1575,7 @@ impl AgentStateGraphServer {
                 .compare_speculations(&[SpecHandle::from_id(id)])
             {
                 Ok(comparison) => comparison,
-                Err(e) => return format!("Error: {}", e),
+                Err(e) => return crate::server::tool_error(&e),
             };
             entries.extend(comparison.entries.iter().map(|e| {
                 // Policy pre-flight: emit the same tokens that
@@ -1588,7 +1606,7 @@ impl AgentStateGraphServer {
         // Infer the ChangeProposal from the live speculation diff.
         let tokens = match infer_change_tokens(&repo, handle) {
             Ok(t) => t,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let intent = p.intent_description.clone();
         let mut proposal = ChangeProposal::new(
@@ -1620,6 +1638,7 @@ impl AgentStateGraphServer {
             Ok(Decision::NoPolicyMatch)
                 if self.policy_fail_safe == "deny" && !proposal.tokens.is_empty() =>
             {
+                log_fail_safe("deny");
                 serde_json::to_string_pretty(&serde_json::json!({
                     "original": { "kind": "no_policy_match" },
                     "translated": {
@@ -1635,7 +1654,10 @@ impl AgentStateGraphServer {
                 }))
                 .unwrap_or_else(|_| "null".to_string())
             }
-            Ok(Decision::Allow { .. }) | Ok(Decision::NoPolicyMatch) => {
+            Ok(decision @ (Decision::Allow { .. } | Decision::NoPolicyMatch)) => {
+                if decision == Decision::NoPolicyMatch && !proposal.tokens.is_empty() {
+                    log_fail_safe("allow");
+                }
                 // Allowed — run the existing promotion path.
                 let category = parse_category(&p.intent_category);
                 let mut opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
@@ -1650,13 +1672,13 @@ impl AgentStateGraphServer {
                         self.forget_spec(p.handle_id);
                         format!("Speculation committed: {}", commit_id)
                     }
-                    Err(e) => format!("Error: {}", e),
+                    Err(e) => crate::server::tool_error(&e),
                 }
             }
             Ok(decision @ (Decision::Deny { .. } | Decision::RequireApproval { .. })) => {
                 serde_json::to_string_pretty(&decision).unwrap_or_else(|_| "null".to_string())
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1671,7 +1693,7 @@ impl AgentStateGraphServer {
                 self.forget_spec(p.handle_id);
                 format!("Speculation {} discarded", p.handle_id)
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1684,7 +1706,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         let filters = QueryFilters {
@@ -1721,7 +1743,7 @@ impl AgentStateGraphServer {
                     .collect();
                 serde_json::to_string_pretty(&entries).unwrap_or_default()
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1732,13 +1754,13 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
         match repo.blame(&ref_name, &p.path) {
             Ok(entry) => serde_json::to_string_pretty(&entry).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1754,7 +1776,7 @@ impl AgentStateGraphServer {
             .create_epoch(&p.id, &p.description, p.root_intents)
         {
             Ok(epoch) => format!("Epoch '{}' created (status: {:?})", epoch.id, epoch.status),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1765,7 +1787,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         match self.repo.seal_epoch(&p.id, &p.summary) {
             Ok(()) => format!("Epoch '{}' sealed", p.id),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1779,7 +1801,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         match self.repo.archive_epoch(&p.id) {
             Ok(()) => format!("Epoch '{}' archived", p.id),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1790,7 +1812,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         match self.repo.export_epoch(&p.id) {
             Ok(bundle) => bundle.to_string(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1802,7 +1824,7 @@ impl AgentStateGraphServer {
         // Validate: epoch exists and is not sealed.
         let epoch = match self.repo.get_epoch(&p.epoch_id) {
             Ok(e) => e,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         if matches!(
             epoch.status,
@@ -1812,7 +1834,7 @@ impl AgentStateGraphServer {
         }
         let prev = match self.repo.active_epoch() {
             Ok(p) => p,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         match self.repo.set_active_epoch(Some(p.epoch_id.clone())) {
             Ok(()) => serde_json::json!({
@@ -1820,7 +1842,7 @@ impl AgentStateGraphServer {
                 "previous": prev,
             })
             .to_string(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1830,11 +1852,11 @@ impl AgentStateGraphServer {
     async fn agentstategraph_exit_epoch(&self) -> String {
         let prev = match self.repo.active_epoch() {
             Ok(p) => p,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         match self.repo.set_active_epoch(None) {
             Ok(()) => serde_json::json!({ "exited": prev }).to_string(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1851,7 +1873,7 @@ impl AgentStateGraphServer {
                 Some(s) => s,
                 None => return format!("Error: session '{}' not found", p.session_id),
             },
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         if !matches!(session.status, agentstategraph_core::SessionStatus::Active) {
             return format!(
@@ -1861,7 +1883,7 @@ impl AgentStateGraphServer {
         }
         let prev = match self.repo.active_session() {
             Ok(p) => p,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         match self.repo.set_active_session(Some(p.session_id.clone())) {
             Ok(()) => serde_json::json!({
@@ -1869,7 +1891,7 @@ impl AgentStateGraphServer {
                 "previous": prev,
             })
             .to_string(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1879,11 +1901,11 @@ impl AgentStateGraphServer {
     async fn agentstategraph_exit_session(&self) -> String {
         let prev = match self.repo.active_session() {
             Ok(p) => p,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         match self.repo.set_active_session(None) {
             Ok(()) => serde_json::json!({ "exited": prev }).to_string(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1908,7 +1930,7 @@ impl AgentStateGraphServer {
                     .collect();
                 serde_json::to_string_pretty(&json).unwrap_or_default()
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1929,11 +1951,11 @@ impl AgentStateGraphServer {
             .transpose()
         {
             Ok(ns) => ns,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let head = match self.repo.head(&p.working_branch) {
             Ok(id) => id,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let create_params = CreateSessionParams {
             parent_session: p.parent_session,
@@ -1955,7 +1977,7 @@ impl AgentStateGraphServer {
                 "status": "Active",
             })
             .to_string(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -1965,7 +1987,7 @@ impl AgentStateGraphServer {
     async fn agentstategraph_sessions(&self, params: Parameters<SessionListParams>) -> String {
         let sessions = match self.repo.sessions().list(params.0.agent_id.as_deref()) {
             Ok(s) => s,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let json: Vec<serde_json::Value> = sessions
             .iter()
@@ -1994,12 +2016,12 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.list_paths(&p.r#ref, &p.prefix, p.max_depth) {
             Ok(paths) => format!("{} paths:\n{}", paths.len(), paths.join("\n")),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2010,12 +2032,12 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.get_tree(&p.r#ref, &p.prefix) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2026,7 +2048,7 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.search_values(&p.r#ref, &p.query, p.max_results) {
@@ -2038,7 +2060,7 @@ impl AgentStateGraphServer {
                     .collect();
                 serde_json::to_string_pretty(&entries).unwrap_or_default()
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2049,12 +2071,12 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.stats(&p.r#ref) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2065,12 +2087,12 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.commit_graph(&p.r#ref, p.depth) {
             Ok(nodes) => serde_json::to_string_pretty(&nodes).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2087,7 +2109,7 @@ impl AgentStateGraphServer {
             p.store,
         ) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2097,7 +2119,7 @@ impl AgentStateGraphServer {
     async fn agentstategraph_gc_dry_run(&self, _params: Parameters<GcParams>) -> String {
         match self.repo.gc_dry_run() {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2114,7 +2136,7 @@ impl AgentStateGraphServer {
         };
         match self.repo.gc_sweep(policy, p.mutate, p.vacuum) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2124,7 +2146,7 @@ impl AgentStateGraphServer {
     async fn agentstategraph_gc_vacuum(&self, _params: Parameters<GcParams>) -> String {
         match self.repo.gc_vacuum() {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2135,12 +2157,12 @@ impl AgentStateGraphServer {
         let p = params.0;
         let forked = match self.ns_repo(p.namespace.as_deref()) {
             Ok(r) => r,
-            Err(e) => return format!("Error: {}", e),
+            Err(e) => return crate::server::tool_error(&e),
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         match repo.intent_tree(&p.r#ref, p.root_commit_id.as_deref()) {
             Ok(json) => serde_json::to_string_pretty(&json).unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -2511,6 +2533,15 @@ pub fn parse_optional_rfc3339(s: Option<&str>) -> Option<chrono::DateTime<chrono
     })
 }
 
+/// No policy matched, so the fail-safe decided: `deny` or `allow`.
+fn log_fail_safe(decided: &'static str) {
+    tracing::info!(
+        asg.policy.decision = "no_policy_match",
+        asg.policy.fail_safe = decided,
+        "no policy matched, so the fail-safe decided"
+    );
+}
+
 /// Translate `Decision::NoPolicyMatch` per the MCP fail-safe config.
 ///
 /// The engine never rewrites its result — translation happens only at
@@ -2521,6 +2552,11 @@ pub fn parse_optional_rfc3339(s: Option<&str>) -> Option<chrono::DateTime<chrono
 pub fn render_decision_with_fail_safe(decision: &Decision, fail_safe: &str) -> String {
     match decision {
         Decision::NoPolicyMatch => {
+            log_fail_safe(if fail_safe == "allow" {
+                "allow"
+            } else {
+                "deny"
+            });
             let translated = if fail_safe == "allow" {
                 serde_json::json!({
                     "kind": "allow",
@@ -2659,6 +2695,22 @@ mod tests {
     use super::*;
     use agentstategraph::{CommitOptions, RepoError, Repository};
     use agentstategraph_storage::SqliteStorage;
+
+    #[test]
+    fn tool_errors_carry_the_code() {
+        let conflict = agentstategraph::RepoError::WriteConflict;
+        assert_eq!(
+            super::tool_error(&conflict),
+            format!("Error [write_conflict]: {conflict}")
+        );
+        let storage = agentstategraph_storage::StorageError::SessionEnded { id: "s1".into() };
+        assert!(super::tool_error(&storage).starts_with("Error [session_ended]: "));
+        // An error without a code reads as before.
+        assert_eq!(
+            super::tool_error(&"no such tool".to_string()),
+            "Error: no such tool"
+        );
+    }
 
     fn handle_from(out: &str) -> u64 {
         out.split("handle_id=")

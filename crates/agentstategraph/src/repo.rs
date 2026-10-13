@@ -17,6 +17,7 @@ use agentstategraph_storage::{
 };
 
 use crate::speculation::{SpecComparison, SpecError, SpecHandle, SpeculationManager};
+use crate::telemetry::{self, op_span, write_span};
 use crate::tree::{self, TreeError};
 
 /// Reserved state path prefix for schema metadata. Writes under this
@@ -446,6 +447,38 @@ pub enum RepoError {
     },
 }
 
+impl RepoError {
+    /// A stable, low-cardinality code for this kind of error (DESIGN.md Plan
+    /// H t-004), such as `write_conflict` or `branch_not_found`. The HTTP API
+    /// returns it beside the message and picks the status from it, MCP tool
+    /// errors carry it, and it becomes `error.type` on spans and metrics.
+    /// Clients can branch on it; messages may change.
+    pub fn code(&self) -> &'static str {
+        match self {
+            RepoError::BranchNotFound(_) => "branch_not_found",
+            RepoError::BranchAlreadyExists(_) => "branch_already_exists",
+            RepoError::RefNotFound(_) => "ref_not_found",
+            RepoError::CommitNotFound(_) => "commit_not_found",
+            RepoError::AmbiguousCommitPrefix { .. } => "ambiguous_commit_prefix",
+            RepoError::NotInitialized => "not_initialized",
+            RepoError::ReservedPath(_) => "reserved_path",
+            RepoError::MergeConflicts(_) => "merge_conflict",
+            RepoError::MergeWouldDelete(_) => "merge_would_delete",
+            RepoError::IntegrityViolation { .. } => "integrity_violation",
+            RepoError::WriteConflict => "write_conflict",
+            RepoError::Speculation(e) => e.code(),
+            RepoError::Tree(e) => e.code(),
+            RepoError::Storage(e) => e.code(),
+            RepoError::EpochSealViolated { .. } => "epoch_sealed",
+            RepoError::InvalidOperation(_) => "invalid_operation",
+            RepoError::CommitRefNotAllowed(_) => "commit_ref_not_allowed",
+            RepoError::NamespaceNotFound(_) => "namespace_not_found",
+            RepoError::CrossNamespaceAccessDenied => "cross_namespace_denied",
+            RepoError::Taint { .. } => "taint_blocked",
+        }
+    }
+}
+
 /// Summary of what merging one ref into another would do, produced by
 /// [`Repository::preview_merge`] without mutating any ref. All key lists are
 /// top-level entries of the state root (e.g. `plans`, `memory`).
@@ -693,6 +726,11 @@ impl Repository {
     /// [`Repository::get_with_intent`] with an
     /// `IntentCategory::Migrate` intent to access them.
     pub fn get(&self, ref_name: &str, path: &str) -> Result<Object, RepoError> {
+        let span = op_span!(DEBUG, "asg.repo.get", asg.ref.name = ref_name);
+        telemetry::run(span, || self.get_inner(ref_name, path))
+    }
+
+    fn get_inner(&self, ref_name: &str, path: &str) -> Result<Object, RepoError> {
         if path_is_secret(path) {
             return Err(RepoError::ReservedPath(path.to_string()));
         }
@@ -742,6 +780,16 @@ impl Repository {
         path: &str,
         intent: &Intent,
     ) -> Result<Object, RepoError> {
+        let span = op_span!(DEBUG, "asg.repo.get", asg.ref.name = ref_name);
+        telemetry::run(span, || self.get_with_intent_inner(ref_name, path, intent))
+    }
+
+    fn get_with_intent_inner(
+        &self,
+        ref_name: &str,
+        path: &str,
+        intent: &Intent,
+    ) -> Result<Object, RepoError> {
         check_secret_read_guard(path, intent)?;
         let commit_id = self.resolve_ref(ref_name)?;
         let commit = self
@@ -776,6 +824,20 @@ impl Repository {
         value: &Object,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
+        telemetry::write(
+            "set",
+            write_span!("asg.repo.set", ref_name, options),
+            || self.set_inner(ref_name, path, value, options),
+        )
+    }
+
+    fn set_inner(
+        &self,
+        ref_name: &str,
+        path: &str,
+        value: &Object,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
         check_meta_guard(path, &options.intent)?;
         // 0.7.75 §4: taint pre-commit hook. Rejects writes to blocked
         // or quarantined paths; review-effect gate enforces the
@@ -791,7 +853,8 @@ impl Repository {
         // Read-modify-write on the ref, so it must be a compare-and-swap: an
         // unconditional ref move built on a head another writer has since
         // advanced silently discards that writer's commit. See `advance_ref`.
-        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+        for attempt in 0..MAX_REF_CAS_ATTEMPTS {
+            telemetry::cas_attempt("set", attempt);
             let (commit_id, is_branch) = self.head_for_write(ref_name)?;
             let commit = self
                 .storage
@@ -808,6 +871,7 @@ impl Repository {
                 return Ok(new_commit.id);
             }
         }
+        telemetry::cas_gave_up("set", MAX_REF_CAS_ATTEMPTS);
         Err(RepoError::WriteConflict)
     }
 
@@ -852,6 +916,21 @@ impl Repository {
     /// ref has moved since `expected_head` was snapshotted (allowing the
     /// caller to retry), or another error on hard failures.
     pub fn set_json_cas(
+        &self,
+        ref_name: &str,
+        expected_head: ObjectId,
+        path: &str,
+        value: &serde_json::Value,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        telemetry::write(
+            "set",
+            write_span!("asg.repo.set", ref_name, options),
+            || self.set_json_cas_inner(ref_name, expected_head, path, value, options),
+        )
+    }
+
+    fn set_json_cas_inner(
         &self,
         ref_name: &str,
         expected_head: ObjectId,
@@ -906,6 +985,19 @@ impl Repository {
         path: &str,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
+        telemetry::write(
+            "delete",
+            write_span!("asg.repo.delete", ref_name, options),
+            || self.delete_inner(ref_name, path, options),
+        )
+    }
+
+    fn delete_inner(
+        &self,
+        ref_name: &str,
+        path: &str,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
         check_meta_guard(path, &options.intent)?;
         if !is_taint_lifecycle_intent(&options.intent.category) {
             self.pre_commit_taint_check(&[path], &options)?;
@@ -913,7 +1005,8 @@ impl Repository {
         let state_path =
             StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
 
-        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+        for attempt in 0..MAX_REF_CAS_ATTEMPTS {
+            telemetry::cas_attempt("delete", attempt);
             let (commit_id, is_branch) = self.head_for_write(ref_name)?;
             let commit = self
                 .storage
@@ -926,6 +1019,7 @@ impl Repository {
                 return Ok(new_commit.id);
             }
         }
+        telemetry::cas_gave_up("delete", MAX_REF_CAS_ATTEMPTS);
         Err(RepoError::WriteConflict)
     }
 
@@ -1013,16 +1107,23 @@ impl Repository {
         options: CommitOptions,
         allow_deletions: bool,
     ) -> Result<ObjectId, RepoError> {
-        // The merge is computed against the target's head at the time, so
-        // landing it is a compare-and-swap on that head; if another writer
-        // moved the target meanwhile, recompute against the new head rather
-        // than overwrite what it wrote.
-        for _ in 0..MAX_REF_CAS_ATTEMPTS {
-            if let Some(id) = self.try_merge_checked(source, target, &options, allow_deletions)? {
-                return Ok(id);
+        let span = write_span!("asg.repo.merge", target, options);
+        telemetry::write("merge", span, || {
+            // The merge is computed against the target's head at the time, so
+            // landing it is a compare-and-swap on that head; if another writer
+            // moved the target meanwhile, recompute against the new head rather
+            // than overwrite what it wrote.
+            for attempt in 0..MAX_REF_CAS_ATTEMPTS {
+                telemetry::cas_attempt("merge", attempt);
+                if let Some(id) =
+                    self.try_merge_checked(source, target, &options, allow_deletions)?
+                {
+                    return Ok(id);
+                }
             }
-        }
-        Err(RepoError::WriteConflict)
+            telemetry::cas_gave_up("merge", MAX_REF_CAS_ATTEMPTS);
+            Err(RepoError::WriteConflict)
+        })
     }
 
     /// One attempt of [`Repository::merge_checked`]. `Ok(None)` means the
@@ -1255,6 +1356,12 @@ impl Repository {
     /// Compute a structured diff between two refs.
     /// Returns typed DiffOps (SetValue, AddKey, RemoveKey, etc.), not text diffs.
     pub fn diff(&self, ref_a: &str, ref_b: &str) -> Result<Vec<DiffOp>, RepoError> {
+        telemetry::run(op_span!(DEBUG, "asg.repo.diff"), || {
+            self.diff_inner(ref_a, ref_b)
+        })
+    }
+
+    fn diff_inner(&self, ref_a: &str, ref_b: &str) -> Result<Vec<DiffOp>, RepoError> {
         let commit_a = self.resolve_ref(ref_a)?;
         let commit_b = self.resolve_ref(ref_b)?;
 
@@ -1283,6 +1390,24 @@ impl Repository {
 
     /// Create a speculation forked from a ref. O(1) — just a pointer.
     pub fn speculate(
+        &self,
+        from_ref: &str,
+        label: Option<String>,
+    ) -> Result<SpecHandle, RepoError> {
+        let span = op_span!(
+            INFO,
+            "asg.speculation.create",
+            asg.ref.name = from_ref,
+            asg.speculation.id = tracing::field::Empty,
+        );
+        let result = telemetry::run(span.clone(), || self.speculate_inner(from_ref, label));
+        if let Ok(handle) = &result {
+            span.record("asg.speculation.id", handle.id());
+        }
+        result
+    }
+
+    fn speculate_inner(
         &self,
         from_ref: &str,
         label: Option<String>,
@@ -1370,9 +1495,13 @@ impl Repository {
         handle: SpecHandle,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
-        let result = self.commit_speculation_inner(handle, options);
-        self.unpin_speculation(handle);
-        result
+        let span = write_span!("asg.speculation.commit", tracing::field::Empty, options);
+        span.record("asg.speculation.id", handle.id());
+        telemetry::write("commit_speculation", span, || {
+            let result = self.commit_speculation_inner(handle, options);
+            self.unpin_speculation(handle);
+            result
+        })
     }
 
     fn commit_speculation_inner(
@@ -1384,6 +1513,7 @@ impl Repository {
             .specs
             .commit_with_base(handle)
             .map_err(RepoError::Speculation)?;
+        tracing::Span::current().record("asg.ref.name", base_ref.as_str());
         let resolver = StorageResolver {
             storage: self.storage.as_ref(),
         };
@@ -1405,7 +1535,8 @@ impl Repository {
         // leaf both sides changed — what it always did — and everything else
         // the head gained is kept. Landed by compare-and-swap, so a write that
         // races the merge itself is not lost either.
-        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+        for attempt in 0..MAX_REF_CAS_ATTEMPTS {
+            telemetry::cas_attempt("commit_speculation", attempt);
             let (parent_id, is_branch) = self.head_for_write(&base_ref)?;
             let parent_root = self
                 .storage
@@ -1462,6 +1593,7 @@ impl Repository {
                 return Ok(commit.id);
             }
         }
+        telemetry::cas_gave_up("commit_speculation", MAX_REF_CAS_ATTEMPTS);
         Err(RepoError::WriteConflict)
     }
 
@@ -1483,9 +1615,13 @@ impl Repository {
         expected_head: ObjectId,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
-        let result = self.commit_speculation_cas_inner(handle, expected_head, options);
-        self.unpin_speculation(handle);
-        result
+        let span = write_span!("asg.speculation.commit", tracing::field::Empty, options);
+        span.record("asg.speculation.id", handle.id());
+        telemetry::write("commit_speculation", span, || {
+            let result = self.commit_speculation_cas_inner(handle, expected_head, options);
+            self.unpin_speculation(handle);
+            result
+        })
     }
 
     fn commit_speculation_cas_inner(
@@ -1498,6 +1634,7 @@ impl Repository {
             .specs
             .commit_with_base(handle)
             .map_err(RepoError::Speculation)?;
+        tracing::Span::current().record("asg.ref.name", base_ref.as_str());
         let expected_root = self
             .storage
             .get_commit(&expected_head)?
@@ -1532,8 +1669,15 @@ impl Repository {
 
     /// Discard a speculation — all changes lost. Instant.
     pub fn discard_speculation(&self, handle: SpecHandle) -> Result<(), RepoError> {
-        self.unpin_speculation(handle);
-        self.specs.discard(handle).map_err(RepoError::Speculation)
+        let span = op_span!(
+            INFO,
+            "asg.speculation.discard",
+            asg.speculation.id = handle.id(),
+        );
+        telemetry::run(span, || {
+            self.unpin_speculation(handle);
+            self.specs.discard(handle).map_err(RepoError::Speculation)
+        })
     }
 
     /// Record an open speculation's roots as GC roots. A speculation writes its
@@ -1590,12 +1734,15 @@ impl Repository {
     /// caps `CommitBuilder::build` uses. This bounds what a malicious or
     /// legacy `.db` can replay to readers. (security threat model v2, F3)
     pub fn log(&self, ref_name: &str, limit: usize) -> Result<Vec<Commit>, RepoError> {
-        let commit_id = self.resolve_ref(ref_name)?;
-        let mut commits = self.storage.list_commits(&commit_id, limit)?;
-        for c in &mut commits {
-            c.enforce_caps();
-        }
-        Ok(commits)
+        let span = op_span!(DEBUG, "asg.repo.log", asg.ref.name = ref_name);
+        telemetry::run(span, || {
+            let commit_id = self.resolve_ref(ref_name)?;
+            let mut commits = self.storage.list_commits(&commit_id, limit)?;
+            for c in &mut commits {
+                c.enforce_caps();
+            }
+            Ok(commits)
+        })
     }
 
     /// Like [`Repository::log`], but walks **every** parent edge.
@@ -1677,6 +1824,15 @@ impl Repository {
     /// flags from one agent are worth investigating.
     /// (security threat model v3+, V4)
     pub fn blame(
+        &self,
+        ref_name: &str,
+        path: &str,
+    ) -> Result<agentstategraph_core::BlameEntry, RepoError> {
+        let span = op_span!(DEBUG, "asg.repo.blame", asg.ref.name = ref_name);
+        telemetry::run(span, || self.blame_inner(ref_name, path))
+    }
+
+    fn blame_inner(
         &self,
         ref_name: &str,
         path: &str,
@@ -2393,6 +2549,19 @@ impl Repository {
     /// caught-up store this is a cheap no-op; after new commits it processes
     /// only those. Returns how many commits were folded and the new cursor.
     pub fn extract_history(&self, batch_size: usize) -> Result<HistoryExtractReport, RepoError> {
+        let span = op_span!(
+            INFO,
+            "asg.history.extract",
+            asg.history.commits_processed = tracing::field::Empty,
+        );
+        let result = telemetry::run(span.clone(), || self.extract_history_inner(batch_size));
+        if let Ok(report) = &result {
+            span.record("asg.history.commits_processed", report.commits_processed);
+        }
+        result
+    }
+
+    fn extract_history_inner(&self, batch_size: usize) -> Result<HistoryExtractReport, RepoError> {
         let batch_size = batch_size.max(1);
         let mut total = 0usize;
         loop {
@@ -2639,6 +2808,10 @@ impl Repository {
     /// the extractor first — it never silently recommends dropping
     /// not-yet-captured history.
     pub fn gc_dry_run(&self) -> Result<serde_json::Value, RepoError> {
+        telemetry::run(op_span!(INFO, "asg.gc.dry_run"), || self.gc_dry_run_inner())
+    }
+
+    fn gc_dry_run_inner(&self) -> Result<serde_json::Value, RepoError> {
         let roots = self.gc_default_roots()?;
         let reach = self
             .storage
@@ -2774,6 +2947,26 @@ impl Repository {
         Ok(set.into_iter().collect())
     }
 
+    /// Compact the store, returning freed pages to the OS (Plan B t-004). Run
+    /// after a sweep — the sweep frees pages to the freelist, but the file only
+    /// shrinks after a `VACUUM`. Returns bytes before/after/reclaimed.
+    pub fn gc_vacuum(&self) -> Result<serde_json::Value, RepoError> {
+        let span = op_span!(
+            INFO,
+            "asg.gc.vacuum",
+            asg.gc.bytes_reclaimed = tracing::field::Empty,
+        );
+        telemetry::run(span.clone(), || {
+            let v = self.storage.history_vacuum()?;
+            span.record("asg.gc.bytes_reclaimed", v.bytes_reclaimed);
+            Ok(serde_json::json!({
+                "bytes_before": v.bytes_before,
+                "bytes_after": v.bytes_after,
+                "bytes_reclaimed": v.bytes_reclaimed,
+            }))
+        })
+    }
+
     /// Run (or preview) a GC sweep under a [`RetentionPolicy`] (Plan B t-003).
     ///
     /// `mutate=false` (the safe default) previews what would be reclaimed and
@@ -2781,19 +2974,32 @@ impl Repository {
     /// from the policy's keep-set — but only after the Plan A safety gate:
     /// if any commit is not yet distilled it refuses (returns `refused:true`,
     /// no mutation), so pruning can't lose not-yet-captured history.
-    /// Compact the store, returning freed pages to the OS (Plan B t-004). Run
-    /// after a sweep — the sweep frees pages to the freelist, but the file only
-    /// shrinks after a `VACUUM`. Returns bytes before/after/reclaimed.
-    pub fn gc_vacuum(&self) -> Result<serde_json::Value, RepoError> {
-        let v = self.storage.history_vacuum()?;
-        Ok(serde_json::json!({
-            "bytes_before": v.bytes_before,
-            "bytes_after": v.bytes_after,
-            "bytes_reclaimed": v.bytes_reclaimed,
-        }))
+    pub fn gc_sweep(
+        &self,
+        policy: RetentionPolicy,
+        mutate: bool,
+        vacuum: bool,
+    ) -> Result<serde_json::Value, RepoError> {
+        let span = op_span!(
+            INFO,
+            "asg.gc.sweep",
+            asg.gc.mutate = mutate,
+            asg.gc.refused = tracing::field::Empty,
+            asg.gc.objects_deleted = tracing::field::Empty,
+        );
+        let result = telemetry::run(span.clone(), || self.gc_sweep_inner(policy, mutate, vacuum));
+        if let Ok(report) = &result {
+            if let Some(refused) = report.get("refused").and_then(|v| v.as_bool()) {
+                span.record("asg.gc.refused", refused);
+            }
+            if let Some(deleted) = report.get("objects_deleted").and_then(|v| v.as_i64()) {
+                span.record("asg.gc.objects_deleted", deleted);
+            }
+        }
+        result
     }
 
-    pub fn gc_sweep(
+    fn gc_sweep_inner(
         &self,
         policy: RetentionPolicy,
         mutate: bool,
@@ -3530,7 +3736,8 @@ impl Repository {
         if let Some(r) = reasoning {
             options = options.with_reasoning(r);
         }
-        for _ in 0..MAX_REF_CAS_ATTEMPTS {
+        for attempt in 0..MAX_REF_CAS_ATTEMPTS {
+            telemetry::cas_attempt("taint", attempt);
             let (parent_id, is_branch) = self.head_for_write(ref_name)?;
             let parent = self
                 .storage
@@ -3541,6 +3748,7 @@ impl Repository {
                 return Ok(commit.id);
             }
         }
+        telemetry::cas_gave_up("taint", MAX_REF_CAS_ATTEMPTS);
         Err(RepoError::WriteConflict)
     }
 }
