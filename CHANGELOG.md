@@ -19,6 +19,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - Metrics: `asg.commit.duration`, `asg.ref.cas_retries`, `asg.policy.decisions` and `asg.policy.evaluator.errors`.
 - **External policy evaluators have a time limit.** Rego and Cedar processes are killed after 10 seconds, or the limit set with `RegoEvaluator::with_timeout` or `CedarEvaluator::with_timeout`, and the evaluation fails with `TimedOut`. Before, a hung evaluator held the write waiting on it indefinitely. `agentstategraph_policy::external::wait_with_timeout` does this for any runner that starts a process.
 - **`ExternalError::code()`, `PolicyError::code()` and `Decision::kind()`** give stable names for telemetry and clients.
+- **The storage backends record every statement as telemetry, through oxtel-sql 0.3** (Plan H t-008, first part). Each statement is a client span named by its query summary (`SELECT objects`, `INSERT refs`), with `db.system.name` and the statement's text with every literal replaced by `?`, and adds to `db.client.operation.duration`.
+  - On Postgres, spans also carry the database and server, a failed statement's SQLSTATE as `error.type`, and the rows a query returned; `BEGIN`, `COMMIT` and `ROLLBACK` are spans too.
+  - The Postgres pool records `db.client.connection.*`: connections in use and idle, callers waiting, wait and use times, and timeouts. These are still in development in the conventions.
+  - See `docs/OBSERVABILITY.md`. The telemetry crates move to oxtel 0.3.
+- **SQLite's connection and the store's size, as metrics** (Plan H t-008, second part).
+  - SQLite's single connection is recorded as a pool of one named `sqlite`: time waiting for it (`db.client.connection.wait_time`), time holding it (`use_time`) and callers waiting (`pending_requests`).
+  - Store gauges, sampled every 60 seconds while a metrics pipeline exists (`ASG_STORE_GAUGES_INTERVAL`, `0` turns them off): `asg.store.objects`, `asg.store.commits`, `asg.store.size` (SQLite), and `asg.history.undistilled_commits`, the history extractor's lag. A sample took 13 to 220 ms on a 3.2 GB store.
+  - The last garbage collection the server ran: `asg.gc.last_sweep.time`, `asg.gc.last_sweep.objects_deleted` and `asg.gc.last_vacuum.bytes_reclaimed`.
+  - Storage backends gain `store_totals`, a cheap count of objects and commits and the store's size, and `Repository` gains `store_totals` and `undistilled_commits`.
 - **A backend conformance suite now runs the same checks on the in-memory, SQLite and Postgres backends.**
   - What it covers:
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.

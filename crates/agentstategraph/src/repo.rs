@@ -13,7 +13,7 @@ use agentstategraph_core::{
     Namespace, Object, ObjectId, ObjectResolver, StatePath, ToolCall,
 };
 use agentstategraph_storage::{
-    CommitWalk, HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError,
+    CommitWalk, HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError, StoreTotals,
 };
 
 use crate::speculation::{SpecComparison, SpecError, SpecHandle, SpeculationManager};
@@ -2686,6 +2686,19 @@ impl Repository {
             }
         }
         Ok(report)
+    }
+
+    /// The store's object and commit counts and its size on disk, for the
+    /// store gauges (DESIGN.md Plan H t-008). Counting reads every row's key,
+    /// so ask on a slow interval. `None` from a backend that doesn't count.
+    pub fn store_totals(&self) -> Result<Option<StoreTotals>, RepoError> {
+        Ok(self.storage.store_totals()?)
+    }
+
+    /// How many commits aren't yet distilled into the history tables: the
+    /// history extractor's lag.
+    pub fn undistilled_commits(&self) -> Result<i64, RepoError> {
+        Ok(self.storage.history_undistilled_commit_count()?)
     }
 
     /// Physical store-shape report (Plan A t-003): object/commit counts, total

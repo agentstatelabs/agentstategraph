@@ -1178,11 +1178,13 @@ async fn gc_sweep(
             checkpoint_every: req.checkpoint_every.unwrap_or(default.checkpoint_every),
             keep_milestones: req.keep_milestones.unwrap_or(default.keep_milestones),
         };
-        Ok(Json(repo.gc_sweep(
+        let report = repo.gc_sweep(
             policy,
             req.mutate.unwrap_or(false),
             req.vacuum.unwrap_or(false),
-        )?))
+        )?;
+        crate::store_gauges::record_sweep(&report);
+        Ok(Json(report))
     })
     .await
 }
@@ -1193,7 +1195,9 @@ async fn gc_vacuum(
 ) -> Result<Json<serde_json::Value>, AppError> {
     blocking(move || {
         store_wide(&ctx)?;
-        Ok(Json(repo.gc_vacuum()?))
+        let report = repo.gc_vacuum()?;
+        crate::store_gauges::record_vacuum(&report);
+        Ok(Json(report))
     })
     .await
 }

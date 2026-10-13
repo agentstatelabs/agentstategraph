@@ -5,6 +5,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use agentstategraph_core::{
     Commit, Epoch, EpochScope, EpochStatus, IntentCategory, Namespace, Node, Object, ObjectId,
@@ -21,7 +22,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::traits::{
     CommitStore, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability, GcSweep,
     HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
-    SessionStore, StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
+    SessionStore, StorageError, StoreShape, StoreTotals, TableBytes, TaintStore, VacuumStats,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -58,6 +59,9 @@ impl SqliteStorage {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path)
             .map_err(|e| StorageError::Backend(format!("sqlite open: {}", e)))?;
+        // Every statement becomes a database span and a
+        // `db.client.operation.duration` measurement.
+        oxtel_sql::rusqlite::instrument(&conn);
         // Best-effort: a pragma failure leaves the slower-but-correct default.
         // `journal_mode` returns the new mode as a row, so it needs a query
         // rather than `pragma_update` (which rejects result rows).
@@ -84,6 +88,7 @@ impl SqliteStorage {
     pub fn in_memory() -> Result<Self, StorageError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| StorageError::Backend(format!("sqlite open: {}", e)))?;
+        oxtel_sql::rusqlite::instrument(&conn);
         let storage = Self {
             conn: Mutex::new(conn),
             path: None,
@@ -551,11 +556,78 @@ impl SqliteStorage {
         Ok(())
     }
 
-    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, StorageError> {
-        self.conn
-            .lock()
-            .map_err(|e| StorageError::Backend(e.to_string()))
+    /// The store's connection. Waiting for it, and holding it, are recorded
+    /// as the conventions' connection pool metrics, as for a pool of one
+    /// named `sqlite`.
+    fn lock_conn(&self) -> Result<ConnGuard<'_>, StorageError> {
+        let waiting = metrics::gauge!(
+            "db.client.connection.pending_requests",
+            POOL_NAME => SQLITE_POOL
+        );
+        waiting.increment(1.0);
+        let started = Instant::now();
+        let conn = self.conn.lock();
+        waiting.decrement(1.0);
+        metrics::histogram!(
+            "db.client.connection.wait_time",
+            POOL_NAME => SQLITE_POOL
+        )
+        .record(started.elapsed().as_secs_f64());
+        Ok(ConnGuard {
+            conn: conn.map_err(|e| StorageError::Backend(e.to_string()))?,
+            since: Instant::now(),
+        })
     }
+}
+
+const POOL_NAME: &str = "db.client.connection.pool.name";
+const SQLITE_POOL: &str = "sqlite";
+
+/// The store's connection while it's held; records how long when dropped.
+struct ConnGuard<'a> {
+    conn: std::sync::MutexGuard<'a, Connection>,
+    since: Instant,
+}
+
+impl std::ops::Deref for ConnGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for ConnGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        metrics::histogram!(
+            "db.client.connection.use_time",
+            POOL_NAME => SQLITE_POOL
+        )
+        .record(self.since.elapsed().as_secs_f64());
+    }
+}
+
+/// Objects, commits and the file's size (page count × page size).
+fn totals(conn: &Connection) -> Result<(i64, i64, i64), StorageError> {
+    let objects: i64 = conn
+        .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+        .map_err(|e| StorageError::Backend(format!("count objects: {}", e)))?;
+    let commits: i64 = conn
+        .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
+        .map_err(|e| StorageError::Backend(format!("count commits: {}", e)))?;
+    let page_count: i64 = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .map_err(|e| StorageError::Backend(format!("page_count: {}", e)))?;
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(|e| StorageError::Backend(format!("page_size: {}", e)))?;
+    Ok((objects, commits, page_count * page_size))
 }
 
 impl ObjectStore for SqliteStorage {
@@ -1354,6 +1426,7 @@ impl CommitStore for SqliteStorage {
         }
         let conn = Connection::open(path)
             .map_err(|e| StorageError::Backend(format!("gc lock connection: {}", e)))?;
+        oxtel_sql::rusqlite::instrument(&conn);
         // Wait out an in-flight writer rather than failing the sweep at once.
         let _ = conn.busy_timeout(std::time::Duration::from_secs(30));
         conn.execute_batch("BEGIN IMMEDIATE")
@@ -1472,23 +1545,19 @@ impl CommitStore for SqliteStorage {
         Ok(out)
     }
 
+    fn store_totals(&self) -> Result<Option<StoreTotals>, StorageError> {
+        let conn = self.lock_conn()?;
+        let (objects, commits, bytes) = totals(&conn)?;
+        Ok(Some(StoreTotals {
+            objects,
+            commits,
+            bytes: self.path.is_some().then_some(bytes),
+        }))
+    }
+
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
         let conn = self.lock_conn()?;
-
-        let objects: i64 = conn
-            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
-            .map_err(|e| StorageError::Backend(format!("count objects: {}", e)))?;
-        let commits: i64 = conn
-            .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
-            .map_err(|e| StorageError::Backend(format!("count commits: {}", e)))?;
-
-        let page_count: i64 = conn
-            .query_row("PRAGMA page_count", [], |row| row.get(0))
-            .map_err(|e| StorageError::Backend(format!("page_count: {}", e)))?;
-        let page_size: i64 = conn
-            .query_row("PRAGMA page_size", [], |row| row.get(0))
-            .map_err(|e| StorageError::Backend(format!("page_size: {}", e)))?;
-        let total_bytes = page_count * page_size;
+        let (objects, commits, total_bytes) = totals(&conn)?;
 
         // Per-table bytes need the dbstat virtual table, which is only present
         // when SQLite was built with SQLITE_ENABLE_DBSTAT_VTAB. Probe it and

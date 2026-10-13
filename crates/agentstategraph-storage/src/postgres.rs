@@ -42,8 +42,17 @@
 //! [`PostgresStorage::with_gc_grace`]) instead of locking writers out.
 
 use deadpool_postgres::{
-    Config, ManagerConfig, Pool, PoolConfig, RecyclingMethod, Runtime as PoolRuntime,
+    Config, ManagerConfig, PoolConfig, RecyclingMethod, Runtime as PoolRuntime,
 };
+// The pool, its clients and their transactions record each query as a
+// database span and `db.client.operation.duration`, and the pool its
+// `db.client.connection.*` metrics.
+use oxtel_sql::postgres::{GenericClient, Pool};
+
+/// A pooled client, instrumented.
+type PgClient = oxtel_sql::postgres::Client<deadpool_postgres::Object>;
+/// A transaction on one, instrumented.
+type PgTransaction<'a> = oxtel_sql::postgres::Transaction<'a>;
 use std::sync::OnceLock;
 use tokio::runtime::RuntimeFlavor;
 #[cfg(not(feature = "postgres-tls"))]
@@ -62,7 +71,7 @@ use chrono::{DateTime, Utc};
 use crate::traits::{
     CommitStore, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GcReachability, GcSweep,
     HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
-    SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
+    SessionStore, StorageError, StoreShape, StoreTotals, TableBytes, TaintStore,
 };
 
 /// TLS settings read from a connection string, and the string tokio-postgres
@@ -630,7 +639,7 @@ pub struct PostgresStorage {
     gc_grace: std::time::Duration,
     /// The connection holding this tenant's sweep lock, between
     /// `history_gc_lock_writers` and `history_gc_unlock_writers`.
-    gc_conn: std::sync::Mutex<Option<deadpool_postgres::Object>>,
+    gc_conn: std::sync::Mutex<Option<PgClient>>,
 }
 
 impl PostgresStorage {
@@ -695,6 +704,10 @@ impl PostgresStorage {
         )?;
         let mut cfg = Config::new();
         cfg.url = Some(tls.url.clone());
+        // What the pool's spans and metrics say about the database.
+        let pg_config = cfg
+            .get_pg_config()
+            .map_err(|e| StorageError::Backend(format!("postgres config: {e}")))?;
         cfg.manager = Some(ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         });
@@ -721,6 +734,7 @@ impl PostgresStorage {
             cfg.create_pool(Some(PoolRuntime::Tokio1), NoTls)
         };
         let pool = pool.map_err(|e| StorageError::Backend(format!("postgres pool: {}", e)))?;
+        let pool = Pool::new(pool, &pg_config);
         Ok(Self {
             pool,
             tenant_id: tenant_id.to_string(),
@@ -778,10 +792,7 @@ impl PostgresStorage {
         }
     }
 
-    async fn try_init_tables(
-        &self,
-        client: &mut deadpool_postgres::Client,
-    ) -> Result<(), tokio_postgres::Error> {
+    async fn try_init_tables(&self, client: &mut PgClient) -> Result<(), tokio_postgres::Error> {
         // Serialized across every process using the database.
         let tx = client.transaction().await?;
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_KEY])
@@ -848,7 +859,7 @@ impl PostgresStorage {
 
     async fn require_namespace(
         &self,
-        client: &deadpool_postgres::Client,
+        client: &PgClient,
         namespace: &Namespace,
     ) -> Result<(), StorageError> {
         let row = client
@@ -1050,7 +1061,7 @@ impl ObjectStore for PostgresStorage {
     fn leaf_index_is_built(&self, namespace: &str, ref_name: &str) -> Result<bool, StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;
-            leaf_set_built(&**client, &self.tenant_id, namespace, ref_name).await
+            leaf_set_built(&client, &self.tenant_id, namespace, ref_name).await
         })
     }
 
@@ -1206,7 +1217,7 @@ impl ObjectStore for PostgresStorage {
     ) -> Result<Option<Vec<(String, String)>>, StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;
-            if !leaf_set_built(&**client, &self.tenant_id, namespace, ref_name).await? {
+            if !leaf_set_built(&client, &self.tenant_id, namespace, ref_name).await? {
                 return Ok(None);
             }
             let rows = client
@@ -1692,7 +1703,7 @@ impl CommitStore for PostgresStorage {
                 Ok::<_, StorageError>((row.get::<_, i64>(0), row.get::<_, i64>(1)))
             }
             .await;
-            drop(deadpool_postgres::Object::take(client));
+            drop(deadpool_postgres::Object::take(client.into_inner()));
             let (live, total) = result?;
             Ok(GcReachability {
                 total_objects: total,
@@ -1810,7 +1821,7 @@ impl CommitStore for PostgresStorage {
     fn gc_pinned_roots(&self, max_age: std::time::Duration) -> Result<Vec<ObjectId>, StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;
-            gc_pinned(&**client, &self.tenant_id, max_age.as_secs_f64()).await
+            gc_pinned(&client, &self.tenant_id, max_age.as_secs_f64()).await
         })
     }
 
@@ -1839,6 +1850,27 @@ impl CommitStore for PostgresStorage {
     /// This tenant's object and commit counts, and the bytes its rows take
     /// in each table (before indexes and free space; the tables are shared
     /// with other tenants). Reads every row, so it is slow on a large store.
+    /// This tenant's objects and commits. The tables are shared by tenants,
+    /// so there is no size of the tenant's own to report.
+    fn store_totals(&self) -> Result<Option<StoreTotals>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_one(
+                    "SELECT (SELECT count(*) FROM objects WHERE tenant_id = $1),
+                            (SELECT count(*) FROM commits WHERE tenant_id = $1)",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| gc_error("store totals", &e))?;
+            Ok(Some(StoreTotals {
+                objects: row.get(0),
+                commits: row.get(1),
+                bytes: None,
+            }))
+        })
+    }
+
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;
@@ -1881,7 +1913,7 @@ impl PostgresStorage {
     /// A connection holding this tenant's sweep lock (a session advisory
     /// lock). Fails at once if another sweep holds it. Closing the connection
     /// releases the lock, so it is never returned to the pool.
-    async fn gc_lock(&self) -> Result<deadpool_postgres::Object, StorageError> {
+    async fn gc_lock(&self) -> Result<PgClient, StorageError> {
         let client = self.pool.get().await.map_err(conn_error)?;
         let locked: bool = client
             .query_one(
@@ -1905,11 +1937,11 @@ impl PostgresStorage {
 /// notices a closed connection a moment later, and a sweep starting in that
 /// moment would find the lock still held. (If the unlock fails, the
 /// connection is broken and the server releases the lock with it.)
-async fn gc_release(client: deadpool_postgres::Object) {
+async fn gc_release(client: PgClient) {
     let _ = client
         .batch_execute("SELECT pg_advisory_unlock_all()")
         .await;
-    drop(deadpool_postgres::Object::take(client));
+    drop(deadpool_postgres::Object::take(client.into_inner()));
 }
 
 /// Fill the temp table `gc_mark` with every object of `tenant_id` reachable
@@ -1917,7 +1949,7 @@ async fn gc_release(client: deadpool_postgres::Object) {
 /// the database rather than in memory. Each statement commits on its own: a
 /// long transaction would hold back every tenant's history extraction.
 async fn gc_mark(
-    client: &deadpool_postgres::Object,
+    client: &PgClient,
     tenant_id: &str,
     roots: &[ObjectId],
     batch: i64,
@@ -1981,7 +2013,7 @@ async fn gc_mark(
 /// The body of [`PostgresStorage::history_gc_sweep`], on a connection that
 /// holds the tenant's sweep lock.
 async fn gc_sweep(
-    client: &deadpool_postgres::Object,
+    client: &PgClient,
     tenant_id: &str,
     roots: &[ObjectId],
     batch: i64,
@@ -2024,7 +2056,7 @@ async fn gc_sweep(
                 .map_err(|e| StorageError::Serialization(e.to_string()))?,
         );
     }
-    keep.extend(gc_pinned(&***client, tenant_id, GC_PIN_MAX_AGE.as_secs_f64()).await?);
+    keep.extend(gc_pinned(client, tenant_id, GC_PIN_MAX_AGE.as_secs_f64()).await?);
 
     gc_mark(client, tenant_id, &keep, batch).await?;
 
@@ -2074,7 +2106,7 @@ async fn gc_sweep(
 }
 
 async fn gc_pinned(
-    client: &(impl tokio_postgres::GenericClient + Sync),
+    client: &impl GenericClient,
     tenant_id: &str,
     max_age_secs: f64,
 ) -> Result<Vec<ObjectId>, StorageError> {
@@ -2111,7 +2143,7 @@ fn gc_error(step: &str, e: &tokio_postgres::Error) -> StorageError {
 }
 
 async fn leaf_set_built(
-    client: &(impl tokio_postgres::GenericClient + Sync),
+    client: &impl GenericClient,
     tenant_id: &str,
     namespace: &str,
     ref_name: &str,
@@ -2130,7 +2162,7 @@ async fn leaf_set_built(
 /// Write `(path, value)` leaves, replacing any value already at a path. A
 /// path given twice keeps its last value.
 async fn upsert_leaves(
-    tx: &deadpool_postgres::Transaction<'_>,
+    tx: &PgTransaction<'_>,
     tenant_id: &str,
     namespace: &str,
     ref_name: &str,
@@ -2274,11 +2306,7 @@ impl HistoryFold {
         }
     }
 
-    async fn write(
-        self,
-        tx: &deadpool_postgres::Transaction<'_>,
-        tenant_id: &str,
-    ) -> Result<(), StorageError> {
+    async fn write(self, tx: &PgTransaction<'_>, tenant_id: &str) -> Result<(), StorageError> {
         let mut days = Vec::new();
         let mut namespaces = Vec::new();
         let mut agents = Vec::new();
@@ -3802,7 +3830,7 @@ fn pg_priority_from_i32(
 
 /// Write every field of `reminder` over its row, on a plain connection or
 /// inside a transaction. Returns the rows changed: 0 means no such reminder.
-async fn write_reminder<C: deadpool_postgres::GenericClient + Sync>(
+async fn write_reminder<C: GenericClient>(
     client: &C,
     tenant_id: &str,
     reminder: &agentstategraph_reminders::Reminder,
