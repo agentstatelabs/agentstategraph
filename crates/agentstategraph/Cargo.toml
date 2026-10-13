@@ -25,8 +25,15 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+# Spans, events and metrics through the facades only; the binary that embeds
+# the library decides where they go (docs/OBSERVABILITY.md).
+tracing = "0.1"
+metrics = "0.24"
 
 [dev-dependencies]
 # tests/backend_conformance.rs runs every built-in backend, Postgres included
 # when TEST_DATABASE_URL is set.
 agentstategraph-storage = { workspace = true, features = ["sqlite", "memory", "postgres"] }
+# tests/telemetry.rs records the repository's spans and metrics in memory.
+oxtel-sdk = "0.3"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }

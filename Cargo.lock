@@ -26,9 +26,13 @@ dependencies = [
  "agentstategraph-storage",
  "agentstategraph-taint",
  "chrono",
+ "metrics",
+ "oxtel-sdk 0.3.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -100,6 +104,7 @@ dependencies = [
  "tower-http",
  "tower_governor",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -147,11 +152,15 @@ dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
  "chrono",
+ "metrics",
  "once_cell",
+ "oxtel-sdk 0.3.0",
  "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2200,7 +2209,7 @@ dependencies = [
  "oxtel-config",
  "oxtel-otlp",
  "oxtel-prometheus",
- "oxtel-sdk",
+ "oxtel-sdk 0.2.0",
  "tracing",
  "tracing-core",
  "tracing-log",
@@ -2224,7 +2233,7 @@ checksum = "35b13da2c971607eaefb01e94ff007842bb77082db9ab11b63f5a225c2723a90"
 dependencies = [
  "fastrand",
  "flate2",
- "oxtel-sdk",
+ "oxtel-sdk 0.2.0",
  "prost",
  "ureq",
 ]
@@ -2235,7 +2244,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e5012d135bcc41bdce10276074fdb55ac66a9b92f4cfb315c151e6a0dac1402"
 dependencies = [
- "oxtel-sdk",
+ "oxtel-sdk 0.2.0",
 ]
 
 [[package]]
@@ -2246,7 +2255,7 @@ checksum = "c7e1e1c77b82bd024a0b0b5a81882cf63f1f106c18af84312eb76046e06b636a"
 dependencies = [
  "http",
  "metrics",
- "oxtel-sdk",
+ "oxtel-sdk 0.2.0",
  "rmcp",
  "serde",
  "serde_json",
@@ -2269,6 +2278,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxtel-sdk"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fc1d1d844305e57cf9d55b69cc315473010eff822713bd649fda664a4a0da2b"
+dependencies = [
+ "fastrand",
+ "metrics",
+ "smallvec",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "oxtel-tower"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2278,7 +2301,7 @@ dependencies = [
  "http",
  "metrics",
  "oxtel-prometheus",
- "oxtel-sdk",
+ "oxtel-sdk 0.2.0",
  "pin-project-lite",
  "tower-layer",
  "tower-service",

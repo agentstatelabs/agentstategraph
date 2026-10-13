@@ -12,6 +12,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - HTTP error responses carry it beside the message: `{"error": ..., "code": ...}`.
   - MCP tool errors start with it: `Error [write_conflict]: ...`. They still start with `Error`.
   - The codes and their statuses are listed in the MCP server guide, under Errors. Spans and metrics take them as `error.type` in later Plan H work.
+- **The library records its own work as spans, events and metrics** (Plan H t-007), through the `tracing` and `metrics` facades, so an embedding binary decides where they go. docs/OBSERVABILITY.md lists every name.
+  - Spans at `info` for writes (`asg.repo.set`, `asg.repo.delete`, `asg.repo.merge`), the speculation lifecycle, history extraction, garbage collection, the taint check and policy evaluation. A write's span carries the commit it made, which ties a trace to its commit. Reads get spans at `debug` only.
+  - A failed operation's span has an error status and `error.type`, the error's stable code. Messages aren't recorded, since they can name state paths.
+  - Events when a write rebuilds on a moved ref (`debug`) or gives up (`warn`), when a taint refuses a write, when the server's fail-safe decides because no policy matched, and when an external evaluator fails.
+  - Metrics: `asg.commit.duration`, `asg.ref.cas_retries`, `asg.policy.decisions` and `asg.policy.evaluator.errors`.
+- **External policy evaluators have a time limit.** Rego and Cedar processes are killed after 10 seconds, or the limit set with `RegoEvaluator::with_timeout` or `CedarEvaluator::with_timeout`, and the evaluation fails with `TimedOut`. Before, a hung evaluator held the write waiting on it indefinitely. `agentstategraph_policy::external::wait_with_timeout` does this for any runner that starts a process.
+- **`ExternalError::code()`, `PolicyError::code()` and `Decision::kind()`** give stable names for telemetry and clients.
 - **A backend conformance suite now runs the same checks on the in-memory, SQLite and Postgres backends.**
   - What it covers:
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
