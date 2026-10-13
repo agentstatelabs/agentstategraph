@@ -89,7 +89,23 @@ Each statement the storage backend runs gets a client span, through oxtel-sql, n
 | `db.client.connection.wait_time`, `db.client.connection.use_time` | histogram, `s` | `db.client.connection.pool.name` |
 | `db.client.connection.timeouts` | counter | `db.client.connection.pool.name` |
 
-The pool's name is `host:port/database`. The `db.client.connection.*` metrics are still in development in the conventions, so their names may change.
+On Postgres the pool's name is `host:port/database`. SQLite's single connection is recorded as a pool of one named `sqlite`: `db.client.connection.wait_time` is time spent waiting for it, `use_time` time holding it, and `pending_requests` callers waiting. The `db.client.connection.*` metrics are still in development in the conventions, so their names may change.
+
+### Store
+
+Gauges of what's in the store, sampled every 60 seconds by default while a metrics pipeline exists (`--metrics`, or OTLP). `ASG_STORE_GAUGES_INTERVAL` sets the interval in seconds; `0` turns sampling off. Counting reads every row's key: on a 3.2 GB SQLite store (212,000 objects, 1.1 million commits) a sample took about 220 ms with a cold cache and 13 ms warm, holding SQLite's connection meanwhile. On Postgres it grows with the tenant's rows; lengthen the interval for a large one.
+
+| Metric | Instrument and unit | Meaning |
+|---|---|---|
+| `asg.store.objects` | gauge | objects in the store; on Postgres, this tenant's |
+| `asg.store.commits` | gauge | commits in the store |
+| `asg.store.size` | gauge, `By` | the store's file on disk; SQLite only, since Postgres tables are shared by tenants |
+| `asg.history.undistilled_commits` | gauge | commits the history extractor hasn't distilled yet: its lag |
+| `asg.gc.last_sweep.time` | gauge, `s` | when the last garbage collection sweep this server ran finished, as Unix time |
+| `asg.gc.last_sweep.objects_deleted` | gauge | what that sweep deleted |
+| `asg.gc.last_vacuum.bytes_reclaimed` | gauge, `By` | what the last vacuum returned to the operating system |
+
+The garbage collection gauges cover sweeps and vacuums run through this server's `/gc/sweep` and `/gc/vacuum`, not those run from the command line. None of these metrics has labels.
 
 ### Log lines
 
@@ -102,7 +118,6 @@ DESIGN.md Plan H adds, under the rules below:
 - spans for repository writes, merges, speculations, history extraction, garbage collection, policy evaluation and taint checks;
 - events for write conflicts, policy decisions and taint rejections;
 - metrics such as `asg.commit.duration`, `asg.ref.cas_retries` and `asg.policy.decisions`;
-- the time spent waiting for SQLite's single connection, and store gauges;
 - stable error codes as `error.type`;
 - links from commits to their traces.
 

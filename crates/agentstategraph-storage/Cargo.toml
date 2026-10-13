@@ -16,7 +16,7 @@ default = ["sqlite"]
 memory = []
 # Each backend records its queries as database spans and metrics through
 # oxtel-sql, which uses the `tracing` and `metrics` facades only.
-sqlite = ["dep:rusqlite", "dep:oxtel-sql", "oxtel-sql/rusqlite"]
+sqlite = ["dep:rusqlite", "dep:metrics", "dep:oxtel-sql", "oxtel-sql/rusqlite"]
 postgres = [
     "dep:tokio-postgres",
     "dep:deadpool-postgres",
@@ -42,6 +42,8 @@ rusqlite = { workspace = true, optional = true }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"], optional = true }
 deadpool-postgres = { version = "0.14", optional = true }
 oxtel-sql = { version = "0.3", optional = true }
+# SQLite's single connection, recorded as a pool of one.
+metrics = { version = "0.24", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }

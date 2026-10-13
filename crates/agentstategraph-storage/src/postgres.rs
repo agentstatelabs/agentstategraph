@@ -71,7 +71,7 @@ use chrono::{DateTime, Utc};
 use crate::traits::{
     CommitStore, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GcReachability, GcSweep,
     HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
-    SessionStore, StorageError, StoreShape, TableBytes, TaintStore,
+    SessionStore, StorageError, StoreShape, StoreTotals, TableBytes, TaintStore,
 };
 
 /// TLS settings read from a connection string, and the string tokio-postgres
@@ -1850,6 +1850,27 @@ impl CommitStore for PostgresStorage {
     /// This tenant's object and commit counts, and the bytes its rows take
     /// in each table (before indexes and free space; the tables are shared
     /// with other tenants). Reads every row, so it is slow on a large store.
+    /// This tenant's objects and commits. The tables are shared by tenants,
+    /// so there is no size of the tenant's own to report.
+    fn store_totals(&self) -> Result<Option<StoreTotals>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_one(
+                    "SELECT (SELECT count(*) FROM objects WHERE tenant_id = $1),
+                            (SELECT count(*) FROM commits WHERE tenant_id = $1)",
+                    &[&self.tenant_id],
+                )
+                .await
+                .map_err(|e| gc_error("store totals", &e))?;
+            Ok(Some(StoreTotals {
+                objects: row.get(0),
+                commits: row.get(1),
+                bytes: None,
+            }))
+        })
+    }
+
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;

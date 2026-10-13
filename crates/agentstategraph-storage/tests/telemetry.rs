@@ -6,7 +6,7 @@
 //! `TEST_DATABASE_URL`.
 
 use agentstategraph_core::Object;
-use agentstategraph_storage::{ObjectStore, SqliteStorage};
+use agentstategraph_storage::{CommitStore, ObjectStore, SqliteStorage};
 use oxtel_sdk::Resource;
 use oxtel_sdk::metrics::MeterProvider;
 use oxtel_sdk::trace::{InMemorySpanExporter, Sampler, SpanData, TracerProvider};
@@ -66,6 +66,13 @@ fn backends_record_their_queries() {
         "db.client.operation.duration",
         ("db.system.name", "sqlite")
     ));
+    // SQLite's single connection, recorded as a pool of one.
+    let pool = ("db.client.connection.pool.name", "sqlite");
+    assert!(has_point(&meters, "db.client.connection.wait_time", pool));
+    assert!(has_point(&meters, "db.client.connection.use_time", pool));
+    let totals = sqlite.store_totals().unwrap().expect("SQLite counts");
+    assert_eq!(totals.objects, 1);
+    assert_eq!(totals.bytes, None, "an in-memory store has no file");
 
     #[cfg(feature = "postgres")]
     postgres(&spans, &meters);
@@ -92,6 +99,12 @@ fn postgres(spans: &InMemorySpanExporter, meters: &MeterProvider) {
             .unwrap();
     postgres.put_object(&Object::string("hello")).unwrap();
     assert!(postgres.has_object(&Object::string("hello").id()).unwrap());
+    let totals = postgres.store_totals().unwrap().expect("Postgres counts");
+    assert_eq!(
+        (totals.objects, totals.bytes),
+        (1, None),
+        "this tenant's one object"
+    );
     let recorded = spans.finished_spans();
     let postgres_spans: Vec<&SpanData> = recorded
         .iter()

@@ -670,6 +670,12 @@ pub fn cmd_serve_with(
     };
 
     repo.init()?;
+    // The store gauges, when there's a metrics pipeline to take them.
+    if meters.is_some() {
+        if let Some(interval) = agentstategraph_mcp::store_gauges::interval_from_env() {
+            agentstategraph_mcp::store_gauges::spawn(&repo, interval);
+        }
+    }
 
     if args.http_mode {
         eprintln!(

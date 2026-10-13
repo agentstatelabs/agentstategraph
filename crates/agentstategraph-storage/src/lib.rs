@@ -31,5 +31,6 @@ pub use sqlite::SqliteStorage;
 pub use traits::{
     CommitStore, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability,
     GcSweep, HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore,
-    RefStore, SessionStore, Storage, StorageError, StoreShape, TableBytes, TaintStore, VacuumStats,
+    RefStore, SessionStore, Storage, StorageError, StoreShape, StoreTotals, TableBytes, TaintStore,
+    VacuumStats,
 };
