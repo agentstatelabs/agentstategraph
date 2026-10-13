@@ -12,6 +12,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - HTTP error responses carry it beside the message: `{"error": ..., "code": ...}`.
   - MCP tool errors start with it: `Error [write_conflict]: ...`. They still start with `Error`.
   - The codes and their statuses are listed in the MCP server guide, under Errors. Spans and metrics take them as `error.type` in later Plan H work.
+- **Request ids, trace ids in error bodies, and rejections counted by reason** (Plan H t-005).
+  - Every HTTP response carries `x-request-id`: the one the request sent, if it's 1 to 128 visible ASCII characters, or a new UUID. The request's span records it as `http.request.header.x-request-id`.
+  - Error bodies carry the request's `trace_id` beside `error` and `code`.
+  - Requests turned away before a handler ran are counted in `asg.http.rejections` by `asg.rejection.reason`: `rate_limited`, `over_capacity`, `timed_out`, `body_too_large`, `unauthenticated`, `forbidden` or `host_refused`. The reason is recorded on the request's span too.
 - **The library records its own work as spans, events and metrics** (Plan H t-007), through the `tracing` and `metrics` facades, so an embedding binary decides where they go. docs/OBSERVABILITY.md lists every name.
   - Spans at `info` for writes (`asg.repo.set`, `asg.repo.delete`, `asg.repo.merge`), the speculation lifecycle, history extraction, garbage collection, the taint check and policy evaluation. A write's span carries the commit it made, which ties a trace to its commit. Reads get spans at `debug` only.
   - A failed operation's span has an error status and `error.type`, the error's stable code. Messages aren't recorded, since they can name state paths.
@@ -73,6 +77,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **`ASG_PORT`** sets the HTTP port when `--port` isn't given.
 
 ### Changed
+- **Rejections answer like other errors.** The rate limit, request limits, authentication and Host check used to answer with their own bodies: plain text from the rate limit, the body limit and the Host check, and `{"error": ...}` without a code from the others. They now answer `{"error", "code", "trace_id"}`, with the reason as the code. Statuses and `Retry-After` are unchanged.
 - **HTTP errors get the status their code calls for**, where before everything but a reserved path and a namespace-bound key's commit reference was a `500`. A missing branch, ref, commit or path is now `404`; a write conflict, merge conflict or existing branch `409`; an invalid request `400`; a taint or policy refusal `403`; too many speculations `429`. Server failures stay `500`. Clients that treated any failure as a `500` should check the status or the new `code`.
 - **The HTTP server now lets only pages served from localhost call it from a browser.** Before, it allowed any origin, so any website the user visited could read and write a local store through it. Pages from `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]` (any port) are allowed by default. Allow other origins with `--cors-origin <ORIGIN>` (repeatable) or `ASG_CORS_ORIGINS` (comma-separated); `*` allows any origin, and the server warns if that is set without `--auth`.
 - **Bound to loopback (the default), the HTTP server only answers requests addressed to a loopback name.** A website that points a domain it controls at 127.0.0.1 (DNS rebinding) now gets `403`. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host <HOST>` (repeatable) or `ASG_ALLOWED_HOSTS`; `*` turns the check off. Bound to another address, the server answers any host name unless some are listed.

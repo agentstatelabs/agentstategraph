@@ -89,13 +89,13 @@ With the `otlp` feature built in, set `OTEL_EXPORTER_OTLP_ENDPOINT` to send trac
 
 ### Errors
 
-An error response is JSON with a message and a stable code:
+An error response is JSON with a message, a stable code, and the id of the request's trace:
 
 ```json
-{"error": "branch already exists: main", "code": "branch_already_exists"}
+{"error": "branch already exists: main", "code": "branch_already_exists", "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}
 ```
 
-Branch on the code; the message is for people and may change. The status follows from the code:
+Branch on the code; the message is for people and may change. Quote the trace id, or the `x-request-id` header every response carries, when reporting a problem: the server's log lines carry both. A request may send its own `x-request-id` (up to 128 visible ASCII characters), and the response echoes it; otherwise the server makes one. The status follows from the code:
 
 | Status | Codes |
 |---|---|
@@ -109,7 +109,17 @@ Branch on the code; the message is for people and may change. The status follows
 
 A `write_conflict` means another writer moved the branch first; it's safe to retry. MCP tools report the same codes at the start of their error text: `Error [write_conflict]: …`.
 
-The limits and authentication below answer before a request reaches the API, with their own statuses (`401`, `413`, `429`, `503`) and no code yet.
+The limits, authentication and host check below answer before a request reaches the API, in the same form. Their codes are the reasons the server counts them by, in `asg.http.rejections`:
+
+| Status | Code | Why |
+|---|---|---|
+| `401` | `unauthenticated` | no API key, or one that isn't valid |
+| `403` | `forbidden` | the key can't use this endpoint, such as a non-admin key on an admin route |
+| `403` | `host_refused` | the request named a host this server doesn't answer to |
+| `413` | `body_too_large` | the body is over the limit |
+| `429` | `rate_limited` | over the rate limit; `Retry-After` says when to try again |
+| `503` | `over_capacity` | the server is handling its limit of requests; `Retry-After: 1` |
+| `503` | `timed_out` | the request ran past the timeout; a write may still have completed |
 
 ### Limits
 

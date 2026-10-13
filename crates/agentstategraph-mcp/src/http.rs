@@ -54,7 +54,26 @@ pub fn build_governor_layer(rpm: u32) -> Option<PeerIpGovernorLayer> {
         .burst_size(burst)
         .finish()?;
     info!(rpm, period_ms, burst, "ASG rate limiter configured");
-    Some(GovernorLayer::new(config))
+    Some(GovernorLayer::new(config).error_handler(rate_limited))
+}
+
+/// The rate limiter's refusal, answered as the server's other rejections
+/// are, with `Retry-After` kept.
+fn rate_limited(error: tower_governor::GovernorError) -> axum::response::Response {
+    match error {
+        tower_governor::GovernorError::TooManyRequests { wait_time, headers } => {
+            let mut response = rejection(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                format!("too many requests; retry in {wait_time}s"),
+            );
+            if let Some(headers) = headers {
+                response.headers_mut().extend(headers);
+            }
+            response
+        }
+        other => other.into_response().map(axum::body::Body::from),
+    }
 }
 
 /// Track per-key warning state so we only warn once per key when it falls
@@ -276,7 +295,7 @@ pub fn build_rate_limit_layer(
         });
     }
     info!(rpm, period_ms, burst, "ASG rate limiter configured");
-    Some(GovernorLayer::new(config))
+    Some(GovernorLayer::new(config).error_handler(rate_limited))
 }
 
 /// Whether a proxied path could leave ASD's `/api/v1`: URL parsing collapses
@@ -335,6 +354,7 @@ pub fn with_request_bounds(app: Router, bounds: &RequestBounds) -> Router {
         permits: Arc::new(tokio::sync::Semaphore::new(bounds.max_concurrent.max(1))),
         max_concurrent: bounds.max_concurrent.max(1),
         timeout: bounds.timeout,
+        max_body_bytes: bounds.max_body_bytes,
     });
     app.layer(middleware::from_fn_with_state(state, bound_request))
         .layer(axum::extract::DefaultBodyLimit::max(bounds.max_body_bytes))
@@ -344,6 +364,7 @@ struct BoundsState {
     permits: Arc<tokio::sync::Semaphore>,
     max_concurrent: usize,
     timeout: Option<std::time::Duration>,
+    max_body_bytes: usize,
 }
 
 async fn bound_request(
@@ -359,37 +380,49 @@ async fn bound_request(
         return next.run(req).await;
     }
     let Ok(_permit) = Arc::clone(&bounds.permits).try_acquire_owned() else {
-        return (
+        let mut response = rejection(
             StatusCode::SERVICE_UNAVAILABLE,
-            [(axum::http::header::RETRY_AFTER, "1")],
-            Json(serde_json::json!({
-                "error": format!(
-                    "the server is handling its limit of {} requests; retry shortly",
-                    bounds.max_concurrent
-                )
-            })),
-        )
-            .into_response();
+            "over_capacity",
+            format!(
+                "the server is handling its limit of {} requests; retry shortly",
+                bounds.max_concurrent
+            ),
+        );
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+        return response;
     };
-    let Some(limit) = bounds.timeout else {
-        return next.run(req).await;
-    };
-    match tokio::time::timeout(limit, next.run(req)).await {
-        Ok(res) => res,
-        Err(_) => {
-            warn!(timeout_secs = limit.as_secs_f64(), "request timed out");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": format!(
+    let response = match bounds.timeout {
+        None => next.run(req).await,
+        Some(limit) => match tokio::time::timeout(limit, next.run(req)).await {
+            Ok(response) => response,
+            Err(_) => {
+                warn!(timeout_secs = limit.as_secs_f64(), "request timed out");
+                return rejection(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "timed_out",
+                    format!(
                         "the request took longer than {}s; a write may still have completed",
                         limit.as_secs_f64()
-                    )
-                })),
-            )
-                .into_response()
-        }
+                    ),
+                );
+            }
+        },
+    };
+    // Only the body limit answers 413: the extractors refuse a body past it.
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return rejection(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "body_too_large",
+            format!(
+                "the request body is over this server's limit of {} bytes",
+                bounds.max_body_bytes
+            ),
+        );
     }
+    response
 }
 
 // ─── Observability ──────────────────────────────────────────
@@ -413,11 +446,60 @@ async fn bound_request(
 /// middleware, never the key. Metrics go to the process's `metrics`
 /// recorder, which `main` installs.
 pub fn with_observability(app: Router) -> Router {
-    app.layer(
+    metrics::describe_counter!(
+        "asg.http.rejections",
+        "Requests the server turned away before a handler ran, by reason."
+    );
+    app.layer(middleware::from_fn(request_context)).layer(
         oxtel_tower::HttpServerLayer::new().with_span(|info| {
-            oxtel_tower::server_span!(info, asg.api_key.id = tracing::field::Empty)
+            oxtel_tower::server_span!(
+                info,
+                asg.api_key.id = tracing::field::Empty,
+                asg.rejection.reason = tracing::field::Empty,
+                "http.request.header.x-request-id" = tracing::field::Empty,
+            )
         }),
     )
+}
+
+/// The header a request's id travels in.
+const REQUEST_ID: &str = "x-request-id";
+
+/// Give each request an id, and count the requests the server rejects.
+///
+/// The id is the `x-request-id` the client sent, when it's 1 to 128 visible
+/// ASCII characters, or else a new UUID. It's recorded on the request's span
+/// as `http.request.header.x-request-id` and echoed on the response, so a
+/// client can quote it. A response marked [`Rejected`] is counted in
+/// `asg.http.rejections`, and its reason recorded on the span as
+/// `asg.rejection.reason`.
+async fn request_context(
+    mut req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let id = req
+        .headers()
+        .get(REQUEST_ID)
+        .filter(|id| {
+            (1..=128).contains(&id.len()) && id.as_bytes().iter().all(u8::is_ascii_graphic)
+        })
+        .cloned()
+        .unwrap_or_else(|| {
+            axum::http::HeaderValue::try_from(uuid::Uuid::new_v4().to_string())
+                .expect("a UUID is a valid header value")
+        });
+    req.headers_mut().insert(REQUEST_ID, id.clone());
+    let span = tracing::Span::current();
+    if let Ok(text) = id.to_str() {
+        span.record("http.request.header.x-request-id", text);
+    }
+    let mut response = next.run(req).await;
+    if let Some(&Rejected(reason)) = response.extensions().get::<Rejected>() {
+        span.record("asg.rejection.reason", reason);
+        metrics::counter!("asg.http.rejections", "asg.rejection.reason" => reason).increment(1);
+    }
+    response.headers_mut().insert(REQUEST_ID, id);
+    response
 }
 
 /// Everything the server puts around its router, in the order that matters:
@@ -604,15 +686,15 @@ async fn check_host(
         Some(host) if policy.allows_host(&host) => next.run(req).await,
         Some(host) => {
             warn!(host = %host, "refused a request for a Host this server doesn't serve");
-            (
+            rejection(
                 StatusCode::FORBIDDEN,
+                "host_refused",
                 format!(
                     "this server doesn't answer to Host '{host}'. Behind a reverse proxy, \
                      pass --allowed-host {} (or set ASG_ALLOWED_HOSTS).",
                     host_name(&host)
                 ),
             )
-                .into_response()
         }
     }
 }
@@ -1464,12 +1546,39 @@ fn status_for(code: &str) -> StatusCode {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        (
-            self.status,
-            Json(serde_json::json!({ "error": self.message, "code": self.code })),
-        )
-            .into_response()
+        (self.status, error_body(self.code, self.message)).into_response()
     }
+}
+
+/// An error body: `{"error": message, "code": code, "trace_id": id}`. The
+/// trace id is the request's, so a client reporting an error can point at
+/// its trace and log lines; it's absent outside a request.
+pub(crate) fn error_body(code: &str, message: impl Into<String>) -> Json<serde_json::Value> {
+    let mut body = serde_json::json!({ "error": message.into(), "code": code });
+    if let Some(context) =
+        oxtel::sdk::trace::current_span_context().filter(|context| context.is_valid())
+    {
+        body["trace_id"] = context.trace_id.to_string().into();
+    }
+    Json(body)
+}
+
+/// Marks a response as a rejection: the server turned the request away
+/// before a handler ran, for a limit, authentication or the Host it named.
+/// [`with_observability`] counts it by reason in `asg.http.rejections`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Rejected(pub(crate) &'static str);
+
+/// A rejection's response: `status`, an error body whose code is `reason`,
+/// and the [`Rejected`] mark.
+pub(crate) fn rejection(
+    status: StatusCode,
+    reason: &'static str,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    let mut response = (status, error_body(reason, message)).into_response();
+    response.extensions_mut().insert(Rejected(reason));
+    response
 }
 
 impl From<RepoError> for AppError {

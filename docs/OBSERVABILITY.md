@@ -38,13 +38,30 @@ Each request gets a server span named `{method} {route}`, such as `GET /state/{r
 | `http.response.status_code` | |
 | `error.type` | for 5xx responses |
 | `asg.api_key.id` | the id of the API key used, recorded by the auth layer; never the key |
+| `http.request.header.x-request-id` | the request's id: the `x-request-id` it sent, if that's 1 to 128 visible ASCII characters, or a new UUID. Every response echoes it |
+| `asg.rejection.reason` | why the server turned the request away before a handler ran, when it did |
 
 Each finished request also logs `request` at `info`, or at `error` for a 5xx, with the status and `http.server.request.duration` in seconds.
+
+Error bodies carry the request's `trace_id` beside `error` and `code`, so a client can point at the trace and its log lines.
+
+A rejection is a request turned away before a handler ran. Its response's `code` is the reason, and it's counted by that reason:
+
+| Reason | Status |
+|---|---|
+| `rate_limited` | 429, over the rate limit |
+| `over_capacity` | 503, the server is handling its limit of requests |
+| `timed_out` | 503, past the request timeout |
+| `body_too_large` | 413, over the body limit |
+| `unauthenticated` | 401, no API key or an invalid one |
+| `forbidden` | 403, a key that can't use the endpoint |
+| `host_refused` | 403, a Host the server doesn't answer to |
 
 | Metric | Instrument and unit | Labels | Prometheus name |
 |---|---|---|---|
 | `http.server.request.duration` | histogram, `s` | `http.request.method`, `url.scheme`, `network.protocol.version`, `http.route`, `http.response.status_code`, `error.type` | `http_server_request_duration_seconds` |
 | `http.server.active_requests` | up-down counter, `{request}` | `http.request.method`, `url.scheme` | `http_server_active_requests` |
+| `asg.http.rejections` | counter | `asg.rejection.reason` | `asg_http_rejections_total` |
 
 Requests the Host check refuses are logged and counted too: the observability layer sits outside the origin policy.
 
@@ -175,6 +192,7 @@ Attributes of our own use the `asg.` prefix, lowercase and dot-separated, and ar
 | `asg.policy.id` | string | log lines | a policy's `path@version` |
 | `asg.ref.cas_attempts` | int | spans, log lines | how many times a write built its commit, recorded when the ref moved under it |
 | `asg.ref.name` | string | spans | the branch or ref a write or read used |
+| `asg.rejection.reason` | string | metrics, spans, log lines | why the server turned a request away: `rate_limited`, `over_capacity`, `timed_out`, `body_too_large`, `unauthenticated`, `forbidden` or `host_refused` |
 | `asg.speculation.id` | int | spans | a speculation's handle |
 | `asg.taint.effect` | string | log lines | the effect that refused a write: `block`, `review` or `quarantine` |
 | `asg.taint.id` | string | log lines | the taint that refused a write |
