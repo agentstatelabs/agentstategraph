@@ -308,6 +308,8 @@ async fn requests_carry_ids_and_rejections_are_counted_by_reason() {
         .expect("the request id on its span");
     assert_eq!(tagged.context.trace_id.to_string(), trace_id);
     assert!(attr(tagged, "asg.rejection.reason").is_none());
+    let code = error["code"].as_str().unwrap();
+    assert_eq!(attr(tagged, "asg.error.code"), Some(Value::from(code)));
     assert!(
         recorded
             .iter()

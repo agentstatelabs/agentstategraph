@@ -14,7 +14,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   - The codes and their statuses are listed in the MCP server guide, under Errors. Spans and metrics take them as `error.type` in later Plan H work.
 - **Request ids, trace ids in error bodies, and rejections counted by reason** (Plan H t-005).
   - Every HTTP response carries `x-request-id`: the one the request sent, if it's 1 to 128 visible ASCII characters, or a new UUID. The request's span records it as `http.request.header.x-request-id`.
-  - Error bodies carry the request's `trace_id` beside `error` and `code`.
+  - Error bodies carry the request's `trace_id` beside `error` and `code`, and the request's span records the code as `asg.error.code`, so its log line shows it.
   - Requests turned away before a handler ran are counted in `asg.http.rejections` by `asg.rejection.reason`: `rate_limited`, `over_capacity`, `timed_out`, `body_too_large`, `unauthenticated`, `forbidden` or `host_refused`. The reason is recorded on the request's span too.
 - **The library records its own work as spans, events and metrics** (Plan H t-007), through the `tracing` and `metrics` facades, so an embedding binary decides where they go. docs/OBSERVABILITY.md lists every name.
   - Spans at `info` for writes (`asg.repo.set`, `asg.repo.delete`, `asg.repo.merge`), the speculation lifecycle, history extraction, garbage collection, the taint check and policy evaluation. A write's span carries the commit it made, which ties a trace to its commit. Reads get spans at `debug` only.

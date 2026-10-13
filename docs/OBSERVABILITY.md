@@ -39,6 +39,7 @@ Each request gets a server span named `{method} {route}`, such as `GET /state/{r
 | `error.type` | for 5xx responses |
 | `asg.api_key.id` | the id of the API key used, recorded by the auth layer; never the key |
 | `http.request.header.x-request-id` | the request's id: the `x-request-id` it sent, if that's 1 to 128 visible ASCII characters, or a new UUID. Every response echoes it |
+| `asg.error.code` | an error response's stable code, such as `branch_not_found` or `rate_limited`; `error.type` stays the status, as the HTTP conventions have it |
 | `asg.rejection.reason` | why the server turned the request away before a handler ran, when it did |
 
 Each finished request also logs `request` at `info`, or at `error` for a 5xx, with the status and `http.server.request.duration` in seconds.
@@ -179,6 +180,7 @@ Attributes of our own use the `asg.` prefix, lowercase and dot-separated, and ar
 |---|---|---|---|
 | `asg.api_key.id` | string | spans, log lines | the id of the API key a request used; never the key |
 | `asg.commit.id` | string | spans | the commit a write made, which ties the trace to the commit |
+| `asg.error.code` | string | spans, log lines | an HTTP error response's stable code, from the codes in the MCP server guide |
 | `asg.gc.bytes_reclaimed` | int | spans | the bytes a vacuum returned to the operating system |
 | `asg.gc.mutate` | boolean | spans | whether a sweep deletes, or only previews |
 | `asg.gc.objects_deleted` | int | spans | the objects a sweep deleted |

@@ -456,6 +456,7 @@ pub fn with_observability(app: Router) -> Router {
                 info,
                 asg.api_key.id = tracing::field::Empty,
                 asg.rejection.reason = tracing::field::Empty,
+                asg.error.code = tracing::field::Empty,
                 "http.request.header.x-request-id" = tracing::field::Empty,
             )
         }),
@@ -470,9 +471,10 @@ const REQUEST_ID: &str = "x-request-id";
 /// The id is the `x-request-id` the client sent, when it's 1 to 128 visible
 /// ASCII characters, or else a new UUID. It's recorded on the request's span
 /// as `http.request.header.x-request-id` and echoed on the response, so a
-/// client can quote it. A response marked [`Rejected`] is counted in
-/// `asg.http.rejections`, and its reason recorded on the span as
-/// `asg.rejection.reason`.
+/// client can quote it. An error response's code is recorded on the span as
+/// `asg.error.code`, so the request's log line shows it. A response marked
+/// [`Rejected`] is counted in `asg.http.rejections`, and its reason recorded
+/// on the span as `asg.rejection.reason`.
 async fn request_context(
     mut req: axum::extract::Request,
     next: middleware::Next,
@@ -494,6 +496,9 @@ async fn request_context(
         span.record("http.request.header.x-request-id", text);
     }
     let mut response = next.run(req).await;
+    if let Some(&ErrorCode(code)) = response.extensions().get::<ErrorCode>() {
+        span.record("asg.error.code", code);
+    }
     if let Some(&Rejected(reason)) = response.extensions().get::<Rejected>() {
         span.record("asg.rejection.reason", reason);
         metrics::counter!("asg.http.rejections", "asg.rejection.reason" => reason).increment(1);
@@ -1546,9 +1551,16 @@ fn status_for(code: &str) -> StatusCode {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        (self.status, error_body(self.code, self.message)).into_response()
+        let mut response = (self.status, error_body(self.code, self.message)).into_response();
+        response.extensions_mut().insert(ErrorCode(self.code));
+        response
     }
 }
+
+/// An error response's code, for [`with_observability`] to record on the
+/// request's span.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ErrorCode(pub(crate) &'static str);
 
 /// An error body: `{"error": message, "code": code, "trace_id": id}`. The
 /// trace id is the request's, so a client reporting an error can point at
@@ -1577,6 +1589,7 @@ pub(crate) fn rejection(
     message: impl Into<String>,
 ) -> axum::response::Response {
     let mut response = (status, error_body(reason, message)).into_response();
+    response.extensions_mut().insert(ErrorCode(reason));
     response.extensions_mut().insert(Rejected(reason));
     response
 }
