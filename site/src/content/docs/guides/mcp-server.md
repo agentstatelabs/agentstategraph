@@ -177,7 +177,7 @@ OPTIONS:
   -h, --help            Print help with full endpoint list
 ```
 
-Each commit records the trace it was made in, shown as `trace_id` and `span_id` in `log` and `blame`; set `ASG_TRACE_LINKS=off` to stop recording them. See [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md).
+Each commit records the trace it was made in, shown as `trace_id` and `span_id` in `log` and `blame`; set `ASG_TRACE_LINKS=off` to stop recording them. Set `ASG_COMMIT_EVENTS=on` to log each commit as an `asg.commit` event, for a log backend or SIEM; it never carries values. See [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md).
 
 ## Available Tools (77)
 

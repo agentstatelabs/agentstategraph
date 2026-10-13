@@ -24,6 +24,20 @@ pub fn current_trace() -> Option<agentstategraph::CommitTrace> {
         })
 }
 
+/// Whether each commit is logged as an `asg.commit` event (DESIGN.md Plan H
+/// t-010): only when `ASG_COMMIT_EVENTS` is `1`, `on`, `true` or `yes`.
+pub fn commit_events_from_env() -> bool {
+    let value = std::env::var("ASG_COMMIT_EVENTS").unwrap_or_default();
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "on" | "true" | "yes"
+    )
+}
+
+/// The log filter directive that lets `asg.commit` events through whatever
+/// level the rest of the log runs at.
+pub const COMMIT_EVENTS_DIRECTIVE: &str = "agentstategraph::provenance=info";
+
 /// Whether commits are linked to their traces: yes, unless `ASG_TRACE_LINKS`
 /// is `0`, `off`, `false` or `no`.
 pub fn trace_links_from_env() -> bool {

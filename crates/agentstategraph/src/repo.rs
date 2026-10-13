@@ -3530,7 +3530,20 @@ impl Repository {
             return Ok(false);
         }
         self.update_leaf_index(&ns, ref_name, old_root.as_ref(), &new_target);
+        self.commit_landed(&ns, ref_name, &new_target);
         Ok(true)
+    }
+
+    /// Emit `asg.commit` for a commit that landed on `ref_name`, when
+    /// [`crate::emit_commit_events`] turned the events on. Reading the commit
+    /// back is best-effort: an event is never worth failing a write for.
+    fn commit_landed(&self, ns: &Namespace, ref_name: &str, commit_id: &ObjectId) {
+        if !telemetry::commit_events_enabled() {
+            return;
+        }
+        if let Ok(Some(commit)) = self.storage.get_commit(commit_id) {
+            telemetry::commit_landed(ns.as_str(), ref_name, &commit);
+        }
     }
 
     /// The commit a write to `ref_name` should build on, and whether
@@ -3558,6 +3571,7 @@ impl Repository {
             self.advance_ref(ref_name, expected, new_target)
         } else {
             self.guarded_set_ref(ref_name, new_target)?;
+            self.commit_landed(&self.active_namespace()?, ref_name, &new_target);
             Ok(true)
         }
     }

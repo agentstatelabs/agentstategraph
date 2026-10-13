@@ -520,6 +520,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "  ASG_TRACE_LINKS=off   Don't record the trace each commit was made in (default: on)"
                 );
+                eprintln!(
+                    "  ASG_COMMIT_EVENTS=on  Log each commit as an asg.commit event, for a log backend or SIEM (default: off)"
+                );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
                 eprintln!("HTTP API ENDPOINTS:");
@@ -863,7 +866,8 @@ pub fn cmd_serve_with(
 /// `RUST_LOG`, else `default_level`, in the form `ASG_LOG_FORMAT` names.
 /// With the `otlp` feature, everything is also sent over OTLP once
 /// `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Serving HTTP keeps metrics in
-/// memory for `/metrics`.
+/// memory for `/metrics`. With `commit_events`, the log also takes the
+/// `asg.commit` events at `info`, whatever its level.
 ///
 /// `None` when an embedding host has installed its own subscriber, which
 /// stays in charge. Keep the guard until `main` returns: dropping it sends
@@ -871,13 +875,18 @@ pub fn cmd_serve_with(
 fn init_telemetry(
     default_level: &str,
     serving_http: bool,
+    commit_events: bool,
 ) -> Result<Option<oxtel::Guard>, oxtel::Error> {
     use oxtel::sdk::logs::LocalFormat;
-    let level = std::env::var("ASG_LOG")
+    let mut level = std::env::var("ASG_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
         .ok()
         .filter(|l| !l.trim().is_empty())
         .unwrap_or_else(|| default_level.to_string());
+    if commit_events {
+        level.push(',');
+        level.push_str(agentstategraph_mcp::COMMIT_EVENTS_DIRECTIVE);
+    }
     let mut builder = oxtel::builder()
         .with_default_service_name("agentstategraph")
         .with_resource_attribute(oxtel::KeyValue::new(
@@ -940,7 +949,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // HTTP serving logs each request at info; an MCP stdio server stays
     // quiet unless something is wrong.
     let serving_http = args.iter().any(|a| a == "--http");
-    let telemetry = init_telemetry(if serving_http { "info" } else { "warn" }, serving_http)?;
+    let commit_events = agentstategraph_mcp::commit_events_from_env();
+    let telemetry = init_telemetry(
+        if serving_http { "info" } else { "warn" },
+        serving_http,
+        commit_events,
+    )?;
+    agentstategraph::emit_commit_events(commit_events);
     if agentstategraph_mcp::trace_links_from_env() {
         agentstategraph::link_commits_to_traces(agentstategraph_mcp::current_trace);
     }

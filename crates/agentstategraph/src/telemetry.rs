@@ -4,10 +4,11 @@
 //! as the server does through oxtel. State paths and values are never
 //! recorded, and neither are error messages, which can name paths.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Once, OnceLock};
 use std::time::Instant;
 
-use agentstategraph_core::ObjectId;
+use agentstategraph_core::{Commit, ObjectId};
 use agentstategraph_storage::CommitTrace;
 use agentstategraph_taint::TaintError;
 use metrics::{Label, Unit};
@@ -188,4 +189,40 @@ pub fn link_commits_to_traces(
 /// The trace the current work belongs to, if a source was set and there is one.
 pub(crate) fn current_trace() -> Option<CommitTrace> {
     TRACE_SOURCE.get().and_then(|source| source())
+}
+
+static COMMIT_EVENTS: AtomicBool = AtomicBool::new(false);
+
+/// Emit each commit that lands on a ref as an `asg.commit` event
+/// (DESIGN.md Plan H t-010), so a log backend or SIEM can index state
+/// changes beside traces. Off until turned on.
+///
+/// The event goes to `tracing` at `info`, under the target
+/// `agentstategraph::provenance`, named `asg.commit`. Inside the write it
+/// carries the write's trace. Its fields are the commit id, the ref and
+/// namespace it landed in, the agent, the intent category and the confidence:
+/// never values, and none of the commit's free text (description, reasoning,
+/// tags).
+pub fn emit_commit_events(enabled: bool) {
+    COMMIT_EVENTS.store(enabled, Ordering::Relaxed);
+}
+
+pub(crate) fn commit_events_enabled() -> bool {
+    COMMIT_EVENTS.load(Ordering::Relaxed)
+}
+
+/// A commit landed on `ref_name` in `namespace`.
+pub(crate) fn commit_landed(namespace: &str, ref_name: &str, commit: &Commit) {
+    tracing::event!(
+        name: "asg.commit",
+        target: "agentstategraph::provenance",
+        tracing::Level::INFO,
+        asg.commit.id = %commit.id,
+        asg.ref.name = ref_name,
+        asg.namespace = namespace,
+        gen_ai.agent.id = commit.agent_id.as_str(),
+        asg.intent.category = ?commit.intent.category,
+        asg.commit.confidence = commit.confidence,
+        "a commit landed"
+    );
 }
