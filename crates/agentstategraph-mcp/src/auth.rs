@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use axum::{
-    Json,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
@@ -757,6 +756,10 @@ pub enum AuthError {
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
+        let reason = match self {
+            AuthError::MissingKey | AuthError::InvalidKey => "unauthenticated",
+            _ => "forbidden",
+        };
         let (status, msg) = match self {
             AuthError::MissingKey => (
                 StatusCode::UNAUTHORIZED,
@@ -786,7 +789,7 @@ impl IntoResponse for AuthError {
                 "This key is bound to an invalid namespace name.".to_string(),
             ),
         };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        crate::http::rejection(status, reason, msg)
     }
 }
 
