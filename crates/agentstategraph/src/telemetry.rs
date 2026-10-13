@@ -4,10 +4,11 @@
 //! as the server does through oxtel. State paths and values are never
 //! recorded, and neither are error messages, which can name paths.
 
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use std::time::Instant;
 
 use agentstategraph_core::ObjectId;
+use agentstategraph_storage::CommitTrace;
 use agentstategraph_taint::TaintError;
 use metrics::{Label, Unit};
 use tracing::Span;
@@ -162,4 +163,29 @@ pub(crate) fn taint_refused(error: &TaintError, taint_id: Option<&str>) {
         error.type = "taint_blocked",
         "a taint refused the write"
     );
+}
+
+/// Where a commit finds the trace it's made in. See [`link_commits_to_traces`].
+type TraceSource = Box<dyn Fn() -> Option<CommitTrace> + Send + Sync>;
+
+static TRACE_SOURCE: OnceLock<TraceSource> = OnceLock::new();
+
+/// Link every commit this process makes to the trace it's made in
+/// (DESIGN.md Plan H t-009). `source` returns the current trace, or `None`
+/// outside one; the server passes oxtel's current span context. Each commit's
+/// trace and span ids are kept beside it in the store, never in it, and
+/// [`Repository::commit_trace`](crate::Repository::commit_trace) reads them
+/// back. Without a source, nothing is recorded.
+///
+/// Set it once, at startup. Returns `false`, keeping the first source, if one
+/// was already set.
+pub fn link_commits_to_traces(
+    source: impl Fn() -> Option<CommitTrace> + Send + Sync + 'static,
+) -> bool {
+    TRACE_SOURCE.set(Box::new(source)).is_ok()
+}
+
+/// The trace the current work belongs to, if a source was set and there is one.
+pub(crate) fn current_trace() -> Option<CommitTrace> {
+    TRACE_SOURCE.get().and_then(|source| source())
 }

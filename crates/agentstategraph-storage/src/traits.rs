@@ -275,6 +275,17 @@ pub struct StoreShape {
     pub dbstat_available: bool,
 }
 
+/// The trace a commit was made in (DESIGN.md Plan H t-009), as W3C trace
+/// context ids in lowercase hex. It's kept beside the commit, never in it, so
+/// commit ids and sync bundles don't depend on telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitTrace {
+    /// The trace: 32 hex characters.
+    pub trace_id: String,
+    /// The span that made the commit: 16 hex characters.
+    pub span_id: String,
+}
+
 /// A store's totals, cheap enough to sample on an interval for the store
 /// gauges (DESIGN.md Plan H t-008). Unlike [`StoreShape`], there is no
 /// per-table breakdown, which reads every page.
@@ -479,6 +490,21 @@ pub trait CommitStore: Send + Sync {
     /// row's key, so sample it on a slow interval. Backends that don't count
     /// report `None`.
     fn store_totals(&self) -> Result<Option<StoreTotals>, StorageError> {
+        Ok(None)
+    }
+
+    /// Record the trace `commit_id` was made in. The first record for a
+    /// commit stands. Backends that don't keep trace links ignore it.
+    fn set_commit_trace(
+        &self,
+        _commit_id: &ObjectId,
+        _trace: &CommitTrace,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// The trace `commit_id` was made in, if one was recorded.
+    fn get_commit_trace(&self, _commit_id: &ObjectId) -> Result<Option<CommitTrace>, StorageError> {
         Ok(None)
     }
 

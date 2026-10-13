@@ -69,7 +69,7 @@ use agentstategraph_core::{
 use chrono::{DateTime, Utc};
 
 use crate::traits::{
-    CommitStore, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GcReachability, GcSweep,
+    CommitStore, CommitTrace, CommitWalk, DEFAULT_GC_GRACE, EpochStore, GcReachability, GcSweep,
     HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
     SessionStore, StorageError, StoreShape, StoreTotals, TableBytes, TaintStore,
 };
@@ -310,7 +310,8 @@ mod tls {
 /// 2: history walks in one query, the history rollup tables, and the leaf
 /// search index (Plan D t-008).
 /// 3: GC: object write times and speculation pins (Plan D t-009).
-const SCHEMA_VERSION: i32 = 3;
+/// 4: the trace each commit was made in (Plan H t-009).
+const SCHEMA_VERSION: i32 = 4;
 
 /// Every table, column and index, each `IF NOT EXISTS` so it's safe to re-run
 /// over any earlier schema, plus the version stamp table.
@@ -565,6 +566,16 @@ const SCHEMA_DDL: &str = "
                     root       BYTEA NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     PRIMARY KEY (tenant_id, key)
+                );
+
+                -- The trace each commit was made in (version 4): beside the
+                -- commit, not in it, so commit ids don't depend on telemetry.
+                CREATE TABLE IF NOT EXISTS commit_traces (
+                    tenant_id TEXT NOT NULL,
+                    commit_id BYTEA NOT NULL,
+                    trace_id  TEXT NOT NULL,
+                    span_id   TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, commit_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS asg_schema (
@@ -1263,6 +1274,49 @@ impl ObjectStore for PostgresStorage {
 // ─── CommitStore ────────────────────────────────────────────
 
 impl CommitStore for PostgresStorage {
+    fn set_commit_trace(
+        &self,
+        commit_id: &ObjectId,
+        trace: &CommitTrace,
+    ) -> Result<(), StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            client
+                .execute(
+                    "INSERT INTO commit_traces (tenant_id, commit_id, trace_id, span_id)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (tenant_id, commit_id) DO NOTHING",
+                    &[
+                        &self.tenant_id,
+                        &commit_id.as_bytes().as_slice(),
+                        &trace.trace_id,
+                        &trace.span_id,
+                    ],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("set commit trace: {}", e)))?;
+            Ok(())
+        })
+    }
+
+    fn get_commit_trace(&self, commit_id: &ObjectId) -> Result<Option<CommitTrace>, StorageError> {
+        self.block_on(async {
+            let client = self.pool.get().await.map_err(conn_error)?;
+            let row = client
+                .query_opt(
+                    "SELECT trace_id, span_id FROM commit_traces
+                     WHERE tenant_id = $1 AND commit_id = $2",
+                    &[&self.tenant_id, &commit_id.as_bytes().as_slice()],
+                )
+                .await
+                .map_err(|e| StorageError::Backend(format!("get commit trace: {}", e)))?;
+            Ok(row.map(|row| CommitTrace {
+                trace_id: row.get(0),
+                span_id: row.get(1),
+            }))
+        })
+    }
+
     fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
         self.block_on(async {
             let client = self.pool.get().await.map_err(conn_error)?;

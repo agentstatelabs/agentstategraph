@@ -28,10 +28,12 @@ pub use agentstategraph_core as core;
 pub use agentstategraph_storage as storage;
 
 // Re-export primary types
+pub use agentstategraph_storage::CommitTrace;
 pub use repo::{
     CommitOptions, HistoryExtractReport, META_PATH_PREFIX, META_SCHEMA_VERSION_PATH, RepoError,
     Repository, RetentionPolicy, SCHEMA_VERSION,
 };
 pub use session::{CreateSessionParams, Session, SessionError, SessionManager};
 pub use speculation::{SpecComparison, SpecHandle, SpeculationManager};
+pub use telemetry::link_commits_to_traces;
 pub use watch::{PathPattern, SubscriptionId, WatchEvent, WatchManager};

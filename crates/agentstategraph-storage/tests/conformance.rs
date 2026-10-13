@@ -21,7 +21,7 @@ use agentstategraph_core::{
     Namespace, Object, ObjectId, Session, SessionStatus, TAG_GIT_REVISION, TAG_PIN_STATE,
 };
 use agentstategraph_reminders::CreateReminder;
-use agentstategraph_storage::{HistoryRollupRow, Storage, StorageError};
+use agentstategraph_storage::{CommitTrace, HistoryRollupRow, Storage, StorageError};
 use agentstategraph_taint::{Taint, TaintEffect, TaintKind, TaintMetadata, TaintSeverity};
 use chrono::{DateTime, Utc};
 
@@ -856,6 +856,29 @@ fn sessions_round_trip_and_end(f: &Fixture) {
     ));
 }
 
+/// The trace each commit was made in (Plan H t-009): kept beside the commit,
+/// and the first record stands.
+fn commit_traces_round_trip(f: &Fixture) {
+    let s = f.store();
+    let c = commit(s, "traced", &[]);
+    let untraced = commit(s, "untraced", &[c.id]);
+    assert_eq!(s.get_commit_trace(&c.id).unwrap(), None);
+    let trace = CommitTrace {
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+        span_id: "00f067aa0ba902b7".into(),
+    };
+    s.set_commit_trace(&c.id, &trace).unwrap();
+    let later = CommitTrace {
+        trace_id: "0af7651916cd43dd8448eb211c80319c".into(),
+        span_id: "b7ad6b7169203331".into(),
+    };
+    s.set_commit_trace(&c.id, &later).unwrap();
+    assert_eq!(s.get_commit_trace(&c.id).unwrap(), Some(trace));
+    assert_eq!(s.get_commit_trace(&untraced.id).unwrap(), None);
+    // The commit itself is untouched: its id doesn't depend on the trace.
+    assert_eq!(s.get_commit(&c.id).unwrap().unwrap().id, c.id);
+}
+
 fn taints_round_trip(f: &Fixture) {
     let s = f.store();
     let t = taint("/data/users", "pii");
@@ -1580,6 +1603,11 @@ fn sessions_end_race() {
 #[test]
 fn sessions() {
     run("sessions_round_trip_and_end", sessions_round_trip_and_end);
+}
+
+#[test]
+fn commit_traces() {
+    run("commit_traces_round_trip", commit_traces_round_trip);
 }
 
 #[test]
