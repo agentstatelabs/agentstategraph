@@ -275,6 +275,18 @@ pub struct StoreShape {
     pub dbstat_available: bool,
 }
 
+/// A store's totals, cheap enough to sample on an interval for the store
+/// gauges (DESIGN.md Plan H t-008). Unlike [`StoreShape`], there is no
+/// per-table breakdown, which reads every page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreTotals {
+    pub objects: i64,
+    pub commits: i64,
+    /// The store's size on disk, where it has a file of its own (SQLite);
+    /// `None` in memory or in a database tenants share (Postgres).
+    pub bytes: Option<i64>,
+}
+
 /// Result of a GC reachability mark (Plan B t-001): how many objects are live
 /// (reachable from the given roots) vs. total, and the reclaimable remainder.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -461,6 +473,13 @@ pub trait CommitStore: Send + Sync {
     /// them. Backends that can't return an empty [`StoreShape`].
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
         Ok(StoreShape::default())
+    }
+
+    /// The store's totals, for the store gauges. Counting still reads every
+    /// row's key, so sample it on a slow interval. Backends that don't count
+    /// report `None`.
+    fn store_totals(&self) -> Result<Option<StoreTotals>, StorageError> {
+        Ok(None)
     }
 
     // -- Retention hooks for GC (Plan A t-005) ------------------------------
