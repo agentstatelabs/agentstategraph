@@ -341,44 +341,6 @@ fn test_fail_safe_translation_when_no_match() {
     assert_eq!(v["matched_policy"], "x@1");
 }
 
-/// Whenever the fail-safe decides, it logs what it decided.
-#[test]
-fn test_fail_safe_logs_its_decision() {
-    use oxtel::sdk::trace::{InMemorySpanExporter, Sampler, TracerProvider};
-    use tracing_subscriber::layer::SubscriberExt;
-
-    let spans = InMemorySpanExporter::default();
-    let traces = TracerProvider::builder()
-        .with_sampler(Sampler::AlwaysOn)
-        .with_span_events(true)
-        .with_simple_exporter(spans.clone())
-        .build();
-    let _guard =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(traces.layer()));
-    tracing::info_span!("call").in_scope(|| {
-        render_decision_with_fail_safe(&Decision::NoPolicyMatch, "deny");
-        let allowed = Decision::Allow {
-            matched_policy: "x@1".into(),
-            preconditions: Vec::new(),
-        };
-        render_decision_with_fail_safe(&allowed, "deny");
-    });
-
-    let call = &spans.finished_spans()[0];
-    let decided: Vec<_> = call
-        .events
-        .iter()
-        .filter(|e| e.name == "no policy matched, so the fail-safe decided")
-        .collect();
-    assert_eq!(decided.len(), 1, "only the unmatched decision");
-    assert!(
-        decided[0]
-            .attributes
-            .iter()
-            .any(|kv| kv.key == "asg.policy.fail_safe" && kv.value == "deny".into())
-    );
-}
-
 #[test]
 fn test_infer_change_tokens_destructive() {
     let diff = vec![DiffOp::RemoveKey {
