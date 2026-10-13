@@ -19,6 +19,12 @@ path = "src/lib.rs"
 name = "agentstategraph-mcp"
 path = "src/main.rs"
 
+# What telemetry costs a request (DESIGN.md Plan H t-011):
+# cargo bench -p agentstategraph-mcp --features otlp --bench overhead
+[[bench]]
+name = "overhead"
+harness = false
+
 [dependencies]
 agentstategraph = { workspace = true, features = ["sqlite"] }
 agentstategraph-core = { workspace = true }
