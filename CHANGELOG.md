@@ -8,6 +8,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Added
+- **Stable error codes** (Plan H t-004). `RepoError`, `StorageError`, `TreeError` and `SpecError` each have `code()`, a short snake_case name such as `write_conflict`, `branch_not_found` or `taint_blocked`, for clients to branch on instead of the message.
+  - HTTP error responses carry it beside the message: `{"error": ..., "code": ...}`.
+  - MCP tool errors start with it: `Error [write_conflict]: ...`. They still start with `Error`.
+  - The codes and their statuses are listed in the MCP server guide, under Errors. Spans and metrics take them as `error.type` in later Plan H work.
 - **A backend conformance suite now runs the same checks on the in-memory, SQLite and Postgres backends.**
   - What it covers:
     - `agentstategraph-storage/tests/conformance.rs` holds the storage contract: objects, commits and DAG walks, refs and namespaces, compare-and-swap races, epochs, sessions, taints and reminders.
@@ -53,6 +57,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **`ASG_PORT`** sets the HTTP port when `--port` isn't given.
 
 ### Changed
+- **HTTP errors get the status their code calls for**, where before everything but a reserved path and a namespace-bound key's commit reference was a `500`. A missing branch, ref, commit or path is now `404`; a write conflict, merge conflict or existing branch `409`; an invalid request `400`; a taint or policy refusal `403`; too many speculations `429`. Server failures stay `500`. Clients that treated any failure as a `500` should check the status or the new `code`.
 - **The HTTP server now lets only pages served from localhost call it from a browser.** Before, it allowed any origin, so any website the user visited could read and write a local store through it. Pages from `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]` (any port) are allowed by default. Allow other origins with `--cors-origin <ORIGIN>` (repeatable) or `ASG_CORS_ORIGINS` (comma-separated); `*` allows any origin, and the server warns if that is set without `--auth`.
 - **Bound to loopback (the default), the HTTP server only answers requests addressed to a loopback name.** A website that points a domain it controls at 127.0.0.1 (DNS rebinding) now gets `403`. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host <HOST>` (repeatable) or `ASG_ALLOWED_HOSTS`; `*` turns the check off. Bound to another address, the server answers any host name unless some are listed.
 - **The router constructors in `agentstategraph_mcp::http` no longer add CORS headers.** Apply the policy with `http::with_origin_policy(router, &OriginPolicy::for_bind(..))`, as the binary now does. That covers the ASD proxy routes too.

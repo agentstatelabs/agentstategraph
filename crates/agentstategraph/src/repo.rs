@@ -446,6 +446,38 @@ pub enum RepoError {
     },
 }
 
+impl RepoError {
+    /// A stable, low-cardinality code for this kind of error (DESIGN.md Plan
+    /// H t-004), such as `write_conflict` or `branch_not_found`. The HTTP API
+    /// returns it beside the message and picks the status from it, MCP tool
+    /// errors carry it, and it becomes `error.type` on spans and metrics.
+    /// Clients can branch on it; messages may change.
+    pub fn code(&self) -> &'static str {
+        match self {
+            RepoError::BranchNotFound(_) => "branch_not_found",
+            RepoError::BranchAlreadyExists(_) => "branch_already_exists",
+            RepoError::RefNotFound(_) => "ref_not_found",
+            RepoError::CommitNotFound(_) => "commit_not_found",
+            RepoError::AmbiguousCommitPrefix { .. } => "ambiguous_commit_prefix",
+            RepoError::NotInitialized => "not_initialized",
+            RepoError::ReservedPath(_) => "reserved_path",
+            RepoError::MergeConflicts(_) => "merge_conflict",
+            RepoError::MergeWouldDelete(_) => "merge_would_delete",
+            RepoError::IntegrityViolation { .. } => "integrity_violation",
+            RepoError::WriteConflict => "write_conflict",
+            RepoError::Speculation(e) => e.code(),
+            RepoError::Tree(e) => e.code(),
+            RepoError::Storage(e) => e.code(),
+            RepoError::EpochSealViolated { .. } => "epoch_sealed",
+            RepoError::InvalidOperation(_) => "invalid_operation",
+            RepoError::CommitRefNotAllowed(_) => "commit_ref_not_allowed",
+            RepoError::NamespaceNotFound(_) => "namespace_not_found",
+            RepoError::CrossNamespaceAccessDenied => "cross_namespace_denied",
+            RepoError::Taint { .. } => "taint_blocked",
+        }
+    }
+}
+
 /// Summary of what merging one ref into another would do, produced by
 /// [`Repository::preview_merge`] without mutating any ref. All key lists are
 /// top-level entries of the state root (e.g. `plans`, `memory`).

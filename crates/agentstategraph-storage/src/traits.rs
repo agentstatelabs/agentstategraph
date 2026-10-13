@@ -52,6 +52,28 @@ pub enum StorageError {
     InvalidOperation(String),
 }
 
+impl StorageError {
+    /// A stable, low-cardinality code for this kind of error (DESIGN.md Plan
+    /// H t-004): for API responses, `error.type` on spans and metrics, and
+    /// for clients to branch on instead of the message.
+    pub fn code(&self) -> &'static str {
+        match self {
+            StorageError::ObjectNotFound(_) => "object_not_found",
+            StorageError::CommitNotFound(_) => "commit_not_found",
+            StorageError::RefNotFound(_) => "ref_not_found",
+            StorageError::NamespaceNotFound(_) => "namespace_not_found",
+            StorageError::NamespaceAlreadyExists(_) => "namespace_already_exists",
+            StorageError::CasConflict { .. } => "write_conflict",
+            StorageError::DuplicateRef(_) => "ref_already_exists",
+            StorageError::Backend(_) => "storage_error",
+            StorageError::Serialization(_) => "serialization_error",
+            StorageError::EpochAlreadySealed { .. } => "epoch_sealed",
+            StorageError::SessionEnded { .. } => "session_ended",
+            StorageError::InvalidOperation(_) => "invalid_operation",
+        }
+    }
+}
+
 /// Content-addressed object storage.
 /// Objects are stored and retrieved by their BLAKE3 hash (ObjectId).
 pub trait ObjectStore: Send + Sync {

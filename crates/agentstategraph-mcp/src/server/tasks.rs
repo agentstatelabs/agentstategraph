@@ -18,7 +18,7 @@ impl AgentStateGraphServer {
                 "created_by": plan.created_by,
             }))
             .unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -48,7 +48,7 @@ impl AgentStateGraphServer {
                     serde_json::to_string_pretty(&json).unwrap_or_default()
                 )
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -80,7 +80,7 @@ impl AgentStateGraphServer {
                 }))
                 .unwrap_or_default()
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -121,7 +121,7 @@ impl AgentStateGraphServer {
                 "assigned_to": task.assigned_to,
             }))
             .unwrap_or_default(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -152,7 +152,7 @@ impl AgentStateGraphServer {
                     serde_json::to_string_pretty(&json).unwrap_or_default()
                 )
             }
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -162,7 +162,7 @@ impl AgentStateGraphServer {
                 "Task {} started (was: Pending → now: InProgress)",
                 task.id.as_str()
             ),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -183,7 +183,7 @@ impl AgentStateGraphServer {
             .complete_task(&p.r#ref, &p.plan, &TaskId(p.task_id), proof)
         {
             Ok(task) => format!("Task {} completed (InProgress → Done)", task.id.as_str()),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -193,7 +193,7 @@ impl AgentStateGraphServer {
             .abandon_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.reason)
         {
             Ok(task) => format!("Task {} abandoned: {}", task.id.as_str(), p.reason),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -203,7 +203,7 @@ impl AgentStateGraphServer {
             .assign_task(&p.r#ref, &p.plan, &TaskId(p.task_id), &p.agent)
         {
             Ok(task) => format!("Task {} assigned to {}", task.id.as_str(), p.agent),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 
@@ -224,7 +224,7 @@ impl AgentStateGraphServer {
                 "blocked_by": task.blocked_by.iter().map(|b| b.as_str().to_string()).collect::<Vec<_>>(),
             })).unwrap_or_default(),
             Ok(None) => "No pending tasks".to_string(),
-            Err(e) => format!("Error: {}", e),
+            Err(e) => crate::server::tool_error(&e),
         }
     }
 }
