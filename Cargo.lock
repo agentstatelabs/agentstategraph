@@ -84,6 +84,7 @@ dependencies = [
  "ed25519-dalek",
  "governor",
  "hex",
+ "metrics",
  "oxtel",
  "oxtel-rmcp",
  "oxtel-tower",

@@ -49,6 +49,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tower_governor = { version = "0.8", features = ["axum"] }
 governor = "0.10"
 tracing = "0.1"
+metrics = "0.24"
 # Logs, traces and metrics, named as docs/OBSERVABILITY.md says. OTLP export
 # is the opt-in `otlp` feature below, so a default build has no network client.
 oxtel = { version = "0.3", default-features = false, features = ["log", "config"] }

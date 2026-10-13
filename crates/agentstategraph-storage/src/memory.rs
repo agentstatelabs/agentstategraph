@@ -111,6 +111,24 @@ impl ObjectStore for MemoryStorage {
 }
 
 impl CommitStore for MemoryStorage {
+    fn store_totals(&self) -> Result<Option<crate::traits::StoreTotals>, StorageError> {
+        let objects = self
+            .objects
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .len();
+        let commits = self
+            .commits
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .len();
+        Ok(Some(crate::traits::StoreTotals {
+            objects: objects as i64,
+            commits: commits as i64,
+            bytes: None,
+        }))
+    }
+
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
         let store = self
             .commits
