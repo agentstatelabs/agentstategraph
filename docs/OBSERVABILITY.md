@@ -68,7 +68,7 @@ Requests the Host check refuses are logged and counted too: the observability la
 
 ### MCP
 
-Each request and notification gets a span named `{mcp.method.name} {target}`, such as `tools/call commit_spec`. It continues the client's trace when `params._meta` carries `traceparent`, over stdio as well as HTTP.
+Each request and notification gets a span named `{mcp.method.name} {target}`, such as `tools/call agentstategraph_commit_spec`. It continues the client's trace when `params._meta` carries `traceparent`, over stdio as well as HTTP.
 
 | Attribute | Notes |
 |---|---|
@@ -76,13 +76,15 @@ Each request and notification gets a span named `{mcp.method.name} {target}`, su
 | `gen_ai.tool.name`, with `gen_ai.operation.name` = `execute_tool` | for tool calls |
 | `mcp.resource.uri`, `gen_ai.prompt.name` | for resources and prompts |
 | `network.transport` | `pipe` over stdio |
-| `error.type` | `tool_error` when a tool reports an error, such as a policy refusal; a JSON-RPC code when the server failed |
+| `error.type` | `tool_error` when a tool reports an error, as the MCP conventions have it, such as a policy refusal; a JSON-RPC code when the server failed. The error's own code is in the tool's text, and on the library spans inside the call |
 | `rpc.response.status_code` | the JSON-RPC error code, when there is one |
 
 | Metric | Instrument and unit | Labels |
 |---|---|---|
 | `mcp.server.operation.duration` | histogram, `s` | `mcp.method.name`, `gen_ai.tool.name`, `gen_ai.operation.name`, `gen_ai.prompt.name`, `mcp.protocol.version`, `network.transport`, `error.type`, `rpc.response.status_code` |
 | `mcp.server.session.duration` | histogram, `s` | `mcp.protocol.version`, `network.transport` |
+
+A tool that fails answers with an error result (`isError`), which is what the span and the metric count. Its text starts `Error [code]: …`, `Error: …` for a bad argument, or `{"error": …}` from the taint and policy-signing tools. `agentstategraph_commit_spec` refused by policy, or by the fail-safe, answers its Decision JSON as an error result too.
 
 Tool arguments and results are never recorded.
 

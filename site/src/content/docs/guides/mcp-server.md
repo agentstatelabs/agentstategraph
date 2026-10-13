@@ -107,7 +107,7 @@ Branch on the code; the message is for people and may change. Quote the trace id
 | `503` | `not_initialized` |
 | `500` | `storage_error`, `serialization_error`, `integrity_violation`, `key_store_failed`, `internal` |
 
-A `write_conflict` means another writer moved the branch first; it's safe to retry. MCP tools report the same codes at the start of their error text: `Error [write_conflict]: …`.
+A `write_conflict` means another writer moved the branch first; it's safe to retry. MCP tools report the same codes at the start of their error text, `Error [write_conflict]: …`, and mark the result as an error (`isError`). So does `agentstategraph_commit_spec` when policy refuses a promotion; its text is then the Decision JSON.
 
 The limits, authentication and host check below answer before a request reaches the API, in the same form. Their codes are the reasons the server counts them by, in `asg.http.rejections`:
 
