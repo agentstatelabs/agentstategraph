@@ -1033,7 +1033,7 @@ that no released log or metric format changes.
 | t-008 | **Storage metrics.** Operation duration per backend, per the database conventions (`db.client.operation.duration`, `db.system.name`). Postgres pool usage, pending requests and wait time (`db.client.connection.*`). Time spent waiting for SQLite's connection lock. Store gauges, read on a slow interval: objects, commits, size, undistilled commits (history lag), and the last GC sweep and what it reclaimed. Measure what the gauges cost on a large store before choosing the interval. — **Merged in MRs !81 and !82.** | 2 |
 | t-009 | **Commit-to-trace link.** Record the active trace id for each commit in a side table on all four backends. Show it in `log`, `blame` and the HTTP commit output. It can be turned off. — **Done.** A `commit_traces` table on SQLite and Postgres (schema version 4), and a map in memory, hold each commit's trace and span ids. The browser's IndexedDB keeps none, having no traces. The library takes the current trace from a source the binary sets once, `link_commits_to_traces`, so it stays on the facades; the server passes oxtel's span context unless `ASG_TRACE_LINKS=off`. Losing a link never fails a write. `log` and `blame` show the ids over HTTP and MCP. | 3 |
 | t-010 | **Provenance events.** Optionally emit each commit as an OpenTelemetry log event (`asg.commit`). The event carries the agent, intent category, confidence, namespace, commit id and trace id, and never values. A log backend or SIEM can then index state changes beside traces. Off by default. — **Done.** `ASG_COMMIT_EVENTS=on`, or `emit_commit_events(true)` in a program embedding the library. The event is emitted where a commit lands on a ref (`advance_ref`, or the unconditional move for a ref that isn't a branch), so a commit that lost a race logs nothing. It carries the ref and the namespace as well. The trace comes from the write's span, which the log record carries, rather than from a field. | 3 |
-| t-011 | **Overhead budget.** Benchmark HTTP reads and writes and MCP tool calls in three modes: telemetry off, on without export, and exporting to a local collector. Proposed budget with telemetry on but not exporting: no more than 3% added at p50 and 5% at p99. Record the results in this plan. — **Measured; over budget.** See "t-011: what telemetry costs" below. The benchmark is `benches/overhead.rs`; how to close the gap is still to be decided. | 3 |
+| t-011 | **Overhead budget.** Benchmark HTTP reads and writes and MCP tool calls in three modes: telemetry off, on without export, and exporting to a local collector. Proposed budget with telemetry on but not exporting: no more than 3% added at p50 and 5% at p99. Record the results in this plan. — **Measured, and mostly met after fixes.** MCP calls and every p99 are within budget; HTTP p50 is about 3.5 points over. See "t-011: what telemetry costs" below. The benchmark is `benches/overhead.rs`. | 3 |
 | t-012 | **Operator kit and docs.** An example OpenTelemetry Collector config. An `observability` compose profile with a collector, Prometheus, Jaeger and Grafana. A Grafana dashboard and Prometheus alert rules as files, covering: not ready, 5xx ratio, p99 latency, rejections, pool saturation, growing history lag, refused GC and write conflicts. A site Observability page with the metric catalogue, and a test that checks the catalogue against the registered instruments. An end-to-end test with an in-memory exporter: one HTTP write makes one trace from request to storage, its log lines carry the trace id, and the commit links back to it. | 3 |
 
 ### t-011: what telemetry costs (2026-10-13)
@@ -1074,12 +1074,22 @@ p99 moved by more between runs than between modes, sometimes falling below `off`
 
 These are percentages of very short requests: a local read takes about 180 µs, so 3% is 5 µs. A client across a network sees its round trip besides.
 
-Ways to close the gap, still to be decided:
+Three of the ways to close the gap were taken on 2026-10-13:
 
-1. **oxtel records no span data when no trace exporter is configured.** It still gives spans their ids, for log lines and trace links. This is an oxtel release, and would save about 5 points.
-2. **SQL statement spans become opt-in,** for example with `info,oxtel_sql=warn` as the server's default trace filter. `db.client.operation.duration` still records. This would save about 7 points on reads and 5 on writes.
-3. **The trace link goes into the commit's own write** rather than a second insert. This would save about 3 points on writes.
-4. **The budget is restated in absolute time** per request on reference hardware, such as 10 µs at p50, which reads more fairly for requests this short.
+1. **oxtel records no span data when nothing exports spans.** Each span still gets its ids, for log lines and trace links. This is oxtel 0.3.1 (agentstatelabs/oxtel#42).
+2. **SQL statement spans are opt-in.** The server's trace filter is `info,oxtel_sql=warn` unless `ASG_SQL_SPANS=on` or `RUST_LOG` says otherwise. `db.client.operation.duration` still records every statement.
+3. **A commit and its trace link are stored in one write,** through `CommitStore::put_commit_traced`: one transaction on SQLite, one statement on Postgres.
+
+Restating the budget in absolute time wasn't taken. Afterwards, 10 rounds at a load average of about 4.4:
+
+| Workload | off p50 | on p50 | added p50 | added p99 | exporting p50 added |
+|---|---|---|---|---|---|
+| HTTP read | 174 µs | 185 µs | +6.4% (11 µs) | +4.5% | +10.6% |
+| HTTP write | 511 µs | 546 µs | +6.8% (35 µs) | +0.8% | +9.1% |
+| MCP get | 166 µs | 164 µs | −1% (within noise) | 0% | +2.7% |
+| MCP set | 485 µs | 498 µs | +2.6% | +3.7% | +6.0% |
+
+**MCP calls are within the budget, and every p99 is within 5%. HTTP's p50 is still about 3.5 points over.** With `ASG_LOG=off` it was +6% on reads and +5% on writes, so the request log line accounts for about 3 points. The HTTP span and the per-request middleware (request id, rejection count) account for the rest. Closing that gap means making the request log optional, or making it or the span cheaper in oxtel. Neither has been decided.
 
 ### Rollout to ASD and CTXone
 
