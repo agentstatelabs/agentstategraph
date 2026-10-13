@@ -46,9 +46,12 @@
 //!   [`ExternalError::SourceResolution`].
 
 use std::io::ErrorKind;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
-use agentstategraph_policy::external::{ExternalError, ExternalEvaluator};
+use agentstategraph_policy::external::{
+    DEFAULT_TIMEOUT, ExternalError, ExternalEvaluator, wait_with_timeout,
+};
 use agentstategraph_policy::selector::Situation;
 use agentstategraph_policy::types::{Decision, EvaluatorSource};
 
@@ -57,14 +60,14 @@ pub struct CedarEvaluator {
     /// Path (or bare name) of the `cedar` binary. Defaults to
     /// `"cedar"` (resolved against `$PATH`).
     cedar_path: String,
+    /// How long `cedar authorize` may run before it's killed.
+    timeout: Duration,
 }
 
 impl CedarEvaluator {
     /// Construct with the default `"cedar"` binary (resolved on `$PATH`).
     pub fn new() -> Self {
-        Self {
-            cedar_path: "cedar".into(),
-        }
+        Self::new_with_path("cedar")
     }
 
     /// Override the Cedar binary path. Useful for tests and for
@@ -72,7 +75,16 @@ impl CedarEvaluator {
     pub fn new_with_path(cedar_path: impl Into<String>) -> Self {
         Self {
             cedar_path: cedar_path.into(),
+            timeout: DEFAULT_TIMEOUT,
         }
+    }
+
+    /// How long `cedar authorize` may run before it's killed and the
+    /// evaluation fails with [`agentstategraph_policy::external::TimedOut`].
+    /// [`DEFAULT_TIMEOUT`] unless set.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -166,7 +178,7 @@ impl ExternalEvaluator for CedarEvaluator {
         .map_err(|e| ExternalError::Execution(format!("write request.json: {e}")))?;
 
         // 4. Invoke `cedar authorize`.
-        let output = Command::new(&self.cedar_path)
+        let child = Command::new(&self.cedar_path)
             .arg("authorize")
             .arg("--policies")
             .arg(&policies_path)
@@ -174,7 +186,10 @@ impl ExternalEvaluator for CedarEvaluator {
             .arg(entities_tmp.path())
             .arg("--request-json")
             .arg(request_tmp.path())
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| {
                 if e.kind() == ErrorKind::NotFound {
                     ExternalError::Execution(format!(
@@ -185,6 +200,7 @@ impl ExternalEvaluator for CedarEvaluator {
                     ExternalError::Execution(format!("failed to invoke {}: {e}", self.cedar_path))
                 }
             })?;
+        let output = wait_with_timeout(child, None, self.timeout)?;
 
         if !output.status.success() {
             return Err(ExternalError::Execution(format!(

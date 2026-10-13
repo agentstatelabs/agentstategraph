@@ -19,6 +19,7 @@ use agentstategraph_taint::{
 use chrono::Utc;
 
 use crate::repo::{CommitOptions, RepoError, Repository};
+use crate::telemetry::{self, op_span};
 
 impl Repository {
     // -----------------------------------------------------------------------
@@ -282,6 +283,20 @@ impl Repository {
     /// Called by `set` / `set_json` / `delete` / `merge` /
     /// `commit_speculation`.
     pub fn pre_commit_taint_check(
+        &self,
+        paths: &[&str],
+        options: &CommitOptions,
+    ) -> Result<Vec<String>, RepoError> {
+        telemetry::run(op_span!(INFO, "asg.taint.check"), || {
+            let result = self.pre_commit_taint_check_inner(paths, options);
+            if let Err(RepoError::Taint { source, taint_id }) = &result {
+                telemetry::taint_refused(source, taint_id.as_deref());
+            }
+            result
+        })
+    }
+
+    fn pre_commit_taint_check_inner(
         &self,
         paths: &[&str],
         options: &CommitOptions,

@@ -68,6 +68,41 @@ Each request and notification gets a span named `{mcp.method.name} {target}`, su
 
 Tool arguments and results are never recorded.
 
+### Repository and policy
+
+The library records its own work as spans inside the request or tool call that asked for it. Writes, speculations, history extraction, garbage collection, the taint check and policy evaluation get spans at `info`. Reads (`asg.repo.get`, `asg.repo.log`, `asg.repo.diff`, `asg.repo.blame`) get spans at `debug` only, so they're recorded only when the trace filter asks for them.
+
+| Span | For | Attributes |
+|---|---|---|
+| `asg.repo.set`, `asg.repo.delete`, `asg.repo.merge` | a write, including `set_json_cas` | `asg.ref.name`, `gen_ai.agent.id`, `asg.intent.category`, `asg.commit.id`, `asg.ref.cas_attempts` |
+| `asg.speculation.create`, `asg.speculation.commit`, `asg.speculation.discard` | a speculation's life | `asg.speculation.id`; committing also records the write's attributes |
+| `asg.history.extract` | folding commits into the history tables | `asg.history.commits_processed` |
+| `asg.gc.dry_run`, `asg.gc.sweep`, `asg.gc.vacuum` | garbage collection | `asg.gc.mutate`, `asg.gc.refused`, `asg.gc.objects_deleted`, `asg.gc.bytes_reclaimed` |
+| `asg.taint.check` | the check before each write | |
+| `asg.policy.evaluate`, `asg.policy.evaluate_change` | a policy decision | `asg.policy.decision` |
+| `asg.policy.external` | one external evaluator's part in it | `asg.policy.evaluator`, `asg.policy.decision` |
+
+A span that fails has an error status and `error.type`, the error's stable code, such as `write_conflict` or `taint_blocked`. Error messages aren't recorded: they can name state paths.
+
+Events:
+
+- `debug`: the ref moved under a write, which rebuilds its commit on the new head (`asg.ref.cas_attempts`);
+- `warn`: a write gave up because the ref kept moving (`asg.operation.name`, `error.type` = `write_conflict`);
+- `info`: a taint refused a write (`asg.taint.id`, `asg.taint.effect`);
+- `info`: no policy matched, so the server's fail-safe decided (`asg.policy.fail_safe`);
+- `warn`: an external evaluator failed, so its policy was skipped (`asg.policy.evaluator`, `asg.policy.id`, `error.type`). Its message isn't recorded, since an evaluator's output can echo its input.
+
+External evaluators that run as processes, Rego and Cedar, are killed after 10 seconds, or the limit their runner sets with `with_timeout`. A timeout's `error.type` is `evaluator_timeout`.
+
+| Metric | Instrument and unit | Labels | Prometheus name |
+|---|---|---|---|
+| `asg.commit.duration` | histogram, `s` | `asg.operation.name`, `error.type` | `asg_commit_duration_seconds` |
+| `asg.ref.cas_retries` | counter | `asg.operation.name` | `asg_ref_cas_retries_total` |
+| `asg.policy.decisions` | counter | `asg.policy.decision` | `asg_policy_decisions_total` |
+| `asg.policy.evaluator.errors` | counter | `asg.policy.evaluator`, `error.type` | `asg_policy_evaluator_errors_total` |
+
+`asg.policy.decisions` counts what the policies decided, before the fail-safe: `no_policy_match` is counted as such.
+
 ### Database
 
 Each statement the storage backend runs gets a client span, through oxtel-sql, named by its query summary: the operations and tables it touches, such as `SELECT objects` or `INSERT refs`. On Postgres, a transaction's `BEGIN`, `COMMIT` and `ROLLBACK` are spans too.
@@ -115,10 +150,6 @@ Each line carries `timestamp`, `level`, `target` and `message`. Inside a span it
 
 DESIGN.md Plan H adds, under the rules below:
 
-- spans for repository writes, merges, speculations, history extraction, garbage collection, policy evaluation and taint checks;
-- events for write conflicts, policy decisions and taint rejections;
-- metrics such as `asg.commit.duration`, `asg.ref.cas_retries` and `asg.policy.decisions`;
-- stable error codes as `error.type`;
 - links from commits to their traces.
 
 Each is added to this page when it lands.
@@ -130,6 +161,23 @@ Attributes of our own use the `asg.` prefix, lowercase and dot-separated, and ar
 | Attribute | Type | Where | Meaning |
 |---|---|---|---|
 | `asg.api_key.id` | string | spans, log lines | the id of the API key a request used; never the key |
+| `asg.commit.id` | string | spans | the commit a write made, which ties the trace to the commit |
+| `asg.gc.bytes_reclaimed` | int | spans | the bytes a vacuum returned to the operating system |
+| `asg.gc.mutate` | boolean | spans | whether a sweep deletes, or only previews |
+| `asg.gc.objects_deleted` | int | spans | the objects a sweep deleted |
+| `asg.gc.refused` | boolean | spans | whether a sweep refused, because history isn't distilled yet |
+| `asg.history.commits_processed` | int | spans | the commits an extraction folded into the history tables |
+| `asg.intent.category` | string | spans | a write's intent category, such as `Checkpoint` |
+| `asg.operation.name` | string | metrics, spans, log lines | the kind of write: `set`, `delete`, `merge`, `commit_speculation` or `taint` |
+| `asg.policy.decision` | string | metrics, spans, log lines | `allow`, `deny`, `require_approval` or `no_policy_match` |
+| `asg.policy.evaluator` | string | metrics, spans, log lines | an external evaluator's kind, such as `rego` or `cedar` |
+| `asg.policy.fail_safe` | string | log lines | what the fail-safe decided when no policy matched: `deny` or `allow` |
+| `asg.policy.id` | string | log lines | a policy's `path@version` |
+| `asg.ref.cas_attempts` | int | spans, log lines | how many times a write built its commit, recorded when the ref moved under it |
+| `asg.ref.name` | string | spans | the branch or ref a write or read used |
+| `asg.speculation.id` | int | spans | a speculation's handle |
+| `asg.taint.effect` | string | log lines | the effect that refused a write: `block`, `review` or `quarantine` |
+| `asg.taint.id` | string | log lines | the taint that refused a write |
 | `asg.tenant.id` | string | resource only | the tenant a process serves, when it serves one |
 
 ## Cardinality
@@ -153,7 +201,7 @@ Never recorded, anywhere:
 - request and response bodies, and query strings;
 - SQL text with literals.
 
-Recorded only on spans and log lines, never on metrics: branch names in `url.path`, and `asg.api_key.id`. State paths aren't recorded. When later tasks add them to spans, they will be off unless the operator turns them on.
+Recorded only on spans and log lines, never on metrics: branch names in `url.path` and `asg.ref.name`, agent ids in `gen_ai.agent.id`, commit ids, and `asg.api_key.id`. State paths aren't recorded. When later tasks add them to spans, they will be off unless the operator turns them on.
 
 Exporting is the operator's choice: nothing leaves the process unless the `otlp` feature is built in and an endpoint is set, or `/metrics` is turned on and scraped.
 

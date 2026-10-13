@@ -304,6 +304,20 @@ pub enum Decision {
     NoPolicyMatch,
 }
 
+impl Decision {
+    /// The decision's kind, as it serializes: `allow`, `deny`,
+    /// `require_approval` or `no_policy_match`. Telemetry records it as
+    /// `asg.policy.decision`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Decision::Allow { .. } => "allow",
+            Decision::Deny { .. } => "deny",
+            Decision::RequireApproval { .. } => "require_approval",
+            Decision::NoPolicyMatch => "no_policy_match",
+        }
+    }
+}
+
 /// Serde helper for `Option<Duration>` encoded as milliseconds.
 mod duration_opt {
     use std::time::Duration;

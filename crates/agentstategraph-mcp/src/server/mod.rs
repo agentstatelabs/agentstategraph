@@ -1638,6 +1638,7 @@ impl AgentStateGraphServer {
             Ok(Decision::NoPolicyMatch)
                 if self.policy_fail_safe == "deny" && !proposal.tokens.is_empty() =>
             {
+                log_fail_safe("deny");
                 serde_json::to_string_pretty(&serde_json::json!({
                     "original": { "kind": "no_policy_match" },
                     "translated": {
@@ -1653,7 +1654,10 @@ impl AgentStateGraphServer {
                 }))
                 .unwrap_or_else(|_| "null".to_string())
             }
-            Ok(Decision::Allow { .. }) | Ok(Decision::NoPolicyMatch) => {
+            Ok(decision @ (Decision::Allow { .. } | Decision::NoPolicyMatch)) => {
+                if decision == Decision::NoPolicyMatch && !proposal.tokens.is_empty() {
+                    log_fail_safe("allow");
+                }
                 // Allowed — run the existing promotion path.
                 let category = parse_category(&p.intent_category);
                 let mut opts = CommitOptions::new("mcp-agent", category, &p.intent_description);
@@ -2529,6 +2533,15 @@ pub fn parse_optional_rfc3339(s: Option<&str>) -> Option<chrono::DateTime<chrono
     })
 }
 
+/// No policy matched, so the fail-safe decided: `deny` or `allow`.
+fn log_fail_safe(decided: &'static str) {
+    tracing::info!(
+        asg.policy.decision = "no_policy_match",
+        asg.policy.fail_safe = decided,
+        "no policy matched, so the fail-safe decided"
+    );
+}
+
 /// Translate `Decision::NoPolicyMatch` per the MCP fail-safe config.
 ///
 /// The engine never rewrites its result — translation happens only at
@@ -2539,6 +2552,11 @@ pub fn parse_optional_rfc3339(s: Option<&str>) -> Option<chrono::DateTime<chrono
 pub fn render_decision_with_fail_safe(decision: &Decision, fail_safe: &str) -> String {
     match decision {
         Decision::NoPolicyMatch => {
+            log_fail_safe(if fail_safe == "allow" {
+                "allow"
+            } else {
+                "deny"
+            });
             let translated = if fail_safe == "allow" {
                 serde_json::json!({
                     "kind": "allow",

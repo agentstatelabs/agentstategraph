@@ -23,7 +23,11 @@
 //!   soft-model principle.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::process::{Child, Output};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::selector::Situation;
 use crate::types::{Decision, EvaluatorSource};
@@ -51,6 +55,97 @@ pub enum ExternalError {
     /// Escape hatch for runner-specific errors.
     #[error(transparent)]
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl ExternalError {
+    /// A stable, low-cardinality code for this error, which telemetry
+    /// records as `error.type`. A runner that timed out returns
+    /// [`TimedOut`] in [`ExternalError::Other`], and its code is
+    /// `evaluator_timeout`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ExternalError::NotRegistered(_) => "evaluator_not_registered",
+            ExternalError::SourceResolution(_) => "evaluator_source_unresolved",
+            ExternalError::Execution(_) => "evaluator_failed",
+            ExternalError::Other(e) if e.is::<TimedOut>() => "evaluator_timeout",
+            ExternalError::Other(_) => "evaluator_error",
+        }
+    }
+}
+
+/// How long a runner's process may run before [`wait_with_timeout`] kills
+/// it, unless the runner sets its own limit.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A runner's process ran past its time limit and was killed. Runners return
+/// it as [`ExternalError::Other`].
+#[derive(Debug, thiserror::Error)]
+#[error("evaluator timed out after {0:?}")]
+pub struct TimedOut(pub Duration);
+
+/// Wait for a runner's process, writing `input` to its stdin, and collect its
+/// output, as [`Child::wait_with_output`] does, but kill it if it runs longer
+/// than `timeout`: a hung evaluator would otherwise hold the write waiting on
+/// its decision. Spawn it with stdout and stderr piped, and stdin too when
+/// there's input.
+pub fn wait_with_timeout(
+    mut child: Child,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<Output, ExternalError> {
+    let started = Instant::now();
+    // Write and read on threads, so a process that fills one pipe while
+    // we're blocked on another can't deadlock against us.
+    let stdin = child.stdin.take();
+    let writer = input.and_then(|input| {
+        let mut stdin = stdin?;
+        Some(thread::spawn(move || stdin.write_all(&input)))
+    });
+    let stdout = child.stdout.take().map(read_on_thread);
+    let stderr = child.stderr.take().map(read_on_thread);
+
+    let mut pause = Duration::from_millis(1);
+    let status = loop {
+        let exited = child
+            .try_wait()
+            .map_err(|e| ExternalError::Execution(format!("wait: {e}")))?;
+        if let Some(status) = exited {
+            break status;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ExternalError::Other(Box::new(TimedOut(timeout))));
+        }
+        thread::sleep(pause.min(timeout - elapsed));
+        pause = (pause * 2).min(Duration::from_millis(50));
+    };
+
+    if let Some(Ok(Err(e))) = writer.map(JoinHandle::join) {
+        // A process that exits without reading all its input closes the
+        // pipe; its status and output say why.
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(ExternalError::Execution(format!("write stdin: {e}")));
+        }
+    }
+    let collect = |pipe: Option<JoinHandle<Vec<u8>>>| {
+        pipe.and_then(|reader| reader.join().ok())
+            .unwrap_or_default()
+    };
+    Ok(Output {
+        status,
+        stdout: collect(stdout),
+        stderr: collect(stderr),
+    })
+}
+
+fn read_on_thread(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = pipe.read_to_end(&mut out);
+        out
+    })
 }
 
 /// Implementors evaluate a policy against a situation using some
@@ -151,6 +246,39 @@ mod tests {
         ) -> Result<Decision, ExternalError> {
             Ok(Decision::NoPolicyMatch)
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_past_its_timeout_is_killed() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("sleep")
+            .arg("5")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let error = wait_with_timeout(child, None, Duration::from_millis(100)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(error.code(), "evaluator_timeout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_gets_its_input_and_returns_its_output() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // More than a pipe holds, so writing and reading must overlap.
+        let input = vec![b'x'; 1 << 20];
+        let output = wait_with_timeout(child, Some(input.clone()), DEFAULT_TIMEOUT).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, input);
     }
 
     #[test]
