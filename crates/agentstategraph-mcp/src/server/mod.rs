@@ -1596,9 +1596,12 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Promote a speculation to a real commit on its base branch using its numeric handle_id. Before promoting, the speculation's diff is turned into a ChangeProposal (with inferred tokens: destructive, schema-change, ref-rewrite, large, reindex, migration) and evaluated against the policy engine. If the decision is Deny or RequireApproval the speculation is NOT promoted and the Decision JSON is returned so the caller can apply the fallback branch. If the change carries tokens and no policy covers them, the server's fail-safe decides (default: deny, not promoted). A change with no tokens is promoted when no policy matches. The speculation is consumed only when promoted."
+        description = "Promote a speculation to a real commit on its base branch using its numeric handle_id. Before promoting, the speculation's diff is turned into a ChangeProposal (with inferred tokens: destructive, schema-change, ref-rewrite, large, reindex, migration) and evaluated against the policy engine. If the decision is Deny or RequireApproval the speculation is NOT promoted and the Decision JSON is returned, as an error result, so the caller can apply the fallback branch. If the change carries tokens and no policy covers them, the server's fail-safe decides (default: deny, not promoted). A change with no tokens is promoted when no policy matches. The speculation is consumed only when promoted."
     )]
-    async fn agentstategraph_commit_spec(&self, params: Parameters<CommitSpecParams>) -> String {
+    async fn agentstategraph_commit_spec(
+        &self,
+        params: Parameters<CommitSpecParams>,
+    ) -> Result<String, String> {
         let p = params.0;
         let handle = SpecHandle::from_id(p.handle_id);
         let repo = self.spec_repo(p.handle_id);
@@ -1606,7 +1609,7 @@ impl AgentStateGraphServer {
         // Infer the ChangeProposal from the live speculation diff.
         let tokens = match infer_change_tokens(&repo, handle) {
             Ok(t) => t,
-            Err(e) => return crate::server::tool_error(&e),
+            Err(e) => return Err(crate::server::tool_error(&e)),
         };
         let intent = p.intent_description.clone();
         let mut proposal = ChangeProposal::new(
@@ -1630,6 +1633,8 @@ impl AgentStateGraphServer {
         // Ref to evaluate policies against (same ref we will commit back to).
         let eval_ref = p.base_ref.clone().unwrap_or_else(|| "main".to_string());
 
+        // A refusal is an error result (`isError`): the speculation wasn't
+        // promoted, and the Decision JSON says why.
         match self.policies.evaluate_change(&eval_ref, &proposal) {
             // A flagged change that no policy covers: the fail-safe decides.
             // An unflagged change can't match any policy (policies match
@@ -1639,7 +1644,7 @@ impl AgentStateGraphServer {
                 if self.policy_fail_safe == "deny" && !proposal.tokens.is_empty() =>
             {
                 log_fail_safe("deny");
-                serde_json::to_string_pretty(&serde_json::json!({
+                Err(serde_json::to_string_pretty(&serde_json::json!({
                     "original": { "kind": "no_policy_match" },
                     "translated": {
                         "kind": "deny",
@@ -1652,7 +1657,7 @@ impl AgentStateGraphServer {
                     "fail_safe": "deny",
                     "tokens": proposal.tokens,
                 }))
-                .unwrap_or_else(|_| "null".to_string())
+                .unwrap_or_else(|_| "null".to_string()))
             }
             Ok(decision @ (Decision::Allow { .. } | Decision::NoPolicyMatch)) => {
                 if decision == Decision::NoPolicyMatch && !proposal.tokens.is_empty() {
@@ -1670,15 +1675,15 @@ impl AgentStateGraphServer {
                 match repo.commit_speculation(handle, opts) {
                     Ok(commit_id) => {
                         self.forget_spec(p.handle_id);
-                        format!("Speculation committed: {}", commit_id)
+                        Ok(format!("Speculation committed: {}", commit_id))
                     }
-                    Err(e) => crate::server::tool_error(&e),
+                    Err(e) => Err(crate::server::tool_error(&e)),
                 }
             }
             Ok(decision @ (Decision::Deny { .. } | Decision::RequireApproval { .. })) => {
-                serde_json::to_string_pretty(&decision).unwrap_or_else(|_| "null".to_string())
+                Err(serde_json::to_string_pretty(&decision).unwrap_or_else(|_| "null".to_string()))
             }
-            Err(e) => crate::server::tool_error(&e),
+            Err(e) => Err(crate::server::tool_error(&e)),
         }
     }
 
@@ -2480,7 +2485,35 @@ impl AgentStateGraphServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl ServerHandler for AgentStateGraphServer {}
+impl ServerHandler for AgentStateGraphServer {
+    /// Run the tool, and mark a result that reports an error as one
+    /// (`isError`), as MCP asks, so clients and telemetry see the failure.
+    /// Tools report errors as text: see [`reports_error`].
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let mut result = self.tool_router.call(call).await?;
+        let text = result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str());
+        if text.is_some_and(reports_error) {
+            result.is_error = Some(true);
+        }
+        Ok(result)
+    }
+}
+
+/// Whether a tool's text reports an error. Tools write `Error [code]: …`
+/// through [`tool_error`], or `Error: …` for a bad argument; the taint tools
+/// answer `{"error": …}`.
+pub fn reports_error(text: &str) -> bool {
+    text.starts_with("Error [") || text.starts_with("Error: ") || text.starts_with(r#"{"error":"#)
+}
 
 // -- Helpers --
 
@@ -2785,7 +2818,8 @@ mod tests {
                 attached_fields: None,
                 base_ref: None,
             }))
-            .await;
+            .await
+            .unwrap_or_else(|refusal| panic!("refused: {refusal}"));
         assert!(
             committed.starts_with("Speculation committed"),
             "{committed}"
@@ -2853,7 +2887,8 @@ mod tests {
 
         let out = server
             .agentstategraph_commit_spec(Parameters(commit_spec_params(handle)))
-            .await;
+            .await
+            .expect_err("the fail-safe refuses it");
         let refusal: serde_json::Value =
             serde_json::from_str(&out).unwrap_or_else(|_| panic!("{out}"));
         assert_eq!(refusal["translated"]["kind"], "deny");
@@ -2877,7 +2912,8 @@ mod tests {
         let server = AgentStateGraphServer::new(Arc::clone(&repo)).with_fail_safe("allow");
         let out = server
             .agentstategraph_commit_spec(Parameters(commit_spec_params(handle)))
-            .await;
+            .await
+            .unwrap_or_else(|refusal| panic!("refused: {refusal}"));
         assert!(out.starts_with("Speculation committed"), "{out}");
         assert!(repo.get_json("main", "/victim").is_err());
     }
@@ -2896,7 +2932,8 @@ mod tests {
             .unwrap();
         let out = server
             .agentstategraph_commit_spec(Parameters(commit_spec_params(handle.id())))
-            .await;
+            .await
+            .unwrap_or_else(|refusal| panic!("refused: {refusal}"));
         assert!(out.starts_with("Speculation committed"), "{out}");
         assert_eq!(
             repo.get_json("main", "/added").unwrap(),
@@ -2940,7 +2977,8 @@ mod tests {
 
         let out = server
             .agentstategraph_commit_spec(Parameters(commit_spec_params(handle)))
-            .await;
+            .await
+            .unwrap_or_else(|refusal| panic!("refused: {refusal}"));
         assert!(out.starts_with("Speculation committed"), "{out}");
     }
 
