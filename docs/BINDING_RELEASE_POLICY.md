@@ -69,7 +69,32 @@ current version) and partly hand-edited (the no-JS fallback and the SwiftPM
 pin). That checklist lives in [RELEASE.md](../RELEASE.md) — it is release
 mechanics, not binding policy.
 
-## Current audit — 1.2.5 (retrospective)
+## Current audit — 1.3.0
+
+Done on 2026-10-13 for `v1.2.8..v1.3.0`, before the release, and recorded in its `release-prep` commit. 1.3.0 brings Postgres parity (Plan D), the HTTP server's hardening (Plan E) and telemetry (Plan H). **No capability changes status in any binding.**
+
+**The binding surfaces didn't change.** Nothing under `crates/agentstategraph-ffi`, `crates/agentstategraph-wasm` or `bindings/` changed, apart from the version strings `release.sh` sets. No advanced ABI operation is added, removed or re-signatured: `advanced_abi_contract_version` stays 1, at **39 operations**.
+
+**What's new in Core is Rust-only:**
+
+- `code()` on `RepoError`, `StorageError`, `TreeError` and `SpecError`;
+- `Repository::with_branch_refs_only`, `commit_trace`, `blame_with_trace`, `store_totals` and `undistilled_commits`;
+- `link_commits_to_traces` and `emit_commit_events`;
+- storage trait methods, each with a default: `leaf_index_*`, `store_totals`, `put_commit_traced`, `set_commit_trace` and `get_commit_trace`.
+
+No binding calls them. Bindings surface repository errors as message strings, and the messages haven't changed, so the codes are additional.
+
+**What a binding consumer observes through `Repository`:**
+
+- **`RepoError::CommitRefNotAllowed`** is new, but it's raised only for a repository built `with_branch_refs_only`. That is the HTTP server's handling of namespace-bound keys, and no binding builds one.
+- **The library now records spans and metrics** through the `tracing` and `metrics` facades. With no subscriber or recorder installed, as in every binding, they do nothing.
+- **Commit trace links are recorded only once a program sets a source,** and no binding sets one. SQLite stores gain an empty `commit_traces` table, which older versions ignore.
+- **Postgres is a storage backend, not a capability in the matrix.** The bindings open SQLite or in-memory stores, as before.
+- **WASM:** `agentstategraph` now depends on `tracing` and `metrics`. `cargo check -p agentstategraph-wasm --target wasm32-unknown-unknown` passes. Durations aren't measured there, because `Instant::now` would panic.
+
+1.2.6 to 1.2.8 were reviewed in their `release-prep` commits. None changed a capability's status or the ABI.
+
+## Earlier audit — 1.2.5 (retrospective)
 
 `reviewed_core_version` moved to 1.2.5 on 2026-09-29 in the release-prep commit
 `446ae43`, but that commit recorded **no audit conclusions**. What follows is a

@@ -7,6 +7,33 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.3.0] — 2026-10-13
+
+PostgreSQL storage, a hardened HTTP server, and OpenTelemetry traces, metrics and logs.
+
+- **PostgreSQL** reaches parity with SQLite: history walks and rollups, value search, garbage collection, and TLS behind `postgres-tls`. A backend conformance suite runs the same checks on every backend.
+- **The HTTP server is hardened.** Browsers from other origins and other Host names are refused by default. API keys are stored hashed, with their tenant and namespace enforced. Requests have a body limit, a timeout and a concurrency cap. Health is split into liveness and readiness.
+- **Observability.** The server records OpenTelemetry traces, metrics and logs through oxtel, and exports them over OTLP when an endpoint is set:
+  - errors carry stable codes;
+  - each commit links to the trace that made it;
+  - `deploy/observability` and the compose `observability` profile give operators a collector, Prometheus alerts and a Grafana dashboard.
+
+**Upgrading from 1.2:**
+
+- **HTTP:**
+  - errors now return 4xx statuses with a `code`, and rejections answer `{"error", "code", "trace_id"}`;
+  - a page from another origin needs `--cors-origin`;
+  - behind a reverse proxy, allow its host name with `--allowed-host`;
+  - `/api/health` no longer reads the store, so use `/api/ready` for that.
+- **MCP:** tool failures and `commit_spec`'s policy refusals are `isError` results. Their text is unchanged.
+- **Postgres:** the schema moves to version 4 on the first connect.
+- **Keys file:** it's rewritten with hashes instead of keys (version 2) the first time the server loads it.
+- **Rust API.** These can stop code compiling, though this is a minor release:
+  - `RepoError` has a new variant, `CommitRefNotAllowed`, so an exhaustive `match` needs an arm for it;
+  - in `agentstategraph-mcp`, `TenantManager::multi_tenant` and the multi-tenant routers return a `Result`, `build_router_with` no longer takes a repository, and `AuthContext::key_prefix` is now `key_id`.
+
+  See Changed for the rest.
+
 ### Added
 - **Stable error codes** (Plan H t-004). `RepoError`, `StorageError`, `TreeError` and `SpecError` each have `code()`, a short snake_case name such as `write_conflict`, `branch_not_found` or `taint_blocked`, for clients to branch on instead of the message.
   - HTTP error responses carry it beside the message: `{"error": ..., "code": ...}`.
