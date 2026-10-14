@@ -6,12 +6,21 @@ source "$ROOT/scripts/lib/github-actions.sh"
 
 gh() {
   [ "$1" = api ] || { echo "unexpected gh command: $*" >&2; return 1; }
-  printf '%s\n' '{"workflow_runs":[
-    {"id":41,"event":"workflow_dispatch","display_title":"verify Swift v0.9.21"},
-    {"id":42,"event":"workflow_dispatch","display_title":"verify Swift v0.9.21"},
-    {"id":99,"event":"push","display_title":"verify Swift v0.9.21"},
-    {"id":100,"event":"workflow_dispatch","display_title":"another run"}
-  ]}'
+  case "$2" in
+    repos/*/releases/tags/*)
+      printf '%s\n' '{"assets":[
+        {"name":"swift.zip","state":"uploaded","digest":"sha256:abc123"},
+        {"name":"swift.zip.sha256","state":"starter","digest":"sha256:def456"},
+        {"name":"swift-release.json","state":"uploaded","digest":null}
+      ]}' ;;
+    *)
+      printf '%s\n' '{"workflow_runs":[
+        {"id":41,"event":"workflow_dispatch","display_title":"verify Swift v0.9.21"},
+        {"id":42,"event":"workflow_dispatch","display_title":"verify Swift v0.9.21"},
+        {"id":99,"event":"push","display_title":"verify Swift v0.9.21"},
+        {"id":100,"event":"workflow_dispatch","display_title":"another run"}
+      ]}' ;;
+  esac
 }
 
 latest=$(github_latest_workflow_run_id example/repo verify.yml "verify Swift v0.9.21")
@@ -26,5 +35,13 @@ if github_wait_for_new_workflow_run \
   echo "expected an unchanged run list to time out" >&2
   exit 1
 fi
+
+# A re-run skips only assets GitHub holds, fully uploaded, with a known digest.
+for pair in "swift.zip=abc123" "swift.zip.sha256=" "swift-release.json=" "missing.zip="; do
+  name="${pair%%=*}"
+  want="${pair#*=}"
+  got=$(github_release_asset_sha256 example/repo v0.9.21 "$name")
+  [ "$got" = "$want" ] || { echo "expected '$want' for $name, got '$got'" >&2; exit 1; }
+done
 
 echo "GitHub Actions compatibility tests passed"

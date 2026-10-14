@@ -7,6 +7,8 @@
 #  * a `release: vX` commit on main is validated by its tag pipeline (pushed
 #    right after — same SHA, plus the publish stage), so its branch pipeline is
 #    skipped to avoid a duplicate full compile.
+# A new pipeline on an already-released tag is safe: every publish job skips
+# what is already published (RELEASE.md, "Re-running a tag pipeline").
 workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /^release: v/'
@@ -140,6 +142,12 @@ version-guard:
 
 # On a release tag, build the Python wheel (pyo3/maturin) and publish it so
 # downstream Python projects can `pip install agentstategraph`.
+#
+# Re-running the tag pipeline is safe: a wheel the registry already has is
+# skipped. GitLab answers a repeat upload with 400 "File name has already been
+# taken", which twine 6.2 and later no longer treat as --skip-existing, so each
+# wheel is first looked up in the project's simple index. --skip-existing still
+# covers a registry that answers 409 or "already exists".
 publish-wheel:
   stage: publish
   allow_failure: true   # internal GitLab-PyPI wheel; never block the release/mirror
@@ -150,17 +158,34 @@ publish-wheel:
     - pip3 install --break-system-packages --quiet maturin twine
     - cd bindings/python
     - maturin build --release -i python3 --out dist
-    - >
-      TWINE_USERNAME=gitlab-ci-token TWINE_PASSWORD="${CI_JOB_TOKEN}"
-      twine upload --non-interactive
-      --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi"
-      dist/*.whl
+    - |
+      upload=()
+      for whl in dist/*.whl; do
+        file="${whl##*/}"
+        listing=$(curl -fs -u "gitlab-ci-token:${CI_JOB_TOKEN}" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi/simple/${file%%-*}" || true)
+        case "$listing" in
+          *">${file}</a>"*) echo "skip ${file} (already in the GitLab PyPI registry)" ;;
+          *) upload+=("$whl") ;;
+        esac
+      done
+      if [ "${#upload[@]}" -gt 0 ]; then
+        TWINE_USERNAME=gitlab-ci-token TWINE_PASSWORD="${CI_JOB_TOKEN}" \
+          twine upload --non-interactive --skip-existing \
+          --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi" \
+          "${upload[@]}"
+      fi
 
 # On a release tag, build the napi-rs native addon and publish the Node package
 # to the GitLab npm registry. Scoped to Linux x64 only — the same single-platform
 # scope as publish-wheel (manylinux). A full cross-platform matrix (macOS/Windows/
 # arm64 via optionalDependencies) is a napi build-matrix follow-up. allow_failure
 # so an internal-registry hiccup never blocks the release/mirror.
+#
+# Re-running the tag pipeline is safe: the registry rejects a version it already
+# has, so the job skips the publish when `npm view` already resolves this
+# name@version. It reads the same .npmrc as `npm publish`, so it asks the
+# registry the job publishes to.
 publish-npm:
   stage: publish
   allow_failure: true
@@ -182,7 +207,14 @@ publish-npm:
       registry=${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/npm/
       //${CI_SERVER_HOST}/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken=${CI_JOB_TOKEN}
       EOF
-    - npm publish
+    - |
+      name=$(node -p 'require("./package.json").name')
+      version=$(node -p 'require("./package.json").version')
+      if [ "$(npm view "${name}@${version}" version 2>/dev/null)" = "$version" ]; then
+        echo "skip ${name} ${version} (already in the GitLab npm registry)"
+      else
+        npm publish
+      fi
 
 # publish-github: mirror main + release tags to the PUBLIC GitHub repo, but only
 # after scripts/leak-scan.sh passes (fail closed). This replaces GitLab push
@@ -191,6 +223,12 @@ publish-npm:
 # whereas scripts/publish-to-github.sh pushes ONLY main and matching release
 # tags. Set CI variables GITHUB_REPO (org/name) and GITHUB_TOKEN (repo scope,
 # masked + protected). Gated on GITHUB_REPO so it no-ops until configured.
+#
+# Re-running a tag pipeline is safe: the tag is already on GitHub, so its push
+# is a no-op and GitHub's release workflow does not fire again, and main moves
+# only when it fast-forwards. Once main has moved past the tag, GitHub's main is
+# no longer the tag's ancestor, so the leak scan covers the tag's whole history
+# and takes a few minutes.
 publish-github:
   stage: publish
   image: debian:bookworm-slim
@@ -218,7 +256,9 @@ publish-github:
 # Set CARGO_REGISTRY_TOKEN (masked + protected; v* tags are protected): a
 # crates.io token scoped to publish-update and agentstategraph*. Gated on it so
 # the job no-ops until configured. publish-update cannot create a crate, so a
-# crate new to the workspace is published once by hand (RELEASE.md).
+# crate new to the workspace is published once by hand (RELEASE.md). Rules are
+# evaluated when a pipeline is created, so a tag pipeline created before the
+# token existed has no publish-crates job: run a new pipeline for the tag.
 publish-crates:
   stage: publish
   needs:
@@ -296,7 +336,9 @@ prepare-swift-release:
 
 # The tag pipeline publishes the byte-identical artifact staged above. GitHub
 # remains the public download surface, but never rebuilds the checksum-pinned
-# Swift asset after the tag has been created.
+# Swift asset after the tag has been created. Re-running a tag pipeline is safe:
+# assets already on the GitHub release with the staged bytes are skipped, not
+# deleted and re-uploaded, and the SwiftPM verification runs again.
 publish-swift-release:
   stage: release
   image: debian:bookworm-slim
@@ -340,7 +382,9 @@ ci-guard:
 # tag, which is what agentstategraph.dev and agentstatelabs.com show as the
 # current version. Delayed like the downstream installers so the site does not
 # advertise a release before GitHub has built it. Gated on SITE_RELEASES_TOKEN
-# so it no-ops until that is configured.
+# so it no-ops until that is configured. Re-running a tag pipeline is safe: the
+# script only moves the version forward, and pushes nothing when releases.json
+# already shows this tag or a newer one.
 site-version:
   stage: .post
   image: debian:bookworm-slim

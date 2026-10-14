@@ -81,7 +81,10 @@ The `publish-crates` job does this on every release tag, once
 `CARGO_REGISTRY_TOKEN` is set. It needs `publish-github`, so it runs only after
 the checks, the tests and the GitHub mirror's leak scan have passed, and it runs
 the leak scan again before `scripts/publish-crates.sh --publish`. Crates already
-on crates.io at the version are skipped, so retrying the job is safe.
+on crates.io at the version are skipped, so retrying the job is safe. A tag
+pipeline created before the token was set has no `publish-crates` job, so to
+publish an existing release run a new pipeline for its tag (see *Re-running a
+tag pipeline* below).
 
 `CARGO_REGISTRY_TOKEN` is a masked, protected CI variable (`v*` tags are
 protected, so tag pipelines can read it). Make it a crates.io token scoped to
@@ -103,6 +106,31 @@ Cargo 1.90 and later verifies every crate before uploading any, then uploads
 in dependency order. A crates.io version can be yanked but never deleted or
 re-uploaded, so anything wrong with a published crate is fixed by the next
 patch release.
+
+## Re-running a tag pipeline
+
+A new pipeline on a tag that has already been released is safe: every publish
+job skips what is already published, so nothing that is already out is
+uploaded again. Use it to finish a release that a job left unpublished, for
+example to run `publish-crates` once `CARGO_REGISTRY_TOKEN` exists. Retrying
+jobs in the old pipeline is not enough for that, because job rules are
+evaluated when a pipeline is created, so a job missing from the old pipeline
+stays missing.
+
+Start one from Build → Pipelines → *Run pipeline* with the tag selected, or:
+
+```sh
+glab api -X POST "projects/agentstategroup%2Fagentstategraph/pipeline?ref=v1.0.0"
+```
+
+| Job | On a re-run |
+|---|---|
+| `publish-github` | The tag is already on GitHub, so its push is a no-op and GitHub's release workflow does not run again; main is pushed only when that fast-forwards it. Once main has moved past the tag, the leak scan covers the tag's whole history and takes a few minutes. |
+| `publish-crates` | Skips crates already on crates.io at the version. |
+| `publish-wheel` | Skips a wheel already in the GitLab PyPI registry. |
+| `publish-npm` | Skips a version already in the GitLab npm registry. |
+| `publish-swift-release` | Skips assets already on the GitHub release with the staged bytes, then runs the SwiftPM verification again. |
+| `site-version` | Leaves `releases.json` alone when it already shows this release or a newer one. |
 
 ## After the release: the site's version strings
 

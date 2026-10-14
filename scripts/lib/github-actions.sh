@@ -37,3 +37,16 @@ github_wait_for_new_workflow_run() {
   done
   return 1
 }
+
+# Print the sha256 GitHub recorded for a fully uploaded release asset. Prints
+# nothing when the release has no such asset, the upload never finished, or the
+# asset predates GitHub's asset digests.
+github_release_asset_sha256() {
+  local repo="$1"
+  local tag="$2"
+  local name="$3"
+
+  gh api "repos/${repo}/releases/tags/${tag}" \
+    | jq -r --arg name "$name" \
+      '.assets[] | select(.name == $name and .state == "uploaded") | .digest // empty | ltrimstr("sha256:")'
+}
