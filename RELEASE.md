@@ -132,6 +132,14 @@ glab api -X POST "projects/agentstategroup%2Fagentstategraph/pipeline?ref=v1.0.0
 | `publish-swift-release` | Skips assets already on the GitHub release with the staged bytes, then runs the SwiftPM verification again. |
 | `site-version` | Leaves `releases.json` alone when it already shows this release or a newer one. |
 
+A tag's pipeline runs the `.gitlab-ci.yml` and scripts at the tag's commit, not
+main's, so the table holds only for a tag whose commit includes this section.
+On v1.3.0 and earlier, `publish-wheel` and `publish-npm` fail on the version
+the registry already has, and `publish-swift-release` deletes and re-uploads
+its unchanged assets. The wheel and npm jobs are allowed to fail, so such a
+pipeline still runs `publish-crates` and `site-version`, and passes with
+warnings.
+
 ## After the release: the site's version strings
 
 The tag pipeline's `site-version` job records the release in
