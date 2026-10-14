@@ -2207,9 +2207,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "oxtel"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a2e7630d8ffc4aa072e8329561e9fc244f1a35ceb4b15e84662e79ca1678c42"
+checksum = "138346a8ba39c08bcba33b01e6122f9ffcb0083565673a7cb5f44454707b31bd"
 dependencies = [
  "metrics",
  "oxtel-config",
@@ -2224,18 +2224,18 @@ dependencies = [
 
 [[package]]
 name = "oxtel-config"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ad2051790d158b220be50534f5e543487200569a8f997aef9a53df6d433ee9f"
+checksum = "d311fbaeeee873a1cd6341a294cfd2114284298aa9615f439b58830a258865e5"
 dependencies = [
  "yaml-rust2",
 ]
 
 [[package]]
 name = "oxtel-otlp"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14cad471859db1e1dd2f29ca885444c684656d9c224bd15d9a91cc00b52a1661"
+checksum = "7f41addbc5ba2fe58c972368d8d5b69242e668d8fbee6801d203d4dcee09154e"
 dependencies = [
  "fastrand",
  "flate2",
@@ -2246,18 +2246,18 @@ dependencies = [
 
 [[package]]
 name = "oxtel-prometheus"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "208965e0ef64691d3012b383d7e2119d8bcc708914958863c4eab3ebbf0900f8"
+checksum = "e4cc07159a3f47fef7fc15fc82e73ca5eb01445f9fa18d9748e89d196d58320b"
 dependencies = [
  "oxtel-sdk",
 ]
 
 [[package]]
 name = "oxtel-rmcp"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23a60b6f043b7c0a0d305524c4ab40cf827b5159dd0156b1291af1614acd8d45"
+checksum = "d0ca556adf2a08b1fe5a136bcd24425c14951280b72090ba0a26e1b01927a1fc"
 dependencies = [
  "http",
  "metrics",
@@ -2270,9 +2270,9 @@ dependencies = [
 
 [[package]]
 name = "oxtel-sdk"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fc1d1d844305e57cf9d55b69cc315473010eff822713bd649fda664a4a0da2b"
+checksum = "fe8cfc54dfbb5fac2fe5f4b7716292c3e4637575ca4ffc072f606c08f03faec2"
 dependencies = [
  "fastrand",
  "http",
@@ -2285,9 +2285,9 @@ dependencies = [
 
 [[package]]
 name = "oxtel-sql"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "493eb69b12fed469706a20206ac3d7ced5f999542205faef83ce54b0a00104c8"
+checksum = "dc3690cee450db843722a46d534262b73d1d2110e79ff25f3bf706410b778058"
 dependencies = [
  "deadpool-postgres",
  "metrics",
@@ -2298,9 +2298,9 @@ dependencies = [
 
 [[package]]
 name = "oxtel-tower"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5630c7dbe8c90bda8caf38463551e3afdc2adcf5e10157a3c7c3b833ca0dea0d"
+checksum = "26500aa998f1b3cde55ea243a0b46c8fc8c477de744bf0f5f0cd5c510969442e"
 dependencies = [
  "axum",
  "http",
