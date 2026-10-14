@@ -10,6 +10,7 @@ use agentstategraph::{CommitOptions, CommitTrace, RepoError, Repository, Retenti
 use agentstategraph_core::IntentCategory;
 use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{TaintEffect, TaintMetadata, TaintParams, TaintSeverity};
+use oxtel_sdk::logs::{InMemoryLogExporter, LogRecord, LoggerProvider};
 use oxtel_sdk::metrics::{MeterProvider, PointValue};
 use oxtel_sdk::trace::{InMemorySpanExporter, Sampler, SpanData, Status, TracerProvider};
 use oxtel_sdk::{Resource, Value};
@@ -52,6 +53,15 @@ fn point(meters: &MeterProvider, name: &str, labels: &[(&str, &str)]) -> Option<
         .map(|p| p.value)
 }
 
+/// The `asg.commit` events logged so far.
+fn commit_events(records: &InMemoryLogExporter) -> Vec<LogRecord> {
+    records
+        .records()
+        .into_iter()
+        .filter(|r| r.event_name.as_deref() == Some("asg.commit"))
+        .collect()
+}
+
 fn options(agent: &str) -> CommitOptions {
     CommitOptions::new(agent, IntentCategory::Checkpoint, "record the name")
 }
@@ -66,10 +76,17 @@ fn the_repository_records_its_operations() {
         .with_simple_exporter(spans.clone())
         .build();
     let meters = MeterProvider::builder().build();
+    let records = InMemoryLogExporter::default();
+    let logs = LoggerProvider::builder()
+        .with_simple_exporter(records.clone())
+        .build();
     tracing::subscriber::set_global_default(
-        tracing_subscriber::registry().with(traces.layer().with_filter(LevelFilter::INFO)),
+        tracing_subscriber::registry()
+            .with(traces.layer().with_filter(LevelFilter::INFO))
+            .with(logs.layer().with_filter(LevelFilter::INFO)),
     )
     .unwrap();
+    agentstategraph::emit_commit_events(true);
     metrics::set_global_recorder(meters.recorder()).unwrap();
     assert!(agentstategraph::link_commits_to_traces(|| {
         oxtel_sdk::trace::current_span_context()
@@ -96,6 +113,23 @@ fn the_repository_records_its_operations() {
     assert_eq!(attr(set, "gen_ai.agent.id"), text("agent-7"));
     assert_eq!(attr(set, "asg.intent.category"), text("Checkpoint"));
     assert_eq!(set.status, Status::Unset);
+    // Its provenance event, in the write's trace (Plan H t-010).
+    let landed = commit_events(&records);
+    assert_eq!(landed.len(), 1);
+    let event = &landed[0];
+    let field = |key: &str| {
+        event
+            .attributes
+            .iter()
+            .find(|kv| kv.key == key)
+            .map(|kv| kv.value.clone())
+    };
+    assert_eq!(field("asg.commit.id"), text(&id.to_string()));
+    assert_eq!(field("asg.ref.name"), text("main"));
+    assert_eq!(field("asg.namespace"), text("default"));
+    assert_eq!(field("gen_ai.agent.id"), text("agent-7"));
+    assert_eq!(field("asg.intent.category"), text("Checkpoint"));
+    assert_eq!(event.trace_id, Some(set.context.trace_id));
     // The commit links back to the span that made it (Plan H t-009).
     assert_eq!(
         repo.commit_trace(&id).unwrap(),
@@ -129,6 +163,11 @@ fn the_repository_records_its_operations() {
         .set_json_cas("main", id, PATH, &json!("late"), options("agent-7"))
         .unwrap_err();
     assert!(matches!(error, RepoError::WriteConflict));
+    assert_eq!(
+        commit_events(&records).len(),
+        2,
+        "the conflict landed nothing"
+    );
     let (blamed, trace) = repo.blame_with_trace("main", PATH).unwrap();
     assert_eq!(blamed.commit_id, other.short());
     assert!(trace.is_some());
@@ -243,6 +282,8 @@ fn the_repository_records_its_operations() {
     // Writers racing on one ref: each rebuild is counted, and recorded on
     // the write it held up. Racing isn't certain, so race until it happens.
     spans.reset();
+    let landed_before = commit_events(&records).len();
+    let mut writes = 0;
     let retries = || match point(
         &meters,
         "asg.ref.cas_retries",
@@ -271,6 +312,7 @@ fn the_repository_records_its_operations() {
         for thread in threads {
             thread.join().unwrap();
         }
+        writes += writers * 10;
         if retries() > 0 {
             break;
         }
@@ -286,6 +328,8 @@ fn the_repository_records_its_operations() {
         })
         .sum();
     assert_eq!(rebuilt as u64, retries());
+    // One event per write that landed: none for the commits that lost.
+    assert_eq!(commit_events(&records).len() - landed_before, writes);
 
     // Nothing recorded carries a value or a state path, and every name of
     // our own is in the contract.
@@ -310,6 +354,16 @@ fn the_repository_records_its_operations() {
             .iter()
             .chain(span.events.iter().flat_map(|e| &e.attributes));
         for kv in fields {
+            let value = format!("{:?}", kv.value);
+            assert!(!value.contains(SECRET), "{} carries a value", kv.key);
+            assert!(!value.contains(PATH), "{} carries a state path", kv.key);
+            if kv.key.starts_with("asg.") {
+                documented(&kv.key);
+            }
+        }
+    }
+    for record in records.records() {
+        for kv in &record.attributes {
             let value = format!("{:?}", kv.value);
             assert!(!value.contains(SECRET), "{} carries a value", kv.key);
             assert!(!value.contains(PATH), "{} carries a state path", kv.key);

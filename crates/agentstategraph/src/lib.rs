@@ -35,5 +35,5 @@ pub use repo::{
 };
 pub use session::{CreateSessionParams, Session, SessionError, SessionManager};
 pub use speculation::{SpecComparison, SpecHandle, SpeculationManager};
-pub use telemetry::link_commits_to_traces;
+pub use telemetry::{emit_commit_events, link_commits_to_traces};
 pub use watch::{PathPattern, SubscriptionId, WatchEvent, WatchManager};

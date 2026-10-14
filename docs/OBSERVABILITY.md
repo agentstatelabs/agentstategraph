@@ -162,6 +162,22 @@ Gauges of what's in the store, sampled every 60 seconds by default while a metri
 
 The garbage collection gauges cover sweeps and vacuums run through this server's `/gc/sweep` and `/gc/vacuum`, not those run from the command line. None of these metrics has labels.
 
+### Commit events
+
+With `ASG_COMMIT_EVENTS=on`, each commit that lands on a ref is logged as an event named `asg.commit`, so a log backend or SIEM can index state changes beside traces. It's off by default.
+
+The event is at `info`, under the target `agentstategraph::provenance`; turning it on lets that target through the log filter whatever `ASG_LOG` says. Inside the write, it carries the write's `trace_id` and `span_id`. With OTLP, it's exported as a log record whose event name is `asg.commit`.
+
+| Field | |
+|---|---|
+| `asg.commit.id` | the commit |
+| `asg.ref.name`, `asg.namespace` | where it landed |
+| `gen_ai.agent.id` | the agent that made it |
+| `asg.intent.category` | its intent category |
+| `asg.commit.confidence` | its confidence, when it has one |
+
+Never recorded: values, and the commit's free text (intent description, reasoning, tags). A write that loses a race to another writer leaves a commit behind that lands nowhere, and logs no event. A program embedding the library turns the events on with `agentstategraph::emit_commit_events(true)`.
+
 ### Log lines
 
 Each line carries `timestamp`, `level`, `target` and `message`. Inside a span it also carries `trace_id` and `span_id`, then the fields of the enclosing spans and of the event, under their OpenTelemetry names. In text, a span appears by its name, such as `GET /state/{ref_name}`. The `ecs` format writes the Elastic Common Schema. With OTLP, the same events are exported as log records that carry their span's context.
@@ -182,21 +198,23 @@ Attributes of our own use the `asg.` prefix, lowercase and dot-separated, and ar
 | Attribute | Type | Where | Meaning |
 |---|---|---|---|
 | `asg.api_key.id` | string | spans, log lines | the id of the API key a request used; never the key |
-| `asg.commit.id` | string | spans | the commit a write made, which ties the trace to the commit |
+| `asg.commit.confidence` | double | log lines | a commit's confidence, from 0 to 1 |
+| `asg.commit.id` | string | spans, log lines | the commit a write made, which ties the trace to the commit |
 | `asg.error.code` | string | spans, log lines | an HTTP error response's stable code, from the codes in the MCP server guide |
 | `asg.gc.bytes_reclaimed` | int | spans | the bytes a vacuum returned to the operating system |
 | `asg.gc.mutate` | boolean | spans | whether a sweep deletes, or only previews |
 | `asg.gc.objects_deleted` | int | spans | the objects a sweep deleted |
 | `asg.gc.refused` | boolean | spans | whether a sweep refused, because history isn't distilled yet |
 | `asg.history.commits_processed` | int | spans | the commits an extraction folded into the history tables |
-| `asg.intent.category` | string | spans | a write's intent category, such as `Checkpoint` |
+| `asg.intent.category` | string | spans, log lines | a write's intent category, such as `Checkpoint` |
+| `asg.namespace` | string | log lines | the namespace a commit landed in |
 | `asg.operation.name` | string | metrics, spans, log lines | the kind of write: `set`, `delete`, `merge`, `commit_speculation` or `taint` |
 | `asg.policy.decision` | string | metrics, spans, log lines | `allow`, `deny`, `require_approval` or `no_policy_match` |
 | `asg.policy.evaluator` | string | metrics, spans, log lines | an external evaluator's kind, such as `rego` or `cedar` |
 | `asg.policy.fail_safe` | string | log lines | what the fail-safe decided when no policy matched: `deny` or `allow` |
 | `asg.policy.id` | string | log lines | a policy's `path@version` |
 | `asg.ref.cas_attempts` | int | spans, log lines | how many times a write built its commit, recorded when the ref moved under it |
-| `asg.ref.name` | string | spans | the branch or ref a write or read used |
+| `asg.ref.name` | string | spans, log lines | the branch or ref a write or read used |
 | `asg.rejection.reason` | string | metrics, spans, log lines | why the server turned a request away: `rate_limited`, `over_capacity`, `timed_out`, `body_too_large`, `unauthenticated`, `forbidden` or `host_refused` |
 | `asg.speculation.id` | int | spans | a speculation's handle |
 | `asg.taint.effect` | string | log lines | the effect that refused a write: `block`, `review` or `quarantine` |
