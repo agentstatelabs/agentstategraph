@@ -1,6 +1,8 @@
-//! A commit links back to the trace of the request that made it, and the log
-//! and blame show it (DESIGN.md Plan H t-009). One test, because it installs
-//! the process's telemetry and trace source.
+//! One HTTP write, end to end (DESIGN.md Plan H t-012): it makes one trace,
+//! from the request through the repository to each SQL statement; its log
+//! line carries that trace; and its commit links back to it, in the log and
+//! blame (t-009). One test, because it installs the process's telemetry and
+//! trace source.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,6 +12,7 @@ use agentstategraph_mcp::auth::TenantManager;
 use agentstategraph_mcp::http::{self, OriginPolicy, RequestBounds};
 use agentstategraph_storage::SqliteStorage;
 use oxtel::Value;
+use oxtel::sdk::logs::InMemoryLogExporter;
 use oxtel::sdk::trace::{InMemorySpanExporter, SpanData};
 use serde_json::json;
 
@@ -21,14 +24,22 @@ fn attr(span: &SpanData, key: &str) -> Option<Value> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commits_link_to_the_request_that_made_them() {
+async fn one_write_makes_one_trace_its_logs_carry_and_its_commit_links_to() {
     let spans = InMemorySpanExporter::default();
+    let records = InMemoryLogExporter::default();
+    // As the server's telemetry, with SQL statement spans on (ASG_SQL_SPANS).
     let _guard = oxtel::builder()
         .without_env_exporters()
         .without_local_logs()
+        .with_traces_filter("info")
         .with_traces({
             let spans = spans.clone();
             move |traces| traces.with_simple_exporter(spans)
+        })
+        .with_logs_filter("info")
+        .with_logs({
+            let records = records.clone();
+            move |logs| logs.with_simple_exporter(records)
         })
         .install()
         .expect("install telemetry");
@@ -115,4 +126,68 @@ async fn commits_link_to_the_request_that_made_them() {
         Some(Value::from(commit["full_id"].as_str().unwrap().to_string()))
     );
     assert_eq!(blame["trace_id"], trace_id, "{blame}");
+
+    // One trace, from the request down to each SQL statement.
+    let in_trace: Vec<&SpanData> = recorded
+        .iter()
+        .filter(|s| s.context.trace_id == request.context.trace_id)
+        .collect();
+    let parent_of = |span: &SpanData| {
+        in_trace
+            .iter()
+            .find(|s| Some(s.context.span_id) == span.parent_span_id)
+            .copied()
+    };
+    let descends_from = |span: &SpanData, ancestor: &SpanData| {
+        let mut at = span;
+        while let Some(parent) = parent_of(at) {
+            if parent.context.span_id == ancestor.context.span_id {
+                return true;
+            }
+            at = parent;
+        }
+        false
+    };
+    assert!(
+        descends_from(set, request),
+        "the write's span is under the request's"
+    );
+    let statements: Vec<&&SpanData> = in_trace
+        .iter()
+        .filter(|s| attr(s, "db.system.name") == Some(Value::from("sqlite")))
+        .collect();
+    assert!(
+        statements
+            .iter()
+            .any(|s| s.name.starts_with("INSERT commits")),
+        "{:?}",
+        statements.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    for statement in &statements {
+        assert!(
+            descends_from(statement, request),
+            "{} isn't under the request",
+            statement.name
+        );
+    }
+    assert!(
+        recorded
+            .iter()
+            .filter(|s| s.context.trace_id == request.context.trace_id)
+            .all(|s| s.parent_span_id.is_some() || s.context.span_id == request.context.span_id),
+        "the request's span is the trace's only root"
+    );
+
+    // The request's log line carries the trace.
+    let logged = records.records();
+    let line = logged
+        .iter()
+        .find(|r| {
+            r.trace_id == Some(request.context.trace_id)
+                && r.body
+                    .as_ref()
+                    .is_some_and(|b| format!("{b:?}").contains("request"))
+        })
+        .unwrap_or_else(|| panic!("no request log line in the write's trace: {logged:?}"));
+    assert_eq!(line.span_id, Some(request.context.span_id));
 }

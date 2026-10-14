@@ -1,0 +1,49 @@
+# An OpenTelemetry Collector for AgentStateGraph (DESIGN.md Plan H t-012).
+#
+# The server sends traces, metrics and logs here over OTLP/HTTP when
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://<this host>:4318 and it's built with the
+# `otlp` feature (release binaries and the Docker image are). From here:
+#
+# - traces go to Jaeger, over OTLP;
+# - metrics are served for Prometheus to scrape, on :8889, under the same
+#   names the server's own /metrics uses (http_server_request_duration_seconds,
+#   asg_commit_duration_seconds, ...);
+# - logs are printed by the debug exporter. Point them at your log backend
+#   (Loki, OpenSearch, a SIEM) with that backend's exporter instead.
+#
+# To use your own backends, replace the exporters; the server needs nothing
+# else.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

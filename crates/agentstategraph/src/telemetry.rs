@@ -112,6 +112,10 @@ fn describe_metrics() {
             "asg.ref.cas_retries",
             "How many times a write rebuilt its commit because another writer moved the ref."
         );
+        metrics::describe_counter!(
+            "asg.gc.sweeps",
+            "Garbage collection sweeps asked to delete, by whether they did or refused."
+        );
     });
 }
 
@@ -225,4 +229,12 @@ pub(crate) fn commit_landed(namespace: &str, ref_name: &str, commit: &Commit) {
         asg.commit.confidence = commit.confidence,
         "a commit landed"
     );
+}
+
+/// A sweep asked to delete finished: it deleted, or it refused because
+/// history wasn't distilled yet. Counted in `asg.gc.sweeps`.
+pub(crate) fn gc_swept(refused: bool) {
+    describe_metrics();
+    let outcome = if refused { "refused" } else { "swept" };
+    metrics::counter!("asg.gc.sweeps", "asg.gc.outcome" => outcome).increment(1);
 }

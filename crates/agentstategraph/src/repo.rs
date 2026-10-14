@@ -3002,8 +3002,12 @@ impl Repository {
         );
         let result = telemetry::run(span.clone(), || self.gc_sweep_inner(policy, mutate, vacuum));
         if let Ok(report) = &result {
-            if let Some(refused) = report.get("refused").and_then(|v| v.as_bool()) {
+            let refused = report.get("refused").and_then(|v| v.as_bool());
+            if let Some(refused) = refused {
                 span.record("asg.gc.refused", refused);
+            }
+            if mutate {
+                telemetry::gc_swept(refused == Some(true));
             }
             if let Some(deleted) = report.get("objects_deleted").and_then(|v| v.as_i64()) {
                 span.record("asg.gc.objects_deleted", deleted);

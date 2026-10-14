@@ -78,7 +78,9 @@ postgres-tls = ["agentstategraph-storage/postgres-tls"]
 # Validate with: cargo build --no-default-features && cargo tree --no-default-features | grep reqwest
 providers = ["dep:reqwest"]
 # Send traces, metrics and logs over OTLP/HTTP once OTEL_EXPORTER_OTLP_ENDPOINT
-# is set. It brings an HTTP client and TLS, so it's opt-in like `providers`.
+# is set. It brings an HTTP client and TLS, so it's opt-in like `providers`;
+# release builds and the Docker image turn it on, and still send nothing until
+# an endpoint is set.
 otlp = ["oxtel/otlp"]
 
 [dev-dependencies]

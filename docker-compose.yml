@@ -13,6 +13,16 @@
 #             "--auth", "--keys-file", "/data/keys.json"]
 #   environment:
 #     ASG_INITIAL_ADMIN_KEY: ${ASG_ADMIN_KEY}   # asg_ + 64 hex characters
+#
+# Observability (DESIGN.md Plan H t-012): the `observability` profile adds an
+# OpenTelemetry Collector, Prometheus with alert rules, Jaeger and Grafana
+# with a dashboard, each on 127.0.0.1. Point the server at the collector:
+#   ASG_OTLP_ENDPOINT=http://otel-collector:4318 docker compose --profile observability up -d
+#   open http://localhost:3000    # Grafana: the AgentStateGraph dashboard
+#   open http://localhost:16686   # Jaeger: traces
+#   open http://localhost:9090    # Prometheus: metrics and alerts
+# The configs are in deploy/observability; the site's Observability page
+# explains them.
 
 services:
   agentstategraph:
@@ -22,6 +32,9 @@ services:
     volumes:
       - agentstategraph-data:/data
     command: ["--http", "--path", "/data/agentstategraph.db"]
+    environment:
+      # Empty sends nothing; see the observability profile above.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${ASG_OTLP_ENDPOINT:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "agentstategraph-mcp", "healthcheck"]
@@ -29,6 +42,47 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
+  otel-collector:
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      # For a server running outside compose: OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+      - "127.0.0.1:4318:4318"
+    restart: unless-stopped
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.2.1
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    restart: unless-stopped
+
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/jaeger:2.3.0
+    ports:
+      - "127.0.0.1:${JAEGER_HOST_PORT:-16686}:16686"
+    restart: unless-stopped
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3000}:3000"
+    restart: unless-stopped
 
 volumes:
   agentstategraph-data:

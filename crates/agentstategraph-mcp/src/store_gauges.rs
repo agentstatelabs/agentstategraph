@@ -4,6 +4,7 @@
 //!
 //! | Gauge | Unit | Meaning |
 //! |---|---|---|
+//! | `asg.store.available` | | 1 if the store answered the last sample, else 0 |
 //! | `asg.store.objects` | | objects in the store (this tenant's, on Postgres) |
 //! | `asg.store.commits` | | commits in the store |
 //! | `asg.store.size` | `By` | the store's file on disk (SQLite only) |
@@ -45,6 +46,10 @@ pub fn interval_from_env() -> Option<Duration> {
 
 /// Describe the gauges to the current recorder.
 pub fn describe() {
+    metrics::describe_gauge!(
+        "asg.store.available",
+        "1 if the store answered the last sample, else 0."
+    );
     metrics::describe_gauge!("asg.store.objects", "Objects in the store.");
     metrics::describe_gauge!("asg.store.commits", "Commits in the store.");
     metrics::describe_gauge!(
@@ -96,6 +101,7 @@ pub fn sample(repo: &Repository) -> bool {
             tracing::debug!(error = %e, "store gauges: counting undistilled commits failed");
         }
     }
+    metrics::gauge!("asg.store.available").set(if ok { 1.0 } else { 0.0 });
     ok
 }
 
