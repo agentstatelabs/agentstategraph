@@ -10,6 +10,8 @@ AgentStateGraph's logs, traces and metrics follow OpenTelemetry, through [oxtel]
 - **Traces, metrics and logs over OTLP.** Build with the `otlp` feature and set `OTEL_EXPORTER_OTLP_ENDPOINT`, for example `http://collector:4318`. Without the feature, the server contains no OTLP code. With it, nothing is sent until an endpoint is set. The standard `OTEL_*` variables apply: `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_TRACES_SAMPLER` and the rest.
 - At startup, at `info`, one line from the target `oxtel` says where log lines go and where each signal is sent. When sending fails, a warning says where, why and what to check.
 
+- **An operator kit** in `deploy/observability`: an OpenTelemetry Collector config, Prometheus with alert rules, and Grafana with a dashboard. `docker compose --profile observability` runs them with Jaeger. The site's Observability page explains them and lists every metric; a test checks that list against what the server records.
+
 ## Pinned conventions
 
 | Conventions | Version |
@@ -120,8 +122,9 @@ External evaluators that run as processes, Rego and Cedar, are killed after 10 s
 | `asg.ref.cas_retries` | counter | `asg.operation.name` | `asg_ref_cas_retries_total` |
 | `asg.policy.decisions` | counter | `asg.policy.decision` | `asg_policy_decisions_total` |
 | `asg.policy.evaluator.errors` | counter | `asg.policy.evaluator`, `error.type` | `asg_policy_evaluator_errors_total` |
+| `asg.gc.sweeps` | counter | `asg.gc.outcome` | `asg_gc_sweeps_total` |
 
-`asg.policy.decisions` counts what the policies decided, before the fail-safe: `no_policy_match` is counted as such.
+`asg.policy.decisions` counts what the policies decided, before the fail-safe: `no_policy_match` is counted as such. `asg.gc.sweeps` counts sweeps asked to delete, from any caller; previews aren't counted.
 
 ### Database
 
@@ -152,6 +155,7 @@ Gauges of what's in the store, sampled every 60 seconds by default while a metri
 
 | Metric | Instrument and unit | Meaning |
 |---|---|---|
+| `asg.store.available` | gauge | 1 if the store answered the last sample, else 0 |
 | `asg.store.objects` | gauge | objects in the store; on Postgres, this tenant's |
 | `asg.store.commits` | gauge | commits in the store |
 | `asg.store.size` | gauge, `By` | the store's file on disk; SQLite only, since Postgres tables are shared by tenants |
@@ -203,6 +207,7 @@ Attributes of our own use the `asg.` prefix, lowercase and dot-separated, and ar
 | `asg.error.code` | string | spans, log lines | an HTTP error response's stable code, from the codes in the MCP server guide |
 | `asg.gc.bytes_reclaimed` | int | spans | the bytes a vacuum returned to the operating system |
 | `asg.gc.mutate` | boolean | spans | whether a sweep deletes, or only previews |
+| `asg.gc.outcome` | string | metrics | how a sweep asked to delete ended: `swept`, or `refused` because history wasn't distilled |
 | `asg.gc.objects_deleted` | int | spans | the objects a sweep deleted |
 | `asg.gc.refused` | boolean | spans | whether a sweep refused, because history isn't distilled yet |
 | `asg.history.commits_processed` | int | spans | the commits an extraction folded into the history tables |

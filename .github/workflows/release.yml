@@ -59,7 +59,7 @@ jobs:
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: Build
-        run: cargo build --release --locked -p agentstategraph-mcp --features postgres-tls --target ${{ matrix.target }}
+        run: cargo build --release --locked -p agentstategraph-mcp --features postgres-tls,otlp --target ${{ matrix.target }}
 
       - name: Package
         shell: bash

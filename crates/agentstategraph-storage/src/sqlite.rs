@@ -82,6 +82,7 @@ impl SqliteStorage {
             gc_grace: DEFAULT_GC_GRACE,
         };
         storage.init_tables()?;
+        describe_connection_metrics();
         Ok(storage)
     }
 
@@ -97,6 +98,7 @@ impl SqliteStorage {
             gc_grace: DEFAULT_GC_GRACE,
         };
         storage.init_tables()?;
+        describe_connection_metrics();
         Ok(storage)
     }
 
@@ -591,6 +593,25 @@ impl SqliteStorage {
 
 const POOL_NAME: &str = "db.client.connection.pool.name";
 const SQLITE_POOL: &str = "sqlite";
+
+/// Describe the connection metrics to the current recorder, so they carry
+/// their units: without one, Prometheus names them without `_seconds`.
+fn describe_connection_metrics() {
+    metrics::describe_gauge!(
+        "db.client.connection.pending_requests",
+        "The number of current pending requests for an open connection."
+    );
+    metrics::describe_histogram!(
+        "db.client.connection.wait_time",
+        metrics::Unit::Seconds,
+        "The time it took to obtain an open connection from the pool."
+    );
+    metrics::describe_histogram!(
+        "db.client.connection.use_time",
+        metrics::Unit::Seconds,
+        "The time between borrowing a connection and returning it to the pool."
+    );
+}
 
 /// The store's connection while it's held; records how long when dropped.
 struct ConnGuard<'a> {

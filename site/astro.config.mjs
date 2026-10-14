@@ -28,6 +28,7 @@ export default defineConfig({
 						{ label: 'Reminders', slug: 'guides/reminders' },
 						{ label: 'Plans & Tasks', slug: 'guides/plans-tasks' },
 						{ label: 'Epochs', slug: 'guides/epochs' },
+						{ label: 'Observability', slug: 'guides/observability' },
 					],
 				},
 				{

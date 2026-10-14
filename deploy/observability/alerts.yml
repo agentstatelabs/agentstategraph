@@ -1,0 +1,122 @@
+# Prometheus alert rules for AgentStateGraph (DESIGN.md Plan H t-012).
+# Metric names are as the collector's Prometheus exporter, or the server's own
+# /metrics, writes them. Thresholds are starting points: tune them to your
+# traffic.
+groups:
+  - name: agentstategraph
+    rules:
+      - alert: AgentStateGraphStoreUnavailable
+        expr: asg_store_available == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AgentStateGraph's store isn't answering"
+          description: "{{ $labels.instance }} couldn't count its store at its last samples, so /api/ready fails too. Check the database file or the Postgres server."
+
+      - alert: AgentStateGraphNotReporting
+        expr: absent_over_time(asg_store_available[10m])
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No AgentStateGraph metrics for 10 minutes"
+          description: "Nothing has reported asg_store_available. The server may be down, or not exporting: it needs the otlp feature and OTEL_EXPORTER_OTLP_ENDPOINT, or --metrics and a scrape."
+
+      - alert: AgentStateGraphHigh5xxRatio
+        expr: |
+          sum by (job, instance) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+            / sum by (job, instance) (rate(http_server_request_duration_seconds_count[5m]))
+            > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of HTTP requests fail with 5xx"
+          description: "{{ $labels.instance }}: {{ $value | humanizePercentage }} of requests. error_type on the same metric, and asg.error.code on the request spans, say why."
+
+      - alert: AgentStateGraphSlowRequests
+        expr: |
+          histogram_quantile(0.99,
+            sum by (job, instance, le) (rate(http_server_request_duration_seconds_bucket[5m])))
+            > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HTTP p99 latency over 1 second"
+          description: "{{ $labels.instance }}: p99 is {{ $value | humanizeDuration }}. The dashboard breaks it down by route."
+
+      - alert: AgentStateGraphShedding
+        expr: |
+          sum by (job, instance, asg_rejection_reason) (rate(asg_http_rejections_total{asg_rejection_reason=~"over_capacity|timed_out"}[5m]))
+            > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AgentStateGraph is turning requests away: {{ $labels.asg_rejection_reason }}"
+          description: "{{ $labels.instance }} is at its request limit or timing requests out. Raise --max-concurrent-requests or --request-timeout-secs, or find what is slow."
+
+      - alert: AgentStateGraphRejections
+        expr: |
+          sum by (job, instance, asg_rejection_reason) (rate(asg_http_rejections_total{asg_rejection_reason!~"over_capacity|timed_out"}[5m]))
+            > 1
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Many requests rejected: {{ $labels.asg_rejection_reason }}"
+          description: "{{ $labels.instance }}: rate limiting, failed authentication, oversized bodies or refused hosts, more than one a second. A misconfigured client, or someone probing."
+
+      - alert: AgentStateGraphPoolSaturated
+        expr: |
+          sum by (job, instance, db_client_connection_pool_name) (db_client_connection_count{db_client_connection_state="used"})
+            / max by (job, instance, db_client_connection_pool_name) (db_client_connection_max)
+            > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Postgres connection pool over 90% used"
+          description: "{{ $labels.instance }}, pool {{ $labels.db_client_connection_pool_name }}. Requests will start waiting for connections."
+
+      - alert: AgentStateGraphSqliteLockWait
+        expr: |
+          histogram_quantile(0.99,
+            sum by (job, instance, le) (rate(db_client_connection_wait_time_seconds_bucket{db_client_connection_pool_name="sqlite"}[5m])))
+            > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Waiting over 0.5 s for SQLite's connection"
+          description: "{{ $labels.instance }}: SQLite serializes every call on one connection, and p99 waits for it are {{ $value | humanizeDuration }}. A long garbage collection or history extraction holds it; so does heavy write traffic."
+
+      - alert: AgentStateGraphHistoryLagGrowing
+        expr: asg_history_undistilled_commits > 10000 and deriv(asg_history_undistilled_commits[1h]) > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "History extraction is falling behind"
+          description: "{{ $labels.instance }} has {{ $value }} undistilled commits, and the number is growing. Garbage collection refuses to sweep until they're distilled; run the extractor."
+
+      - alert: AgentStateGraphGcRefused
+        expr: increase(asg_gc_sweeps_total{asg_gc_outcome="refused"}[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A garbage collection sweep refused to run"
+          description: "{{ $labels.instance }}: a sweep refused because history isn't distilled yet. Run the history extractor, then sweep again."
+
+      - alert: AgentStateGraphWriteConflicts
+        expr: |
+          sum by (job, instance) (rate(asg_commit_duration_seconds_count{error_type="write_conflict"}[5m]))
+            > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Writes failing with write conflicts"
+          description: "{{ $labels.instance }}: writers keep moving the same ref, and writes give up after retrying. asg_ref_cas_retries_total shows how often they rebuild."
