@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Barrier};
 
-use agentstategraph::{CommitOptions, RepoError, Repository, RetentionPolicy};
+use agentstategraph::{CommitOptions, CommitTrace, RepoError, Repository, RetentionPolicy};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_storage::SqliteStorage;
 use agentstategraph_taint::{TaintEffect, TaintMetadata, TaintParams, TaintSeverity};
@@ -71,6 +71,14 @@ fn the_repository_records_its_operations() {
     )
     .unwrap();
     metrics::set_global_recorder(meters.recorder()).unwrap();
+    assert!(agentstategraph::link_commits_to_traces(|| {
+        oxtel_sdk::trace::current_span_context()
+            .filter(|context| context.is_valid())
+            .map(|context| CommitTrace {
+                trace_id: context.trace_id.to_string(),
+                span_id: context.span_id.to_string(),
+            })
+    }));
 
     let repo = Arc::new(Repository::new(Box::new(
         SqliteStorage::in_memory().unwrap(),
@@ -88,6 +96,14 @@ fn the_repository_records_its_operations() {
     assert_eq!(attr(set, "gen_ai.agent.id"), text("agent-7"));
     assert_eq!(attr(set, "asg.intent.category"), text("Checkpoint"));
     assert_eq!(set.status, Status::Unset);
+    // The commit links back to the span that made it (Plan H t-009).
+    assert_eq!(
+        repo.commit_trace(&id).unwrap(),
+        Some(CommitTrace {
+            trace_id: set.context.trace_id.to_string(),
+            span_id: set.context.span_id.to_string(),
+        })
+    );
     let check = named(&recorded, "asg.taint.check")[0];
     assert_eq!(check.parent_span_id, Some(set.context.span_id));
     let Some(PointValue::Histogram(durations)) = point(
@@ -106,12 +122,17 @@ fn the_repository_records_its_operations() {
     assert_eq!(unit.as_deref(), Some("s"));
 
     // A write that fails records its error's code.
-    repo.set_json_cas("main", id, PATH, &json!("other"), options("agent-7"))
+    let other = repo
+        .set_json_cas("main", id, PATH, &json!("other"), options("agent-7"))
         .unwrap();
     let error = repo
         .set_json_cas("main", id, PATH, &json!("late"), options("agent-7"))
         .unwrap_err();
     assert!(matches!(error, RepoError::WriteConflict));
+    let (blamed, trace) = repo.blame_with_trace("main", PATH).unwrap();
+    assert_eq!(blamed.commit_id, other.short());
+    assert!(trace.is_some());
+    assert_eq!(trace, repo.commit_trace(&other).unwrap());
     let recorded = spans.finished_spans();
     let conflict = named(&recorded, "asg.repo.set")
         .into_iter()

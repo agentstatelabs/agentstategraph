@@ -1077,7 +1077,7 @@ async fn get_log(
         let entries: Vec<serde_json::Value> = commits
             .iter()
             .map(|c| {
-                serde_json::json!({
+                let entry = serde_json::json!({
                     "id": c.id.short(),
                     "full_id": c.id.to_string(),
                     "agent": c.agent_id,
@@ -1090,7 +1090,8 @@ async fn get_log(
                     "confidence": c.confidence,
                     "parents": c.parents.iter().map(|p| p.short()).collect::<Vec<_>>(),
                     "timestamp": c.timestamp.to_rfc3339(),
-                })
+                });
+                with_commit_trace(&repo, &c.id, entry)
             })
             .collect();
         Ok(Json(serde_json::json!(entries)))
@@ -1109,8 +1110,13 @@ async fn blame(
     Query(q): Query<BlameQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     blocking(move || {
-        let entry = repo.blame(&ref_name, &q.path)?;
-        Ok(Json(serde_json::to_value(&entry).unwrap_or_default()))
+        let (entry, trace) = repo.blame_with_trace(&ref_name, &q.path)?;
+        let mut entry = serde_json::to_value(&entry).unwrap_or_default();
+        if let Some(trace) = trace {
+            entry["trace_id"] = trace.trace_id.into();
+            entry["span_id"] = trace.span_id.into();
+        }
+        Ok(Json(entry))
     })
     .await
 }
@@ -1485,7 +1491,7 @@ async fn blocking<T: Send + 'static>(
 
 // ─── Error handling ─────────────────────────────────────────
 
-/// An error response: `{"error": message, "code": code}`. The code is
+/// An error response: `{"error": message, "code": code, "trace_id": id}`. The code is
 /// stable (DESIGN.md Plan H t-004) and the status follows from it; clients
 /// can branch on the code, while messages may change.
 struct AppError {
@@ -1561,6 +1567,21 @@ impl IntoResponse for AppError {
 /// request's span.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ErrorCode(pub(crate) &'static str);
+
+/// Add the trace a commit was made in to its JSON, as `trace_id` and
+/// `span_id`, when one was recorded. Reading it is best-effort: a commit
+/// listing doesn't fail for want of its trace.
+pub(crate) fn with_commit_trace(
+    repo: &Repository,
+    commit_id: &agentstategraph_core::ObjectId,
+    mut entry: serde_json::Value,
+) -> serde_json::Value {
+    if let Ok(Some(trace)) = repo.commit_trace(commit_id) {
+        entry["trace_id"] = trace.trace_id.into();
+        entry["span_id"] = trace.span_id.into();
+    }
+    entry
+}
 
 /// An error body: `{"error": message, "code": code, "trace_id": id}`. The
 /// trace id is the request's, so a client reporting an error can point at

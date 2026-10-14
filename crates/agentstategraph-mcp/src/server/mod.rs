@@ -1452,7 +1452,7 @@ impl AgentStateGraphServer {
                 let entries: Vec<serde_json::Value> = commits
                     .iter()
                     .map(|c| {
-                        serde_json::json!({
+                        let entry = serde_json::json!({
                             "id": c.id.short(),
                             "agent": c.agent_id,
                             "intent": {
@@ -1464,7 +1464,8 @@ impl AgentStateGraphServer {
                             "confidence": c.confidence,
                             "parents": c.parents.len(),
                             "timestamp": c.timestamp.to_rfc3339(),
-                        })
+                        });
+                        crate::http::with_commit_trace(repo, &c.id, entry)
                     })
                     .collect();
                 serde_json::to_string_pretty(&entries).unwrap_or_default()
@@ -1763,8 +1764,15 @@ impl AgentStateGraphServer {
         };
         let repo = forked.as_ref().unwrap_or(&self.repo);
         let ref_name = p.r#ref.unwrap_or_else(|| "main".to_string());
-        match repo.blame(&ref_name, &p.path) {
-            Ok(entry) => serde_json::to_string_pretty(&entry).unwrap_or_default(),
+        match repo.blame_with_trace(&ref_name, &p.path) {
+            Ok((entry, trace)) => {
+                let mut entry = serde_json::to_value(&entry).unwrap_or_default();
+                if let Some(trace) = trace {
+                    entry["trace_id"] = trace.trace_id.into();
+                    entry["span_id"] = trace.span_id.into();
+                }
+                serde_json::to_string_pretty(&entry).unwrap_or_default()
+            }
             Err(e) => crate::server::tool_error(&e),
         }
     }

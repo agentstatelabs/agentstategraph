@@ -166,13 +166,14 @@ The garbage collection gauges cover sweeps and vacuums run through this server's
 
 Each line carries `timestamp`, `level`, `target` and `message`. Inside a span it also carries `trace_id` and `span_id`, then the fields of the enclosing spans and of the event, under their OpenTelemetry names. In text, a span appears by its name, such as `GET /state/{ref_name}`. The `ecs` format writes the Elastic Common Schema. With OTLP, the same events are exported as log records that carry their span's context.
 
-### Planned
+### Commits and their traces
 
-DESIGN.md Plan H adds, under the rules below:
+Each commit records the trace it was made in, and the span that made it: its write's span, such as `asg.repo.set`. A trace leads to its commits through `asg.commit.id` on that span, and a commit leads back through these ids:
 
-- links from commits to their traces.
+- `log` and `blame`, over HTTP and as MCP tools, show `trace_id` and `span_id` for each commit that has them;
+- `Repository::commit_trace` and `Repository::blame_with_trace` read them in code.
 
-Each is added to this page when it lands.
+They're kept beside the commit, in the store's `commit_traces` table, never in the commit itself, so commit ids and sync bundles don't depend on telemetry, and a fetched commit carries no trace. Log lines carry the same trace id, so a commit's log lines can be found even when its trace wasn't exported or was sampled out. `ASG_TRACE_LINKS=off` turns linking off. A program embedding the library turns it on by passing a source of the current trace to `agentstategraph::link_commits_to_traces`, once, at startup. The browser build keeps no links: it has no traces.
 
 ## `asg.*` attributes
 

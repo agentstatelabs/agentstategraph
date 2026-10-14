@@ -36,6 +36,8 @@ pub struct MemoryStorage {
     commit_epoch: RwLock<Vec<(ObjectId, String)>>,
     /// (commit_id, session_id) associations, in insertion order.
     commit_session: RwLock<Vec<(ObjectId, String)>>,
+    /// The trace each commit was made in.
+    commit_traces: RwLock<HashMap<ObjectId, crate::traits::CommitTrace>>,
     /// Taints keyed by id, insertion-ordered for deterministic
     /// list output.
     taints: RwLock<Vec<Taint>>,
@@ -56,6 +58,7 @@ impl MemoryStorage {
             sessions: RwLock::new(HashMap::new()),
             commit_epoch: RwLock::new(Vec::new()),
             commit_session: RwLock::new(Vec::new()),
+            commit_traces: RwLock::new(HashMap::new()),
             taints: RwLock::new(Vec::new()),
             reminders: MemoryReminderStore::new(),
         }
@@ -111,6 +114,31 @@ impl ObjectStore for MemoryStorage {
 }
 
 impl CommitStore for MemoryStorage {
+    fn set_commit_trace(
+        &self,
+        commit_id: &ObjectId,
+        trace: &crate::traits::CommitTrace,
+    ) -> Result<(), StorageError> {
+        self.commit_traces
+            .write()
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .entry(*commit_id)
+            .or_insert_with(|| trace.clone());
+        Ok(())
+    }
+
+    fn get_commit_trace(
+        &self,
+        commit_id: &ObjectId,
+    ) -> Result<Option<crate::traits::CommitTrace>, StorageError> {
+        Ok(self
+            .commit_traces
+            .read()
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .get(commit_id)
+            .cloned())
+    }
+
     fn store_totals(&self) -> Result<Option<crate::traits::StoreTotals>, StorageError> {
         let objects = self
             .objects

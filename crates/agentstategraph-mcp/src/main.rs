@@ -517,6 +517,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 eprintln!(
                     "  OTEL_EXPORTER_OTLP_ENDPOINT=<url>  Send traces, metrics and logs over OTLP (built with --features otlp)"
                 );
+                eprintln!(
+                    "  ASG_TRACE_LINKS=off   Don't record the trace each commit was made in (default: on)"
+                );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
                 eprintln!("HTTP API ENDPOINTS:");
@@ -938,6 +941,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // quiet unless something is wrong.
     let serving_http = args.iter().any(|a| a == "--http");
     let telemetry = init_telemetry(if serving_http { "info" } else { "warn" }, serving_http)?;
+    if agentstategraph_mcp::trace_links_from_env() {
+        agentstategraph::link_commits_to_traces(agentstategraph_mcp::current_trace);
+    }
 
     if args.get(1).map(String::as_str) == Some("migrate") {
         let rest: Vec<String> = args.iter().skip(2).cloned().collect();

@@ -11,7 +11,7 @@
 use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Epoch, Intent, IntentCategory, Object, ObjectId,
 };
-use agentstategraph_storage::{CommitStore, EpochStore, ObjectStore, PostgresStorage};
+use agentstategraph_storage::{CommitStore, CommitTrace, EpochStore, ObjectStore, PostgresStorage};
 use chrono::Utc;
 
 fn url() -> Option<String> {
@@ -76,7 +76,8 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
 
     // A current database with a merge in its history, rewound to look like
     // one from before the version stamp (version 1), epoch seal digests, the
-    // version 2 history and search tables, and the version 3 GC columns.
+    // version 2 history and search tables, the version 3 GC columns, and the
+    // version 4 commit traces.
     let old = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
     let commit = |tag: &str, parents: &[ObjectId]| -> Commit {
         let root = old.put_object(&Object::string(tag)).unwrap();
@@ -103,7 +104,7 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
          DROP INDEX idx_commits_data_id;
          ALTER TABLE commits DROP COLUMN xid;
          DROP TABLE asg_history_cursor, asg_history_commit_rollup, asg_history_milestone,
-                    leaf_rows, leaf_index_refs, gc_pending_roots;
+                    leaf_rows, leaf_index_refs, gc_pending_roots, commit_traces;
          ALTER TABLE objects DROP COLUMN written_at;",
     );
 
@@ -113,8 +114,18 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             &db,
             "SELECT version::BIGINT FROM asg_schema WHERE component = 'postgres'"
         ),
-        3,
+        4,
         "the upgrade stamps the schema version"
+    );
+    let trace = CommitTrace {
+        trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+        span_id: "00f067aa0ba902b7".into(),
+    };
+    storage.set_commit_trace(&merge.id, &trace).unwrap();
+    assert_eq!(
+        storage.get_commit_trace(&merge.id).unwrap(),
+        Some(trace),
+        "the commit traces table is back"
     );
     storage
         .create_epoch(&Epoch::new("e", "upgraded", vec![]))

@@ -177,6 +177,8 @@ OPTIONS:
   -h, --help            Print help with full endpoint list
 ```
 
+Each commit records the trace it was made in, shown as `trace_id` and `span_id` in `log` and `blame`; set `ASG_TRACE_LINKS=off` to stop recording them. See [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md).
+
 ## Available Tools (77)
 
 The most-used tools are listed below by category. See the full [MCP Tools Reference](/reference/mcp-tools/) for every tool with parameters and example payloads.

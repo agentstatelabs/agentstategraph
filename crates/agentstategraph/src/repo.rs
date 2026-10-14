@@ -13,7 +13,8 @@ use agentstategraph_core::{
     Namespace, Object, ObjectId, ObjectResolver, StatePath, ToolCall,
 };
 use agentstategraph_storage::{
-    CommitWalk, HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError, StoreTotals,
+    CommitTrace, CommitWalk, HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError,
+    StoreTotals,
 };
 
 use crate::speculation::{SpecComparison, SpecError, SpecHandle, SpeculationManager};
@@ -1829,14 +1830,26 @@ impl Repository {
         path: &str,
     ) -> Result<agentstategraph_core::BlameEntry, RepoError> {
         let span = op_span!(DEBUG, "asg.repo.blame", asg.ref.name = ref_name);
-        telemetry::run(span, || self.blame_inner(ref_name, path))
+        telemetry::run(span, || self.blame_inner(ref_name, path)).map(|(entry, _)| entry)
+    }
+
+    /// [`Repository::blame`], with the trace the blamed commit was made in,
+    /// when [`crate::link_commits_to_traces`] recorded one.
+    pub fn blame_with_trace(
+        &self,
+        ref_name: &str,
+        path: &str,
+    ) -> Result<(agentstategraph_core::BlameEntry, Option<CommitTrace>), RepoError> {
+        let span = op_span!(DEBUG, "asg.repo.blame", asg.ref.name = ref_name);
+        let (entry, commit_id) = telemetry::run(span, || self.blame_inner(ref_name, path))?;
+        Ok((entry, self.commit_trace(&commit_id)?))
     }
 
     fn blame_inner(
         &self,
         ref_name: &str,
         path: &str,
-    ) -> Result<agentstategraph_core::BlameEntry, RepoError> {
+    ) -> Result<(agentstategraph_core::BlameEntry, ObjectId), RepoError> {
         // DAG walk for the population, then re-sorted by time.
         //
         // `log` missed changes made on a merged-in branch, attributing them to
@@ -1875,7 +1888,7 @@ impl Repository {
 
             if commit.parents.is_empty() {
                 // Initial commit — this is where everything was "set".
-                return self.blame_entry_for(path, commit);
+                return Ok((self.blame_entry_for(path, commit)?, commit.id));
             }
 
             let mut introduced_here = true;
@@ -1893,7 +1906,7 @@ impl Repository {
                 }
             }
             if introduced_here {
-                return self.blame_entry_for(path, commit);
+                return Ok((self.blame_entry_for(path, commit)?, commit.id));
             }
         }
 
@@ -3709,7 +3722,20 @@ impl Repository {
         if let Some(session_id) = self.active_session()? {
             self.storage.set_commit_session(&commit.id, &session_id)?;
         }
+        if let Some(trace) = telemetry::current_trace() {
+            // The link is for finding the trace later; losing it mustn't
+            // fail the write.
+            if let Err(e) = self.storage.set_commit_trace(&commit.id, &trace) {
+                tracing::warn!(error.type = e.code(), "couldn't record the commit's trace");
+            }
+        }
         Ok(commit)
+    }
+
+    /// The trace `commit_id` was made in, when [`crate::link_commits_to_traces`]
+    /// recorded one.
+    pub fn commit_trace(&self, commit_id: &ObjectId) -> Result<Option<CommitTrace>, RepoError> {
+        Ok(self.storage.get_commit_trace(commit_id)?)
     }
 
     // -----------------------------------------------------------------------

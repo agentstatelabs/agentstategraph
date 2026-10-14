@@ -20,9 +20,10 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::traits::{
-    CommitStore, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability, GcSweep,
-    HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore, RefStore,
-    SessionStore, StorageError, StoreShape, StoreTotals, TableBytes, TaintStore, VacuumStats,
+    CommitStore, CommitTrace, DEFAULT_GC_GRACE, EpochStore, GC_FRESHEN_AFTER, GcReachability,
+    GcSweep, HISTORY_NAMESPACE_UNKNOWN, HistoryMilestoneRow, HistoryRollupRow, ObjectStore,
+    RefStore, SessionStore, StorageError, StoreShape, StoreTotals, TableBytes, TaintStore,
+    VacuumStats,
 };
 
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
@@ -136,6 +137,14 @@ impl SqliteStorage {
                 id        BLOB PRIMARY KEY,
                 data      BLOB NOT NULL,
                 timestamp TEXT NOT NULL
+            );
+
+            -- The trace each commit was made in (Plan H t-009): beside the
+            -- commit, not in it, so commit ids don't depend on telemetry.
+            CREATE TABLE IF NOT EXISTS commit_traces (
+                commit_id BLOB PRIMARY KEY,
+                trace_id  TEXT NOT NULL,
+                span_id   TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS namespaces (
@@ -981,6 +990,41 @@ fn leaf_set_apply(
 }
 
 impl CommitStore for SqliteStorage {
+    fn set_commit_trace(
+        &self,
+        commit_id: &ObjectId,
+        trace: &CommitTrace,
+    ) -> Result<(), StorageError> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO commit_traces (commit_id, trace_id, span_id)
+             VALUES (?1, ?2, ?3)",
+            params![
+                commit_id.as_bytes().as_slice(),
+                trace.trace_id,
+                trace.span_id
+            ],
+        )
+        .map_err(|e| StorageError::Backend(format!("set commit trace: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_commit_trace(&self, commit_id: &ObjectId) -> Result<Option<CommitTrace>, StorageError> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT trace_id, span_id FROM commit_traces WHERE commit_id = ?1",
+            params![commit_id.as_bytes().as_slice()],
+            |row| {
+                Ok(CommitTrace {
+                    trace_id: row.get(0)?,
+                    span_id: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| StorageError::Backend(format!("get commit trace: {}", e)))
+    }
+
     fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
         let conn = self.lock_conn()?;
         let mut stmt = conn
