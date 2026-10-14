@@ -1033,8 +1033,63 @@ that no released log or metric format changes.
 | t-008 | **Storage metrics.** Operation duration per backend, per the database conventions (`db.client.operation.duration`, `db.system.name`). Postgres pool usage, pending requests and wait time (`db.client.connection.*`). Time spent waiting for SQLite's connection lock. Store gauges, read on a slow interval: objects, commits, size, undistilled commits (history lag), and the last GC sweep and what it reclaimed. Measure what the gauges cost on a large store before choosing the interval. — **Merged in MRs !81 and !82.** | 2 |
 | t-009 | **Commit-to-trace link.** Record the active trace id for each commit in a side table on all four backends. Show it in `log`, `blame` and the HTTP commit output. It can be turned off. — **Done.** A `commit_traces` table on SQLite and Postgres (schema version 4), and a map in memory, hold each commit's trace and span ids. The browser's IndexedDB keeps none, having no traces. The library takes the current trace from a source the binary sets once, `link_commits_to_traces`, so it stays on the facades; the server passes oxtel's span context unless `ASG_TRACE_LINKS=off`. Losing a link never fails a write. `log` and `blame` show the ids over HTTP and MCP. | 3 |
 | t-010 | **Provenance events.** Optionally emit each commit as an OpenTelemetry log event (`asg.commit`). The event carries the agent, intent category, confidence, namespace, commit id and trace id, and never values. A log backend or SIEM can then index state changes beside traces. Off by default. — **Done.** `ASG_COMMIT_EVENTS=on`, or `emit_commit_events(true)` in a program embedding the library. The event is emitted where a commit lands on a ref (`advance_ref`, or the unconditional move for a ref that isn't a branch), so a commit that lost a race logs nothing. It carries the ref and the namespace as well. The trace comes from the write's span, which the log record carries, rather than from a field. | 3 |
-| t-011 | **Overhead budget.** Benchmark HTTP reads and writes and MCP tool calls in three modes: telemetry off, on without export, and exporting to a local collector. Proposed budget with telemetry on but not exporting: no more than 3% added at p50 and 5% at p99. Record the results in this plan. | 3 |
+| t-011 | **Overhead budget.** Benchmark HTTP reads and writes and MCP tool calls in three modes: telemetry off, on without export, and exporting to a local collector. Proposed budget with telemetry on but not exporting: no more than 3% added at p50 and 5% at p99. Record the results in this plan. — **Measured, and mostly met after fixes.** MCP calls and every p99 are within budget; HTTP p50 is about 3.5 points over. See "t-011: what telemetry costs" below. The benchmark is `benches/overhead.rs`. | 3 |
 | t-012 | **Operator kit and docs.** An example OpenTelemetry Collector config. An `observability` compose profile with a collector, Prometheus, Jaeger and Grafana. A Grafana dashboard and Prometheus alert rules as files, covering: not ready, 5xx ratio, p99 latency, rejections, pool saturation, growing history lag, refused GC and write conflicts. A site Observability page with the metric catalogue, and a test that checks the catalogue against the registered instruments. An end-to-end test with an in-memory exporter: one HTTP write makes one trace from request to storage, its log lines carry the trace id, and the commit links back to it. | 3 |
+
+### t-011: what telemetry costs (2026-10-13)
+
+`cargo bench -p agentstategraph-mcp --features otlp --bench overhead` starts the server binary in three modes and times requests from a client: HTTP reads and writes over one kept-alive connection, and MCP `agentstategraph_get` and `agentstategraph_set` calls over stdio.
+
+- **off:** `OTEL_SDK_DISABLED=true` and `ASG_LOG=off`.
+- **on:** the defaults, with nothing exported. That means spans, metrics, a log line per HTTP request (to a discarded stderr) and commit trace links.
+- **exporting:** the defaults, plus OTLP to a collector stub in the bench.
+
+The modes rotate within each round, and each starts on a new SQLite database. The run below was 10 rounds of 1,000 requests per workload per mode. It ran on an Apple M4 Pro (14 cores) under other work, with a load average of about 5.5, and the stack included t-009 and t-010.
+
+| Workload | off p50 | on p50 | added | exporting p50 | added |
+|---|---|---|---|---|---|
+| HTTP read | 179 µs | 211 µs | +18% (32 µs) | 233 µs | +31% |
+| HTTP write | 527 µs | 614 µs | +17% (87 µs) | 640 µs | +22% |
+| MCP get | 166 µs | 177 µs | +7% (11 µs) | 186 µs | +13% |
+| MCP set | 501 µs | 542 µs | +8% (41 µs) | 590 µs | +18% |
+
+p99 moved by more between runs than between modes, sometimes falling below `off`, because of the background load, so it isn't reported. Repeated runs put p50 within a few points of these.
+
+**The budget isn't met.** It proposed at most 3% at p50 with telemetry on and not exporting. `OVERHEAD_ENV` switched one thing off at a time in the `on` mode, to find what costs what:
+
+| Switched off | HTTP read | HTTP write | MCP get | MCP set |
+|---|---|---|---|---|
+| nothing | +16.5% | +13.4% | +7.6% | +7.5% |
+| commit trace links (`ASG_TRACE_LINKS=off`) | +16.6% | +10.6% | +5.7% | +6.3% |
+| SQL statement spans (`RUST_LOG=info,oxtel_sql=off`) | +8.9% | +8.6% | +1.4% | +2.8% |
+| log lines (`ASG_LOG=off`) | +11.6% | +10.9% | +5.3% | +6.7% |
+| span recording (`OTEL_TRACES_SAMPLER=always_off`) | +11.8% | +10.1% | +4.2% | +6.5% |
+| all info spans, log lines and trace links | +0.5% | -0.2% | -0.7% | -1.6% |
+
+- **Metrics cost nothing measurable.** The last row still records every metric.
+- **SQL statement spans cost the most.** A small read runs several statements, and each one is a span. They cost about 7 points on HTTP reads.
+- **Span data costs about 5 points.** It's recorded even though nothing exports it.
+- **The request log line costs about 5 points** on HTTP.
+- **Trace links cost about 3 points** on writes: one more insert per commit.
+
+These are percentages of very short requests: a local read takes about 180 µs, so 3% is 5 µs. A client across a network sees its round trip besides.
+
+Three of the ways to close the gap were taken on 2026-10-13:
+
+1. **oxtel records no span data when nothing exports spans.** Each span still gets its ids, for log lines and trace links. This is oxtel 0.3.1 (agentstatelabs/oxtel#42).
+2. **SQL statement spans are opt-in.** The server's trace filter is `info,oxtel_sql=warn` unless `ASG_SQL_SPANS=on` or `RUST_LOG` says otherwise. `db.client.operation.duration` still records every statement.
+3. **A commit and its trace link are stored in one write,** through `CommitStore::put_commit_traced`: one transaction on SQLite, one statement on Postgres.
+
+Restating the budget in absolute time wasn't taken. Afterwards, 10 rounds at a load average of about 4.4:
+
+| Workload | off p50 | on p50 | added p50 | added p99 | exporting p50 added |
+|---|---|---|---|---|---|
+| HTTP read | 174 µs | 185 µs | +6.4% (11 µs) | +4.5% | +10.6% |
+| HTTP write | 511 µs | 546 µs | +6.8% (35 µs) | +0.8% | +9.1% |
+| MCP get | 166 µs | 164 µs | −1% (within noise) | 0% | +2.7% |
+| MCP set | 485 µs | 498 µs | +2.6% | +3.7% | +6.0% |
+
+**MCP calls are within the budget, and every p99 is within 5%. HTTP's p50 is still about 3.5 points over.** With `ASG_LOG=off` it was +6% on reads and +5% on writes, so the request log line accounts for about 3 points. The HTTP span and the per-request middleware (request id, rejection count) account for the rest. Closing that gap means making the request log optional, or making it or the span cheaper in oxtel. Neither has been decided.
 
 ### Rollout to ASD and CTXone
 

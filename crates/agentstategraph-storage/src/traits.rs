@@ -493,6 +493,21 @@ pub trait CommitStore: Send + Sync {
         Ok(None)
     }
 
+    /// Store `commit` and, when given, the trace it was made in. A backend
+    /// that can does both in one write, which matters on every commit; the
+    /// default stores one after the other.
+    fn put_commit_traced(
+        &self,
+        commit: &Commit,
+        trace: Option<&CommitTrace>,
+    ) -> Result<(), StorageError> {
+        self.put_commit(commit)?;
+        match trace {
+            Some(trace) => self.set_commit_trace(&commit.id, trace),
+            None => Ok(()),
+        }
+    }
+
     /// Record the trace `commit_id` was made in. The first record for a
     /// commit stands. Backends that don't keep trace links ignore it.
     fn set_commit_trace(

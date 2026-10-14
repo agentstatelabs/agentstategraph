@@ -19,6 +19,12 @@ path = "src/lib.rs"
 name = "agentstategraph-mcp"
 path = "src/main.rs"
 
+# What telemetry costs a request (DESIGN.md Plan H t-011):
+# cargo bench -p agentstategraph-mcp --features otlp --bench overhead
+[[bench]]
+name = "overhead"
+harness = false
+
 [dependencies]
 agentstategraph = { workspace = true, features = ["sqlite"] }
 agentstategraph-core = { workspace = true }
@@ -52,7 +58,7 @@ tracing = "0.1"
 metrics = "0.24"
 # Logs, traces and metrics, named as docs/OBSERVABILITY.md says. OTLP export
 # is the opt-in `otlp` feature below, so a default build has no network client.
-oxtel = { version = "0.3", default-features = false, features = ["log", "config"] }
+oxtel = { version = "0.3.1", default-features = false, features = ["log", "config"] }
 oxtel-tower = { version = "0.3", features = ["axum"] }
 oxtel-rmcp = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }

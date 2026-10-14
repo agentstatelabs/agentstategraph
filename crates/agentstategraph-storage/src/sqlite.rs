@@ -990,6 +990,40 @@ fn leaf_set_apply(
 }
 
 impl CommitStore for SqliteStorage {
+    fn put_commit_traced(
+        &self,
+        commit: &Commit,
+        trace: Option<&CommitTrace>,
+    ) -> Result<(), StorageError> {
+        let Some(trace) = trace else {
+            return self.put_commit(commit);
+        };
+        let data =
+            serde_json::to_vec(commit).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let timestamp = commit.timestamp.to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| StorageError::Backend(format!("begin put commit: {}", e)))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO commits (id, data, timestamp) VALUES (?1, ?2, ?3)",
+            params![commit.id.as_bytes().as_slice(), data, timestamp],
+        )
+        .map_err(|e| StorageError::Backend(format!("put commit: {}", e)))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO commit_traces (commit_id, trace_id, span_id)
+             VALUES (?1, ?2, ?3)",
+            params![
+                commit.id.as_bytes().as_slice(),
+                trace.trace_id,
+                trace.span_id
+            ],
+        )
+        .map_err(|e| StorageError::Backend(format!("set commit trace: {}", e)))?;
+        tx.commit()
+            .map_err(|e| StorageError::Backend(format!("commit put commit: {}", e)))
+    }
+
     fn set_commit_trace(
         &self,
         commit_id: &ObjectId,

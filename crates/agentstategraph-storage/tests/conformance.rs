@@ -877,6 +877,27 @@ fn commit_traces_round_trip(f: &Fixture) {
     assert_eq!(s.get_commit_trace(&untraced.id).unwrap(), None);
     // The commit itself is untouched: its id doesn't depend on the trace.
     assert_eq!(s.get_commit(&c.id).unwrap().unwrap().id, c.id);
+
+    // A commit stored with its trace in one write, and one stored without.
+    let build = |tag: &str| {
+        let root = s.put_object(&Object::string(tag)).unwrap();
+        CommitBuilder::new(
+            root,
+            "agent/conformance",
+            Authority::simple("conformance"),
+            Intent::new(IntentCategory::Checkpoint, tag),
+        )
+        .parents(vec![c.id])
+        .build()
+    };
+    let together = build("stored with its trace");
+    s.put_commit_traced(&together, Some(&later)).unwrap();
+    assert_eq!(s.get_commit(&together.id).unwrap().unwrap().id, together.id);
+    assert_eq!(s.get_commit_trace(&together.id).unwrap(), Some(later));
+    let alone = build("stored without one");
+    s.put_commit_traced(&alone, None).unwrap();
+    assert!(s.get_commit(&alone.id).unwrap().is_some());
+    assert_eq!(s.get_commit_trace(&alone.id).unwrap(), None);
 }
 
 fn taints_round_trip(f: &Fixture) {

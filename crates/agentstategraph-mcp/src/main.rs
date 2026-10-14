@@ -521,6 +521,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                     "  ASG_TRACE_LINKS=off   Don't record the trace each commit was made in (default: on)"
                 );
                 eprintln!(
+                    "  ASG_SQL_SPANS=on      Trace each SQL statement as a span (default: off; the duration metric records either way)"
+                );
+                eprintln!(
                     "  ASG_COMMIT_EVENTS=on  Log each commit as an asg.commit event, for a log backend or SIEM (default: off)"
                 );
                 eprintln!("  -h, --help            Print help");
@@ -893,7 +896,8 @@ fn init_telemetry(
             "service.version",
             env!("CARGO_PKG_VERSION"),
         ))
-        .with_logs_filter(level);
+        .with_logs_filter(level)
+        .with_traces_filter(agentstategraph_mcp::traces_filter());
     match std::env::var("ASG_LOG_FORMAT")
         .unwrap_or_default()
         .trim()
