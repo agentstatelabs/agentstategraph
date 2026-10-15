@@ -182,10 +182,11 @@ publish-wheel:
 # arm64 via optionalDependencies) is a napi build-matrix follow-up. allow_failure
 # so an internal-registry hiccup never blocks the release/mirror.
 #
-# Re-running the tag pipeline is safe: the registry rejects a version it already
-# has, so the job skips the publish when `npm view` already resolves this
-# name@version. It reads the same .npmrc as `npm publish`, so it asks the
-# registry the job publishes to.
+# Re-running the tag pipeline is safe: the job skips the publish when `npm view`
+# already resolves this name@version. It reads the same .npmrc as `npm publish`,
+# so it asks the registry the job publishes to. Without the skip, GitLab accepts
+# a repeat publish and the job passes, but a background step then rejects the
+# duplicate and leaves an errored 0.0.0-<uuid> package in the registry.
 publish-npm:
   stage: publish
   allow_failure: true

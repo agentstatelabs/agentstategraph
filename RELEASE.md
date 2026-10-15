@@ -134,9 +134,11 @@ glab api -X POST "projects/agentstategroup%2Fagentstategraph/pipeline?ref=v1.0.0
 
 A tag's pipeline runs the `.gitlab-ci.yml` and scripts at the tag's commit, not
 main's, so the table holds only for a tag whose commit includes this section.
-On v1.3.0 and earlier, `publish-wheel` and `publish-npm` fail on the version
-the registry already has, and `publish-swift-release` deletes and re-uploads
-its unchanged assets. The wheel and npm jobs are allowed to fail, so such a
+On v1.3.0 and earlier, `publish-wheel` fails on the wheel the registry already
+has, and `publish-swift-release` deletes and re-uploads its unchanged assets.
+`publish-npm` passes, but GitLab rejects the repeat publish in a background
+step and leaves an errored `0.0.0-<uuid>` package under Deploy → Package
+registry, which can be deleted. The wheel job is allowed to fail, so such a
 pipeline still runs `publish-crates` and `site-version`, and passes with
 warnings.
 
