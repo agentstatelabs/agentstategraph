@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Publish the exact Swift artifact prepared before the release tag, then verify
 # that a clean external SwiftPM consumer can resolve, build, and run it.
+#
+# Safe to re-run: assets already on the GitHub release with the staged bytes are
+# skipped, and the SwiftPM verification simply runs again.
 set -euo pipefail
 
 required=(CI_API_V4_URL CI_COMMIT_SHA CI_COMMIT_TAG CI_JOB_TOKEN CI_PROJECT_ID GITHUB_REPO GITHUB_TOKEN)
@@ -76,12 +79,25 @@ gh api "repos/${GITHUB_REPO}/git/ref/tags/${TAG}" >/dev/null
 if ! gh release view "$TAG" --repo "$GITHUB_REPO" >/dev/null 2>&1; then
   gh release create "$TAG" --repo "$GITHUB_REPO" --verify-tag --title "$TAG" --generate-notes
 fi
-gh release upload "$TAG" \
-  --repo "$GITHUB_REPO" \
-  --clobber \
-  "$STAGE/$ASSET" \
-  "$STAGE/${ASSET}.sha256" \
-  "$STAGE/swift-release.json"
+# Upload only what the release lacks or holds different bytes for, so a re-run
+# of the tag pipeline leaves the published assets alone. --clobber deletes an
+# asset before uploading its replacement, so re-uploading an unchanged asset
+# could leave Package.swift pointing at a missing binary if the upload failed.
+uploads=()
+for file in "$ASSET" "${ASSET}.sha256" swift-release.json; do
+  sha=$(sha256sum "$STAGE/$file" | awk '{print $1}')
+  if [ "$(github_release_asset_sha256 "$GITHUB_REPO" "$TAG" "$file")" = "$sha" ]; then
+    echo "skip $file (already on the $TAG release)"
+  else
+    uploads+=("$STAGE/$file")
+  fi
+done
+if [ "${#uploads[@]}" -gt 0 ]; then
+  gh release upload "$TAG" \
+    --repo "$GITHUB_REPO" \
+    --clobber \
+    "${uploads[@]}"
+fi
 
 echo ">> dispatching clean remote SwiftPM verification"
 run_title="verify Swift $TAG"
