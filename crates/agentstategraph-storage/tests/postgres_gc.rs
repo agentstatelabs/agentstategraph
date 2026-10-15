@@ -41,6 +41,51 @@ fn connect(url: &str, tenant: &str) -> PostgresStorage {
     PostgresStorage::connect_tenant_blocking(url, tenant, 4).unwrap()
 }
 
+/// `url` for connections that refuse to wait for a lock: a statement that
+/// would wait more than a second fails instead. A writer here touches no row a
+/// sweep deletes, so it has nothing to wait for. That makes "it never waits
+/// for the sweep" checkable without timing a write, which a busy machine can
+/// slow by seconds without any waiting (CI saw 2.4 s and 3.2 s).
+fn refusing_lock_waits(url: &str) -> String {
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        let sep = if url.contains('?') { '&' } else { '?' };
+        format!("{url}{sep}options=-c%20lock_timeout%3D1s")
+    } else {
+        format!("{url} options='-c lock_timeout=1s'")
+    }
+}
+
+/// A writer that refuses to wait for a lock (see [`refusing_lock_waits`]). An
+/// ordinary connection brings the schema up to date first: on a fresh
+/// database another test may be creating it, and waiting for that is fine.
+fn connect_refusing_lock_waits(url: &str, tenant: &str) -> PostgresStorage {
+    drop(connect(url, tenant));
+    connect(&refusing_lock_waits(url), tenant)
+}
+
+/// A commit of a one-key map, `v` = `value`, after `parent`.
+fn commit_once(
+    s: &PostgresStorage,
+    value: String,
+    parent: Option<ObjectId>,
+) -> (ObjectId, Vec<ObjectId>) {
+    let leaf = s.put_object(&Object::string(value.clone())).unwrap();
+    let root = s
+        .put_object(&Object::map([("v".to_string(), leaf)].into()))
+        .unwrap();
+    let c = CommitBuilder::new(
+        root,
+        "agent/writer",
+        Authority::simple("test"),
+        Intent::new(IntentCategory::Refine, value),
+    )
+    .parents(parent.into_iter().collect())
+    .build();
+    s.put_commit(&c).unwrap();
+    s.set_ref(&Namespace::default_ns(), "main", c.id).unwrap();
+    (c.id, vec![leaf, root])
+}
+
 /// Run SQL against `url` directly, outside the storage layer.
 fn admin(url: &str, sql: &str) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -131,13 +176,58 @@ fn storing_an_object_again_refreshes_it() {
     }
 }
 
+/// What the writers in the tests below rely on: a connection from
+/// [`refusing_lock_waits`] fails a write that has to wait for a lock.
+#[test]
+fn a_writer_refusing_lock_waits_fails_instead_of_waiting() {
+    let Some(url) = url() else { return };
+    let t = tenant("lock-timeout");
+    let s = connect_refusing_lock_waits(&url, &t);
+    let (c, _) = commit_once(&s, "first".to_string(), None);
+
+    // Another connection holds the ref's row until the write returns (or for
+    // 10 s, should the write wait after all). The storage's errors don't say
+    // why the database refused, so the proof is that the write fails while
+    // the row is held and goes through once it isn't.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let holder = rt.block_on(async {
+        let (client, conn) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("admin connect");
+        tokio::spawn(conn);
+        client
+            .batch_execute(&format!(
+                "BEGIN; SELECT 1 FROM refs WHERE tenant_id = '{t}' FOR UPDATE"
+            ))
+            .await
+            .expect("hold the ref");
+        client
+    });
+    let (returned, wait) = std::sync::mpsc::channel::<()>();
+    let handle = rt.handle().clone();
+    let release = std::thread::spawn(move || {
+        let _ = wait.recv_timeout(Duration::from_secs(10));
+        handle.block_on(holder.batch_execute("ROLLBACK")).unwrap();
+    });
+
+    let ns = Namespace::default_ns();
+    let result = s.set_ref(&ns, "main", c);
+    let _ = returned.send(());
+    release.join().unwrap();
+    result.expect_err("the write waited for the lock instead of failing");
+    s.set_ref(&ns, "main", c)
+        .expect("with the row free, the same write goes through");
+}
+
 /// A writer commits throughout a sweep that is deleting old garbage. Nothing
-/// it wrote may go, and it never waits for the sweep.
+/// it wrote may go, and it never waits for the sweep: its connections refuse
+/// to wait for a lock, and it keeps finishing writes while the sweep runs.
+/// How long a write takes is not asserted (see [`refusing_lock_waits`]).
 #[test]
 fn a_sweep_spares_writes_made_while_it_runs() {
     let Some(url) = url() else { return };
     let t = tenant("concurrent");
-    let s = Arc::new(connect(&url, &t));
+    let s = connect(&url, &t);
     admin(
         &url,
         &format!(
@@ -148,50 +238,48 @@ fn a_sweep_spares_writes_made_while_it_runs() {
     );
 
     let sweeping = Arc::new(AtomicBool::new(true));
+    let (first_write, wrote_once) = std::sync::mpsc::channel();
     let writer = {
-        let (s, sweeping) = (connect(&url, &t), Arc::clone(&sweeping));
+        let (s, sweeping) = (connect_refusing_lock_waits(&url, &t), Arc::clone(&sweeping));
         std::thread::spawn(move || {
-            let ns = Namespace::default_ns();
-            let mut head: Option<ObjectId> = None;
-            let mut written = Vec::new();
-            let mut slowest = Duration::ZERO;
+            let (mut head, mut written, mut finished) = (None, Vec::new(), Vec::new());
             let mut i = 0;
             while sweeping.load(Ordering::SeqCst) || i < 20 {
-                let started = Instant::now();
-                let leaf = s.put_object(&Object::string(format!("write {i}"))).unwrap();
-                let root = s
-                    .put_object(&Object::map([("v".to_string(), leaf)].into()))
-                    .unwrap();
-                let c = CommitBuilder::new(
-                    root,
-                    "agent/writer",
-                    Authority::simple("test"),
-                    Intent::new(IntentCategory::Refine, format!("write {i}")),
-                )
-                .parents(head.into_iter().collect())
-                .build();
-                s.put_commit(&c).unwrap();
-                s.set_ref(&ns, "main", c.id).unwrap();
-                slowest = slowest.max(started.elapsed());
-                head = Some(c.id);
-                written.extend([leaf, root]);
+                let (c, objects) = commit_once(&s, format!("write {i}"), head);
+                finished.push(Instant::now());
+                if i == 0 {
+                    first_write.send(()).unwrap();
+                }
+                head = Some(c);
+                written.extend(objects);
                 i += 1;
             }
-            (written, slowest)
+            (written, finished)
         })
     };
 
+    // Sweep once the writer is up and writing.
+    wrote_once.recv().expect("the writer's first write failed");
+    let started = Instant::now();
     let sweep = s.history_gc_sweep(&[], 500).unwrap();
+    let swept = Instant::now();
     sweeping.store(false, Ordering::SeqCst);
-    let (written, slowest) = writer.join().unwrap();
+    let (written, finished) = writer
+        .join()
+        .expect("a write failed: a lock timeout means it waited on the sweep");
 
     assert_eq!(sweep.objects_deleted, 20000, "the old garbage went");
     for id in &written {
         assert!(s.has_object(id).unwrap(), "the sweep took a write");
     }
+    let during = finished
+        .iter()
+        .filter(|&&at| at > started && at < swept)
+        .count();
     assert!(
-        slowest < Duration::from_secs(2),
-        "a write waited {slowest:?} on the sweep"
+        during > 0,
+        "no write finished during the {:?} sweep",
+        swept - started
     );
 }
 
@@ -233,21 +321,10 @@ fn one_sweep_per_tenant_at_a_time() {
     );
     other.history_gc_lock_writers().unwrap();
 
-    // Writers carry on while the lock is held.
-    let started = Instant::now();
-    let root = second.put_object(&Object::string("during")).unwrap();
-    let c = CommitBuilder::new(
-        root,
-        "agent/writer",
-        Authority::simple("test"),
-        Intent::new(IntentCategory::Refine, "during"),
-    )
-    .build();
-    second.put_commit(&c).unwrap();
-    second
-        .set_ref(&Namespace::default_ns(), "main", c.id)
-        .unwrap();
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // Writers carry on while the lock is held: a writer that refuses to wait
+    // for a lock still commits.
+    let writer = connect_refusing_lock_waits(&url, &t);
+    commit_once(&writer, "during".to_string(), None);
 
     // The holder sweeps under its lock; released, the lock is free again.
     first.history_gc_sweep(&[], 100).unwrap();
