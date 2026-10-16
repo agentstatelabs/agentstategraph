@@ -144,10 +144,11 @@ version-guard:
 # downstream Python projects can `pip install agentstategraph`.
 #
 # Re-running the tag pipeline is safe: a wheel the registry already has is
-# skipped. GitLab answers a repeat upload with 400 "File name has already been
-# taken", which twine 6.2 and later no longer treat as --skip-existing, so each
-# wheel is first looked up in the project's simple index. --skip-existing still
-# covers a registry that answers 409 or "already exists".
+# skipped. Each wheel is first looked up in the project's simple index, because
+# twine can't skip it for us: GitLab answers a repeat upload with 400 "File
+# name has already been taken", which twine 6.2 and later don't count as
+# existing, and twine 7 refuses --skip-existing outright for any repository but
+# PyPI and TestPyPI ("UnsupportedConfiguration"), which failed v1.3.1's upload.
 publish-wheel:
   stage: publish
   allow_failure: true   # internal GitLab-PyPI wheel; never block the release/mirror
@@ -171,7 +172,7 @@ publish-wheel:
       done
       if [ "${#upload[@]}" -gt 0 ]; then
         TWINE_USERNAME=gitlab-ci-token TWINE_PASSWORD="${CI_JOB_TOKEN}" \
-          twine upload --non-interactive --skip-existing \
+          twine upload --non-interactive \
           --repository-url "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi" \
           "${upload[@]}"
       fi
