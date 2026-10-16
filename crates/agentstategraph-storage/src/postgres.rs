@@ -775,6 +775,24 @@ impl PostgresStorage {
         self.pool.status().max_size
     }
 
+    /// The storage's connection pool, configured as for the storage itself
+    /// (TLS, pool size), with every query recorded as a database span. For a
+    /// host that keeps tables of its own in the same database: scope their
+    /// rows by [`tenant_id`](Self::tenant_id), and use the pool inside
+    /// [`PostgresStorage::run`], so a connection it opens is driven by the
+    /// storage's runtime like the storage's own, not by a caller's runtime that
+    /// may be gone when the connection is reused. Take the pool and tenant
+    /// before handing the storage to a `Repository`. The client crates are
+    /// re-exported as `agentstategraph_storage::{oxtel_sql, tokio_postgres}`.
+    pub fn pool(&self) -> Pool {
+        self.pool.clone()
+    }
+
+    /// The tenant this storage reads and writes.
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
     /// Bring the schema up to date and seed this tenant's default namespace.
     ///
     /// The DDL runs only when the database's stamped schema version is behind
@@ -843,12 +861,24 @@ impl PostgresStorage {
     }
 
     /// Run an async operation for the sync storage API, on whatever kind of
-    /// thread the caller is on. Before, this assumed a multi-threaded tokio
-    /// runtime: plain threads panicked (no runtime), as did single-threaded
-    /// runtimes (`block_in_place` is multi-thread only).
+    /// thread the caller is on. See [`run`](Self::run).
     fn block_on<F, T>(&self, f: F) -> Result<T, StorageError>
     where
         F: std::future::Future<Output = Result<T, StorageError>> + Send,
+        T: Send,
+    {
+        Self::run(f)
+    }
+
+    /// Run `f` to completion on the storage's runtime (one per process), from
+    /// whatever kind of thread the caller is on: a plain thread, or a thread of
+    /// either kind of tokio runtime. Every synchronous storage method goes
+    /// through this; a host uses it with [`pool`](Self::pool) for its own
+    /// tables. (Before Plan D t-002 this assumed a multi-threaded tokio
+    /// runtime: plain threads panicked, as did single-threaded runtimes.)
+    pub fn run<F, T>(f: F) -> T
+    where
+        F: std::future::Future<Output = T> + Send,
         T: Send,
     {
         let rt = runtime().handle();

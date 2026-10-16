@@ -34,3 +34,7 @@ pub use traits::{
     ObjectStore, RefStore, SessionStore, Storage, StorageError, StoreShape, StoreTotals,
     TableBytes, TaintStore, VacuumStats,
 };
+/// The Postgres client crates the storage is built on, for a host that keeps
+/// its own tables in the same database through [`PostgresStorage::pool`].
+#[cfg(feature = "postgres")]
+pub use {oxtel_sql, tokio_postgres};
