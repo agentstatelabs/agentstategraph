@@ -142,6 +142,11 @@ registry, which can be deleted. The wheel job is allowed to fail, so such a
 pipeline still runs `publish-crates` and `site-version`, and passes with
 warnings.
 
+On v1.3.1, `publish-wheel` fails before uploading anything: twine 7 refuses
+`--skip-existing` for a registry other than PyPI. So the GitLab PyPI registry
+has no 1.3.1 wheel, and re-running v1.3.1's pipeline won't add one. Its Python
+binding is the same as 1.3.0's, whose wheel is there.
+
 ## After the release: the site's version strings
 
 The tag pipeline's `site-version` job records the release in
