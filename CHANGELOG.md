@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Changed
+- **Reading or writing a subtree takes a storage call per level, not per object.** `get_json`, the capped read, path listing, value search, leaf collection and the diff behind search-index upkeep fetched one object at a time, and `set_json` stored one at a time. That's a round trip per node on Postgres. Reads now load a subtree a level at a time with `batch_get_objects`, and writes store a new tree with one `batch_put_objects`. On a large real store (a CTXone Hub's) on Postgres:
+  - reading the memory tree went from 3,382 queries (1.5 s) to 12 (79 ms), faster than SQLite;
+  - a CTXone Hub's session list went from 5,435 queries to 247;
+  - loading the store took 282 s instead of 40 minutes.
+
+  SQLite gets somewhat faster too, and results are unchanged.
+- **`TaskStore::list_plans` reads the plans tree once.** It read the whole tree, then each plan's metadata again, one read per plan; it now takes each plan's metadata from the one read. `list_tasks` reads a plan once instead of checking it exists first. Listing a large workspace's plans went from 17,357 queries (7.6 s) to 343 (0.4 s) on Postgres.
+
+### Added
+- **`TaskStore::list_plans_with_tasks`**: every plan with its tasks from one read of the plans tree, for a listing that shows task counts without a read per plan.
+
 ## [v1.3.1] — 2026-10-15
 
 A host can keep its own tables beside a Postgres store, on the storage's connection pool. Nothing else changes for existing users.

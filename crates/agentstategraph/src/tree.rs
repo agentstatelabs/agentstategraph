@@ -4,10 +4,76 @@
 //! objects along the modified path (structural sharing), leaving all
 //! other subtrees untouched.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use agentstategraph_core::{Atom, Node, Object, ObjectId, PathComponent, StatePath};
 use agentstategraph_storage::{ObjectStore, StorageError};
+
+/// The most objects one `batch_get_objects` call asks for.
+const PREFETCH_BATCH: usize = 1000;
+
+/// A subtree's objects, read a level at a time with `batch_get_objects`, so
+/// that walking it costs one storage call per level instead of one per object.
+/// On Postgres that is the difference between a few queries and one per node,
+/// which for a large plan or memory tree is thousands. An object it doesn't
+/// hold (below the levels loaded) comes from the backing store, so a walk over
+/// it is always complete; the levels only decide how much is fetched up front.
+struct Prefetched<'a> {
+    store: &'a dyn ObjectStore,
+    objects: HashMap<ObjectId, Object>,
+}
+
+impl<'a> Prefetched<'a> {
+    /// Load the objects in the `levels` levels below `root`.
+    fn load(store: &'a dyn ObjectStore, root: &Object, levels: usize) -> Result<Self, TreeError> {
+        let mut objects: HashMap<ObjectId, Object> = HashMap::new();
+        let mut frontier = child_ids(root);
+        let mut level = 0;
+        while !frontier.is_empty() && level < levels {
+            level += 1;
+            // A subtree shared by several parents is loaded once.
+            let mut seen = std::collections::HashSet::new();
+            frontier.retain(|id| !objects.contains_key(id) && seen.insert(*id));
+            let mut next = Vec::new();
+            for chunk in frontier.chunks(PREFETCH_BATCH) {
+                for (id, obj) in chunk.iter().zip(store.batch_get_objects(chunk)?) {
+                    if let Some(obj) = obj {
+                        next.extend(child_ids(&obj));
+                        objects.insert(*id, obj);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok(Self { store, objects })
+    }
+}
+
+impl ObjectStore for Prefetched<'_> {
+    fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, StorageError> {
+        match self.objects.get(id) {
+            Some(obj) => Ok(Some(obj.clone())),
+            None => self.store.get_object(id),
+        }
+    }
+
+    fn put_object(&self, obj: &Object) -> Result<ObjectId, StorageError> {
+        self.store.put_object(obj)
+    }
+
+    fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
+        Ok(self.objects.contains_key(id) || self.store.has_object(id)?)
+    }
+}
+
+/// The ids a node points at, in order; none for an atom.
+fn child_ids(obj: &Object) -> Vec<ObjectId> {
+    match obj {
+        Object::Atom(_) => Vec::new(),
+        Object::Node(Node::Map(entries)) => entries.values().copied().collect(),
+        Object::Node(Node::List(items) | Node::Set(items)) => items.clone(),
+    }
+}
 
 /// Absolute ceiling on how deep `tree_list_paths` / `tree_search_values`
 /// will ever recurse, regardless of the caller-supplied `max_depth`.
@@ -103,8 +169,14 @@ pub fn tree_delete(
 }
 
 /// Convert an Object to a serde_json::Value for user-facing output.
-/// Recursively resolves all ObjectId references.
+/// Recursively resolves all ObjectId references, reading the subtree a level
+/// at a time.
 pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json::Value, TreeError> {
+    let prefetched = Prefetched::load(store, obj, usize::MAX)?;
+    to_json(&prefetched, obj)
+}
+
+fn to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json::Value, TreeError> {
     match obj {
         Object::Atom(atom) => Ok(atom_to_json(atom)),
         Object::Node(node) => match node {
@@ -114,7 +186,7 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
                     let child = store
                         .get_object(child_id)?
                         .ok_or(TreeError::ObjectNotFound(*child_id))?;
-                    map.insert(key.clone(), tree_to_json(store, &child)?);
+                    map.insert(key.clone(), to_json(store, &child)?);
                 }
                 Ok(serde_json::Value::Object(map))
             }
@@ -124,7 +196,7 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
                     let child = store
                         .get_object(child_id)?
                         .ok_or(TreeError::ObjectNotFound(*child_id))?;
-                    arr.push(tree_to_json(store, &child)?);
+                    arr.push(to_json(store, &child)?);
                 }
                 Ok(serde_json::Value::Array(arr))
             }
@@ -134,7 +206,7 @@ pub fn tree_to_json(store: &dyn ObjectStore, obj: &Object) -> Result<serde_json:
                     let child = store
                         .get_object(child_id)?
                         .ok_or(TreeError::ObjectNotFound(*child_id))?;
-                    arr.push(tree_to_json(store, &child)?);
+                    arr.push(to_json(store, &child)?);
                 }
                 Ok(serde_json::Value::Array(arr))
             }
@@ -154,7 +226,10 @@ pub fn tree_to_json_capped(
     obj: &Object,
     max_depth: usize,
 ) -> Result<serde_json::Value, TreeError> {
-    to_json_capped(store, obj, max_depth, 0)
+    // Nodes at `max_depth` are summarized from themselves, so levels
+    // 1..=max_depth are all the walk reads.
+    let prefetched = Prefetched::load(store, obj, max_depth)?;
+    to_json_capped(&prefetched, obj, max_depth, 0)
 }
 
 fn to_json_capped(
@@ -235,7 +310,9 @@ pub fn tree_list_paths(
     // cannot produce unbounded recursion. See LIST_PATHS_HARD_CEILING.
     let depth = max_depth.min(LIST_PATHS_HARD_CEILING);
     let mut paths = Vec::new();
-    collect_paths(store, &start_obj, &base_path, depth, 0, &mut paths)?;
+    // The walk loads children down to depth + 1 before it stops.
+    let prefetched = Prefetched::load(store, &start_obj, depth + 1)?;
+    collect_paths(&prefetched, &start_obj, &base_path, depth, 0, &mut paths)?;
     // Truncate to the absolute result cap — a malicious/wide tree cannot
     // make us materialize more than LIST_PATHS_MAX_RESULTS entries.
     if paths.len() > LIST_PATHS_MAX_RESULTS {
@@ -326,7 +403,16 @@ pub fn tree_search_values(
     // query can't force us to materialize an unbounded result set.
     let limit = max_results.min(LIST_PATHS_MAX_RESULTS);
     let mut results = Vec::new();
-    search_recursive(store, &root_obj, "", &query_lower, limit, 0, &mut results)?;
+    let prefetched = Prefetched::load(store, &root_obj, LIST_PATHS_HARD_CEILING + 1)?;
+    search_recursive(
+        &prefetched,
+        &root_obj,
+        "",
+        &query_lower,
+        limit,
+        0,
+        &mut results,
+    )?;
     Ok(results)
 }
 
@@ -432,7 +518,7 @@ pub fn tree_collect_leaves(
         .get_object(root)?
         .ok_or(TreeError::ObjectNotFound(*root))?;
     let mut out = Vec::new();
-    collect_leaves_recursive(store, &root_obj, "", 0, &mut out)?;
+    collect_leaves(store, &root_obj, "", 0, &mut out)?;
     Ok(out)
 }
 
@@ -498,6 +584,32 @@ fn atom_value_string(atom: &Atom) -> Option<String> {
         Atom::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+/// [`collect_leaves_recursive`] over `obj`'s subtree, read a level at a time.
+fn collect_leaves(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    current_path: &str,
+    depth: usize,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), TreeError> {
+    let levels = (LIST_PATHS_HARD_CEILING + 1).saturating_sub(depth);
+    let prefetched = Prefetched::load(store, obj, levels)?;
+    collect_leaves_recursive(&prefetched, obj, current_path, depth, out)
+}
+
+/// [`collect_leaf_paths`] over `obj`'s subtree, read a level at a time.
+fn collect_paths_of(
+    store: &dyn ObjectStore,
+    obj: &Object,
+    current_path: &str,
+    depth: usize,
+    out: &mut Vec<String>,
+) -> Result<(), TreeError> {
+    let levels = (LIST_PATHS_HARD_CEILING + 1).saturating_sub(depth);
+    let prefetched = Prefetched::load(store, obj, levels)?;
+    collect_leaf_paths(&prefetched, obj, current_path, depth, out)
 }
 
 /// Collect just the leaf PATHS under `obj` (for removals during a diff).
@@ -596,8 +708,8 @@ fn diff_recursive(
     };
     match (old_obj, new_obj) {
         (None, None) => {}
-        (Some(o), None) => collect_leaf_paths(store, &o, path, depth, removed)?,
-        (None, Some(n)) => collect_leaves_recursive(store, &n, path, depth, added)?,
+        (Some(o), None) => collect_paths_of(store, &o, path, depth, removed)?,
+        (None, Some(n)) => collect_leaves(store, &n, path, depth, added)?,
         (Some(Object::Atom(_)), Some(Object::Atom(new_atom))) => {
             // Same path, changed value: drop the old row, add the new one.
             let leaf = if path.is_empty() { "/" } else { path }.to_string();
@@ -607,7 +719,7 @@ fn diff_recursive(
             }
         }
         (Some(o @ Object::Node(_)), Some(Object::Atom(new_atom))) => {
-            collect_leaf_paths(store, &o, path, depth, removed)?;
+            collect_paths_of(store, &o, path, depth, removed)?;
             let leaf = if path.is_empty() { "/" } else { path }.to_string();
             if let Some(v) = atom_value_string(&new_atom) {
                 added.push((leaf, v));
@@ -616,7 +728,7 @@ fn diff_recursive(
         (Some(Object::Atom(_)), Some(n @ Object::Node(_))) => {
             let leaf = if path.is_empty() { "/" } else { path }.to_string();
             removed.push(leaf);
-            collect_leaves_recursive(store, &n, path, depth, added)?;
+            collect_leaves(store, &n, path, depth, added)?;
         }
         (Some(Object::Node(on)), Some(Object::Node(nn))) => match (on, nn) {
             (Node::Map(oe), Node::Map(ne)) => {
@@ -652,8 +764,8 @@ fn diff_recursive(
             }
             // Container kind changed (map <-> sequence): treat as full replace.
             (old_node, new_node) => {
-                collect_leaf_paths(store, &Object::Node(old_node), path, depth, removed)?;
-                collect_leaves_recursive(store, &Object::Node(new_node), path, depth, added)?;
+                collect_paths_of(store, &Object::Node(old_node), path, depth, removed)?;
+                collect_leaves(store, &Object::Node(new_node), path, depth, added)?;
             }
         },
     }
@@ -662,12 +774,19 @@ fn diff_recursive(
 
 /// Convert a serde_json::Value to Objects and store them.
 /// Returns the root ObjectId.
+///
+/// The objects are built in memory and stored with one `batch_put_objects`
+/// call: one statement per thousand objects on Postgres, one transaction on
+/// SQLite, rather than a round trip per node.
 pub fn json_to_tree(
     store: &dyn ObjectStore,
     value: &serde_json::Value,
 ) -> Result<ObjectId, TreeError> {
-    let obj = json_to_object(store, value)?;
-    let id = store.put_object(&obj)?;
+    let mut objects = Vec::new();
+    let root = json_to_objects(value, &mut objects);
+    let id = root.id();
+    objects.push(root);
+    store.batch_put_objects(&objects)?;
     Ok(id)
 }
 
@@ -892,30 +1011,26 @@ fn atom_to_json(atom: &Atom) -> serde_json::Value {
     }
 }
 
-fn json_to_object(store: &dyn ObjectStore, value: &serde_json::Value) -> Result<Object, TreeError> {
+/// `value` as an Object, pushing every object below it onto `out`, each
+/// child before its parent.
+fn json_to_objects(value: &serde_json::Value, out: &mut Vec<Object>) -> Object {
+    let mut child = |value: &serde_json::Value| {
+        let obj = json_to_objects(value, out);
+        let id = obj.id();
+        out.push(obj);
+        id
+    };
     match value {
-        serde_json::Value::Null => Ok(Object::null()),
-        serde_json::Value::Bool(b) => Ok(Object::bool(*b)),
-        serde_json::Value::Number(n) => Ok(Object::from_json_number(n)),
-        serde_json::Value::String(s) => Ok(Object::string(s.clone())),
-        serde_json::Value::Array(arr) => {
-            let mut ids = Vec::new();
-            for item in arr {
-                let child = json_to_object(store, item)?;
-                let id = store.put_object(&child)?;
-                ids.push(id);
-            }
-            Ok(Object::list(ids))
-        }
-        serde_json::Value::Object(map) => {
-            let mut entries = BTreeMap::new();
-            for (key, val) in map {
-                let child = json_to_object(store, val)?;
-                let id = store.put_object(&child)?;
-                entries.insert(key.clone(), id);
-            }
-            Ok(Object::map(entries))
-        }
+        serde_json::Value::Null => Object::null(),
+        serde_json::Value::Bool(b) => Object::bool(*b),
+        serde_json::Value::Number(n) => Object::from_json_number(n),
+        serde_json::Value::String(s) => Object::string(s.clone()),
+        serde_json::Value::Array(arr) => Object::list(arr.iter().map(&mut child).collect()),
+        serde_json::Value::Object(map) => Object::map(
+            map.iter()
+                .map(|(key, val)| (key.clone(), child(val)))
+                .collect::<BTreeMap<_, _>>(),
+        ),
     }
 }
 
@@ -1245,5 +1360,178 @@ mod tests {
             root_id, new_root_id,
             "JSON roundtrip should produce same ObjectId"
         );
+    }
+
+    // -- Batched object I/O (hosted-hub-mvp t-014) --
+    //
+    // On Postgres every storage call is a round trip, so a walk that fetches
+    // one object at a time costs one query per node. These count the calls a
+    // walk makes instead of timing it.
+
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    /// A store that counts single and batched gets and puts.
+    #[derive(Default)]
+    struct Counting {
+        inner: agentstategraph_storage::MemoryStorage,
+        gets: AtomicUsize,
+        batch_gets: AtomicUsize,
+        puts: AtomicUsize,
+        batch_puts: AtomicUsize,
+    }
+
+    impl Counting {
+        fn reset(&self) {
+            for c in [&self.gets, &self.batch_gets, &self.puts, &self.batch_puts] {
+                c.store(0, Relaxed);
+            }
+        }
+        fn counts(&self) -> (usize, usize, usize, usize) {
+            (
+                self.gets.load(Relaxed),
+                self.batch_gets.load(Relaxed),
+                self.puts.load(Relaxed),
+                self.batch_puts.load(Relaxed),
+            )
+        }
+    }
+
+    impl ObjectStore for Counting {
+        fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, StorageError> {
+            self.gets.fetch_add(1, Relaxed);
+            self.inner.get_object(id)
+        }
+        fn put_object(&self, obj: &Object) -> Result<ObjectId, StorageError> {
+            self.puts.fetch_add(1, Relaxed);
+            self.inner.put_object(obj)
+        }
+        fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
+            self.inner.has_object(id)
+        }
+        fn batch_get_objects(&self, ids: &[ObjectId]) -> Result<Vec<Option<Object>>, StorageError> {
+            self.batch_gets.fetch_add(1, Relaxed);
+            self.inner.batch_get_objects(ids)
+        }
+        fn batch_put_objects(&self, objs: &[Object]) -> Result<Vec<ObjectId>, StorageError> {
+            self.batch_puts.fetch_add(1, Relaxed);
+            self.inner.batch_put_objects(objs)
+        }
+    }
+
+    /// A plan-shaped tree: 40 plans of 12 tasks each, with a shared
+    /// subtree (every task's `owner`), 5 levels deep below the root.
+    fn plans() -> serde_json::Value {
+        let owner = serde_json::json!({"agent": "claude-code", "team": "core"});
+        let plans: serde_json::Map<String, serde_json::Value> = (0..40)
+            .map(|p| {
+                let tasks: Vec<serde_json::Value> = (0..12)
+                    .map(|t| {
+                        serde_json::json!({
+                            "id": format!("t-{t:03}"),
+                            "title": format!("task {t} of plan {p}"),
+                            "status": if t % 3 == 0 { "done" } else { "pending" },
+                            "blocked_by": [format!("t-{:03}", t.max(1) - 1)],
+                            "owner": owner,
+                        })
+                    })
+                    .collect();
+                (
+                    format!("plan-{p:02}"),
+                    serde_json::json!({"name": format!("plan {p}"), "tasks": tasks}),
+                )
+            })
+            .collect();
+        serde_json::json!({ "plans": plans, "version": 1 })
+    }
+
+    /// Levels below the root: plans / plan-NN / tasks / [i] / owner / agent.
+    const PLANS_DEPTH: usize = 6;
+
+    fn stored(value: &serde_json::Value) -> (Counting, Object) {
+        let store = Counting::default();
+        let root_id = json_to_tree(&store, value).unwrap();
+        let root = store.inner.get_object(&root_id).unwrap().unwrap();
+        store.reset();
+        (store, root)
+    }
+
+    #[test]
+    fn a_tree_is_written_with_one_batch_put() {
+        let store = Counting::default();
+        let value = plans();
+        let root_id = json_to_tree(&store, &value).unwrap();
+        let (_, _, puts, batch_puts) = store.counts();
+        assert_eq!((puts, batch_puts), (0, 1));
+        let root = store.inner.get_object(&root_id).unwrap().unwrap();
+        assert_eq!(tree_to_json(&store.inner, &root).unwrap(), value);
+        // The id is the same as storing node by node gave.
+        assert_eq!(root_id, root.id());
+    }
+
+    #[test]
+    fn a_tree_is_read_a_level_at_a_time() {
+        let value = plans();
+        let (store, root) = stored(&value);
+        assert_eq!(tree_to_json(&store, &root).unwrap(), value);
+        let (gets, batch_gets, _, _) = store.counts();
+        assert_eq!(gets, 0, "no object fetched on its own");
+        assert!(batch_gets <= PLANS_DEPTH, "{batch_gets} batch calls");
+    }
+
+    #[test]
+    fn a_capped_read_loads_only_its_levels() {
+        let (store, root) = stored(&plans());
+        let capped = tree_to_json_capped(&store, &root, 2).unwrap();
+        let (gets, batch_gets, _, _) = store.counts();
+        assert_eq!((gets, batch_gets), (0, 2));
+        // Depth 2 is summarized from the plan nodes themselves.
+        let plan = &capped["plans"]["plan-07"];
+        assert_eq!(plan["_truncated"], true);
+        assert_eq!(plan["_keys"], serde_json::json!(["name", "tasks"]));
+        assert_eq!(capped["version"], 1);
+    }
+
+    #[test]
+    fn paths_search_and_leaves_read_a_level_at_a_time() {
+        let (store, root) = stored(&plans());
+        let root_id = root.id();
+        let leaves = |s: &Counting| -> usize {
+            let (gets, batch_gets, _, _) = s.counts();
+            s.reset();
+            assert!(gets <= 1, "{gets} single gets");
+            assert!(batch_gets <= PLANS_DEPTH + 1, "{batch_gets} batch calls");
+            batch_gets
+        };
+
+        let paths = tree_list_paths(&store, &root_id, "", 64).unwrap();
+        leaves(&store);
+        // 40 plans x (name + 12 tasks x 6 leaves) + version.
+        assert_eq!(paths.len(), 40 * (1 + 12 * 6) + 1);
+
+        let found = tree_search_values(&store, &root_id, "of plan 39", 100).unwrap();
+        leaves(&store);
+        assert_eq!(found.len(), 12);
+
+        let collected = tree_collect_leaves(&store, &root_id).unwrap();
+        leaves(&store);
+        assert_eq!(collected.len(), paths.len());
+
+        let (removed, added) = tree_diff_leaves(&store, None, &root_id).unwrap();
+        leaves(&store);
+        assert!(removed.is_empty());
+        assert_eq!(added.len(), paths.len());
+    }
+
+    /// The levels loaded up front only decide what's fetched in batches: a walk
+    /// past them fetches the rest itself and still returns the whole tree.
+    #[test]
+    fn a_shallow_prefetch_still_reads_the_whole_tree() {
+        let value = plans();
+        let (store, root) = stored(&value);
+        let prefetched = Prefetched::load(&store, &root, 2).unwrap();
+        assert_eq!(to_json(&prefetched, &root).unwrap(), value);
+        let (gets, batch_gets, _, _) = store.counts();
+        assert_eq!(batch_gets, 2);
+        assert!(gets > 0, "the levels below were fetched one by one");
     }
 }
