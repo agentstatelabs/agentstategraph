@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.3.1] — 2026-10-15
+
+A host can keep its own tables beside a Postgres store, on the storage's connection pool. Nothing else changes for existing users.
+
 ### Added
 - **`PostgresStorage` shares its connection pool with a host.** `pool()` returns the storage's pool (TLS and pool size as configured, every query recorded as a database span), `tenant_id()` its tenant, and `PostgresStorage::run(future)` runs async code on the storage's runtime from any kind of thread, as the storage's own methods do. A host can keep tables of its own in the same database without a second pool or a TLS setup of its own; CTXone keeps its project registry and session statistics this way. The client crates are re-exported as `agentstategraph_storage::{oxtel_sql, tokio_postgres}`.
 
