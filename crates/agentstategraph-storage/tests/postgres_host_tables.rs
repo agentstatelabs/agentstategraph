@@ -27,6 +27,9 @@ fn url() -> Option<String> {
     }
 }
 
+/// The advisory lock key the tests' host table is created under.
+const HOST_SCHEMA_LOCK: i64 = 0x686f_7374;
+
 fn tenant(tag: &str) -> String {
     format!("host-{tag}-{}", uuid::Uuid::new_v4().simple())
 }
@@ -37,18 +40,24 @@ fn bump(storage: &PostgresStorage, key: &str) -> i64 {
     let tenant = storage.tenant_id().to_string();
     let key = key.to_string();
     PostgresStorage::run(async move {
-        let client = pool.get().await.expect("a pooled connection");
-        client
-            .batch_execute(
-                "CREATE TABLE IF NOT EXISTS host_counters (
-                     tenant_id TEXT NOT NULL,
-                     key TEXT NOT NULL,
-                     n BIGINT NOT NULL,
-                     PRIMARY KEY (tenant_id, key)
-                 )",
-            )
+        let mut client = pool.get().await.expect("a pooled connection");
+        // Under an advisory lock, as a host must: `CREATE TABLE IF NOT EXISTS`
+        // from two connections at once can fail on Postgres's catalog index.
+        let tx = client.transaction().await.expect("begin");
+        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&HOST_SCHEMA_LOCK])
             .await
-            .expect("create the host table");
+            .expect("schema lock");
+        tx.batch_execute(
+            "CREATE TABLE IF NOT EXISTS host_counters (
+                 tenant_id TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 n BIGINT NOT NULL,
+                 PRIMARY KEY (tenant_id, key)
+             )",
+        )
+        .await
+        .expect("create the host table");
+        tx.commit().await.expect("commit");
         client
             .query_one(
                 "INSERT INTO host_counters (tenant_id, key, n) VALUES ($1, $2, 1)

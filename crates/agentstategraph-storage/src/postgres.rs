@@ -782,8 +782,11 @@ impl PostgresStorage {
     /// [`PostgresStorage::run`], so a connection it opens is driven by the
     /// storage's runtime like the storage's own, not by a caller's runtime that
     /// may be gone when the connection is reused. Take the pool and tenant
-    /// before handing the storage to a `Repository`. The client crates are
-    /// re-exported as `agentstategraph_storage::{oxtel_sql, tokio_postgres}`.
+    /// before handing the storage to a `Repository`. Create the tables in a
+    /// transaction holding an advisory lock (`pg_advisory_xact_lock`):
+    /// `CREATE TABLE IF NOT EXISTS` from two processes at once can still fail
+    /// on Postgres's catalog index. The client crates are re-exported as
+    /// `agentstategraph_storage::{oxtel_sql, tokio_postgres}`.
     pub fn pool(&self) -> Pool {
         self.pool.clone()
     }
