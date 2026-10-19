@@ -160,12 +160,31 @@ impl TaskStore {
             return Ok(Vec::new());
         };
 
-        let mut plans = Vec::new();
-        for name in map.keys() {
-            let plan = self.get_plan(ref_name, name)?;
-            plans.push(plan);
-        }
-        Ok(plans)
+        // The read above holds every plan's metadata already; reading each
+        // plan again cost a round trip per plan on a remote store.
+        map.iter()
+            .map(|(name, plan)| plan_from_tree(name, plan))
+            .collect()
+    }
+
+    /// Every plan with its tasks (sorted by id), from one read of the plans
+    /// tree: what a listing that shows task counts needs, without a read per
+    /// plan.
+    pub fn list_plans_with_tasks(
+        &self,
+        ref_name: &str,
+    ) -> Result<Vec<(Plan, Vec<Task>)>, TaskStoreError> {
+        let root = match self.repo.get_json(ref_name, &self.prefix) {
+            Ok(v) => v,
+            Err(e) if is_path_not_found(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let serde_json::Value::Object(map) = root else {
+            return Ok(Vec::new());
+        };
+        map.iter()
+            .map(|(name, plan)| Ok((plan_from_tree(name, plan)?, tasks_from_tree(plan)?)))
+            .collect()
     }
 
     /// Fetch a single plan by name.
@@ -452,27 +471,16 @@ impl TaskStore {
     /// deserializes every task — O(n) in total field count. For id-only
     /// operations prefer `task_ids`.
     pub fn list_tasks(&self, ref_name: &str, plan: &str) -> Result<Vec<Task>, TaskStoreError> {
-        if !self.plan_exists(ref_name, plan)? {
+        // One read of the plan's tree: a plan exists when it has metadata.
+        let root_path = paths::plan_root(&self.prefix, plan);
+        let root = self
+            .repo
+            .get_json(ref_name, &root_path)
+            .map_err(|e| map_not_found(e, || TaskStoreError::PlanNotFound(plan.to_string())))?;
+        if root.get(paths::META_KEY).is_none() {
             return Err(TaskStoreError::PlanNotFound(plan.to_string()));
         }
-
-        let root_path = paths::plan_root(&self.prefix, plan);
-        let root = self.repo.get_json(ref_name, &root_path)?;
-
-        let serde_json::Value::Object(map) = root else {
-            return Ok(Vec::new());
-        };
-
-        let mut tasks = Vec::new();
-        for (key, value) in map.iter() {
-            if key == paths::META_KEY {
-                continue;
-            }
-            let task: Task = serde_json::from_value(value.clone())?;
-            tasks.push(task);
-        }
-        tasks.sort_by_key(|t| t.id.clone());
-        Ok(tasks)
+        tasks_from_tree(&root)
     }
 
     pub fn get_task(
@@ -900,6 +908,29 @@ fn is_path_not_found(e: &agentstategraph::RepoError) -> bool {
         e,
         agentstategraph::RepoError::Tree(agentstategraph::tree::TreeError::PathNotFound(_))
     )
+}
+
+/// A plan's metadata from its subtree of the plans tree (`plan` is the value
+/// at `<prefix>/<name>`).
+fn plan_from_tree(name: &str, plan: &serde_json::Value) -> Result<Plan, TaskStoreError> {
+    let meta = plan
+        .get(paths::META_KEY)
+        .ok_or_else(|| TaskStoreError::PlanNotFound(name.to_string()))?;
+    Ok(serde_json::from_value(meta.clone())?)
+}
+
+/// The tasks in a plan's subtree, sorted by id.
+fn tasks_from_tree(plan: &serde_json::Value) -> Result<Vec<Task>, TaskStoreError> {
+    let serde_json::Value::Object(map) = plan else {
+        return Ok(Vec::new());
+    };
+    let mut tasks = map
+        .iter()
+        .filter(|(key, _)| key.as_str() != paths::META_KEY)
+        .map(|(_, value)| serde_json::from_value::<Task>(value.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    tasks.sort_by_key(|t| t.id.clone());
+    Ok(tasks)
 }
 
 fn map_not_found<F>(e: agentstategraph::RepoError, make: F) -> TaskStoreError
