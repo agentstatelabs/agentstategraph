@@ -17,6 +17,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 - **`TaskStore::list_plans` reads the plans tree once.** It read the whole tree, then each plan's metadata again, one read per plan; it now takes each plan's metadata from the one read. `list_tasks` reads a plan once instead of checking it exists first. Listing a large workspace's plans went from 17,357 queries (7.6 s) to 343 (0.4 s) on Postgres.
 
 ### Added
+- **`Repository::get_json_many(ref, paths)`**: several paths of one ref as JSON at once. The ref is resolved once, each level of every path is fetched in one batch, and the subtrees below them are read together, so a remote store answers many paths in about as many round trips as one. A path that doesn't exist reads as `None`. For a host that decorates a list (a title and metadata per session, say) without a read per item.
 - **`TaskStore::list_plans_with_tasks`**: every plan with its tasks from one read of the plans tree, for a listing that shows task counts without a read per plan.
 
 ## [v1.3.1] — 2026-10-15

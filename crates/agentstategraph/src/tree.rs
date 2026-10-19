@@ -26,8 +26,18 @@ struct Prefetched<'a> {
 impl<'a> Prefetched<'a> {
     /// Load the objects in the `levels` levels below `root`.
     fn load(store: &'a dyn ObjectStore, root: &Object, levels: usize) -> Result<Self, TreeError> {
+        Self::load_many(store, &[root], levels)
+    }
+
+    /// Load the objects in the `levels` levels below each of `roots`, the
+    /// same level of every root in one batch.
+    fn load_many(
+        store: &'a dyn ObjectStore,
+        roots: &[&Object],
+        levels: usize,
+    ) -> Result<Self, TreeError> {
         let mut objects: HashMap<ObjectId, Object> = HashMap::new();
-        let mut frontier = child_ids(root);
+        let mut frontier: Vec<ObjectId> = roots.iter().flat_map(|r| child_ids(r)).collect();
         let mut level = 0;
         while !frontier.is_empty() && level < levels {
             level += 1;
@@ -113,6 +123,83 @@ pub fn tree_get(
     }
 
     Ok(current)
+}
+
+/// [`tree_get`] for several paths at once: the objects along all of them
+/// are fetched a level at a time, one batch per level, so reading many
+/// paths costs about as many storage calls as reading the deepest one.
+///
+/// `None` for a path that doesn't exist: a missing key or index, or a path
+/// that runs into an atom or a container of the wrong kind.
+pub fn tree_get_many(
+    store: &dyn ObjectStore,
+    root: &ObjectId,
+    paths: &[StatePath],
+) -> Result<Vec<Option<Object>>, TreeError> {
+    let root_obj = store
+        .get_object(root)?
+        .ok_or(TreeError::ObjectNotFound(*root))?;
+    let mut current: Vec<Option<Object>> = vec![Some(root_obj); paths.len()];
+    let deepest = paths
+        .iter()
+        .map(|p| p.components().len())
+        .max()
+        .unwrap_or(0);
+    for level in 0..deepest {
+        // The child each path still being walked wants at this level.
+        let mut wanted: Vec<(usize, ObjectId)> = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            let Some(component) = path.components().get(level) else {
+                continue;
+            };
+            match current[i]
+                .as_ref()
+                .and_then(|obj| child_id_at(obj, component))
+            {
+                Some(id) => wanted.push((i, id)),
+                None => current[i] = None,
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let ids: Vec<ObjectId> = wanted
+            .iter()
+            .map(|(_, id)| *id)
+            .filter(|id| seen.insert(*id))
+            .collect();
+        let mut fetched: HashMap<ObjectId, Object> = HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(PREFETCH_BATCH) {
+            for (id, obj) in chunk.iter().zip(store.batch_get_objects(chunk)?) {
+                fetched.insert(*id, obj.ok_or(TreeError::ObjectNotFound(*id))?);
+            }
+        }
+        for (i, id) in wanted {
+            current[i] = fetched.get(&id).cloned();
+        }
+    }
+    Ok(current)
+}
+
+/// The id a path component names in `obj`, by [`navigate`]'s rules: a key
+/// into a map, an index into a list, nothing else.
+fn child_id_at(obj: &Object, component: &PathComponent) -> Option<ObjectId> {
+    match (obj, component) {
+        (Object::Node(Node::Map(entries)), PathComponent::Key(key)) => entries.get(key).copied(),
+        (Object::Node(Node::List(items)), PathComponent::Index(idx)) => items.get(*idx).copied(),
+        _ => None,
+    }
+}
+
+/// [`tree_to_json`] for several objects, their subtrees read together a
+/// level at a time.
+pub fn trees_to_json(
+    store: &dyn ObjectStore,
+    objs: &[Option<Object>],
+) -> Result<Vec<Option<serde_json::Value>>, TreeError> {
+    let roots: Vec<&Object> = objs.iter().flatten().collect();
+    let prefetched = Prefetched::load_many(store, &roots, usize::MAX)?;
+    objs.iter()
+        .map(|obj| obj.as_ref().map(|o| to_json(&prefetched, o)).transpose())
+        .collect()
 }
 
 /// Set a value in the state tree at the given path.
@@ -1520,6 +1607,50 @@ mod tests {
         leaves(&store);
         assert!(removed.is_empty());
         assert_eq!(added.len(), paths.len());
+    }
+
+    /// Many paths read together match `tree_get` path by path, at one batch
+    /// per level of the deepest path.
+    #[test]
+    fn many_paths_are_read_a_level_at_a_time() {
+        let (store, root) = stored(&plans());
+        let root_id = root.id();
+        let raw = [
+            "/plans/plan-03/tasks/2/title",
+            "/plans/plan-39/name",
+            "/plans/plan-07/tasks/11/owner",
+            "/version",
+            "/",
+            "/plans/plan-99/name",     // missing key
+            "/plans/plan-03/tasks/12", // index out of range
+            "/version/deeper",         // through an atom
+            "/plans/0",                // index into a map
+            "/plans/plan-03/name/0",   // index into an atom
+        ];
+        let paths: Vec<StatePath> = raw.iter().map(|p| StatePath::parse(p).unwrap()).collect();
+        let many = tree_get_many(&store, &root_id, &paths).unwrap();
+        let (gets, batch_gets, _, _) = store.counts();
+        assert_eq!(gets, 1, "the root only");
+        // The deepest paths have five components.
+        assert_eq!(batch_gets, 5, "one per level of the deepest path");
+        for (path, got) in paths.iter().zip(&many) {
+            let one = tree_get(&store.inner, &root_id, path).ok();
+            assert_eq!(got, &one, "{path}");
+        }
+        assert!(many[5..].iter().all(Option::is_none));
+
+        store.reset();
+        let json = trees_to_json(&store, &many).unwrap();
+        let (gets, batch_gets, _, _) = store.counts();
+        assert_eq!(gets, 0);
+        assert!(batch_gets <= PLANS_DEPTH, "{batch_gets}");
+        assert_eq!(json[0], Some(serde_json::json!("task 2 of plan 3")));
+        assert_eq!(
+            json[2],
+            Some(serde_json::json!({"agent": "claude-code", "team": "core"}))
+        );
+        assert_eq!(json[4], Some(plans()));
+        assert_eq!(json[5], None);
     }
 
     /// The levels loaded up front only decide what's fetched in batches: a walk

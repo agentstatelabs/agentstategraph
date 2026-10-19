@@ -758,6 +758,39 @@ impl Repository {
         Ok(json)
     }
 
+    /// [`Repository::get_json`] for several paths of one ref at once. The ref
+    /// is resolved once, each level of every path is fetched in one batch, and
+    /// the subtrees below them are read together a level at a time, so a
+    /// remote store answers many paths in about as many round trips as one.
+    ///
+    /// Returns a value per path, in order: `None` where the path doesn't exist
+    /// (a missing key or index, or a path through an atom or a container of
+    /// the wrong kind). Reads under `/_meta/_secret/*` are rejected, as by
+    /// `get_json`.
+    pub fn get_json_many(
+        &self,
+        ref_name: &str,
+        paths: &[&str],
+    ) -> Result<Vec<Option<serde_json::Value>>, RepoError> {
+        let span = op_span!(DEBUG, "asg.repo.get_many", asg.ref.name = ref_name);
+        telemetry::run(span, || {
+            if let Some(secret) = paths.iter().find(|p| path_is_secret(p)) {
+                return Err(RepoError::ReservedPath(secret.to_string()));
+            }
+            let parsed = paths
+                .iter()
+                .map(|p| StatePath::parse(p).map_err(|e| TreeError::PathNotFound(e.to_string())))
+                .collect::<Result<Vec<_>, _>>()?;
+            let commit_id = self.resolve_ref(ref_name)?;
+            let commit = self
+                .storage
+                .get_commit(&commit_id)?
+                .ok_or_else(|| RepoError::RefNotFound(ref_name.to_string()))?;
+            let objs = tree::tree_get_many(self.storage.as_ref(), &commit.state_root, &parsed)?;
+            Ok(tree::trees_to_json(self.storage.as_ref(), &objs)?)
+        })
+    }
+
     /// Like [`Repository::get_json`] but stops materializing `max_depth` levels
     /// below `path`: nodes at the cap become `{ "_truncated": true, ... }`
     /// placeholders and their subtrees are never loaded. A cheap shallow read of
