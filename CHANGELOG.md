@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.3.2] — 2026-10-19
+
+Reads and writes of whole subtrees take a storage call per level instead of one per object, which on Postgres turns thousands of queries into a handful. New `Repository::get_json_many` and `TaskStore::list_plans_with_tasks` let a host read a list without a query per item.
+
 ### Changed
 - **Reading or writing a subtree takes a storage call per level, not per object.** `get_json`, the capped read, path listing, value search, leaf collection and the diff behind search-index upkeep fetched one object at a time, and `set_json` stored one at a time. That's a round trip per node on Postgres. Reads now load a subtree a level at a time with `batch_get_objects`, and writes store a new tree with one `batch_put_objects`. On a large real store (a CTXone Hub's) on Postgres:
   - reading the memory tree went from 3,382 queries (1.5 s) to 12 (79 ms), faster than SQLite;
