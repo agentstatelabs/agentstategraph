@@ -1523,6 +1523,28 @@ pub extern "C" fn agentstategraph_taskstore_set_priority(
     }
 }
 
+/// Replace a task's title; a blank title is refused.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_set_title(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+    title: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    let title = unsafe { c_to_str(title) };
+    match store.inner.set_title(&ref_name, &plan, &id, &title) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
 /// Set blockers. `blockers_json` is a JSON string array (may be null or "[]").
 #[no_mangle]
 pub extern "C" fn agentstategraph_taskstore_set_blockers(

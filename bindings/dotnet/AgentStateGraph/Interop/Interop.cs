@@ -217,6 +217,14 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string priority);
 
     [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_taskstore_set_title(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string plan,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string taskId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string title);
+
+    [DllImport(Lib)]
     internal static extern IntPtr agentstategraph_taskstore_set_blockers(
         IntPtr store,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,

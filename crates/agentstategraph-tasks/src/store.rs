@@ -7,6 +7,7 @@
 //! `_meta` together) use the speculation API so they land in a single
 //! commit.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use agentstategraph::{CommitOptions, RepoError, Repository};
@@ -606,6 +607,30 @@ impl TaskStore {
         })
     }
 
+    /// Replace a task's title. The title must not be blank. Status, proof,
+    /// blockers and timestamps are left as they are; the commit records who
+    /// changed it.
+    pub fn set_title(
+        &self,
+        ref_name: &str,
+        plan: &str,
+        id: &TaskId,
+        title: &str,
+    ) -> Result<Task, TaskStoreError> {
+        if title.trim().is_empty() {
+            return Err(TaskStoreError::TitleRequired);
+        }
+        let desc = format!("Retitle {}/{}", plan, id);
+        self.update_task(ref_name, plan, id, desc, |task| {
+            task.title = title.to_string();
+            Ok(())
+        })
+    }
+
+    /// Replace a task's blocker list. Every blocker must be a task in the same
+    /// plan, and the new list must not make the task wait on itself, directly
+    /// or through other tasks: a cycle would leave every task in it blocked
+    /// for good.
     pub fn set_blockers(
         &self,
         ref_name: &str,
@@ -616,8 +641,17 @@ impl TaskStore {
         validate_blocker_ids(&blockers)?;
         let desc = format!("Update blockers on {}/{}", plan, id);
         self.update_task(ref_name, plan, id, desc, |task| {
+            let tasks = self.list_tasks(ref_name, plan)?;
             for blocker in &blockers {
-                self.get_task(ref_name, plan, blocker)?;
+                if !tasks.iter().any(|t| &t.id == blocker) {
+                    return Err(TaskStoreError::TaskNotFound {
+                        plan: plan.to_string(),
+                        id: blocker.clone(),
+                    });
+                }
+            }
+            if let Some(cycle) = blocker_cycle(&tasks, &task.id, &blockers) {
+                return Err(TaskStoreError::BlockerCycle { cycle });
             }
             task.blocked_by = blockers.clone();
             Ok(())
@@ -887,6 +921,47 @@ fn blocker_satisfied(tasks: &[Task], id: &TaskId) -> bool {
     tasks
         .iter()
         .any(|t| &t.id == id && t.status == TaskStatus::Done)
+}
+
+/// The cycle that making `blockers` the blockers of `id` would close, as the
+/// path from `id` back to itself: `[t-001, t-003, t-001]`, or `[t-001, t-001]`
+/// for a task that would block itself. `None` when the plan's blocker graph
+/// stays acyclic. The other tasks' blockers come from `tasks`.
+fn blocker_cycle(tasks: &[Task], id: &TaskId, blockers: &[TaskId]) -> Option<Vec<TaskId>> {
+    let edges: HashMap<&TaskId, &[TaskId]> = tasks
+        .iter()
+        .map(|t| (&t.id, t.blocked_by.as_slice()))
+        .collect();
+    let mut visited = HashSet::new();
+    let mut path = vec![id.clone()];
+    blockers
+        .iter()
+        .any(|b| reaches(b, id, &edges, &mut visited, &mut path))
+        .then_some(path)
+}
+
+/// Depth-first along `blocked_by` from `node`: true when it reaches `target`,
+/// with `path` then holding the route there.
+fn reaches<'a>(
+    node: &'a TaskId,
+    target: &TaskId,
+    edges: &HashMap<&'a TaskId, &'a [TaskId]>,
+    visited: &mut HashSet<&'a TaskId>,
+    path: &mut Vec<TaskId>,
+) -> bool {
+    path.push(node.clone());
+    if node == target {
+        return true;
+    }
+    if visited.insert(node) {
+        for next in edges.get(node).copied().unwrap_or_default() {
+            if reaches(next, target, edges, visited, path) {
+                return true;
+            }
+        }
+    }
+    path.pop();
+    false
 }
 
 #[derive(Default, Debug)]

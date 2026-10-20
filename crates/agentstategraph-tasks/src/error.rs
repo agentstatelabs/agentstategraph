@@ -42,6 +42,12 @@ pub enum TaskStoreError {
     #[error("reason required for abandonment")]
     ReasonRequired,
 
+    #[error("a task's title must not be blank")]
+    TitleRequired,
+
+    #[error("blockers would form a cycle, leaving these tasks blocked for good: {cycle:?}")]
+    BlockerCycle { cycle: Vec<TaskId> },
+
     #[error("invalid task id format: {0}")]
     InvalidTaskId(String),
 

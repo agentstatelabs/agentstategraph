@@ -150,6 +150,19 @@ public sealed class TaskStoreTests
     }
 
     [Fact]
+    public void SetTitle_ReplacesTheTitle()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ts = new TaskStore(repo, "/plans", "xunit");
+        ts.CreatePlan(Ref, "p", null);
+        var a = ts.AddTask(Ref, "p", "a", Priority.Low);
+
+        var updated = ts.SetTitle(Ref, "p", a.Id, "a, retitled");
+        Assert.Equal("a, retitled", updated.Title);
+        Assert.Equal(a.Status, updated.Status);
+    }
+
+    [Fact]
     public void SetBlockers_AcceptsJsonArray()
     {
         using var repo = TestHelpers.FreshRepo();

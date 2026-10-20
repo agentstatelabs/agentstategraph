@@ -69,6 +69,8 @@ extern char* agentstategraph_taskstore_abandon_task(SgTaskStore store, const cha
     const char* task_id, const char* reason);
 extern char* agentstategraph_taskstore_set_priority(SgTaskStore store, const char* ref_name, const char* plan,
     const char* task_id, const char* priority);
+extern char* agentstategraph_taskstore_set_title(SgTaskStore store, const char* ref_name, const char* plan,
+    const char* task_id, const char* title);
 extern char* agentstategraph_taskstore_set_blockers(SgTaskStore store, const char* ref_name, const char* plan,
     const char* task_id, const char* blockers_json);
 extern char* agentstategraph_taskstore_assign_task(SgTaskStore store, const char* ref_name, const char* plan,

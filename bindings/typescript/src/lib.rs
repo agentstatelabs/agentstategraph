@@ -1235,6 +1235,21 @@ impl TaskStore {
     }
 
     #[napi]
+    pub fn set_title(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+        title: String,
+    ) -> napi::Result<serde_json::Value> {
+        let t = self
+            .inner
+            .set_title(&ref_name, &plan, &TaskId(id), &title)
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    #[napi]
     pub fn set_blockers(
         &self,
         ref_name: String,

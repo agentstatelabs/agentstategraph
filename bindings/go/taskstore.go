@@ -587,6 +587,30 @@ func (ts *TaskStore) SetPriority(ref, plan, id string, priority Priority) (*Task
 	return &t, nil
 }
 
+// SetTitle replaces a task's title. A blank title is refused.
+func (ts *TaskStore) SetTitle(ref, plan, id, title string) (*Task, error) {
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	cPlan := C.CString(plan)
+	defer C.free(unsafe.Pointer(cPlan))
+	cID := C.CString(id)
+	defer C.free(unsafe.Pointer(cID))
+	cTitle := C.CString(title)
+	defer C.free(unsafe.Pointer(cTitle))
+	raw, err := consume(
+		C.agentstategraph_taskstore_set_title(ts.handle, cRef, cPlan, cID, cTitle),
+		"set_title",
+	)
+	if err != nil {
+		return nil, err
+	}
+	var t Task
+	if err := decodeOrErr(raw, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // SetBlockers replaces a task's blocker list.
 func (ts *TaskStore) SetBlockers(ref, plan, id string, blockers []string) (*Task, error) {
 	cRef := C.CString(ref)

@@ -1136,6 +1136,21 @@ impl TaskStore {
         task_to_dict(py, &t)
     }
 
+    fn set_title(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+        title: &str,
+    ) -> PyResult<PyObject> {
+        let t = self
+            .inner
+            .set_title(ref_name, plan, &TaskId(id.to_string()), title)
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
     fn set_blockers(
         &self,
         py: Python<'_>,
