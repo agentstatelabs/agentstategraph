@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.4.0] — 2026-10-20
+
+A task can be revised after it's added: `TaskStore::set_title` changes its title, in Rust and every binding, and `set_blockers` refuses blockers that would form a cycle. `TaskStoreError` gains `TitleRequired` and `BlockerCycle`.
+
 ### Added
 - **`TaskStore::set_title`** replaces a task's title and leaves its status, proof, blockers and timestamps as they are. The commit records who changed it. A blank title is refused with the new `TaskStoreError::TitleRequired`. Every binding has it: `agentstategraph_taskstore_set_title` in C, `SetTitle` in Go and .NET, `setTitle` in Swift, `set_title` in Python and Node, and `tasksSetTitle` in WASM. With `set_priority` and `set_blockers`, a task can now be revised after it's added.
 

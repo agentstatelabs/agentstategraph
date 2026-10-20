@@ -98,6 +98,8 @@ No binding calls them. Bindings surface repository errors as message strings, an
 
 1.3.2 was reviewed in its `release-prep` commit (`v1.3.1..v1.3.2`). Nothing under `crates/agentstategraph-ffi`, `crates/agentstategraph-wasm` or `bindings/` changed apart from the version strings. Core now reads and writes subtrees through `batch_get_objects` and `batch_put_objects`: the results and object ids are the same, with fewer storage calls, and backends without batch overrides (memory, IndexedDB) make the same single calls through the trait defaults. `Repository::get_json_many` and `TaskStore::list_plans_with_tasks` are Rust-only additions that no binding calls. No capability changes status and the ABI stays at 39 operations.
 
+1.4.0 was reviewed in its `release-prep` commit (`v1.3.2..v1.4.0`). `TaskStore::set_title` is new in Core, and every binding wraps it: the C ABI's `agentstategraph_taskstore_set_title`, declared in the Go and Swift headers, `SetTitle` in Go and .NET, `setTitle` in Swift, `set_title` in Python and Node, and `tasksSetTitle` in WASM, each shaped like that binding's `set_priority`. It is a plain C function, not an advanced ABI operation, so the ABI stays at 39 operations. `set_blockers` now refuses a cycle with the new `TaskStoreError::BlockerCycle`, and `set_title` a blank title with `TitleRequired`; bindings surface both as error strings, as they do every task error. `tasks` stays `full` in every binding.
+
 ## Earlier audit — 1.2.5 (retrospective)
 
 `reviewed_core_version` moved to 1.2.5 on 2026-09-29 in the release-prep commit
