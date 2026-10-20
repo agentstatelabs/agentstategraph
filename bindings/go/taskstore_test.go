@@ -119,6 +119,47 @@ func TestTaskStore_NextTaskBlockers(t *testing.T) {
 	}
 }
 
+func TestTaskStore_EditTask(t *testing.T) {
+	asg, _ := NewMemory()
+	defer asg.Close()
+	ts, err := NewTaskStore(asg, "/plans", "go-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	if _, err := ts.CreatePlan("main", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	a, err := ts.AddTask("main", "p", "a", PriorityHigh, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ts.AddTask("main", "p", "b", PriorityHigh, &AddTaskOptions{
+		Blockers: []string{a.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retitled, err := ts.SetTitle("main", "p", a.ID, "a, retitled")
+	if err != nil {
+		t.Fatalf("SetTitle: %v", err)
+	}
+	if retitled.Title != "a, retitled" || retitled.Status != TaskStatusPending {
+		t.Fatalf("unexpected task after SetTitle: %+v", retitled)
+	}
+	if _, err := ts.SetTitle("main", "p", a.ID, "  "); err == nil {
+		t.Fatal("SetTitle accepted a blank title")
+	}
+
+	// b waits on a, so a can't wait on b.
+	_, err = ts.SetBlockers("main", "p", a.ID, []string{b.ID})
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("expected a blocker cycle error, got %v", err)
+	}
+}
+
 func TestTaskStore_AddTaskWithExtensions(t *testing.T) {
 	asg, _ := NewMemory()
 	defer asg.Close()

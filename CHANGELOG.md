@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **`TaskStore::set_title`** replaces a task's title and leaves its status, proof, blockers and timestamps as they are. The commit records who changed it. A blank title is refused with the new `TaskStoreError::TitleRequired`. Every binding has it: `agentstategraph_taskstore_set_title` in C, `SetTitle` in Go and .NET, `setTitle` in Swift, `set_title` in Python and Node, and `tasksSetTitle` in WASM. With `set_priority` and `set_blockers`, a task can now be revised after it's added.
+
+### Changed
+- **`set_blockers` refuses blockers that would form a cycle,** including a task blocking itself, with the new `TaskStoreError::BlockerCycle { cycle }` naming the path (`[t-001, t-002, t-001]`). A cycle left every task in it blocked for good. It also reads the plan once instead of once per blocker. A `match` on `TaskStoreError` without a wildcard arm needs one for the two new variants.
+
 ## [v1.3.2] — 2026-10-19
 
 Reads and writes of whole subtrees take a storage call per level instead of one per object, which on Postgres turns thousands of queries into a handful. New `Repository::get_json_many` and `TaskStore::list_plans_with_tasks` let a host read a list without a query per item.

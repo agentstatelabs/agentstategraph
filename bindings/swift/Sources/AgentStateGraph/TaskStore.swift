@@ -348,6 +348,19 @@ public final class TaskStore {
         return try decodeJSON(raw)
     }
 
+    /// Replace a task's title. A blank title is refused.
+    @discardableResult
+    public func setTitle(plan: String, id: String, title: String, ref: String = "main") throws -> Task {
+        let s = try h()
+        let cRef = sgDup(ref); defer { free(cRef) }
+        let cPlan = sgDup(plan); defer { free(cPlan) }
+        let cID = sgDup(id); defer { free(cID) }
+        let cTitle = sgDup(title); defer { free(cTitle) }
+        let raw = try consume(
+            agentstategraph_taskstore_set_title(s, cRef, cPlan, cID, cTitle), "set_title")
+        return try decodeJSON(raw)
+    }
+
     /// Replace a task's blocker list.
     @discardableResult
     public func setBlockers(plan: String, id: String, blockers: [String], ref: String = "main") throws -> Task {

@@ -243,6 +243,14 @@ public sealed class TaskStore : IDisposable
         return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "set_priority");
     }
 
+    public Task SetTitle(string refName, string plan, string taskId, string title)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(title);
+        var ptr = NativeMethods.agentstategraph_taskstore_set_title(H, refName, plan, taskId, title);
+        return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "set_title");
+    }
+
     public Task SetBlockers(string refName, string plan, string taskId, IReadOnlyList<string> blockers)
     {
         ThrowIfDisposed();

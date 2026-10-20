@@ -790,6 +790,23 @@ impl WasmAgentStateGraph {
         serde_json::to_string(&task).map_err(js_err)
     }
 
+    #[wasm_bindgen(js_name = tasksSetTitle)]
+    pub fn tasks_set_title(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+        title: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .set_title(ref_name, plan, &TaskId(task_id.to_string()), title)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = tasksSetBlockers)]
     pub fn tasks_set_blockers(
         &self,

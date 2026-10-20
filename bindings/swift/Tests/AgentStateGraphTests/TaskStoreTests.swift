@@ -52,6 +52,23 @@ final class TaskStoreTests: XCTestCase {
         _ = b
     }
 
+    func testEditTask() throws {
+        let (asg, ts) = try store()
+        defer { asg.close(); ts.close() }
+        try ts.createPlan("p")
+        let a = try ts.addTask(plan: "p", title: "a", priority: .medium)
+        let b = try ts.addTask(
+            plan: "p", title: "b", priority: .medium,
+            options: AddTaskOptions(blockers: [a.id]))
+
+        let retitled = try ts.setTitle(plan: "p", id: a.id, title: "a, retitled")
+        XCTAssertEqual(retitled.title, "a, retitled")
+        XCTAssertEqual(retitled.status, .pending)
+        XCTAssertThrowsError(try ts.setTitle(plan: "p", id: a.id, title: " "))
+        // b waits on a, so a can't wait on b.
+        XCTAssertThrowsError(try ts.setBlockers(plan: "p", id: a.id, blockers: [b.id]))
+    }
+
     func testAssignAndFilter() throws {
         let (asg, ts) = try store()
         defer { asg.close(); ts.close() }
