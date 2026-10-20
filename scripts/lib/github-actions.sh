@@ -50,3 +50,33 @@ github_release_asset_sha256() {
     | jq -r --arg name "$name" \
       '.assets[] | select(.name == $name and .state == "uploaded") | .digest // empty | ltrimstr("sha256:")'
 }
+
+# Download a workflow run's artifact into dir, retrying with a doubling delay.
+# GitHub has answered a download with HTTP 503 after a build that passed, which
+# shipped v1.4.0 without its Swift binary. Each attempt downloads into a fresh
+# directory, so a partial download is never used.
+github_download_run_artifact() {
+  local repo="$1"
+  local run_id="$2"
+  local name="$3"
+  local dir="$4"
+  local attempts="${5:-5}"
+  local delay="${6:-15}"
+  local try tmp
+
+  for try in $(seq 1 "$attempts"); do
+    tmp=$(mktemp -d "${dir}/download.XXXXXX")
+    if gh run download "$run_id" --repo "$repo" --name "$name" --dir "$tmp"; then
+      mv "$tmp"/* "$dir"/ || return 1
+      rmdir "$tmp"
+      return 0
+    fi
+    rm -rf "$tmp"
+    if [ "$try" -lt "$attempts" ]; then
+      echo "gh run download failed (attempt $try of $attempts); retrying in ${delay}s" >&2
+      sleep "$delay"
+      delay=$((delay * 2))
+    fi
+  done
+  return 1
+}

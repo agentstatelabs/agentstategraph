@@ -51,24 +51,53 @@ elif [ "$TAG" != "v$VER" ]; then
   echo "note: HEAD is not tag v$VER; fine for a dry run, not for --publish"
 fi
 
-# Every publishable workspace member, minus the ones already live at $VER.
+# Every publishable workspace member.
 CRATES="$(cargo metadata --no-deps --format-version 1 | python3 -c '
 import json, sys
 for p in json.load(sys.stdin)["packages"]:
     if p["publish"] != []:
         print(p["name"])
 ')"
-EXCLUDE=()
-TODO=0
-for c in $CRATES; do
-  code="$(curl -s -o /dev/null -w '%{http_code}' -A "agentstatelabs-publish-crates" \
-    "https://crates.io/api/v1/crates/$c/$VER")"
-  case "$code" in
-    200) echo "skip $c $VER (already on crates.io)"; EXCLUDE+=(--exclude "$c") ;;
-    404) TODO=$((TODO + 1)) ;;
-    *) echo "error: crates.io answered $code for $c $VER; not publishing" >&2; exit 1 ;;
-  esac
-done
+
+# Ask crates.io which crates are already live at $VER. Sets LIVE, an --exclude
+# for each of them in EXCLUDE, and TODO, the number left to publish.
+check_live() {
+  LIVE=""
+  EXCLUDE=()
+  TODO=0
+  local c code
+  for c in $CRATES; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' -A "agentstatelabs-publish-crates" \
+      "https://crates.io/api/v1/crates/$c/$VER")"
+    case "$code" in
+      200) LIVE="$LIVE $c"; EXCLUDE+=(--exclude "$c") ;;
+      404) TODO=$((TODO + 1)) ;;
+      *) echo "error: crates.io answered $code for $c $VER; not publishing" >&2; exit 1 ;;
+    esac
+  done
+}
+
+# crates.io lists an upload at once, but cargo resolves the excluded crates from
+# the sparse index, which can lag. Wait up to five minutes for each live crate
+# to appear there. Every crate here has a name of four or more characters, so
+# its index file is at <first two>/<next two>/<name>.
+wait_for_index() {
+  local c tries body
+  for c in $LIVE; do
+    tries=0
+    while :; do
+      body="$(curl -fs -A "agentstatelabs-publish-crates" \
+        "https://index.crates.io/${c:0:2}/${c:2:2}/$c" || true)"
+      case "$body" in *"\"vers\":\"$VER\""*) break ;; esac
+      tries=$((tries + 1))
+      [ "$tries" -lt 30 ] || { echo "error: $c $VER is not in the crates.io index after five minutes" >&2; exit 1; }
+      sleep 10
+    done
+  done
+}
+
+check_live
+for c in $LIVE; do echo "skip $c $VER (already on crates.io)"; done
 if [ "$TODO" -eq 0 ]; then
   echo "every crate is already on crates.io at $VER; nothing to do"
   exit 0
@@ -76,4 +105,23 @@ fi
 
 # Cargo 1.90+ packages and verifies every crate before uploading any, then
 # uploads in dependency order.
-cargo publish --workspace --locked ${EXCLUDE[@]+"${EXCLUDE[@]}"} $MODE
+#
+# Cargo 1.96 can stop partway through the uploads with "no packages ready to
+# publish but N packages remain in plan", an internal error (v1.4.0 and v1.4.1
+# both stopped after three crates, and retrying the job published the rest).
+# So after a failure, publish what is left, for as long as each run uploads at
+# least one crate. A failure that uploaded nothing is real, and fails the run.
+until cargo publish --workspace --locked ${EXCLUDE[@]+"${EXCLUDE[@]}"} $MODE; do
+  before=$TODO
+  check_live
+  if [ "$TODO" -eq 0 ]; then
+    echo "every crate is on crates.io at $VER despite cargo's error"
+    exit 0
+  fi
+  if [ "$TODO" -ge "$before" ]; then
+    echo "error: cargo publish failed without uploading a crate; $TODO left to publish" >&2
+    exit 1
+  fi
+  echo "cargo publish stopped with $TODO crate(s) left; publishing them once the index has the others" >&2
+  wait_for_index
+done

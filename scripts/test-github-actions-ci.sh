@@ -44,4 +44,36 @@ for pair in "swift.zip=abc123" "swift.zip.sha256=" "swift-release.json=" "missin
   [ "$got" = "$want" ] || { echo "expected '$want' for $name, got '$got'" >&2; exit 1; }
 done
 
+# A failed artifact download is retried into a fresh directory, so only a
+# complete download reaches the destination.
+DOWNLOADS=$(mktemp -d)
+trap 'rm -rf "$DOWNLOADS"' EXIT
+gh() {
+  [ "$1 $2" = "run download" ] || { echo "unexpected gh command: $*" >&2; return 1; }
+  local dir="${@: -1}"
+  local n=$(( $(cat "$DOWNLOADS/attempts" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$DOWNLOADS/attempts"
+  if [ "$n" -lt 3 ]; then
+    echo partial > "$dir/partial.zip"
+    echo "HTTP 503: 503 Service Unavailable" >&2
+    return 1
+  fi
+  echo payload > "$dir/swift.zip"
+}
+
+mkdir "$DOWNLOADS/stage"
+github_download_run_artifact example/repo 42 swift-release "$DOWNLOADS/stage" 3 0 2>/dev/null \
+  || { echo "expected the third download attempt to succeed" >&2; exit 1; }
+[ "$(cat "$DOWNLOADS/attempts")" = 3 ] || { echo "expected 3 download attempts" >&2; exit 1; }
+got=$(ls -A "$DOWNLOADS/stage")
+[ "$got" = swift.zip ] || { echo "expected only swift.zip in the stage, got '$got'" >&2; exit 1; }
+
+rm "$DOWNLOADS/attempts"
+mkdir "$DOWNLOADS/stage2"
+if github_download_run_artifact example/repo 42 swift-release "$DOWNLOADS/stage2" 2 0 2>/dev/null; then
+  echo "expected a download that fails every attempt to fail" >&2
+  exit 1
+fi
+[ -z "$(ls -A "$DOWNLOADS/stage2")" ] || { echo "expected a failed download to leave the stage empty" >&2; exit 1; }
+
 echo "GitHub Actions compatibility tests passed"
