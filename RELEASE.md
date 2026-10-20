@@ -107,6 +107,13 @@ in dependency order. A crates.io version can be yanked but never deleted or
 re-uploaded, so anything wrong with a published crate is fixed by the next
 patch release.
 
+Cargo 1.96 can stop partway through the uploads with an internal error ("no
+packages ready to publish but N packages remain in plan"), as it did on v1.4.0
+and v1.4.1. The script then publishes the crates left, once the crates.io index
+has the ones already uploaded, for as long as each `cargo publish` uploads
+something. A failure that uploads nothing, such as a build error, fails the job
+at once.
+
 ## Re-running a tag pipeline
 
 A new pipeline on a tag that has already been released is safe: every publish

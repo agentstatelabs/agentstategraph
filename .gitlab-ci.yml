@@ -75,8 +75,9 @@ release-script-contract:
   before_script: []
   cache: {}
   script:
-    - apk add --no-cache bash jq >/dev/null
+    - apk add --no-cache bash jq python3 >/dev/null
     - bash scripts/test-github-actions-ci.sh
+    - bash scripts/test-publish-crates.sh
 
 clippy:
   stage: check

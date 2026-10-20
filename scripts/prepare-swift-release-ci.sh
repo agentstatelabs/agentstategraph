@@ -85,7 +85,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-gh run download "$run_id" --repo "$GITHUB_REPO" --name "$ARTIFACT" --dir "$STAGE"
+github_download_run_artifact "$GITHUB_REPO" "$run_id" "$ARTIFACT" "$STAGE" || {
+  echo "error: could not download $ARTIFACT from GitHub run $run_id" >&2
+  exit 1
+}
 
 for file in "$ASSET" "${ASSET}.sha256" swift-release.json; do
   [ -f "$STAGE/$file" ] || { echo "error: downloaded artifact lacks $file" >&2; exit 1; }
