@@ -100,6 +100,8 @@ No binding calls them. Bindings surface repository errors as message strings, an
 
 1.4.0 was reviewed in its `release-prep` commit (`v1.3.2..v1.4.0`). `TaskStore::set_title` is new in Core, and every binding wraps it: the C ABI's `agentstategraph_taskstore_set_title`, declared in the Go and Swift headers, `SetTitle` in Go and .NET, `setTitle` in Swift, `set_title` in Python and Node, and `tasksSetTitle` in WASM, each shaped like that binding's `set_priority`. It is a plain C function, not an advanced ABI operation, so the ABI stays at 39 operations. `set_blockers` now refuses a cycle with the new `TaskStoreError::BlockerCycle`, and `set_title` a blank title with `TitleRequired`; bindings surface both as error strings, as they do every task error. `tasks` stays `full` in every binding.
 
+1.4.1 was reviewed in its `release-prep` commit (`v1.4.0..v1.4.1`). Nothing changed apart from the version strings. It exists to ship the Swift XCFramework 1.4.0 lacked: that release's `prepare-swift-release` job failed downloading the built artifact from GitHub, so v1.4.0's `Package.swift` still pins 1.3.2's XCFramework, whose header has no `agentstategraph_taskstore_set_title`. No capability changes status and the ABI stays at 39 operations.
+
 ## Earlier audit — 1.2.5 (retrospective)
 
 `reviewed_core_version` moved to 1.2.5 on 2026-09-29 in the release-prep commit

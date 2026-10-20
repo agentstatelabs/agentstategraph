@@ -7,6 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.4.1] — 2026-10-20
+
+Ships the Swift package that 1.4.0 should have. Nothing else changes: the Rust crates, Python wheel and npm package are 1.4.0 rebuilt under the new version.
+
+### Fixed
+- **The Swift package builds again.** 1.4.0's XCFramework built on GitHub, but its download back to GitLab failed (HTTP 503), so the v1.4.0 tag kept 1.3.2's XCFramework. Its header predates `agentstategraph_taskstore_set_title`, so `TaskStore.swift` doesn't compile from the v1.4.0 package. Swift users should take 1.4.1, which pins an XCFramework built from this release's source.
+
 ## [v1.4.0] — 2026-10-20
 
 A task can be revised after it's added: `TaskStore::set_title` changes its title, in Rust and every binding, and `set_blockers` refuses blockers that would form a cycle. `TaskStoreError` gains `TitleRequired` and `BlockerCycle`.
