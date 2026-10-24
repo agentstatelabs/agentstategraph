@@ -8,6 +8,8 @@
 //!   let storage = PostgresStorage::connect_tenant("postgres://...", "tenant-123").await?;
 //!   // From sync code, with or without an async runtime:
 //!   let storage = PostgresStorage::connect_tenant_blocking("postgres://...", "tenant-123", 8)?;
+//!   // Another tenant on the same pool, for a host serving many:
+//!   let other = storage.for_tenant("tenant-456")?;
 //!
 //! The storage traits are synchronous. Every connection is driven by one
 //! process-wide runtime owned by this module, so callers can use the storage
@@ -623,6 +625,12 @@ const FRESHEN_ON_CONFLICT: &str = "ON CONFLICT (tenant_id, id) DO UPDATE SET wri
 /// a database ("asg-sch" as bytes).
 const SCHEMA_LOCK_KEY: i64 = 0x6173_672d_7363_68;
 
+/// Store a tenant's `default` namespace, which every tenant has; a no-op once
+/// it exists.
+const SEED_DEFAULT_NAMESPACE: &str = "INSERT INTO namespaces (tenant_id, name, created_at)
+     VALUES ($1, 'default', NOW()::TEXT)
+     ON CONFLICT DO NOTHING";
+
 /// The runtime that drives every `PostgresStorage` connection in the process.
 ///
 /// A pooled connection lives on the runtime it was opened in. Owning that
@@ -699,6 +707,36 @@ impl PostgresStorage {
     ) -> Result<Self, StorageError> {
         let storage = Self::with_pool(database_url, tenant_id, max_size)?;
         storage.block_on(storage.init_tables())?;
+        Ok(storage)
+    }
+
+    /// A storage for another tenant on this storage's connection pool, for a
+    /// host that serves many tenants from one process. Every tenant opened
+    /// this way shares the one pool, so the pool's size caps the connections
+    /// the process holds however many tenants it opens, and they share its
+    /// TLS setup. Tenants stay apart as they do across processes: every row
+    /// carries its tenant, and every query filters on it.
+    ///
+    /// Cheap enough for a tenant's first request: the schema was brought up to
+    /// date when this storage connected, so opening a tenant only stores its
+    /// `default` namespace if it has none. The new storage has its own sweep
+    /// lock and this storage's GC grace period. Works from any thread, like the
+    /// rest of the storage API.
+    pub fn for_tenant(&self, tenant_id: &str) -> Result<Self, StorageError> {
+        let storage = Self {
+            pool: self.pool.clone(),
+            tenant_id: tenant_id.to_string(),
+            gc_grace: self.gc_grace,
+            gc_conn: std::sync::Mutex::new(None),
+        };
+        storage.block_on(async {
+            let client = storage.pool.get().await.map_err(conn_error)?;
+            client
+                .execute(SEED_DEFAULT_NAMESPACE, &[&storage.tenant_id])
+                .await
+                .map_err(|e| StorageError::Backend(format!("open tenant: {e}")))?;
+            Ok(())
+        })?;
         Ok(storage)
     }
 
@@ -852,14 +890,8 @@ impl PostgresStorage {
             )
             .await?;
         }
-        // Seed the default namespace for this tenant.
-        tx.execute(
-            "INSERT INTO namespaces (tenant_id, name, created_at)
-             VALUES ($1, 'default', NOW()::TEXT)
-             ON CONFLICT DO NOTHING",
-            &[&self.tenant_id],
-        )
-        .await?;
+        tx.execute(SEED_DEFAULT_NAMESPACE, &[&self.tenant_id])
+            .await?;
         tx.commit().await
     }
 
