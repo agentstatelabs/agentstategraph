@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **`PostgresStorage::for_tenant` opens another tenant on the same connection pool,** for a host that serves many tenants from one process, such as a multi-tenant CTXone Hub. Every tenant opened this way shares the one pool, so the pool's size caps the connections the process holds however many tenants it opens: 24 busy tenants on a pool of 3 held 3 server connections. Opening a tenant is cheap enough for its first request. It skips schema setup and its lock, since the storage it's called on already did that, and only stores the tenant's `default` namespace if it has none. Each tenant gets its own sweep lock and inherits the host storage's GC grace period. Tenants stay apart as they do across processes: tests open two tenants with the same namespace, ref and indexed-ref names and check that neither sees the other's objects, refs, commits, history, namespaces or search rows, and that a sweep in one leaves the other alone. Row-level security as a backstop comes later.
+
 ## [v1.4.1] — 2026-10-20
 
 Ships the Swift package that 1.4.0 should have. Nothing else changes: the Rust crates, Python wheel and npm package are 1.4.0 rebuilt under the new version.
