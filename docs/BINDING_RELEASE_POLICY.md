@@ -102,6 +102,8 @@ No binding calls them. Bindings surface repository errors as message strings, an
 
 1.4.1 was reviewed in its `release-prep` commit (`v1.4.0..v1.4.1`). Nothing changed apart from the version strings. It exists to ship the Swift XCFramework 1.4.0 lacked: that release's `prepare-swift-release` job failed downloading the built artifact from GitHub, so v1.4.0's `Package.swift` still pins 1.3.2's XCFramework, whose header has no `agentstategraph_taskstore_set_title`. No capability changes status and the ABI stays at 39 operations.
 
+1.4.2 was reviewed in its `release-prep` commit (`v1.4.1..v1.4.2`). Nothing under `crates/agentstategraph-ffi`, `crates/agentstategraph-wasm` or `bindings/` changed apart from the version strings. The one Core change is Rust-only and behind the `postgres` feature: `PostgresStorage::for_tenant`, which opens another tenant on the same connection pool. No binding opens a Postgres store, so no capability changes status and the ABI stays at 39 operations.
+
 ## Earlier audit — 1.2.5 (retrospective)
 
 `reviewed_core_version` moved to 1.2.5 on 2026-09-29 in the release-prep commit
