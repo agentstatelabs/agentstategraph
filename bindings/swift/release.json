@@ -1,6 +1,6 @@
 {
-  "asset": "agentstategraph-swift-v1.4.2.xcframework.zip",
-  "checksum": "7b04f2eba80fbf55e69f7f400ab75427c4f1eecc1b60ec323930897f291d1a7a",
-  "source_sha": "5e792ccc736efdbd82dea2edd0349d67adae0708",
-  "version": "1.4.2"
+  "asset": "agentstategraph-swift-v1.5.0.xcframework.zip",
+  "checksum": "7d54c591ccb7dac5bc9e9ba7c577e605ffbd3a228cff09ba445c20b2d613f481",
+  "source_sha": "bb2e3ff8c9556bf29bb14be9bd960241ec28f808",
+  "version": "1.5.0"
 }
