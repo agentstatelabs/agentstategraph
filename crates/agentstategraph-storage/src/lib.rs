@@ -25,7 +25,7 @@ pub use indexeddb::IndexedDbStorage;
 #[cfg(feature = "memory")]
 pub use memory::MemoryStorage;
 #[cfg(feature = "postgres")]
-pub use postgres::PostgresStorage;
+pub use postgres::{PostgresStorage, RowSecurity, TenantPool};
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
 pub use traits::{
@@ -35,6 +35,6 @@ pub use traits::{
     TableBytes, TaintStore, VacuumStats,
 };
 /// The Postgres client crates the storage is built on, for a host that keeps
-/// its own tables in the same database through [`PostgresStorage::pool`].
+/// its own tables in the same database through [`PostgresStorage::tenant_pool`].
 #[cfg(feature = "postgres")]
 pub use {oxtel_sql, tokio_postgres};

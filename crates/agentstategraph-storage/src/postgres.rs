@@ -42,6 +42,13 @@
 //! GC sweeps one tenant at a time and never makes writers wait: a sweep
 //! spares objects written within a grace period (see
 //! [`PostgresStorage::with_gc_grace`]) instead of locking writers out.
+//!
+//! Postgres row-level security can back up every query's tenant filter. Each
+//! table holding tenants' rows has a policy that lets a statement see and
+//! write only the rows of its connection's tenant, and every connection the
+//! storage checks out sets that tenant first ([`TENANT_SETTING`]). The
+//! policies do nothing until [`PostgresStorage::set_row_security`] switches
+//! them on, per database. A superuser or a role with `BYPASSRLS` skips them.
 
 use deadpool_postgres::{
     Config, ManagerConfig, PoolConfig, RecyclingMethod, Runtime as PoolRuntime,
@@ -52,7 +59,7 @@ use deadpool_postgres::{
 use oxtel_sql::postgres::{GenericClient, Pool};
 
 /// A pooled client, instrumented.
-type PgClient = oxtel_sql::postgres::Client<deadpool_postgres::Object>;
+pub type PgClient = oxtel_sql::postgres::Client<deadpool_postgres::Object>;
 /// A transaction on one, instrumented.
 type PgTransaction<'a> = oxtel_sql::postgres::Transaction<'a>;
 use std::sync::OnceLock;
@@ -313,7 +320,9 @@ mod tls {
 /// search index (Plan D t-008).
 /// 3: GC: object write times and speculation pins (Plan D t-009).
 /// 4: the trace each commit was made in (Plan H t-009).
-const SCHEMA_VERSION: i32 = 4;
+/// 5: the tenant policy on every tenant table, for row-level security (Plan F
+/// t-003). It's added after `SCHEMA_DDL`, from [`TENANT_TABLES`].
+const SCHEMA_VERSION: i32 = 5;
 
 /// Every table, column and index, each `IF NOT EXISTS` so it's safe to re-run
 /// over any earlier schema, plus the version stamp table.
@@ -586,6 +595,247 @@ const SCHEMA_DDL: &str = "
                 );
 ";
 
+/// The session setting that names the tenant a connection works for. Every
+/// connection the storage checks out has it set to the storage's tenant
+/// first, as does every connection a [`TenantPool`] hands out. With
+/// row-level security on (see [`PostgresStorage::set_row_security`]), each
+/// tenant table's policy compares a row's `tenant_id` with it, so a statement
+/// sees and writes only that tenant's rows, and a connection with no tenant
+/// set sees none.
+pub const TENANT_SETTING: &str = "asg.tenant";
+
+/// The name of the row-level security policy on each tenant table.
+/// [`PostgresStorage::set_row_security`] switches row-level security for
+/// every table in the schema that has it, a host's own included (see
+/// [`add_tenant_policy`]).
+pub const TENANT_POLICY: &str = "asg_tenant";
+
+/// AgentStateGraph's tables that hold tenants' rows. Each has a `tenant_id`
+/// column and the tenant policy. (`asg_schema` holds no tenant's rows.)
+pub const TENANT_TABLES: &[&str] = &[
+    "objects",
+    "commits",
+    "commit_traces",
+    "namespaces",
+    "refs",
+    "epochs",
+    "sessions",
+    "taints",
+    "reminders",
+    "leaf_rows",
+    "leaf_index_refs",
+    "gc_pending_roots",
+    "asg_history_cursor",
+    "asg_history_commit_rollup",
+    "asg_history_milestone",
+];
+
+/// Add the tenant policy ([`TENANT_POLICY`]) to `table` in the current schema,
+/// unless it has it: a statement may see or write a row only when the row's
+/// `tenant_id` is the connection's tenant ([`TENANT_SETTING`]). The policy
+/// does nothing until row-level security is switched on.
+///
+/// For a host that keeps tables of its own in the database, each with a
+/// `tenant_id` column: add the policy where the table is created (as its
+/// owner, under the same advisory lock), and switching row-level security on
+/// covers that table too.
+pub async fn add_tenant_policy(
+    client: &impl GenericClient,
+    table: &str,
+) -> Result<(), tokio_postgres::Error> {
+    let present: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_policies
+                            WHERE schemaname = current_schema()
+                              AND tablename = $1 AND policyname = $2)",
+            &[&table, &TENANT_POLICY],
+        )
+        .await?
+        .get(0);
+    if !present {
+        let tenant = format!("current_setting('{TENANT_SETTING}', true)");
+        client
+            .batch_execute(&format!(
+                "CREATE POLICY {TENANT_POLICY} ON {}
+                     USING (tenant_id = {tenant}) WITH CHECK (tenant_id = {tenant})",
+                quote_ident(table)
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Whether row-level security is on, table by table, in the storage's schema.
+/// See [`PostgresStorage::row_security`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowSecurity {
+    /// Tables with the tenant policy where row-level security is on. It's
+    /// forced too, so it binds the tables' owner.
+    pub on: Vec<String>,
+    /// Tables with the tenant policy where it's off.
+    pub off: Vec<String>,
+    /// Tables with a `tenant_id` column but no tenant policy. Switching
+    /// row-level security leaves them alone: nothing backs up their queries'
+    /// tenant filters.
+    pub unguarded: Vec<String>,
+    /// Whether this connection's role skips row-level security whatever the
+    /// tables say: a superuser, or a role with `BYPASSRLS`.
+    pub role_bypasses: bool,
+}
+
+impl RowSecurity {
+    /// On for every table with the tenant policy, and binding this role.
+    pub fn enforced(&self) -> bool {
+        self.off.is_empty() && !self.on.is_empty() && !self.role_bypasses
+    }
+}
+
+/// The schema's tables with a `tenant_id` column: each one's name, whether
+/// row-level security is on (enabled and forced), and whether it has the
+/// tenant policy.
+const TENANT_ID_TABLES: &str = "
+    SELECT c.relname::text,
+           c.relrowsecurity AND c.relforcerowsecurity,
+           EXISTS (SELECT 1 FROM pg_policy p
+                   WHERE p.polrelid = c.oid AND p.polname = $1)
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema()
+      AND c.relkind IN ('r', 'p')
+      AND EXISTS (SELECT 1 FROM pg_attribute a
+                  WHERE a.attrelid = c.oid AND a.attname = 'tenant_id'
+                    AND NOT a.attisdropped)
+    ORDER BY 1";
+
+async fn row_security_of(
+    client: &impl GenericClient,
+) -> Result<RowSecurity, tokio_postgres::Error> {
+    let mut status = RowSecurity {
+        on: Vec::new(),
+        off: Vec::new(),
+        unguarded: Vec::new(),
+        role_bypasses: client
+            .query_one(
+                "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+                &[],
+            )
+            .await?
+            .get(0),
+    };
+    for row in client.query(TENANT_ID_TABLES, &[&TENANT_POLICY]).await? {
+        let (table, on, guarded): (String, bool, bool) = (row.get(0), row.get(1), row.get(2));
+        match (guarded, on) {
+            (false, _) => status.unguarded.push(table),
+            (true, true) => status.on.push(table),
+            (true, false) => status.off.push(table),
+        }
+    }
+    Ok(status)
+}
+
+/// See [`PostgresStorage::set_row_security`]. Switching on touches only the
+/// tables where it's off; switching off touches every table with the policy,
+/// so a table left enabled but not forced goes off too.
+async fn try_set_row_security(
+    client: &mut PgClient,
+    on: bool,
+) -> Result<RowSecurity, tokio_postgres::Error> {
+    let tx = client.transaction().await?;
+    // A waiting ALTER TABLE queues every later query on its table behind it,
+    // so wait for a busy table only so long.
+    tx.batch_execute("SET LOCAL lock_timeout = '10s'").await?;
+    tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_KEY])
+        .await?;
+    let before = row_security_of(&tx).await?;
+    let (tables, change): (Vec<&String>, &str) = if on {
+        (
+            before.off.iter().collect(),
+            "ENABLE ROW LEVEL SECURITY, FORCE ROW LEVEL SECURITY",
+        )
+    } else {
+        (
+            before.on.iter().chain(&before.off).collect(),
+            "DISABLE ROW LEVEL SECURITY, NO FORCE ROW LEVEL SECURITY",
+        )
+    };
+    for table in tables {
+        tx.batch_execute(&format!("ALTER TABLE {} {change}", quote_ident(table)))
+            .await?;
+    }
+    let after = row_security_of(&tx).await?;
+    tx.commit().await?;
+    Ok(after)
+}
+
+/// `name` as an SQL identifier, quoted.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// `value` as an SQL string literal, for a statement sent without parameters.
+/// The `E'...'` form reads backslashes the same way whatever
+/// `standard_conforming_strings` says.
+fn quote_literal(value: &str) -> String {
+    format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// Check out a connection from `pool` that works for `tenant`: it sets
+/// [`TENANT_SETTING`] first. The setting lasts for the connection's session,
+/// so it goes back to the pool with it, and the next checkout through here
+/// replaces it. It's sent without parameters because that takes one round
+/// trip, where a statement with parameters takes two.
+async fn checkout(pool: &Pool, tenant: &str) -> Result<PgClient, StorageError> {
+    let client = pool.get().await.map_err(conn_error)?;
+    client
+        .batch_execute(&format!(
+            "SELECT set_config('{TENANT_SETTING}', {}, false)",
+            quote_literal(tenant)
+        ))
+        .await
+        .map_err(|e| StorageError::Backend(with_causes("set the tenant", &e)))?;
+    Ok(client)
+}
+
+/// A storage's connection pool, for one tenant: every connection it hands out
+/// has the tenant set ([`TENANT_SETTING`]), so with row-level security on its
+/// statements see only that tenant's rows. For a host that keeps tables of its
+/// own in the same database; see [`PostgresStorage::tenant_pool`].
+#[derive(Clone)]
+pub struct TenantPool {
+    pool: Pool,
+    tenant_id: String,
+}
+
+impl TenantPool {
+    /// A pooled connection with the tenant set. Use it inside
+    /// [`PostgresStorage::run`]: a connection belongs to the storage's
+    /// runtime.
+    pub async fn get(&self) -> Result<PgClient, StorageError> {
+        checkout(&self.pool, &self.tenant_id).await
+    }
+
+    /// The tenant its connections work for.
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    /// The same pool, for another tenant.
+    pub fn for_tenant(&self, tenant_id: &str) -> TenantPool {
+        TenantPool {
+            pool: self.pool.clone(),
+            tenant_id: tenant_id.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Debug for TenantPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TenantPool")
+            .field("tenant_id", &self.tenant_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A database error with its whole cause chain. tokio-postgres's Display for
 /// a server error is just "db error"; the server's message is the source.
 fn with_causes(context: &str, e: &dyn std::error::Error) -> String {
@@ -730,7 +980,7 @@ impl PostgresStorage {
             gc_conn: std::sync::Mutex::new(None),
         };
         storage.block_on(async {
-            let client = storage.pool.get().await.map_err(conn_error)?;
+            let client = storage.client().await?;
             client
                 .execute(SEED_DEFAULT_NAMESPACE, &[&storage.tenant_id])
                 .await
@@ -813,18 +1063,36 @@ impl PostgresStorage {
         self.pool.status().max_size
     }
 
-    /// The storage's connection pool, configured as for the storage itself
-    /// (TLS, pool size), with every query recorded as a database span. For a
-    /// host that keeps tables of its own in the same database: scope their
-    /// rows by [`tenant_id`](Self::tenant_id), and use the pool inside
-    /// [`PostgresStorage::run`], so a connection it opens is driven by the
-    /// storage's runtime like the storage's own, not by a caller's runtime that
-    /// may be gone when the connection is reused. Take the pool and tenant
-    /// before handing the storage to a `Repository`. Create the tables in a
-    /// transaction holding an advisory lock (`pg_advisory_xact_lock`):
-    /// `CREATE TABLE IF NOT EXISTS` from two processes at once can still fail
-    /// on Postgres's catalog index. The client crates are re-exported as
+    /// The storage's connection pool, for its tenant: configured as for the
+    /// storage itself (TLS, pool size), with every query recorded as a
+    /// database span, and every connection it hands out has the tenant set
+    /// ([`TENANT_SETTING`]). For a host that keeps tables of its own in the
+    /// same database: scope their rows by the tenant all the same, add the
+    /// tenant policy to each ([`add_tenant_policy`]) so row-level security
+    /// covers them, and use the pool inside [`PostgresStorage::run`], so a
+    /// connection it opens is driven by the storage's runtime like the
+    /// storage's own, not by a caller's runtime that may be gone when the
+    /// connection is reused. Take the pool before handing the storage to a
+    /// `Repository`. Create the tables in a transaction holding an advisory
+    /// lock (`pg_advisory_xact_lock`): `CREATE TABLE IF NOT EXISTS` from two
+    /// processes at once can still fail on Postgres's catalog index. The
+    /// client crates are re-exported as
     /// `agentstategraph_storage::{oxtel_sql, tokio_postgres}`.
+    pub fn tenant_pool(&self) -> TenantPool {
+        TenantPool {
+            pool: self.pool.clone(),
+            tenant_id: self.tenant_id.clone(),
+        }
+    }
+
+    /// The storage's connection pool, raw: its connections don't set a
+    /// tenant, so one carries whichever tenant used it last, and row-level
+    /// security can't back up a query on it.
+    #[deprecated(
+        since = "1.5.0",
+        note = "use tenant_pool(): a connection from pool() carries whichever tenant used it \
+                last, so row-level security can't back up its queries"
+    )]
     pub fn pool(&self) -> Pool {
         self.pool.clone()
     }
@@ -832,6 +1100,62 @@ impl PostgresStorage {
     /// The tenant this storage reads and writes.
     pub fn tenant_id(&self) -> &str {
         &self.tenant_id
+    }
+
+    /// Where row-level security stands in the storage's schema, table by
+    /// table, and whether this connection's role skips it.
+    pub fn row_security(&self) -> Result<RowSecurity, StorageError> {
+        self.block_on(async {
+            let client = self.client().await?;
+            row_security_of(&client)
+                .await
+                .map_err(|e| StorageError::Backend(with_causes("row-level security", &e)))
+        })
+    }
+
+    /// Switch row-level security on or off for every table in the storage's
+    /// schema that has the tenant policy, AgentStateGraph's and a host's
+    /// alike, and return where it then stands. On means enabled and forced,
+    /// so it binds the tables' owner too: a statement sees and writes only
+    /// the rows of its connection's tenant ([`TENANT_SETTING`]), a backstop
+    /// behind every query's own tenant filter.
+    ///
+    /// It's off until switched on, per database. Every connection the storage
+    /// checks out already has its tenant set, so the processes using the
+    /// database needn't restart. It doesn't cover a superuser or a role with
+    /// `BYPASSRLS` (see [`RowSecurity::role_bypasses`]), so connect as a role
+    /// with neither; nor a connection from the deprecated
+    /// [`pool`](Self::pool).
+    ///
+    /// Run it as the role that owns the tables. It locks each table briefly,
+    /// under the schema setup lock, and gives up if it waits 10 seconds for
+    /// one. With it on, `pg_dump` run as the tables' owner fails rather than
+    /// dump only some rows: dump as a superuser or a role with `BYPASSRLS`.
+    pub fn set_row_security(&self, on: bool) -> Result<RowSecurity, StorageError> {
+        let context = if on {
+            "switch row-level security on"
+        } else {
+            "switch row-level security off"
+        };
+        let deadlock = Some(&tokio_postgres::error::SqlState::T_R_DEADLOCK_DETECTED);
+        self.block_on(async {
+            let mut client = self.client().await?;
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                match try_set_row_security(&mut client, on).await {
+                    Err(e) if attempt < 5 && e.code() == deadlock => continue,
+                    Err(e) => return Err(StorageError::Backend(with_causes(context, &e))),
+                    Ok(status) => return Ok(status),
+                }
+            }
+        })
+    }
+
+    /// A pooled connection for this storage's tenant. Every query the storage
+    /// runs goes through one.
+    async fn client(&self) -> Result<PgClient, StorageError> {
+        checkout(&self.pool, &self.tenant_id).await
     }
 
     /// Bring the schema up to date and seed this tenant's default namespace.
@@ -844,7 +1168,7 @@ impl PostgresStorage {
     /// table locks at startup. An actual upgrade still can collide with
     /// writers, so a deadlock victim retries.
     async fn init_tables(&self) -> Result<(), StorageError> {
-        let mut client = self.pool.get().await.map_err(conn_error)?;
+        let mut client = self.client().await?;
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -883,6 +1207,9 @@ impl PostgresStorage {
         };
         if version.is_none_or(|v| v < SCHEMA_VERSION) {
             tx.batch_execute(SCHEMA_DDL).await?;
+            for table in TENANT_TABLES {
+                add_tenant_policy(&tx, table).await?;
+            }
             tx.execute(
                 "INSERT INTO asg_schema (component, version) VALUES ('postgres', $1)
                  ON CONFLICT (component) DO UPDATE SET version = EXCLUDED.version",
@@ -967,7 +1294,7 @@ impl PostgresStorage {
     ) -> Result<(), StorageError> {
         let root = root.map(|r| r.as_bytes().as_slice());
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             let tx = client
                 .transaction()
                 .await
@@ -999,7 +1326,7 @@ impl PostgresStorage {
 impl ObjectStore for PostgresStorage {
     fn get_object(&self, id: &ObjectId) -> Result<Option<Object>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let row = client
                 .query_opt(
@@ -1027,7 +1354,7 @@ impl ObjectStore for PostgresStorage {
             serde_json::to_value(obj).map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             client
                 .execute(
@@ -1068,7 +1395,7 @@ impl ObjectStore for PostgresStorage {
             return Ok(Vec::new());
         }
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             let tx = client
                 .transaction()
                 .await
@@ -1113,7 +1440,7 @@ impl ObjectStore for PostgresStorage {
         }
         let wanted: Vec<Vec<u8>> = ids.iter().map(|id| id.as_bytes().to_vec()).collect();
         let found = self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "SELECT id, data FROM objects WHERE tenant_id = $1 AND id = ANY($2)",
@@ -1136,7 +1463,7 @@ impl ObjectStore for PostgresStorage {
 
     fn leaf_index_is_built(&self, namespace: &str, ref_name: &str) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             leaf_set_built(&client, &self.tenant_id, namespace, ref_name).await
         })
     }
@@ -1158,7 +1485,7 @@ impl ObjectStore for PostgresStorage {
         added: &[(String, String)],
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             let tx = client
                 .transaction()
                 .await
@@ -1204,7 +1531,7 @@ impl ObjectStore for PostgresStorage {
         ref_name: &str,
     ) -> Result<Option<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_opt(
                     "SELECT root FROM leaf_index_refs
@@ -1240,7 +1567,7 @@ impl ObjectStore for PostgresStorage {
         added: &[(String, String)],
     ) -> Result<bool, StorageError> {
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             let tx = client
                 .transaction()
                 .await
@@ -1292,7 +1619,7 @@ impl ObjectStore for PostgresStorage {
         limit: usize,
     ) -> Result<Option<Vec<(String, String)>>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             if !leaf_set_built(&client, &self.tenant_id, namespace, ref_name).await? {
                 return Ok(None);
             }
@@ -1321,7 +1648,7 @@ impl ObjectStore for PostgresStorage {
 
     fn has_object(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let row = client
                 .query_one(
@@ -1351,7 +1678,7 @@ impl CommitStore for PostgresStorage {
             serde_json::to_value(commit).map_err(|e| StorageError::Serialization(e.to_string()))?;
         let timestamp = commit.timestamp;
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             // One statement, so one round trip.
             client
                 .execute(
@@ -1384,7 +1711,7 @@ impl CommitStore for PostgresStorage {
         trace: &CommitTrace,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             client
                 .execute(
                     "INSERT INTO commit_traces (tenant_id, commit_id, trace_id, span_id)
@@ -1405,7 +1732,7 @@ impl CommitStore for PostgresStorage {
 
     fn get_commit_trace(&self, commit_id: &ObjectId) -> Result<Option<CommitTrace>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_opt(
                     "SELECT trace_id, span_id FROM commit_traces
@@ -1423,7 +1750,7 @@ impl CommitStore for PostgresStorage {
 
     fn all_commit_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "SELECT id FROM commits WHERE tenant_id = $1",
@@ -1446,7 +1773,7 @@ impl CommitStore for PostgresStorage {
 
     fn get_commit(&self, id: &ObjectId) -> Result<Option<Commit>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let row = client
                 .query_opt(
@@ -1474,7 +1801,7 @@ impl CommitStore for PostgresStorage {
         let timestamp = commit.timestamp;
 
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             client
                 .execute(
@@ -1496,7 +1823,7 @@ impl CommitStore for PostgresStorage {
 
     fn has_commit(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let row = client
                 .query_one(
@@ -1517,7 +1844,7 @@ impl CommitStore for PostgresStorage {
             return Ok(Vec::new());
         }
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "WITH RECURSIVE line(data, n) AS (
@@ -1558,7 +1885,7 @@ impl CommitStore for PostgresStorage {
     /// commit table instead.
     fn list_commits_dag(&self, from: &ObjectId, limit: usize) -> Result<CommitWalk, StorageError> {
         let mut commits = self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "WITH RECURSIVE walk(id, parents) AS (
@@ -1611,7 +1938,7 @@ impl CommitStore for PostgresStorage {
     fn history_extract_batch(&self, batch_size: usize) -> Result<usize, StorageError> {
         let batch_size = sql_count(batch_size.max(1));
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             let tx = client
                 .transaction()
                 .await
@@ -1707,7 +2034,7 @@ impl CommitStore for PostgresStorage {
     /// rowid; either way it only grows, and 0 means nothing is extracted.)
     fn history_cursor(&self) -> Result<i64, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_opt(
                     "SELECT folded FROM asg_history_cursor WHERE tenant_id = $1",
@@ -1721,7 +2048,7 @@ impl CommitStore for PostgresStorage {
 
     fn history_undistilled_commit_count(&self) -> Result<i64, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_one(
                     "SELECT COUNT(*) FROM commits c
@@ -1738,7 +2065,7 @@ impl CommitStore for PostgresStorage {
 
     fn history_is_commit_distilled(&self, id: &ObjectId) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_one(
                     "SELECT EXISTS (
@@ -1757,7 +2084,7 @@ impl CommitStore for PostgresStorage {
 
     fn history_rollup(&self) -> Result<Vec<HistoryRollupRow>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "SELECT day, namespace, agent_id, intent_category, commit_count,
@@ -1786,7 +2113,7 @@ impl CommitStore for PostgresStorage {
 
     fn history_milestones(&self, limit: usize) -> Result<Vec<HistoryMilestoneRow>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "SELECT commit_id, kind, timestamp, day, namespace, agent_id, description,
@@ -1822,7 +2149,7 @@ impl CommitStore for PostgresStorage {
 
     fn history_retained_state_roots(&self) -> Result<Vec<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "SELECT DISTINCT state_root FROM asg_history_milestone
@@ -1847,7 +2174,7 @@ impl CommitStore for PostgresStorage {
         self.block_on(async {
             // The mark lives in temp tables, so it runs on a connection of
             // its own that is closed afterwards rather than pooled.
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let result = async {
                 gc_mark(&client, &self.tenant_id, roots, batch).await?;
                 let row = client
@@ -1947,7 +2274,7 @@ impl CommitStore for PostgresStorage {
 
     fn gc_pin_root(&self, key: &str, root: &ObjectId) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             client
                 .execute(
                     "INSERT INTO gc_pending_roots (tenant_id, key, root, updated_at)
@@ -1964,7 +2291,7 @@ impl CommitStore for PostgresStorage {
 
     fn gc_unpin_root(&self, key: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             client
                 .execute(
                     "DELETE FROM gc_pending_roots WHERE tenant_id = $1 AND key = $2",
@@ -1978,7 +2305,7 @@ impl CommitStore for PostgresStorage {
 
     fn gc_pinned_roots(&self, max_age: std::time::Duration) -> Result<Vec<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             gc_pinned(&client, &self.tenant_id, max_age.as_secs_f64()).await
         })
     }
@@ -1987,7 +2314,7 @@ impl CommitStore for PostgresStorage {
     /// from before that was recorded come last, newest first by timestamp).
     fn commit_state_roots_recent_first(&self) -> Result<Vec<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let rows = client
                 .query(
                     "SELECT data -> 'state_root' FROM commits WHERE tenant_id = $1
@@ -2012,7 +2339,7 @@ impl CommitStore for PostgresStorage {
     /// so there is no size of the tenant's own to report.
     fn store_totals(&self) -> Result<Option<StoreTotals>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_one(
                     "SELECT (SELECT count(*) FROM objects WHERE tenant_id = $1),
@@ -2031,7 +2358,7 @@ impl CommitStore for PostgresStorage {
 
     fn history_store_shape(&self) -> Result<StoreShape, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_one(
                     "SELECT (SELECT count(*) FROM objects WHERE tenant_id = $1),
@@ -2072,7 +2399,7 @@ impl PostgresStorage {
     /// lock). Fails at once if another sweep holds it. Closing the connection
     /// releases the lock, so it is never returned to the pool.
     async fn gc_lock(&self) -> Result<PgClient, StorageError> {
-        let client = self.pool.get().await.map_err(conn_error)?;
+        let client = self.client().await?;
         let locked: bool = client
             .query_one(
                 "SELECT pg_try_advisory_lock(hashtextextended('asg-gc:' || $1, 0))",
@@ -2550,7 +2877,7 @@ impl HistoryFold {
 impl RefStore for PostgresStorage {
     fn create_namespace(&self, namespace: &Namespace) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let rows = client
                 .execute(
@@ -2572,7 +2899,7 @@ impl RefStore for PostgresStorage {
 
     fn list_namespaces(&self) -> Result<Vec<Namespace>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let rows = client
                 .query(
@@ -2596,7 +2923,7 @@ impl RefStore for PostgresStorage {
 
     fn get_ref(&self, namespace: &Namespace, name: &str) -> Result<Option<ObjectId>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let ns_row = client
                 .query_opt(
@@ -2641,7 +2968,7 @@ impl RefStore for PostgresStorage {
         target: ObjectId,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let ns_row = client
                 .query_opt(
@@ -2683,7 +3010,7 @@ impl RefStore for PostgresStorage {
         new: ObjectId,
     ) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let ns_row = client
                 .query_opt(
@@ -2725,7 +3052,7 @@ impl RefStore for PostgresStorage {
         target: ObjectId,
     ) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             self.require_namespace(&client, namespace).await?;
             let rows = client
                 .execute(
@@ -2752,7 +3079,7 @@ impl RefStore for PostgresStorage {
         expected: ObjectId,
     ) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             self.require_namespace(&client, namespace).await?;
             let rows = client
                 .execute(
@@ -2778,7 +3105,7 @@ impl RefStore for PostgresStorage {
         prefix: &str,
     ) -> Result<Vec<(String, ObjectId)>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let ns_row = client
                 .query_opt(
@@ -2821,7 +3148,7 @@ impl RefStore for PostgresStorage {
 
     fn delete_ref(&self, namespace: &Namespace, name: &str) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let ns_row = client
                 .query_opt(
@@ -2857,7 +3184,7 @@ impl RefStore for PostgresStorage {
         let ns = namespace.as_str().to_string();
         let tid = self.tenant_id.clone();
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             // Refs and the namespace row go together or not at all; separately,
             // a failure in between left refs deleted under a namespace that
             // still existed.
@@ -3056,7 +3383,7 @@ impl EpochStore for PostgresStorage {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             client
                 .execute(
@@ -3100,7 +3427,7 @@ impl EpochStore for PostgresStorage {
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
 
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             // One conditional UPDATE, so two sealers can't both pass a status
             // check and overwrite each other's seal.
@@ -3142,7 +3469,7 @@ impl EpochStore for PostgresStorage {
 
     fn assign_epoch_namespace(&self, id: &str, namespace: &str) -> Result<bool, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             // `namespace IS NULL` makes this assign-only — see the trait docs.
             let changed = client
                 .execute(
@@ -3171,7 +3498,7 @@ impl EpochStore for PostgresStorage {
 
     fn list_epochs(&self) -> Result<Vec<Epoch>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let rows = client
                 .query(
@@ -3190,7 +3517,7 @@ impl EpochStore for PostgresStorage {
 
     fn get_epoch(&self, id: &str) -> Result<Option<Epoch>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let row = client
                 .query_opt(
@@ -3237,7 +3564,7 @@ impl EpochStore for PostgresStorage {
 
     fn archive_epoch(&self, id: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let n = client
                 .execute(
                     "UPDATE epochs SET status = 'Archived'
@@ -3258,7 +3585,7 @@ impl EpochStore for PostgresStorage {
 
     fn set_commit_epoch(&self, commit_id: &ObjectId, epoch_id: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             // One transaction with the epoch row locked: a seal waits for it,
             // so a commit can't join an epoch that is being sealed, and the
             // status check can't go stale before the write.
@@ -3331,7 +3658,7 @@ impl SessionStore for PostgresStorage {
         .to_string();
 
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             client
                 .execute(
@@ -3383,7 +3710,7 @@ impl SessionStore for PostgresStorage {
         ended_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             // One conditional UPDATE, so two callers ending one session can't
             // both pass a status check; exactly one ends it.
             let ended = client
@@ -3418,7 +3745,7 @@ impl SessionStore for PostgresStorage {
 
     fn list_sessions(&self, agent_filter: Option<&str>) -> Result<Vec<Session>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let rows = client
                 .query(
@@ -3453,7 +3780,7 @@ impl SessionStore for PostgresStorage {
 
     fn get_session(&self, id: &str) -> Result<Option<Session>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let row = client
                 .query_opt(
@@ -3489,7 +3816,7 @@ impl SessionStore for PostgresStorage {
         session_id: &str,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let mut client = self.pool.get().await.map_err(conn_error)?;
+            let mut client = self.client().await?;
             // As set_commit_epoch: one transaction, the session row locked so
             // ending the session waits and the status check can't go stale.
             let tx = client
@@ -3673,7 +4000,7 @@ fn pg_row_to_taint(
 impl TaintStore for PostgresStorage {
     fn create_taint(&self, taint: &agentstategraph_taint::Taint) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let metadata_json = serde_json::to_string(&taint.metadata)
                 .map_err(|e| StorageError::Serialization(format!("taint metadata: {e}")))?;
             let expires = taint.expires_at.map(|t| t.to_rfc3339());
@@ -3721,7 +4048,7 @@ impl TaintStore for PostgresStorage {
         resolved_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             // Guard: fail on already-resolved / not-found. Partial
             // unique index would force failures on re-activation;
             // we want explicit control here so the error is legible.
@@ -3768,7 +4095,7 @@ impl TaintStore for PostgresStorage {
         include_resolved: bool,
     ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             // Build dynamic WHERE without sacrificing parameterization:
             // we always pass tenant_id + optional prefix/plike/kind.
             let prefix = path_prefix.map(|p| p.trim_end_matches('/').to_string());
@@ -3874,7 +4201,7 @@ impl TaintStore for PostgresStorage {
         request_path: &str,
     ) -> Result<Vec<agentstategraph_taint::Taint>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let now = Utc::now().to_rfc3339();
             // Ancestor match: exact OR (propagate=true AND request_path
             // LIKE path || '/%'). Postgres LIKE is case-sensitive.
@@ -3900,7 +4227,7 @@ impl TaintStore for PostgresStorage {
 
     fn get_taint(&self, id: &str) -> Result<Option<agentstategraph_taint::Taint>, StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_opt(
                     "SELECT * FROM taints WHERE tenant_id = $1 AND id = $2",
@@ -3917,7 +4244,7 @@ impl TaintStore for PostgresStorage {
 
     fn set_taint_commit_id(&self, id: &str, commit_id: &str) -> Result<(), StorageError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             client
                 .execute(
                     "UPDATE taints SET commit_id = $3
@@ -4140,7 +4467,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         let snoozed_until = reminder.snoozed_until.map(|t| t.to_rfc3339());
 
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             client
                 .execute(
                     "INSERT INTO reminders (
@@ -4180,7 +4507,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
     ) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
     {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let row = client
                 .query_opt(
                     "SELECT * FROM reminders WHERE tenant_id = $1 AND id = $2",
@@ -4202,7 +4529,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
         let written = self
             .block_on(async {
-                let client = self.pool.get().await.map_err(conn_error)?;
+                let client = self.client().await?;
                 write_reminder(&client, &self.tenant_id, reminder).await
             })
             .map_err(|e| agentstategraph_reminders::ReminderError::Store(e.to_string()))?;
@@ -4229,7 +4556,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         }
         let outcome = self
             .block_on(async {
-                let mut client = self.pool.get().await.map_err(conn_error)?;
+                let mut client = self.client().await?;
                 let tx = client
                     .transaction()
                     .await
@@ -4265,7 +4592,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
 
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
             let n = client
                 .execute(
                     "DELETE FROM reminders WHERE tenant_id = $1 AND id = $2",
@@ -4294,7 +4621,7 @@ impl agentstategraph_reminders::ReminderStore for PostgresStorage {
         let tags = filter.tags.clone();
 
         self.block_on(async {
-            let client = self.pool.get().await.map_err(conn_error)?;
+            let client = self.client().await?;
 
             let mut sql = "SELECT * FROM reminders WHERE tenant_id = $1".to_string();
             let mut idx = 2usize;
@@ -4376,6 +4703,32 @@ mod tests {
             .create_pool(Some(PoolRuntime::Tokio1), tokio_postgres::NoTls)
             .expect("build pool");
         assert_eq!(pool.status().max_size, 7);
+    }
+
+    /// Every connection the storage takes from its pool comes through
+    /// `checkout`, which sets the tenant row-level security checks. A
+    /// connection taken any other way carries whichever tenant used it last.
+    #[test]
+    fn every_checkout_sets_the_tenant() {
+        let source = include_str!("postgres.rs");
+        let raw = concat!("pool", ".get()");
+        let lines: Vec<&str> = source.lines().filter(|l| l.contains(raw)).collect();
+        assert_eq!(
+            lines,
+            [concat!(
+                "    let client = pool",
+                ".get().await.map_err(conn_error)?;"
+            )],
+            "take connections through `checkout` (or `self.client()`)"
+        );
+    }
+
+    #[test]
+    fn literals_and_identifiers_are_quoted() {
+        assert_eq!(quote_literal("plain"), "E'plain'");
+        assert_eq!(quote_literal(r"o'brien\x"), r"E'o\'brien\\x'");
+        assert_eq!(quote_ident("objects"), "\"objects\"");
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
     }
 
     fn tls_of(url: &str) -> ConnectionTls {

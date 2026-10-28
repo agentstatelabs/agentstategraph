@@ -4,7 +4,10 @@
 //! backends are held to one contract by tests rather than by reading code.
 //! Memory and SQLite always run. Postgres runs when `TEST_DATABASE_URL` is
 //! set (CI provides one; `scripts/test-postgres.sh` starts one locally), and
-//! every test gets its own tenant so tests can share one database.
+//! every test gets its own tenant so tests can share one database. Postgres
+//! runs twice: as `TEST_DATABASE_URL`'s role, and as a role that row-level
+//! security binds, in a schema of its own with it switched on, so every
+//! operation is checked to work under the tenant policies (Plan F t-003).
 //!
 //! A case a backend is known to fail is listed in [`KNOWN_FAILURES`] with the
 //! Plan D task that owns the fix. A deterministic known failure must keep
@@ -27,11 +30,17 @@ use chrono::{DateTime, Utc};
 
 type Store = Arc<dyn Storage + Send + Sync>;
 
+#[cfg(feature = "postgres")]
+#[path = "support/row_security.rs"]
+mod row_security;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Backend {
     Memory,
     Sqlite,
     Postgres,
+    /// Postgres with row-level security on, as a role it binds.
+    PostgresRowSecurity,
 }
 
 /// A case a backend fails today, and who owns the fix.
@@ -142,6 +151,52 @@ fn postgres_url() -> Option<String> {
         .filter(|u| !u.is_empty())
 }
 
+/// The schema the row-level security legs share, each test with a tenant of
+/// its own.
+#[cfg(feature = "postgres")]
+const ROW_SECURITY_SCHEMA: &str = "asg_conformance_row_security";
+
+/// A connection string for the row-level security legs: the role
+/// [`row_security::ROLE`], in a fresh schema of its own (made once per run),
+/// with row-level security switched on there.
+#[cfg(feature = "postgres")]
+fn row_security_url() -> Option<String> {
+    static URL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        let admin_url = postgres_url()?;
+        row_security::Admin::connect(&admin_url).role_and_schema(ROW_SECURITY_SCHEMA);
+        let url = row_security::role_url(&admin_url, ROW_SECURITY_SCHEMA);
+        let setup = agentstategraph_storage::PostgresStorage::connect_tenant_blocking(
+            &url,
+            "conformance-row-security",
+            1,
+        )
+        .expect("connect as the row-level security role");
+        let status = setup
+            .set_row_security(true)
+            .expect("switch row-level security on");
+        assert!(
+            status.enforced(),
+            "row-level security isn't enforced: {status:?}"
+        );
+        Some(url)
+    })
+    .clone()
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_row_security_fixture(case: &str) -> Option<Fixture> {
+    let url = row_security_url()?;
+    let tenant = format!("conformance-rls-{case}-{}", uuid::Uuid::new_v4().simple());
+    let store = postgres_connect(&url, &tenant);
+    Some(Fixture {
+        backend: Backend::PostgresRowSecurity,
+        store,
+        opener: Arc::new(move || postgres_connect(&url, &tenant)),
+        cleanup: None,
+    })
+}
+
 #[cfg(feature = "postgres")]
 fn postgres_fixture(case: &str) -> Option<Fixture> {
     let url = postgres_url()?;
@@ -166,6 +221,8 @@ fn fixtures(case: &str) -> Vec<Fixture> {
         Some(f) => all.push(f),
         None => skip_postgres(case),
     }
+    #[cfg(feature = "postgres")]
+    all.extend(postgres_row_security_fixture(case));
     #[cfg(not(feature = "postgres"))]
     skip_postgres(case);
     all
