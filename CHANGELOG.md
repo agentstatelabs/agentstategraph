@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.5.0] — 2026-10-28
+
+A host serving many tenants on one Postgres database can switch on row-level security, so a query that forgot its tenant filter sees nothing of other tenants'. It's off until switched on, per database, so nothing changes for existing users until then. `PostgresStorage::pool` is deprecated in favour of `tenant_pool`.
+
 ### Added
 - **Postgres row-level security, as a backstop behind every query's tenant filter.** Every table that holds tenants' rows gets a policy that lets a statement see and write only the rows of its connection's tenant, kept in the session setting `asg.tenant`. Every connection the storage checks out sets it first. The policies do nothing until `PostgresStorage::set_row_security(true)` switches them on, per database. `row_security()` reports where it stands, table by table, and whether the connection's role skips it: a superuser or a role with `BYPASSRLS` always does, so a host should connect as a role with neither.
   - Switched on, it's forced, so it binds the tables' owner too. A `pg_dump` run as the owner then fails rather than dump only some rows: dump as a superuser or a role with `BYPASSRLS`.
