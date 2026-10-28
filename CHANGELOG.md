@@ -7,6 +7,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **Postgres row-level security, as a backstop behind every query's tenant filter.** Every table that holds tenants' rows gets a policy that lets a statement see and write only the rows of its connection's tenant, kept in the session setting `asg.tenant`. Every connection the storage checks out sets it first. The policies do nothing until `PostgresStorage::set_row_security(true)` switches them on, per database. `row_security()` reports where it stands, table by table, and whether the connection's role skips it: a superuser or a role with `BYPASSRLS` always does, so a host should connect as a role with neither.
+  - Switched on, it's forced, so it binds the tables' owner too. A `pg_dump` run as the owner then fails rather than dump only some rows: dump as a superuser or a role with `BYPASSRLS`.
+  - Connecting to an older database adds the policies once (schema version 5). They change nothing until switched on.
+  - A host's own tables join with `postgres::add_tenant_policy`, and the switch covers them.
+  - The conformance suite runs every case on Postgres a second time with it on, as a role it binds. With it on, a query without a tenant filter counts only its tenant's rows in every table, and a connection with no tenant set sees none.
+- **`PostgresStorage::tenant_pool`** gives a host the storage's pool for its tenant: every connection from the `TenantPool` has the tenant set. `TenantPool::for_tenant` gives the same pool for another tenant.
+
+### Changed
+- **Each connection the Postgres storage checks out takes one more round trip,** to set its tenant.
+
+### Deprecated
+- **`PostgresStorage::pool`.** Its connections don't set a tenant, so one carries whichever tenant used it last, and row-level security can't back up its queries. Use `tenant_pool`.
+
 ## [v1.4.2] — 2026-10-24
 
 A host can serve many tenants from one process on one Postgres connection pool, with `PostgresStorage::for_tenant`. Nothing else changes for existing users.

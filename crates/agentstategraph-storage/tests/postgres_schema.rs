@@ -76,8 +76,8 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
 
     // A current database with a merge in its history, rewound to look like
     // one from before the version stamp (version 1), epoch seal digests, the
-    // version 2 history and search tables, the version 3 GC columns, and the
-    // version 4 commit traces.
+    // version 2 history and search tables, the version 3 GC columns, the
+    // version 4 commit traces, and the version 5 tenant policies.
     let old = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
     let commit = |tag: &str, parents: &[ObjectId]| -> Commit {
         let root = old.put_object(&Object::string(tag)).unwrap();
@@ -105,8 +105,20 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
          ALTER TABLE commits DROP COLUMN xid;
          DROP TABLE asg_history_cursor, asg_history_commit_rollup, asg_history_milestone,
                     leaf_rows, leaf_index_refs, gc_pending_roots, commit_traces;
-         ALTER TABLE objects DROP COLUMN written_at;",
+         ALTER TABLE objects DROP COLUMN written_at;
+         DO $$ DECLARE t text; BEGIN
+             FOR t IN SELECT tablename FROM pg_policies WHERE policyname = 'asg_tenant' LOOP
+                 EXECUTE format('DROP POLICY asg_tenant ON %I', t);
+             END LOOP;
+         END $$;",
     );
+    let policies = |db: &str| {
+        query_one_i64(
+            db,
+            "SELECT COUNT(*) FROM pg_policies WHERE policyname = 'asg_tenant'",
+        )
+    };
+    assert_eq!(policies(&db), 0);
 
     let storage = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
     assert_eq!(
@@ -114,8 +126,13 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             &db,
             "SELECT version::BIGINT FROM asg_schema WHERE component = 'postgres'"
         ),
-        4,
+        5,
         "the upgrade stamps the schema version"
+    );
+    assert_eq!(
+        policies(&db),
+        agentstategraph_storage::postgres::TENANT_TABLES.len() as i64,
+        "every tenant table has the tenant policy"
     );
     let trace = CommitTrace {
         trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".into(),

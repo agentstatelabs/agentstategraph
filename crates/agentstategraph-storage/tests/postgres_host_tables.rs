@@ -1,8 +1,9 @@
 //! A host's own tables beside the storage's, through
-//! [`PostgresStorage::pool`], [`PostgresStorage::run`] and
-//! [`tenant_id`](PostgresStorage::tenant_id). CTXone keeps its project registry
-//! and session statistics this way, on the storage's pool rather than a second
-//! one, so a hosted hub holds one set of connections with one TLS setup.
+//! [`PostgresStorage::tenant_pool`], [`PostgresStorage::run`] and
+//! [`add_tenant_policy`](agentstategraph_storage::postgres::add_tenant_policy).
+//! CTXone keeps its project registry and session statistics this way, on the
+//! storage's pool rather than a second one, so a hosted hub holds one set of
+//! connections with one TLS setup.
 //!
 //! Skipped unless `TEST_DATABASE_URL` is set; `ASG_REQUIRE_POSTGRES` turns the
 //! skip into a failure.
@@ -10,6 +11,7 @@
 #![cfg(feature = "postgres")]
 
 use agentstategraph_storage::PostgresStorage;
+use agentstategraph_storage::postgres::add_tenant_policy;
 
 fn url() -> Option<String> {
     match std::env::var("TEST_DATABASE_URL") {
@@ -36,8 +38,7 @@ fn tenant(tag: &str) -> String {
 
 /// Add one to this tenant's counter `key` in a host table and return it.
 fn bump(storage: &PostgresStorage, key: &str) -> i64 {
-    let pool = storage.pool();
-    let tenant = storage.tenant_id().to_string();
+    let pool = storage.tenant_pool();
     let key = key.to_string();
     PostgresStorage::run(async move {
         let mut client = pool.get().await.expect("a pooled connection");
@@ -57,13 +58,16 @@ fn bump(storage: &PostgresStorage, key: &str) -> i64 {
         )
         .await
         .expect("create the host table");
+        add_tenant_policy(&tx, "host_counters")
+            .await
+            .expect("add the tenant policy");
         tx.commit().await.expect("commit");
         client
             .query_one(
                 "INSERT INTO host_counters (tenant_id, key, n) VALUES ($1, $2, 1)
                  ON CONFLICT (tenant_id, key) DO UPDATE SET n = host_counters.n + 1
                  RETURNING n",
-                &[&tenant, &key],
+                &[&pool.tenant_id(), &key],
             )
             .await
             .expect("bump the counter")
