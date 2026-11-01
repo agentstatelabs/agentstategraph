@@ -65,6 +65,16 @@ jobs:
             protobuf-compiler cmake clang libclang-dev pkg-config \
             python3 python3-dev
 
+      # PyO3 0.24 builds against Python 3.13 at most, and ubuntu-latest is
+      # moving to Ubuntu 26, whose python3 is 3.14: clippy failed building
+      # pyo3-ffi. setup-python puts a 3.13 python3 first on PATH, which is
+      # what PYO3_PYTHON names, until the binding takes a PyO3 that supports
+      # 3.14.
+      - name: Python 3.13 for pyo3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Format
         run: cargo fmt --all -- --check
 
