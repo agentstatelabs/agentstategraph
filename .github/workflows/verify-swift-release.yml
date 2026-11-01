@@ -15,7 +15,7 @@ permissions:
 jobs:
   consumer:
     name: clean remote SwiftPM consumer
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Create consumer package
         shell: bash
