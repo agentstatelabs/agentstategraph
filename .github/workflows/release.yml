@@ -35,9 +35,9 @@ jobs:
           # is GitHub's most-contended runner class — jobs queue for hours/never
           # start. dtolnay/rust-toolchain installs the target; Apple's toolchain
           # cross-compiles between mac arches natively.
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
-          - os: macos-14 # Apple-silicon runner
+          - os: macos-15 # Apple-silicon runner
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
