@@ -644,7 +644,7 @@ pub struct CallContext {
     pub request_id: Option<String>,        // correlates audit events
 }
 
-let repo = stores.open(&store_id)?;      // F t-003: cheap, shares one pool
+let repo = hosts_cache.open(&store_id)?; // F t-003: for_tenant on one shared pool
 let scoped = repo.scoped(ctx);           // F t-001: per-call handle
 scoped.set("main", "/x", &value, intent)?;   // provenance from ctx; authorized; audited
 ```
@@ -670,18 +670,34 @@ scoped.set("main", "/x", &value, intent)?;   // provenance from ctx; authorized;
   With no `Authorizer`, unscoped methods behave exactly as today, so
   local single-user use and the language bindings don't change.
 
+### Decisions (2026-10-29)
+
+- **An audit failure fails the operation.** If the `AuditSink` can't
+  record an event, the operation it describes fails: no audit, no
+  operation. A host can opt into best effort. (t-002)
+- **Erasing part of a store uses redaction commits plus GC.** A
+  redaction commit removes the data, history is rewritten past it, and
+  GC drops the objects no longer reachable. Crypto-shredding with
+  per-subject keys isn't built. Purging a whole store already works.
+  (t-008)
+- **Several stores per process stops at the shipped Postgres half.**
+  `PostgresStorage::for_tenant` with row-level security is what hosts
+  needed. The `StoreProvider` trait, the SQLite file per store and the
+  bounded per-store watchers are dropped; a host keeps its own cache of
+  open stores. (t-003)
+
 ### Task table
 
 | Task | Description | Wave |
 |------|-------------|------|
 | t-001 | **`CallContext` and `ScopedRepo`.** Add the per-call handle. Move the active session, epoch and namespace from `Repository` fields into the context. The existing setters stay as the default context for unscoped single-user use. Build `CommitOptions` from the context, so every commit records the host-verified principal, the acting agent and the delegation chain; this resolves Plan C t-004 by wiring delegation. Scope speculation handles to the principal that created them. Key them by namespace, so a namespaced speculation is reachable (the bug class in Plan E t-005). | 1 |
-| t-002 | **`Authorizer` and `AuditSink`, behind one choke point.** Define both traits. The defaults allow everything and record nothing. Route every `ScopedRepo` operation through a single internal enforcement path, and re-express the reserved-path guards as built-in rules there. Add the enforcement mode (`ContextRequired`). **Coverage test:** with a deny-all authorizer, every public operation must fail, enumerated so that a new method without a check fails the test. Decide whether an audit failure fails the operation (best-effort vs. required) and make it configurable. | 1 |
-| t-003 | **Several stores per process.** Add a `StoreProvider` trait, `open(store_id) -> Arc<Repository>`, with two implementations. **Postgres:** one shared pool; each store is a cheap view keyed by the existing `tenant_id` column; each transaction sets `SET LOCAL app.store_id`; Row-Level Security policies on every table, under an app role without `BYPASSRLS`, so a query that forgets the filter returns nothing. **SQLite:** one file per store under a directory. Bound per-store in-memory state (watchers, speculations) with eviction. Builds on Plan D t-004 (transactions). Plan G's reference hub uses it. *As built, the Postgres half:* `PostgresStorage::for_tenant` opens a store on the shared pool (1.4.2). Row-level security checks `asg.tenant`, which every checkout sets for the session, not per transaction, since most statements run outside one; the policies are off until `set_row_security` switches them on per database. | 1 |
+| t-002 | **`Authorizer` and `AuditSink`, behind one choke point.** Define both traits. The defaults allow everything and record nothing. Route every `ScopedRepo` operation through a single internal enforcement path, and re-express the reserved-path guards as built-in rules there. Add the enforcement mode (`ContextRequired`). **Coverage test:** with a deny-all authorizer, every public operation must fail, enumerated so that a new method without a check fails the test. An audit failure fails the operation, and a host can configure best effort instead (decided 2026-10-29). | 1 |
+| t-003 | **Several stores per process.** Add a `StoreProvider` trait, `open(store_id) -> Arc<Repository>`, with two implementations. **Postgres:** one shared pool; each store is a cheap view keyed by the existing `tenant_id` column; each transaction sets `SET LOCAL app.store_id`; Row-Level Security policies on every table, under an app role without `BYPASSRLS`, so a query that forgets the filter returns nothing. **SQLite:** one file per store under a directory. Bound per-store in-memory state (watchers, speculations) with eviction. Builds on Plan D t-004 (transactions). Plan G's reference hub uses the Postgres half. *As built, the Postgres half:* `PostgresStorage::for_tenant` opens a store on the shared pool (1.4.2). Row-level security checks `asg.tenant`, which every checkout sets for the session, not per transaction, since most statements run outside one; the policies are off until `set_row_security` switches them on per database. *Decided 2026-10-29:* that half is all of it; the trait, the SQLite file per store and the bounded per-store state are dropped, and hosts cache stores themselves. | 1 |
 | t-004 | **Policy-backed `Authorizer`.** An `Authorizer` implementation backed by the policy crate, with Cedar evaluated in-process through the `cedar-policy` crate instead of the `cedar` CLI (today one subprocess per evaluation, `agentstategraph-policy-cedar/src/lib.rs:169`). Pass real principal attributes and groups from the context instead of an empty `Agent::"<id>"`. Make `/policies` a protected path that only policy APIs can write. | 2 |
 | t-005 | **Namespace read isolation.** Commit-id and prefix resolution only sees commits reachable from the context's namespace, through a commit → namespace index maintained on ref moves; measure it against a reachability walk first. Filter sessions, history rollups and control-ref records (Plan G t-001) by namespace. Make cross-namespace reads an explicit authorizer action. | 2 |
 | t-006 | **Host-friendly performance.** Add an async facade (`AsyncRepository`) that runs operations on a blocking pool, so tokio hosts don't stall reactor threads. Plan D t-002 already frees storage from the caller's runtime. Bound the per-write epoch-seal check: index sealed commits and check only the commits a ref move would orphan, instead of scanning every epoch and walking the reachable graph (`repo.rs:3085-3129`). Add generation numbers to the commit graph so merge-base and bounded walks stop early. | 2 |
 | t-007 | **Context through the surfaces.** The MCP server builds a context per call (namespace from the argument, not `fork_namespace`), and so does the HTTP server (principal from the authenticated key, Plan E t-006). Expose `scoped` in the FFI and language bindings once the Rust API settles. ASG's own server stays a single-store reference server, but it uses the same API. | 2 |
-| t-008 | **Store lifecycle.** Export and import a whole store (reusing Plan G's bundle format); purge a store (delete every row for its id, which is clean because dedup is per store); history retention with sealed epochs exempt. Erasing *part* of a store (one person's data) conflicts with content-addressed, sealed history. Choose between crypto-shredding with per-subject keys and redaction commits plus GC before building it. | 3 |
+| t-008 | **Store lifecycle.** Export and import a whole store (reusing Plan G's bundle format); purge a store (delete every row for its id, which is clean because dedup is per store); history retention with sealed epochs exempt. Erasing *part* of a store (one person's data) conflicts with content-addressed, sealed history, so it uses redaction commits plus GC: the commit removes the data, history is rewritten past it, and GC drops what's unreachable (decided 2026-10-29). | 3 |
 | t-009 | **Rolling-upgrade schema contract.** Migrations follow expand-then-contract, so two versions of an embedder can share a database during a deploy. At startup, refuse a schema newer than the binary understands. Extends Plan D t-006. | 3 |
 
 ### Acceptance
@@ -755,8 +771,8 @@ self-host one.
      record itself is in the table (`taint.rs:58`).
    - Which commits belong to which epoch is a side column on `commits`
      (`epoch_id`, `session_id`), not part of the commit.
-   - These move into a reserved per-store **control ref** as ordinary
-     tree state. The tables become local indexes rebuilt from it, the
+   - These move into a reserved per-store **control ref**, `_control`,
+     as ordinary tree state. The tables become local indexes rebuilt from it, the
      same way the leaf index is.
    - Sync then moves exactly one kind of thing, commit history. ASG's
      merge handles edits made on two machines, and every taint, reminder
@@ -777,6 +793,17 @@ self-host one.
    id is recomputed (BLAKE3) on receipt; one mismatch rejects the whole
    bundle. Otherwise a client could plant content under another
    object's id.
+
+Decided 2026-10-29:
+
+6. **The control ref is `_control`,** with the merge rules t-001 lists:
+   a resolved taint stays resolved; reminder status changes are ordered,
+   and otherwise the newest edit wins; a sealed epoch never changes.
+7. **The sync server is an embeddable service.** ASG ships the
+   `/sync/v1` server as a router a host mounts, with an auth hook that
+   resolves each request to a store. `agentstategraph-mcp --hub` is
+   built on it and serves one account; a host that serves many accounts
+   mounts it behind its own auth, one store per account.
 
 ### Design shape
 
@@ -806,12 +833,12 @@ self-host one.
 
 | Task | Description | Wave |
 |------|-------------|------|
-| t-001 | **Control ref.** Add a reserved per-store ref holding taints, reminders and epochs (with each epoch's commit membership) as tree state at fixed paths. Rebuild the tables from it on open and after every fetch, and keep them current on local writes so the per-write taint check stays index-backed. Writes to the control ref go only through the taint, reminder and epoch APIs, guarded like `/_meta`. Define merge rules per record type: a resolved taint stays resolved; reminder status changes are ordered, and otherwise the newest edit wins; a sealed epoch is immutable. Migrate existing rows on open, idempotently. Settle the ref's name. | 1 |
+| t-001 | **Control ref.** Add a reserved per-store ref holding taints, reminders and epochs (with each epoch's commit membership) as tree state at fixed paths. Rebuild the tables from it on open and after every fetch, and keep them current on local writes so the per-write taint check stays index-backed. Writes to the control ref go only through the taint, reminder and epoch APIs, guarded like `/_meta`. Define merge rules per record type: a resolved taint stays resolved; reminder status changes are ordered, and otherwise the newest edit wins; a sealed epoch is immutable. Migrate existing rows on open, idempotently. The ref is `_control` (decided 2026-10-29). | 1 |
 | t-002 | **Bundle format and verification.** Serialize and deserialize commits and objects with a versioned header, length prefixes and zstd. Recompute every id on read and reject the whole bundle on any mismatch. Enforce size limits. Library only, no network. | 1 |
 | t-003 | **Missing-set computation.** Given a local head and the last known remote head (or none), produce the commits and objects the remote lacks by walking commits and diffing trees. Support a shallow boundary. Test against `list_commits_dag`, including merge commits and second parents. | 1 |
 | t-004 | **`Remote` trait and library push / fetch / pull.** In-process remote for tests. Remote-tracking refs. Fetch applies a verified bundle and moves `remotes/<remote>/<ref>`. Push is fast-forward-only, a CAS on the expected old head; on rejection it returns a clear "fetch and merge" error. `pull` = fetch + `merge`, with the caller supplying `CommitOptions`. | 2 |
 | t-005 | **Push guards.** Refuse a push when the ref's tree contains `/_meta/_secret`. Refuse refs the store marks local-only. Both errors name what was refused. | 2 |
-| t-006 | **HTTP transport and reference hub.** HTTP `Remote` client. `agentstategraph-mcp --hub` serves `/sync/v1/*` for one account on SQLite or Postgres, behind Plan E's hashed API keys, and keeps the push log. Version is negotiated in the URL and the bundle header. | 2 |
+| t-006 | **HTTP transport and reference hub.** HTTP `Remote` client. The server is an embeddable service (decision 7): a router with an auth hook that resolves a request to a store, keeping the push log. `agentstategraph-mcp --hub` mounts it for one account on SQLite or Postgres, behind Plan E's hashed API keys. Stores on one Postgres pool come from `PostgresStorage::for_tenant`, so this doesn't wait on a `StoreProvider` trait. Version is negotiated in the URL and the bundle header. | 2 |
 | t-007 | **Shallow push and fetch.** Record boundary commits; make history walks, blame and merge-base stop cleanly at a boundary instead of erroring. | 3 |
 | t-008 | **Surfaces.** MCP tools (`agentstategraph_remote_add`, `_fetch`, `_push`, `_pull`) and the matching HTTP routes. Expose the same calls in the FFI and language bindings after the Rust API settles. | 3 |
 | t-009 | **End-to-end sync suite.** Two stores and a hub. Cover: concurrent pushes, and the fetch → merge → push retry; a taint applied on store A blocks a write on store B after B pulls; reminder and epoch round-trips; secrets refusal; a tampered bundle rejected; and the same suite against a Postgres hub through Plan D's harness. | 3 |
@@ -837,7 +864,8 @@ self-host one.
   the index on a local-only ref, and `asd remote` / `push` / `pull`.
   For CTXone: memory sync, and whether session transcripts sync.
 - **Accounts, teams, billing, or a multi-account hosted hub.** The
-  reference hub serves one account.
+  reference hub serves one account. A host that serves many mounts the
+  sync service behind its own accounts (decision 7).
 - **Commit signing.** Per-device Ed25519 signatures would let a hub
   verify authorship rather than only the pusher. That's a follow-on
   using the existing signing infrastructure.
