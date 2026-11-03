@@ -513,6 +513,151 @@ fn sweep_spares_a_write_in_flight(f: &Fixture) {
     );
 }
 
+/// The missing set (DESIGN.md Plan G t-003) on each backend. In a history
+/// with merges both ways, for several heads and haves, the commits are
+/// exactly those `list_commits_dag` reaches from the heads and not from the
+/// haves, parents first, and a remote holding the haves' history plus the
+/// set has every commit it should with its whole tree.
+fn missing_set_matches_the_dag(f: &Fixture) {
+    use agentstategraph::sync::missing_set;
+    use agentstategraph_core::ObjectId;
+    use agentstategraph_storage::{CommitStore, ObjectStore};
+    use std::collections::{HashMap, HashSet};
+
+    let repo = f.open();
+    repo.init().unwrap();
+    repo.set_json(
+        "main",
+        "/config",
+        &json!({"name": "prod", "replicas": 1}),
+        opts("init"),
+    )
+    .unwrap();
+    let start = repo.head("main").unwrap();
+    repo.branch("feature", "main").unwrap();
+    for i in 0..3 {
+        repo.set_json(
+            "feature",
+            &format!("/feature/f{i}"),
+            &json!(i),
+            opts("feature"),
+        )
+        .unwrap();
+        repo.set_json(
+            "main",
+            &format!("/main/m{i}"),
+            &json!({"i": i, "list": [i, i + 1]}),
+            opts("main"),
+        )
+        .unwrap();
+    }
+    let main_before = repo.head("main").unwrap();
+    let feature_tip = repo.head("feature").unwrap();
+    let merge = || CommitOptions::new("agent/conformance", IntentCategory::Merge, "merge");
+    repo.merge("feature", "main", merge()).unwrap();
+    repo.set_json("feature", "/feature/after", &json!(true), opts("after"))
+        .unwrap();
+    repo.merge("main", "feature", merge()).unwrap();
+    let merged = repo.head("main").unwrap();
+    let feature = repo.head("feature").unwrap();
+
+    let store = f.storage();
+    let dag = |heads: &[ObjectId]| -> HashSet<ObjectId> {
+        heads
+            .iter()
+            .flat_map(|h| {
+                store
+                    .list_commits_dag(h, usize::MAX)
+                    .unwrap()
+                    .commits
+                    .into_iter()
+                    .map(|c| c.id)
+            })
+            .collect()
+    };
+    for (heads, haves) in [
+        (vec![merged], vec![]),
+        (vec![merged], vec![main_before]),
+        (vec![merged], vec![feature_tip]),
+        (vec![feature], vec![merged]),
+        (vec![merged, feature], vec![start]),
+        (vec![main_before], vec![merged]),
+    ] {
+        let m = missing_set(store.as_ref(), &heads, &haves, &[]).unwrap();
+        let has = dag(&haves);
+        let want: HashSet<ObjectId> = dag(&heads)
+            .into_iter()
+            .filter(|c| !has.contains(c))
+            .collect();
+        let got: HashSet<ObjectId> = m.commits.iter().copied().collect();
+        assert_eq!(got, want, "{heads:?} over {haves:?}");
+        assert_eq!(m.commits.len(), want.len(), "each commit once");
+        assert!(m.shallow.is_empty());
+        let pos: HashMap<ObjectId, usize> =
+            m.commits.iter().enumerate().map(|(i, c)| (*c, i)).collect();
+        for c in &m.commits {
+            for p in store.get_commit(c).unwrap().unwrap().parents {
+                assert!(pos.get(&p).is_none_or(|pp| *pp < pos[c]), "parents first");
+            }
+        }
+
+        let remote = MemoryStorage::new();
+        for id in &has {
+            let c = store.get_commit(id).unwrap().unwrap();
+            copy_tree(store.as_ref(), &remote, c.state_root);
+            remote.put_commit(&c).unwrap();
+        }
+        for id in &m.objects {
+            remote
+                .put_object(&store.get_object(id).unwrap().unwrap())
+                .unwrap();
+        }
+        for id in &m.commits {
+            remote
+                .put_commit(&store.get_commit(id).unwrap().unwrap())
+                .unwrap();
+        }
+        for id in dag(&heads) {
+            let c = remote
+                .get_commit(&id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("the remote lacks commit {id}"));
+            assert_whole_tree(&remote, c.state_root);
+        }
+    }
+}
+
+fn object_children(o: &Object) -> Vec<agentstategraph_core::ObjectId> {
+    use agentstategraph_core::Node;
+    match o {
+        Object::Atom(_) => vec![],
+        Object::Node(Node::Map(m)) => m.values().copied().collect(),
+        Object::Node(Node::List(v) | Node::Set(v)) => v.clone(),
+    }
+}
+
+fn copy_tree(from: &dyn Storage, to: &MemoryStorage, root: agentstategraph_core::ObjectId) {
+    use agentstategraph_storage::ObjectStore;
+    let mut todo = vec![root];
+    while let Some(id) = todo.pop() {
+        let o = from.get_object(&id).unwrap().unwrap();
+        todo.extend(object_children(&o));
+        to.put_object(&o).unwrap();
+    }
+}
+
+fn assert_whole_tree(store: &MemoryStorage, root: agentstategraph_core::ObjectId) {
+    use agentstategraph_storage::ObjectStore;
+    let mut todo = vec![root];
+    while let Some(id) = todo.pop() {
+        let o = store
+            .get_object(&id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("the remote lacks object {id}"));
+        todo.extend(object_children(&o));
+    }
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -574,4 +719,9 @@ fn gc_write_in_flight() {
         "sweep_spares_a_write_in_flight",
         sweep_spares_a_write_in_flight,
     );
+}
+
+#[test]
+fn sync_missing_set() {
+    run("missing_set_matches_the_dag", missing_set_matches_the_dag);
 }
