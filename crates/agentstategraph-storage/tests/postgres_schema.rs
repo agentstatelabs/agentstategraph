@@ -1,7 +1,9 @@
 //! Schema setup on Postgres (DESIGN.md Plan D t-004/t-006/t-008): the DDL
 //! runs once per schema version, not on every connect, and an older database
-//! is brought up to date, its existing commits included. Uses its own throwaway database, so rewinding the
-//! schema can't disturb other tests.
+//! is brought up to date, its existing commits included. A database a newer
+//! build set up is used as it is, unless it needs more than this build
+//! understands (Plan F t-009). Each test uses its own throwaway database, so
+//! rewinding the schema can't disturb other tests.
 //!
 //! Skipped unless `TEST_DATABASE_URL` is set (its user needs CREATEDB);
 //! `ASG_REQUIRE_POSTGRES` turns the skip into a failure.
@@ -11,7 +13,9 @@
 use agentstategraph_core::{
     Authority, Commit, CommitBuilder, Epoch, Intent, IntentCategory, Object, ObjectId,
 };
-use agentstategraph_storage::{CommitStore, CommitTrace, EpochStore, ObjectStore, PostgresStorage};
+use agentstategraph_storage::{
+    CommitStore, CommitTrace, EpochStore, ObjectStore, PostgresStorage, StorageError,
+};
 use chrono::Utc;
 
 fn url() -> Option<String> {
@@ -126,8 +130,16 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             &db,
             "SELECT version::BIGINT FROM asg_schema WHERE component = 'postgres'"
         ),
-        5,
+        6,
         "the upgrade stamps the schema version"
+    );
+    assert_eq!(
+        query_one_i64(
+            &db,
+            "SELECT compatible_from::BIGINT FROM asg_schema WHERE component = 'postgres'"
+        ),
+        5,
+        "and the oldest version a build must understand"
     );
     assert_eq!(
         policies(&db),
@@ -196,5 +208,106 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
     );
 
     drop(storage);
+    admin(&url, &format!("DROP DATABASE {name} WITH (FORCE)"));
+}
+
+/// A throwaway database set up by this build, as `(url, name)`.
+fn fresh_database(url: &str) -> (String, String) {
+    let name = format!("asg_schema_{}", uuid::Uuid::new_v4().simple());
+    admin(url, &format!("CREATE DATABASE {name}"));
+    let db = with_database(url, &name);
+    drop(PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap());
+    (db, name)
+}
+
+#[test]
+fn a_database_from_a_newer_compatible_build_is_used_as_it_is() {
+    let Some(url) = url() else { return };
+    let (db, name) = fresh_database(&url);
+
+    // A newer build expanded the schema, so this one can still use it. It
+    // must not migrate: the dropped column stays dropped.
+    admin(
+        &db,
+        "UPDATE asg_schema SET version = 99, compatible_from = 5 WHERE component = 'postgres';
+         ALTER TABLE sessions DROP COLUMN scope_namespace;",
+    );
+    let storage = PostgresStorage::connect_tenant_blocking(&db, "new-tenant", 2).unwrap();
+    let id = storage.put_object(&Object::string("works")).unwrap();
+    assert!(storage.has_object(&id).unwrap());
+    assert_eq!(
+        query_one_i64(
+            &db,
+            "SELECT COUNT(*) FROM namespaces WHERE tenant_id = 'new-tenant'"
+        ),
+        1,
+        "a new tenant still gets its default namespace"
+    );
+    assert_eq!(
+        query_one_i64(
+            &db,
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_name = 'sessions' AND column_name = 'scope_namespace'"
+        ),
+        0,
+        "a newer database must not be migrated"
+    );
+    assert_eq!(
+        query_one_i64(
+            &db,
+            "SELECT (version * 100 + compatible_from)::BIGINT FROM asg_schema
+             WHERE component = 'postgres'"
+        ),
+        9905,
+        "an older build lowers neither number"
+    );
+
+    drop(storage);
+    admin(&url, &format!("DROP DATABASE {name} WITH (FORCE)"));
+}
+
+#[test]
+fn a_database_needing_a_newer_build_is_refused_and_left_alone() {
+    let Some(url) = url() else { return };
+    let (db, name) = fresh_database(&url);
+    admin(
+        &db,
+        "UPDATE asg_schema SET version = 99, compatible_from = 98 WHERE component = 'postgres';",
+    );
+
+    let err = PostgresStorage::connect_tenant_blocking(&db, "new-tenant", 2)
+        .err()
+        .expect("refused");
+    match &err {
+        StorageError::SchemaTooNew {
+            backend,
+            found,
+            compatible_from,
+            supported,
+        } => {
+            assert_eq!(*backend, "postgres");
+            assert_eq!((*found, *compatible_from), (99, 98));
+            assert!(*supported < 98);
+        }
+        other => panic!("expected SchemaTooNew, got {other:?}"),
+    }
+    assert_eq!(err.code(), "schema_too_new");
+    assert_eq!(
+        query_one_i64(
+            &db,
+            "SELECT COUNT(*) FROM namespaces WHERE tenant_id = 'new-tenant'"
+        ),
+        0,
+        "a refused connect writes nothing"
+    );
+
+    // The async connect refuses too.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(PostgresStorage::connect_tenant(&db, "new-tenant"))
+        .err()
+        .expect("refused");
+    assert_eq!(err.code(), "schema_too_new");
+
     admin(&url, &format!("DROP DATABASE {name} WITH (FORCE)"));
 }

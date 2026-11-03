@@ -322,7 +322,24 @@ mod tls {
 /// 4: the trace each commit was made in (Plan H t-009).
 /// 5: the tenant policy on every tenant table, for row-level security (Plan F
 /// t-003). It's added after `SCHEMA_DDL`, from [`TENANT_TABLES`].
-const SCHEMA_VERSION: i32 = 5;
+/// 6: `asg_schema.compatible_from` (Plan F t-009).
+///
+/// Several builds can share one database during a rolling deploy, so
+/// migrations expand, then contract. An expand migration only adds (a table,
+/// a nullable or defaulted column, an index), so an older build still works
+/// on the result, and it leaves [`SCHEMA_COMPATIBLE_FROM`] alone. A contract
+/// migration removes or changes what an older build uses, and ships only once
+/// no build that needs it is still running; it raises
+/// [`SCHEMA_COMPATIBLE_FROM`] to its own version.
+const SCHEMA_VERSION: i32 = 6;
+
+/// The oldest schema version a build must understand to use a database this
+/// build has set up, stamped as `asg_schema.compatible_from`. A build refuses
+/// a database whose stamp is above its own [`SCHEMA_VERSION`], and uses one
+/// stamped by a newer build otherwise, without migrating it. Version 5's
+/// tenant policy is what an older build can't use: with row-level security
+/// on, a build that doesn't set the tenant on its connections sees no rows.
+const SCHEMA_COMPATIBLE_FROM: i32 = 5;
 
 /// Every table, column and index, each `IF NOT EXISTS` so it's safe to re-run
 /// over any earlier schema, plus the version stamp table.
@@ -593,6 +610,10 @@ const SCHEMA_DDL: &str = "
                     component TEXT PRIMARY KEY,
                     version   INTEGER NOT NULL
                 );
+                -- The oldest schema version a build must understand to use
+                -- this database (version 6). See SCHEMA_COMPATIBLE_FROM.
+                ALTER TABLE asg_schema
+                    ADD COLUMN IF NOT EXISTS compatible_from INTEGER NOT NULL DEFAULT 1;
 ";
 
 /// The session setting that names the tenant a connection works for. Every
@@ -1167,12 +1188,18 @@ impl PostgresStorage {
     /// (any multi-statement transaction). Up-to-date databases now take no
     /// table locks at startup. An actual upgrade still can collide with
     /// writers, so a deadlock victim retries.
+    ///
+    /// A database set up by a newer build is used as it is, unless that build
+    /// stamped it as needing more than this one understands: then this fails
+    /// with [`StorageError::SchemaTooNew`] and changes nothing.
     async fn init_tables(&self) -> Result<(), StorageError> {
         let mut client = self.client().await?;
         let mut attempt = 0;
         loop {
             attempt += 1;
             match self.try_init_tables(&mut client).await {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(too_new)) => return Err(too_new),
                 Err(e)
                     if attempt < 5
                         && e.code()
@@ -1181,12 +1208,16 @@ impl PostgresStorage {
                     continue;
                 }
                 Err(e) => return Err(StorageError::Backend(with_causes("init tables", &e))),
-                Ok(()) => return Ok(()),
             }
         }
     }
 
-    async fn try_init_tables(&self, client: &mut PgClient) -> Result<(), tokio_postgres::Error> {
+    /// The inner result is [`StorageError::SchemaTooNew`] when the database
+    /// is stamped as needing a newer build; the transaction is rolled back.
+    async fn try_init_tables(
+        &self,
+        client: &mut PgClient,
+    ) -> Result<Result<(), StorageError>, tokio_postgres::Error> {
         // Serialized across every process using the database.
         let tx = client.transaction().await?;
         tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_KEY])
@@ -1205,21 +1236,43 @@ impl PostgresStorage {
         } else {
             None
         };
+        if let Some(found) = version.filter(|v| *v > SCHEMA_VERSION) {
+            // Stamped by a newer build, which also added the column.
+            let compatible_from: i32 = tx
+                .query_one(
+                    "SELECT compatible_from FROM asg_schema WHERE component = 'postgres'",
+                    &[],
+                )
+                .await?
+                .get(0);
+            if compatible_from > SCHEMA_VERSION {
+                return Ok(Err(StorageError::SchemaTooNew {
+                    backend: "postgres",
+                    found,
+                    compatible_from,
+                    supported: SCHEMA_VERSION,
+                }));
+            }
+        }
         if version.is_none_or(|v| v < SCHEMA_VERSION) {
             tx.batch_execute(SCHEMA_DDL).await?;
             for table in TENANT_TABLES {
                 add_tenant_policy(&tx, table).await?;
             }
             tx.execute(
-                "INSERT INTO asg_schema (component, version) VALUES ('postgres', $1)
-                 ON CONFLICT (component) DO UPDATE SET version = EXCLUDED.version",
-                &[&SCHEMA_VERSION],
+                "INSERT INTO asg_schema (component, version, compatible_from)
+                 VALUES ('postgres', $1, $2)
+                 ON CONFLICT (component) DO UPDATE SET
+                     version = EXCLUDED.version,
+                     compatible_from = GREATEST(asg_schema.compatible_from,
+                                                EXCLUDED.compatible_from)",
+                &[&SCHEMA_VERSION, &SCHEMA_COMPATIBLE_FROM],
             )
             .await?;
         }
         tx.execute(SEED_DEFAULT_NAMESPACE, &[&self.tenant_id])
             .await?;
-        tx.commit().await
+        tx.commit().await.map(Ok)
     }
 
     /// Run an async operation for the sync storage API, on whatever kind of
