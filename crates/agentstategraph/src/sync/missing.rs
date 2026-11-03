@@ -46,6 +46,10 @@ pub struct MissingSet {
     /// boundaries asked for, and any commit a parent of which this store no
     /// longer has (pruned). The receiver needs to accept them as shallow.
     pub shallow: Vec<ObjectId>,
+    /// Of `commits`, those sent without their trees, because a retention
+    /// sweep (`Repository::gc_sweep`) took them: the commit's root is gone.
+    /// Ref tips always keep theirs.
+    pub pruned: Vec<ObjectId>,
 }
 
 impl MissingSet {
@@ -232,6 +236,7 @@ where
 
     let mut sent: HashSet<ObjectId> = HashSet::new();
     let mut objects = Vec::new();
+    let mut pruned = Vec::new();
     for id in &commits {
         let commit = &walk.commits[id];
         // Trees the remote has, or gets with this send.
@@ -241,13 +246,16 @@ where
             .filter(|p| new.contains(p) || walk.remote_has(p))
             .filter_map(|p| walk.commits.get(p).map(|c| c.state_root))
             .collect();
-        diff_tree(store, commit.state_root, bases, &mut sent, &mut objects)?;
+        if !diff_tree(store, commit.state_root, bases, &mut sent, &mut objects)? {
+            pruned.push(*id);
+        }
     }
 
     Ok(MissingSet {
         commits,
         objects,
         shallow: shallow_out,
+        pruned,
     })
 }
 
@@ -321,16 +329,21 @@ fn child_at(object: &Object, slot: &Slot<'_>) -> Option<ObjectId> {
 
 /// Append to `out` the objects of the tree at `root` that neither `sent`
 /// nor the trees at `bases` account for, a level at a time. Everything in
-/// `sent` is already on its way with its whole subtree.
+/// `sent` is already on its way with its whole subtree. `false` if the root
+/// itself is gone, as a retention sweep leaves an old commit; a node missing
+/// below a root that's there is an error.
 fn diff_tree<S: ObjectStore + ?Sized>(
     store: &S,
     root: ObjectId,
     bases: Vec<ObjectId>,
     sent: &mut HashSet<ObjectId>,
     out: &mut Vec<ObjectId>,
-) -> Result<(), StorageError> {
+) -> Result<bool, StorageError> {
     if sent.contains(&root) || bases.contains(&root) {
-        return Ok(());
+        return Ok(true);
+    }
+    if !store.has_object(&root)? {
+        return Ok(false);
     }
     sent.insert(root);
     let mut level: Vec<(ObjectId, Vec<ObjectId>)> = vec![(root, bases)];
@@ -375,7 +388,7 @@ fn diff_tree<S: ObjectStore + ?Sized>(
         }
         level = next;
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -696,12 +709,26 @@ mod tests {
     }
 
     #[test]
-    fn a_new_commit_missing_an_object_fails() {
+    fn a_swept_tree_goes_as_pruned_and_a_hole_in_a_tree_fails() {
         let mut h = History::new();
         let c1 = h.commit("1", &[], None);
-        let mut c: Commit = h.store.get_commit(&c1).unwrap().unwrap();
-        c.state_root = ObjectId::hash(b"absent");
-        c.parents = vec![c1];
+        // A commit whose whole tree a sweep took.
+        let mut swept: Commit = h.store.get_commit(&c1).unwrap().unwrap();
+        swept.state_root = ObjectId::hash(b"absent");
+        swept.parents = vec![c1];
+        swept.id = swept.compute_id();
+        h.store.put_commit(&swept).unwrap();
+        let m = missing_set(&h.store, &[swept.id], &[c1], &[]).unwrap();
+        assert_eq!(m.commits, vec![swept.id]);
+        assert_eq!(m.pruned, vec![swept.id]);
+        assert!(m.objects.is_empty());
+
+        // A root that's there, with a child that isn't.
+        let mut entries = BTreeMap::new();
+        entries.insert("gone".to_string(), ObjectId::hash(b"never stored"));
+        let holed = h.put(Object::map(entries));
+        let mut c: Commit = swept.clone();
+        c.state_root = holed;
         c.id = c.compute_id();
         h.store.put_commit(&c).unwrap();
         assert!(matches!(

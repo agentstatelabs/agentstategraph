@@ -6,12 +6,16 @@
 //!   too.
 //! - [`missing`]: the commits and objects a remote lacks, from a walk of
 //!   both sides' history and a thin diff of the new trees (t-003).
+//! - [`store`]: a whole store exported to a bundle and imported from one
+//!   (Plan F t-008).
 
 pub mod bundle;
 pub mod missing;
+pub mod store;
 
 pub use bundle::{
     Bundle, BundleError, BundleLimits, BundleReader, BundleRef, BundleWriter, FORMAT_VERSION,
     Record,
 };
 pub use missing::{MissingSet, missing_set};
+pub use store::{ExportReport, ImportReport, TransferError};
