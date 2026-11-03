@@ -92,6 +92,14 @@ fn check_secret_read_guard(path: &str, intent: &Intent) -> Result<(), RepoError>
     Ok(())
 }
 
+/// Refuse an ordinary write to the control ref or a ref beside it.
+fn refuse_reserved_ref(name: &str) -> Result<(), RepoError> {
+    if crate::control_repo::is_reserved_ref(name) {
+        return Err(RepoError::ReservedRef(name.to_string()));
+    }
+    Ok(())
+}
+
 fn refuse_deleting_main(name: &str) -> Result<(), RepoError> {
     if name == "main" {
         return Err(RepoError::InvalidOperation(
@@ -431,6 +439,14 @@ pub enum RepoError {
     #[error("'{0}' looks like a commit id; only branch names are accepted here")]
     CommitRefNotAllowed(String),
 
+    /// A write to the control ref (`_control`) or a ref beside it. Taints,
+    /// reminders and epochs change it through their own APIs (DESIGN.md
+    /// Plan G t-001).
+    #[error(
+        "ref '{0}' is reserved: refs starting with _control change only through the taint, reminder and epoch APIs"
+    )]
+    ReservedRef(String),
+
     #[error("namespace not found: '{0}' — call create_namespace first")]
     NamespaceNotFound(String),
 
@@ -473,6 +489,7 @@ impl RepoError {
             RepoError::EpochSealViolated { .. } => "epoch_sealed",
             RepoError::InvalidOperation(_) => "invalid_operation",
             RepoError::CommitRefNotAllowed(_) => "commit_ref_not_allowed",
+            RepoError::ReservedRef(_) => "reserved_ref",
             RepoError::NamespaceNotFound(_) => "namespace_not_found",
             RepoError::CrossNamespaceAccessDenied => "cross_namespace_denied",
             RepoError::Taint { .. } => "taint_blocked",
@@ -585,7 +602,7 @@ impl Repository {
                     || v.eq_ignore_ascii_case("off"))
             })
             .unwrap_or(true);
-        Self {
+        let repo = Self {
             storage,
             specs: SpeculationManager::new(),
             instance: uuid::Uuid::new_v4().simple().to_string(),
@@ -596,7 +613,17 @@ impl Repository {
             active_session: std::sync::RwLock::new(None),
             epoch_seal_strict: strict,
             branch_refs_only: false,
+        };
+        // Bring the taint, reminder and epoch tables and the control ref
+        // together (DESIGN.md Plan G t-001). Opening must not fail on it: the
+        // tables still work, and the next open tries again.
+        if let Err(e) = repo.reconcile_control() {
+            tracing::warn!(
+                error.type = e.code(),
+                "couldn't reconcile the control ref with the tables: {e}"
+            );
         }
+        repo
     }
 
     /// Return a Repository configured to use the given namespace for all ref
@@ -1070,6 +1097,7 @@ impl Repository {
     /// Creating a ref orphans no commit, so there are no epoch seals to
     /// enforce, and a new ref has no leaf index to update.
     pub fn branch(&self, name: &str, from: &str) -> Result<ObjectId, RepoError> {
+        refuse_reserved_ref(name)?;
         let ns = self.active_namespace()?;
         if self.storage.get_ref(&ns, name)?.is_some() {
             return Err(RepoError::BranchAlreadyExists(name.to_string()));
@@ -1092,6 +1120,7 @@ impl Repository {
     /// deletes only the head the caller looked at.
     pub fn delete_branch(&self, name: &str) -> Result<bool, RepoError> {
         refuse_deleting_main(name)?;
+        refuse_reserved_ref(name)?;
         let ns = self.active_namespace()?;
         Ok(self.storage.delete_ref(&ns, name)?)
     }
@@ -1102,17 +1131,21 @@ impl Repository {
     /// [`Repository::delete_branch`].
     pub fn delete_branch_if(&self, name: &str, expected: ObjectId) -> Result<bool, RepoError> {
         refuse_deleting_main(name)?;
+        refuse_reserved_ref(name)?;
         let ns = self.active_namespace()?;
         Ok(self.storage.cas_delete_ref(&ns, name, expected)?)
     }
 
-    /// List all branches, optionally filtered by prefix.
+    /// List all branches, optionally filtered by prefix. The control ref
+    /// and the refs beside it aren't branches, so they're left out.
     pub fn list_branches(
         &self,
         prefix: Option<&str>,
     ) -> Result<Vec<(String, ObjectId)>, RepoError> {
         let ns = self.active_namespace()?;
-        Ok(self.storage.list_refs(&ns, prefix.unwrap_or(""))?)
+        let mut refs = self.storage.list_refs(&ns, prefix.unwrap_or(""))?;
+        refs.retain(|(name, _)| !crate::control_repo::is_reserved_ref(name));
+        Ok(refs)
     }
 
     /// Merge source branch into target branch.
@@ -2194,7 +2227,7 @@ impl Repository {
     ) -> Result<agentstategraph_core::Epoch, RepoError> {
         let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
             .with_namespace(self.active_namespace()?.as_str());
-        self.storage.create_epoch(&epoch)?;
+        self.epoch_through(id, "create", || Ok(self.storage.create_epoch(&epoch)?))?;
         Ok(epoch)
     }
 
@@ -2209,7 +2242,7 @@ impl Repository {
         let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
             .with_namespace(self.active_namespace()?.as_str())
             .with_scope(scope);
-        self.storage.create_epoch(&epoch)?;
+        self.epoch_through(id, "create", || Ok(self.storage.create_epoch(&epoch)?))?;
         Ok(epoch)
     }
 
@@ -2265,9 +2298,32 @@ impl Repository {
         };
 
         let seal_hash = Self::compute_seal_hash(id, &sealed_commits);
-        self.storage
-            .seal_epoch(id, summary, chrono::Utc::now(), &sealed_commits, &seal_hash)?;
-        Ok(())
+        self.epoch_through(id, "seal", || {
+            Ok(self.storage.seal_epoch(
+                id,
+                summary,
+                chrono::Utc::now(),
+                &sealed_commits,
+                &seal_hash,
+            )?)
+        })
+    }
+
+    /// Run an epoch table write, then commit the epoch to the control ref.
+    fn epoch_through<T>(
+        &self,
+        id: &str,
+        what: &str,
+        table: impl FnOnce() -> Result<T, RepoError>,
+    ) -> Result<T, RepoError> {
+        self.write_through(
+            crate::control_repo::Stage::Record(crate::control_repo::Kind::Epoch, id),
+            crate::control_repo::system_options(
+                IntentCategory::Checkpoint,
+                format!("epoch {id}: {what}"),
+            ),
+            table,
+        )
     }
 
     /// Tamper-evident digest over an epoch's sealed set.
@@ -2312,9 +2368,11 @@ impl Repository {
         // then never match any real workspace on read.
         Namespace::new(namespace)
             .map_err(|e| RepoError::InvalidOperation(format!("invalid namespace: {e}")))?;
-        self.storage
-            .assign_epoch_namespace(id, namespace)
-            .map_err(RepoError::Storage)
+        self.epoch_through(id, "assign namespace", || {
+            self.storage
+                .assign_epoch_namespace(id, namespace)
+                .map_err(RepoError::Storage)
+        })
     }
 
     /// List this workspace's epochs (as lightweight index entries).
@@ -2348,7 +2406,9 @@ impl Repository {
 
     /// Transition a sealed epoch to Archived.
     pub fn archive_epoch(&self, id: &str) -> Result<(), RepoError> {
-        self.storage.archive_epoch(id).map_err(RepoError::Storage)
+        self.epoch_through(id, "archive", || {
+            self.storage.archive_epoch(id).map_err(RepoError::Storage)
+        })
     }
 
     /// Export a sealed or archived epoch as a self-contained JSON audit bundle.
@@ -3523,6 +3583,7 @@ impl Repository {
     /// enforcement check. Every internal code path that moves a ref goes
     /// through this.
     fn guarded_set_ref(&self, ref_name: &str, new_target: ObjectId) -> Result<(), RepoError> {
+        refuse_reserved_ref(ref_name)?;
         let ns = self.active_namespace()?;
         self.enforce_epoch_seals(ref_name, &new_target)?;
         // Capture the outgoing state root before the ref moves, so the leaf
@@ -3555,6 +3616,7 @@ impl Repository {
         expected: ObjectId,
         new_target: ObjectId,
     ) -> Result<bool, RepoError> {
+        refuse_reserved_ref(ref_name)?;
         let ns = self.active_namespace()?;
         self.enforce_epoch_seals(ref_name, &new_target)?;
         let old_root = self
@@ -3588,6 +3650,7 @@ impl Repository {
     /// a branch (a commit hash) has nothing to compare-and-swap against, so
     /// `move_ref` keeps the historical unconditional move for it.
     fn head_for_write(&self, ref_name: &str) -> Result<(ObjectId, bool), RepoError> {
+        refuse_reserved_ref(ref_name)?;
         let ns = self.active_namespace()?;
         match self.storage.get_ref(&ns, ref_name)? {
             Some(id) => Ok((id, true)),
@@ -3777,7 +3840,17 @@ impl Repository {
         // drop its mark. Callers can unset the active epoch before
         // retrying.
         if let Some(epoch_id) = self.active_epoch()? {
-            self.storage.set_commit_epoch(&commit.id, &epoch_id)?;
+            self.write_through(
+                crate::control_repo::Stage::Member {
+                    epoch: &epoch_id,
+                    commit: commit.id,
+                },
+                crate::control_repo::system_options(
+                    IntentCategory::Checkpoint,
+                    format!("epoch {epoch_id}: add {}", commit.id),
+                ),
+                || Ok::<_, RepoError>(self.storage.set_commit_epoch(&commit.id, &epoch_id)?),
+            )?;
         }
         if let Some(session_id) = self.active_session()? {
             self.storage.set_commit_session(&commit.id, &session_id)?;
@@ -3833,11 +3906,12 @@ impl Repository {
 }
 
 impl agentstategraph_reminders::ReminderStore for Repository {
+    // Each write goes through to the control ref (DESIGN.md Plan G t-001).
     fn save(
         &self,
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
-        self.storage.save(reminder)
+        self.reminder_through(&reminder.id, "save", || self.storage.save(reminder))
     }
 
     fn get(
@@ -3852,7 +3926,7 @@ impl agentstategraph_reminders::ReminderStore for Repository {
         &self,
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
-        self.storage.update(reminder)
+        self.reminder_through(&reminder.id, "update", || self.storage.update(reminder))
     }
 
     fn update_if_unchanged(
@@ -3860,11 +3934,13 @@ impl agentstategraph_reminders::ReminderStore for Repository {
         expected: &agentstategraph_reminders::Reminder,
         new: &agentstategraph_reminders::Reminder,
     ) -> Result<bool, agentstategraph_reminders::ReminderError> {
-        self.storage.update_if_unchanged(expected, new)
+        self.reminder_through(&new.id, "update", || {
+            self.storage.update_if_unchanged(expected, new)
+        })
     }
 
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
-        self.storage.delete(id)
+        self.reminder_through(id, "delete", || self.storage.delete(id))
     }
 
     fn list(
@@ -3873,6 +3949,32 @@ impl agentstategraph_reminders::ReminderStore for Repository {
     ) -> Result<Vec<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
     {
         self.storage.list(filter)
+    }
+}
+
+impl Repository {
+    /// Run a reminder table write, then commit the reminder to the control
+    /// ref.
+    fn reminder_through<T>(
+        &self,
+        id: &str,
+        what: &str,
+        table: impl FnOnce() -> Result<T, agentstategraph_reminders::ReminderError>,
+    ) -> Result<T, agentstategraph_reminders::ReminderError> {
+        self.write_through(
+            crate::control_repo::Stage::Record(crate::control_repo::Kind::Reminder, id),
+            crate::control_repo::system_options(
+                IntentCategory::Checkpoint,
+                format!("reminder {id}: {what}"),
+            ),
+            table,
+        )
+    }
+}
+
+impl From<RepoError> for agentstategraph_reminders::ReminderError {
+    fn from(e: RepoError) -> Self {
+        agentstategraph_reminders::ReminderError::Store(e.to_string())
     }
 }
 
