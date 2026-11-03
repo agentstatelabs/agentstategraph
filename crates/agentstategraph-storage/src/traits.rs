@@ -50,6 +50,20 @@ pub enum StorageError {
 
     #[error("invalid operation: {0}")]
     InvalidOperation(String),
+
+    /// The database was set up by a newer build whose schema this one can't
+    /// use: it needs a build that understands at least `compatible_from`, and
+    /// this one understands up to `supported`. Nothing was changed. (DESIGN.md
+    /// Plan F t-009.)
+    #[error(
+        "the {backend} database is at schema version {found}, which needs a build that understands version {compatible_from} or later; this build understands up to {supported}. Upgrade AgentStateGraph"
+    )]
+    SchemaTooNew {
+        backend: &'static str,
+        found: i32,
+        compatible_from: i32,
+        supported: i32,
+    },
 }
 
 impl StorageError {
@@ -70,6 +84,7 @@ impl StorageError {
             StorageError::EpochAlreadySealed { .. } => "epoch_sealed",
             StorageError::SessionEnded { .. } => "session_ended",
             StorageError::InvalidOperation(_) => "invalid_operation",
+            StorageError::SchemaTooNew { .. } => "schema_too_new",
         }
     }
 }

@@ -7,6 +7,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **A build refuses a database that a newer build has changed in a way it can't use,** instead of running on it. Several builds can share one database during a rolling deploy, so schema changes now expand, then contract: a change that only adds leaves older builds working, and one that removes what an older build uses ships only once no such build is still running. Each database records its schema version and the oldest version a build must understand to use it, in `asg_schema`. A build below that fails to open the database with `StorageError::SchemaTooNew` (code `schema_too_new`) and changes nothing; otherwise a newer build's database is used as it is, so a replica that restarts mid-deploy, or a rolled-back one, still starts. Builds from before this one don't check.
+  - Postgres moves to schema version 6, which adds the `compatible_from` column. Connecting to an older database runs the setup once, as every schema bump does.
+  - SQLite files get a schema stamp for the first time (version 1).
+
 ## [v1.5.0] — 2026-10-28
 
 A host serving many tenants on one Postgres database can switch on row-level security, so a query that forgot its tenant filter sees nothing of other tenants'. It's off until switched on, per database, so nothing changes for existing users until then. `PostgresStorage::pool` is deprecated in favour of `tenant_pool`.

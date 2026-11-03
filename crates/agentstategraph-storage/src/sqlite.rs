@@ -26,6 +26,23 @@ use crate::traits::{
     VacuumStats,
 };
 
+/// The schema this build sets up, stamped in `asg_schema` (DESIGN.md Plan F
+/// t-009). SQLite migrations check for what they add rather than read a
+/// version, so the stamp exists to let a build refuse a file a newer build has
+/// changed in a way it can't use. Bump it with each schema change.
+///
+/// 1: the first stamped schema.
+///
+/// Migrations expand, then contract, as on Postgres: one that only adds
+/// leaves [`SCHEMA_COMPATIBLE_FROM`] alone, and one that removes or changes
+/// what an older build uses raises it to its own version.
+const SCHEMA_VERSION: i32 = 1;
+
+/// The oldest schema version a build must understand to use a file this build
+/// has set up. A build refuses a file stamped above its own
+/// [`SCHEMA_VERSION`].
+const SCHEMA_COMPATIBLE_FROM: i32 = 1;
+
 /// SQLite-backed storage. Thread-safe via Mutex around the connection.
 ///
 /// Creates the database file and tables automatically on first use.
@@ -124,6 +141,10 @@ impl SqliteStorage {
             .conn
             .lock()
             .map_err(|e| StorageError::Backend(e.to_string()))?;
+
+        // Before any migration: a file a newer build has stamped as needing
+        // more than this one understands is left as it is.
+        refuse_newer_schema(&conn)?;
 
         conn.execute_batch(
             "
@@ -564,6 +585,26 @@ impl SqliteStorage {
                 .map_err(|e| StorageError::Backend(format!("add scope_namespace: {}", e)))?;
         }
 
+        // Stamp the schema. A newer build's stamp is kept: neither number
+        // goes down.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS asg_schema (
+                component       TEXT PRIMARY KEY,
+                version         INTEGER NOT NULL,
+                compatible_from INTEGER NOT NULL
+            );",
+        )
+        .map_err(|e| StorageError::Backend(format!("create asg_schema: {}", e)))?;
+        conn.execute(
+            "INSERT INTO asg_schema (component, version, compatible_from)
+             VALUES ('sqlite', ?1, ?2)
+             ON CONFLICT (component) DO UPDATE SET
+                 version = MAX(version, excluded.version),
+                 compatible_from = MAX(compatible_from, excluded.compatible_from)",
+            params![SCHEMA_VERSION, SCHEMA_COMPATIBLE_FROM],
+        )
+        .map_err(|e| StorageError::Backend(format!("stamp schema: {}", e)))?;
+
         Ok(())
     }
 
@@ -588,6 +629,42 @@ impl SqliteStorage {
             conn: conn.map_err(|e| StorageError::Backend(e.to_string()))?,
             since: Instant::now(),
         })
+    }
+}
+
+/// Fail with [`StorageError::SchemaTooNew`] if a newer build stamped this
+/// file as needing more than this build understands. An unstamped file is
+/// from before the stamp, which every build understands.
+fn refuse_newer_schema(conn: &Connection) -> Result<(), StorageError> {
+    let stamped: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master
+                            WHERE type = 'table' AND name = 'asg_schema')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| StorageError::Backend(format!("read schema stamp: {}", e)))?;
+    if !stamped {
+        return Ok(());
+    }
+    let stamp: Option<(i32, i32)> = conn
+        .query_row(
+            "SELECT version, compatible_from FROM asg_schema WHERE component = 'sqlite'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| StorageError::Backend(format!("read schema stamp: {}", e)))?;
+    match stamp {
+        Some((found, compatible_from)) if compatible_from > SCHEMA_VERSION => {
+            Err(StorageError::SchemaTooNew {
+                backend: "sqlite",
+                found,
+                compatible_from,
+                supported: SCHEMA_VERSION,
+            })
+        }
+        _ => Ok(()),
     }
 }
 
