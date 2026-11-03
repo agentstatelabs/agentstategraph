@@ -70,6 +70,26 @@ pub struct Commit {
 }
 
 impl Commit {
+    /// The content address of this commit's fields, computed the way
+    /// [`CommitBuilder::build`] computes `id`. A commit is intact when this
+    /// equals its `id`; sync and import recompute it for every commit they
+    /// receive rather than trust the sender's `id` (DESIGN.md Plan G).
+    pub fn compute_id(&self) -> ObjectId {
+        let bytes = serde_json::to_vec(&CommitHashInput {
+            state_root: &self.state_root,
+            parents: &self.parents,
+            timestamp: &self.timestamp,
+            agent_id: &self.agent_id,
+            authority: &self.authority,
+            intent: &self.intent,
+            reasoning: &self.reasoning,
+            confidence: &self.confidence,
+            tool_calls: &self.tool_calls,
+        })
+        .expect("commit serialization should never fail");
+        ObjectId::hash(&bytes)
+    }
+
     /// Apply the same size caps `CommitBuilder::build` uses to a commit
     /// loaded from storage. Idempotent — commits already within caps are
     /// returned unchanged.
@@ -203,20 +223,7 @@ impl CommitBuilder {
         };
 
         // Compute the content-addressed ID from all fields
-        let bytes = serde_json::to_vec(&CommitHashInput {
-            state_root: &commit.state_root,
-            parents: &commit.parents,
-            timestamp: &commit.timestamp,
-            agent_id: &commit.agent_id,
-            authority: &commit.authority,
-            intent: &commit.intent,
-            reasoning: &commit.reasoning,
-            confidence: &commit.confidence,
-            tool_calls: &commit.tool_calls,
-        })
-        .expect("commit serialization should never fail");
-
-        commit.id = ObjectId::hash(&bytes);
+        commit.id = commit.compute_id();
         commit
     }
 }
@@ -289,6 +296,30 @@ mod tests {
             commit1.id, commit2.id,
             "different commits should have different IDs"
         );
+    }
+
+    #[test]
+    fn compute_id_matches_build_and_survives_a_json_round_trip() {
+        let commit = CommitBuilder::new(
+            ObjectId::hash(b"root"),
+            "agent/test",
+            test_authority(),
+            test_intent(),
+        )
+        .parent(ObjectId::hash(b"parent"))
+        .reasoning("why")
+        .confidence(0.3)
+        .build();
+        assert_eq!(commit.compute_id(), commit.id);
+
+        // Storage keeps commits as JSON, and sync recomputes ids from what it
+        // reads back, so the round trip must not change any hashed field.
+        let back: Commit = serde_json::from_slice(&serde_json::to_vec(&commit).unwrap()).unwrap();
+        assert_eq!(back.compute_id(), commit.id);
+
+        let mut tampered = back;
+        tampered.intent.description = "something else".into();
+        assert_ne!(tampered.compute_id(), commit.id);
     }
 
     #[test]

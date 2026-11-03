@@ -18,6 +18,8 @@
 pub mod repo;
 pub mod session;
 pub mod speculation;
+#[cfg(feature = "sync")]
+pub mod sync;
 pub mod taint;
 mod telemetry;
 pub mod tree;
