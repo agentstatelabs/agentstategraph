@@ -658,6 +658,316 @@ fn assert_whole_tree(store: &MemoryStorage, root: agentstategraph_core::ObjectId
     }
 }
 
+// Control ref (DESIGN.md Plan G t-001) -------------------------------------
+
+mod control_support {
+    use super::*;
+    use agentstategraph::control::{self, CONTROL_REF, ControlState};
+    use agentstategraph_core::ObjectId;
+
+    pub fn head(store: &dyn Storage) -> Option<ObjectId> {
+        store
+            .get_ref(&Namespace::default_ns(), CONTROL_REF)
+            .unwrap()
+    }
+
+    pub fn state(store: &dyn Storage) -> ControlState {
+        let head = head(store).expect("a control ref");
+        let root = store.get_commit(&head).unwrap().unwrap().state_root;
+        control::read(store, &root).unwrap()
+    }
+
+    pub fn taint_params(name: &str) -> agentstategraph_taint::TaintParams {
+        agentstategraph_taint::TaintParams {
+            name: name.into(),
+            effect: agentstategraph_taint::TaintEffect::Block,
+            reason: "holds pii".into(),
+            severity: agentstategraph_taint::TaintSeverity::High,
+            expires_at: None,
+            propagate: true,
+            metadata: agentstategraph_taint::TaintMetadata::new(),
+            agent_id: "agent/conformance".into(),
+        }
+    }
+
+    pub fn reminder(title: &str) -> agentstategraph_reminders::CreateReminder {
+        agentstategraph_reminders::CreateReminder::new(
+            title,
+            "look",
+            chrono::Utc::now(),
+            "agent/conformance",
+        )
+    }
+
+    /// Copy `name`'s whole history from `from` to `to`, and point `name` at
+    /// it there, as a fetch would.
+    pub fn copy_ref(from: &dyn Storage, to: &dyn Storage, name: &str) {
+        let ns = Namespace::default_ns();
+        let head = from.get_ref(&ns, name).unwrap().unwrap();
+        let set = agentstategraph::sync::missing_set(from, &[head], &[], &[]).unwrap();
+        for id in &set.objects {
+            to.put_object(&from.get_object(id).unwrap().unwrap())
+                .unwrap();
+        }
+        for id in &set.commits {
+            to.put_commit(&from.get_commit(id).unwrap().unwrap())
+                .unwrap();
+        }
+        to.set_ref(&ns, name, head).unwrap();
+    }
+}
+
+/// Every taint, reminder and epoch change lands on the control ref, the ref
+/// is guarded from ordinary writes, and a repository opened on tables that
+/// match it changes nothing.
+fn control_ref_follows_every_change(f: &Fixture) {
+    use agentstategraph::control::ReminderEntry;
+    use agentstategraph_core::EpochStatus;
+    use agentstategraph_reminders::{ReminderManager, ReminderStatus, ReminderStore};
+    use control_support::*;
+
+    let repo = Arc::new(f.open());
+    repo.init().unwrap();
+    let taint_id = repo.taint("main", "/users", taint_params("pii")).unwrap();
+    repo.untaint(
+        "main",
+        "/users",
+        "pii",
+        agentstategraph_taint::UntaintParams {
+            reason: "scrubbed".into(),
+            proof: None,
+            agent_id: "person/reviewer".into(),
+        },
+    )
+    .unwrap();
+    let mgr = ReminderManager::new(repo.clone());
+    let kept = mgr.create(reminder("kept")).unwrap();
+    mgr.cancel(&kept.id).unwrap();
+    let gone = mgr.create(reminder("gone")).unwrap();
+    assert!(ReminderStore::delete(repo.as_ref(), &gone.id).unwrap());
+    repo.create_epoch("e1", "work", vec![]).unwrap();
+    repo.set_active_epoch(Some("e1".into())).unwrap();
+    let member = repo
+        .set_json("main", "/work", &json!(1), opts("in the epoch"))
+        .unwrap();
+    repo.set_active_epoch(None).unwrap();
+    repo.seal_epoch("e1", "done").unwrap();
+    repo.archive_epoch("e1").unwrap();
+
+    let store = f.storage();
+    let state = state(store.as_ref());
+    let taint = &state.taints[&taint_id];
+    assert_eq!(taint.resolved_by.as_deref(), Some("person/reviewer"));
+    assert!(!taint.commit_id.is_empty(), "the intent commit is recorded");
+    match &state.reminders[&kept.id] {
+        ReminderEntry::Live { reminder, .. } => {
+            assert_eq!(reminder.status, ReminderStatus::Cancelled)
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        state.reminders[&gone.id],
+        ReminderEntry::Deleted { .. }
+    ));
+    let table_epoch = repo.get_epoch("e1").unwrap();
+    let epoch = &state.epochs["e1"];
+    assert_eq!(epoch.status, EpochStatus::Archived);
+    assert_eq!(epoch.seal_hash, table_epoch.seal_hash);
+    let mut sealed = table_epoch.sealed_commits.clone();
+    sealed.sort();
+    assert_eq!(epoch.sealed_commits, sealed);
+    assert!(state.members["e1"].contains(&member));
+
+    // Guarded, and not a branch.
+    for result in [
+        repo.set_json("_control", "/x", &json!(1), opts("no"))
+            .map(|_| ()),
+        repo.branch("_control", "main").map(|_| ()),
+        repo.branch("_control-anything", "main").map(|_| ()),
+        repo.delete_branch("_control").map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(RepoError::ReservedRef(_))),
+            "{result:?}"
+        );
+    }
+    assert!(
+        repo.list_branches(None)
+            .unwrap()
+            .iter()
+            .all(|(name, _)| !name.starts_with("_control"))
+    );
+
+    // Opening again on matching tables changes nothing.
+    let head = head(store.as_ref());
+    let again = f.open();
+    assert_eq!(again.reconcile_control().unwrap(), Default::default());
+    assert_eq!(control_support::head(store.as_ref()), head);
+}
+
+/// Rows written before the control ref existed move into it when a
+/// repository opens, once.
+fn existing_rows_move_into_the_control_ref(f: &Fixture) {
+    use agentstategraph_core::{Epoch, ObjectId};
+    use control_support::*;
+
+    let store = f.storage();
+    let taint = agentstategraph_taint::Taint {
+        id: "old-taint".into(),
+        path: "/a".into(),
+        name: "old".into(),
+        kind: agentstategraph_taint::TaintKind::Taint,
+        effect: agentstategraph_taint::TaintEffect::Warn,
+        severity: agentstategraph_taint::TaintSeverity::Low,
+        reason: "from before".into(),
+        agent_id: "agent/old".into(),
+        commit_id: String::new(),
+        created_at: chrono::Utc::now(),
+        expires_at: None,
+        resolved_at: None,
+        resolved_by: None,
+        resolved_reason: None,
+        resolved_proof: None,
+        propagate: false,
+        metadata: agentstategraph_taint::TaintMetadata::new(),
+    };
+    store.create_taint(&taint).unwrap();
+    let r = reminder("old").into_reminder();
+    store.save(&r).unwrap();
+    store
+        .create_epoch(&Epoch::new("old-epoch", "before", vec![]).with_namespace("default"))
+        .unwrap();
+    let seal = ObjectId::hash(b"seal");
+    store
+        .seal_epoch("old-epoch", "sealed before", chrono::Utc::now(), &[], &seal)
+        .unwrap();
+    assert!(head(store.as_ref()).is_none());
+
+    let repo = f.open();
+    let state = state(store.as_ref());
+    assert_eq!(state.taints["old-taint"], taint);
+    assert!(state.reminders[&r.id].live().is_some());
+    assert_eq!(state.epochs["old-epoch"].seal_hash, Some(seal));
+    let moved = head(store.as_ref());
+    assert_eq!(repo.reconcile_control().unwrap(), Default::default());
+    drop(f.open());
+    assert_eq!(head(store.as_ref()), moved, "once");
+}
+
+/// A control ref brought from another store (as by a fetch) rebuilds this
+/// store's tables when a repository opens: a resolved taint, a cancelled and
+/// a deleted reminder, an archived epoch with its seal and members.
+fn tables_rebuild_from_a_fetched_control_ref(f: &Fixture) {
+    use agentstategraph_core::EpochStatus;
+    use agentstategraph_reminders::{ReminderManager, ReminderStatus, ReminderStore};
+    use control_support::*;
+
+    let source_store: Arc<dyn Storage + Send + Sync> = Arc::new(MemoryStorage::new());
+    let source = Arc::new(Repository::from_shared(source_store.clone()));
+    source.init().unwrap();
+    let taint_id = source.taint("main", "/users", taint_params("pii")).unwrap();
+    source
+        .untaint(
+            "main",
+            "/users",
+            "pii",
+            agentstategraph_taint::UntaintParams {
+                reason: "scrubbed".into(),
+                proof: None,
+                agent_id: "person/reviewer".into(),
+            },
+        )
+        .unwrap();
+    let mgr = ReminderManager::new(source.clone());
+    let kept = mgr.create(reminder("kept")).unwrap();
+    mgr.cancel(&kept.id).unwrap();
+    let gone = mgr.create(reminder("gone")).unwrap();
+    ReminderStore::delete(source.as_ref(), &gone.id).unwrap();
+    source.create_epoch("e1", "work", vec![]).unwrap();
+    source.set_active_epoch(Some("e1".into())).unwrap();
+    let member = source
+        .set_json("main", "/work", &json!(1), opts("in the epoch"))
+        .unwrap();
+    source.set_active_epoch(None).unwrap();
+    source.seal_epoch("e1", "done").unwrap();
+    source.archive_epoch("e1").unwrap();
+    let source_epoch = source.get_epoch("e1").unwrap();
+
+    // This store has the deleted reminder, as if it predated the delete.
+    let store = f.storage();
+    store
+        .save(&source_store.get(&gone.id).unwrap().unwrap_or_else(|| {
+            let mut r = reminder("gone").into_reminder();
+            r.id = gone.id.clone();
+            r
+        }))
+        .unwrap();
+    copy_ref(source_store.as_ref(), store.as_ref(), "main");
+    copy_ref(source_store.as_ref(), store.as_ref(), "_control");
+
+    let repo = f.open();
+    let taint = repo
+        .get_taint(&taint_id)
+        .unwrap()
+        .expect("the taint is rebuilt");
+    assert_eq!(taint.resolved_by.as_deref(), Some("person/reviewer"));
+    assert_eq!(
+        store.get(&kept.id).unwrap().unwrap().status,
+        ReminderStatus::Cancelled
+    );
+    assert!(
+        store.get(&gone.id).unwrap().is_none(),
+        "the delete is applied"
+    );
+    let epoch = repo.get_epoch("e1").unwrap();
+    assert_eq!(epoch.status, EpochStatus::Archived);
+    assert_eq!(epoch.seal_hash, source_epoch.seal_hash);
+    assert_eq!(epoch.commits, vec![member]);
+    let (mut a, mut b) = (
+        epoch.sealed_commits.clone(),
+        source_epoch.sealed_commits.clone(),
+    );
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
+    assert_eq!(repo.reconcile_control().unwrap(), Default::default());
+}
+
+/// A write cut short after its table write, before its control commit, is
+/// taken from the table when a repository next opens.
+fn a_write_cut_short_is_taken_from_the_table(f: &Fixture) {
+    use agentstategraph_core::ObjectId;
+    use agentstategraph_reminders::{ReminderManager, ReminderStatus};
+    use control_support::*;
+
+    let repo = Arc::new(f.open());
+    let r = ReminderManager::new(repo.clone())
+        .create(reminder("r"))
+        .unwrap();
+    let store = f.storage();
+    let mut changed = store.get(&r.id).unwrap().unwrap();
+    changed.status = ReminderStatus::Cancelled;
+    store.update(&changed).unwrap();
+    let mark = format!("_control-pending/reminder/{}/cut-short", r.id);
+    store
+        .set_ref(&Namespace::default_ns(), &mark, ObjectId::hash(b"x"))
+        .unwrap();
+
+    drop(f.open());
+    let state = state(store.as_ref());
+    assert_eq!(
+        state.reminders[&r.id].live().unwrap().status,
+        ReminderStatus::Cancelled
+    );
+    assert!(
+        store
+            .get_ref(&Namespace::default_ns(), &mark)
+            .unwrap()
+            .is_none(),
+        "the mark is cleared"
+    );
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -724,4 +1034,36 @@ fn gc_write_in_flight() {
 #[test]
 fn sync_missing_set() {
     run("missing_set_matches_the_dag", missing_set_matches_the_dag);
+}
+
+#[test]
+fn control_ref_writes() {
+    run(
+        "control_ref_follows_every_change",
+        control_ref_follows_every_change,
+    );
+}
+
+#[test]
+fn control_ref_migration() {
+    run(
+        "existing_rows_move_into_the_control_ref",
+        existing_rows_move_into_the_control_ref,
+    );
+}
+
+#[test]
+fn control_ref_rebuild() {
+    run(
+        "tables_rebuild_from_a_fetched_control_ref",
+        tables_rebuild_from_a_fetched_control_ref,
+    );
+}
+
+#[test]
+fn control_ref_cut_short() {
+    run(
+        "a_write_cut_short_is_taken_from_the_table",
+        a_write_cut_short_is_taken_from_the_table,
+    );
 }

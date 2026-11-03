@@ -56,16 +56,20 @@ impl Repository {
             propagate: params.propagate,
             metadata: params.metadata,
         };
-        self.taint_storage().create_taint(&taint)?;
-        let commit_id = self.write_taint_intent(
-            ref_name,
-            IntentCategory::Taint,
-            format!("taint {name} on {path}: {reason}"),
-            &agent_id,
-            Some(reason),
-        )?;
-        self.taint_storage()
-            .set_taint_commit_id(&id, &format!("{commit_id}"))?;
+        let description = format!("taint {name} on {path}: {reason}");
+        self.taint_through(&id, &agent_id, IntentCategory::Taint, &description, || {
+            self.taint_storage().create_taint(&taint)?;
+            let commit_id = self.write_taint_intent(
+                ref_name,
+                IntentCategory::Taint,
+                description.clone(),
+                &agent_id,
+                Some(reason),
+            )?;
+            self.taint_storage()
+                .set_taint_commit_id(&id, &format!("{commit_id}"))?;
+            Ok(())
+        })?;
         Ok(id)
     }
 
@@ -123,16 +127,26 @@ impl Repository {
             propagate: params.propagate,
             metadata,
         };
-        self.taint_storage().create_taint(&taint)?;
-        let commit_id = self.write_taint_intent(
-            ref_name,
-            IntentCategory::Quarantine,
-            format!("quarantine {name} on {path}: {reason}"),
+        let description = format!("quarantine {name} on {path}: {reason}");
+        self.taint_through(
+            &id,
             &agent_id,
-            Some(reason),
+            IntentCategory::Quarantine,
+            &description,
+            || {
+                self.taint_storage().create_taint(&taint)?;
+                let commit_id = self.write_taint_intent(
+                    ref_name,
+                    IntentCategory::Quarantine,
+                    description.clone(),
+                    &agent_id,
+                    Some(reason),
+                )?;
+                self.taint_storage()
+                    .set_taint_commit_id(&id, &format!("{commit_id}"))?;
+                Ok(())
+            },
         )?;
-        self.taint_storage()
-            .set_taint_commit_id(&id, &format!("{commit_id}"))?;
         Ok(id)
     }
 
@@ -197,16 +211,20 @@ impl Repository {
             propagate: params.propagate,
             metadata,
         };
-        self.taint_storage().create_taint(&taint)?;
-        let commit_id = self.write_taint_intent(
-            ref_name,
-            IntentCategory::Watch,
-            format!("watch {name} on {path}: {reason}"),
-            &agent_id,
-            Some(reason),
-        )?;
-        self.taint_storage()
-            .set_taint_commit_id(&id, &format!("{commit_id}"))?;
+        let description = format!("watch {name} on {path}: {reason}");
+        self.taint_through(&id, &agent_id, IntentCategory::Watch, &description, || {
+            self.taint_storage().create_taint(&taint)?;
+            let commit_id = self.write_taint_intent(
+                ref_name,
+                IntentCategory::Watch,
+                description.clone(),
+                &agent_id,
+                Some(reason),
+            )?;
+            self.taint_storage()
+                .set_taint_commit_id(&id, &format!("{commit_id}"))?;
+            Ok(())
+        })?;
         Ok(id)
     }
 
@@ -465,21 +483,48 @@ impl Repository {
                     "{kind:?}:{path}:{taint_name}"
                 )))
             })?;
-        self.taint_storage().resolve_taint(
+        let description = format!("resolve {kind:?} {taint_name} on {path}");
+        self.taint_through(
             &target.id,
             &params.agent_id,
-            &params.reason,
-            params.proof.as_deref(),
-            Utc::now(),
-        )?;
-        self.write_taint_intent(
-            ref_name,
-            intent,
-            format!("resolve {kind:?} {taint_name} on {path}"),
-            &params.agent_id,
-            Some(params.reason),
-        )?;
-        Ok(())
+            intent.clone(),
+            &description,
+            || {
+                self.taint_storage().resolve_taint(
+                    &target.id,
+                    &params.agent_id,
+                    &params.reason,
+                    params.proof.as_deref(),
+                    Utc::now(),
+                )?;
+                self.write_taint_intent(
+                    ref_name,
+                    intent,
+                    description.clone(),
+                    &params.agent_id,
+                    Some(params.reason),
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    /// Run a taint table write, then commit the taint to the control ref
+    /// (DESIGN.md Plan G t-001), with the same provenance as its intent
+    /// commit.
+    fn taint_through(
+        &self,
+        id: &str,
+        agent_id: &str,
+        category: IntentCategory,
+        description: &str,
+        table: impl FnOnce() -> Result<(), RepoError>,
+    ) -> Result<(), RepoError> {
+        self.write_through(
+            crate::control_repo::Stage::Record(crate::control_repo::Kind::Taint, id),
+            CommitOptions::new(agent_id, category, description),
+            table,
+        )
     }
 }
 

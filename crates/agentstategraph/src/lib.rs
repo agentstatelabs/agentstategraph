@@ -16,6 +16,7 @@
 //! ```
 
 pub mod control;
+pub mod control_repo;
 pub mod repo;
 pub mod session;
 pub mod speculation;
@@ -32,6 +33,7 @@ pub use agentstategraph_storage as storage;
 
 // Re-export primary types
 pub use agentstategraph_storage::CommitTrace;
+pub use control_repo::ControlReport;
 pub use repo::{
     CommitOptions, HistoryExtractReport, META_PATH_PREFIX, META_SCHEMA_VERSION_PATH, RepoError,
     Repository, RetentionPolicy, SCHEMA_VERSION,
