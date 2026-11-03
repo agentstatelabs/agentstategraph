@@ -12,8 +12,10 @@ repository.workspace = true
 description = "AI-native versioned state store for intent-based systems"
 
 [features]
-default = ["sqlite"]
+default = ["sqlite", "sync"]
 sqlite = ["agentstategraph-storage/sqlite"]
+# Sync between stores (DESIGN.md Plan G): bundles, compressed with zstd.
+sync = ["dep:zstd"]
 
 [dependencies]
 agentstategraph-core = { workspace = true }
@@ -29,6 +31,7 @@ uuid = { workspace = true }
 # the library decides where they go (docs/OBSERVABILITY.md).
 tracing = "0.1"
 metrics = "0.24"
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 # tests/backend_conformance.rs runs every built-in backend, Postgres included

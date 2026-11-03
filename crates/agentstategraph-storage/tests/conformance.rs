@@ -458,6 +458,58 @@ fn commits_and_walks(f: &Fixture) {
     );
 }
 
+/// A commit read back recomputes to its id, however its backend keeps it
+/// (Postgres normalizes JSONB). Sync and import recompute every id they
+/// receive (DESIGN.md Plan G t-002), so a backend that changed a hashed
+/// field on the way back would make its own history unsyncable.
+fn commits_recompute_to_their_ids(f: &Fixture) {
+    use agentstategraph_core::{AuthScope, DelegationLink, ToolCall};
+    let s = f.store();
+    let root = s.put_object(&Object::string("root")).unwrap();
+    let now = Utc::now();
+    let mut authority = Authority::simple("person/ünïcode");
+    authority.scope = AuthScope::Path("/a/*".into());
+    authority.expires = Some(at("2031-01-02T03:04:05.123456789Z"));
+    authority.delegation_chain = vec![DelegationLink {
+        from: "person/a".into(),
+        to: "agent/b".into(),
+        scope: AuthScope::Custom("x".into()),
+        granted_at: now,
+        expires: None,
+    }];
+    let mut intent = Intent::new(IntentCategory::Fix, "quote \" tab \t emoji 🙂");
+    intent.tags = vec!["z".into(), "a".into()];
+    let parent = commit(s, "parent", &[]);
+    let c = CommitBuilder::new(root, "agent/conformance", authority, intent)
+        .parent(parent.id)
+        // No NUL: Postgres JSONB can't hold U+0000, so no Postgres store
+        // keeps a commit with one.
+        .reasoning("line\nbreak, \u{1} control")
+        .confidence(0.1)
+        .tool_calls(vec![ToolCall {
+            tool_name: "set".into(),
+            arguments: serde_json::json!({
+                "zeta": 1e-7, "alpha": 0.1, "big": u64::MAX, "neg": i64::MIN,
+                "exp": 1.5e300, "nested": {"b": [1, 2.0, null], "a": "ü"}
+            }),
+            result: None,
+            timestamp: now,
+        }])
+        .build();
+    s.put_commit(&c).unwrap();
+
+    let back = s.get_commit(&c.id).unwrap().expect("round-trips");
+    assert_eq!(back.compute_id(), c.id, "get_commit");
+    for walked in s.list_commits(&c.id, 10).unwrap() {
+        assert_eq!(walked.compute_id(), walked.id, "list_commits");
+    }
+    let walk = s.list_commits_dag(&c.id, 10).unwrap();
+    assert_eq!(walk.commits.len(), 2);
+    for walked in walk.commits {
+        assert_eq!(walked.compute_id(), walked.id, "list_commits_dag");
+    }
+}
+
 /// Walks over long and merge-heavy histories, and over a pruned parent.
 fn dag_walks_at_scale(f: &Fixture) {
     let s = f.store();
@@ -1620,6 +1672,14 @@ fn objects_batch() {
 #[test]
 fn commits() {
     run("commits_and_walks", commits_and_walks);
+}
+
+#[test]
+fn commits_recompute() {
+    run(
+        "commits_recompute_to_their_ids",
+        commits_recompute_to_their_ids,
+    );
 }
 
 #[test]
