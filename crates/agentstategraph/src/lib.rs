@@ -15,6 +15,7 @@
 //! let mut repo = Repository::new(Box::new(storage));
 //! ```
 
+pub mod control;
 pub mod repo;
 pub mod session;
 pub mod speculation;
