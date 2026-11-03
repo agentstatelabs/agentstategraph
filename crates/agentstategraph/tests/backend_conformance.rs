@@ -968,6 +968,64 @@ fn a_write_cut_short_is_taken_from_the_table(f: &Fixture) {
     );
 }
 
+/// A store exported from memory imports into this backend, taints and
+/// epochs included, and this backend's export imports back into memory as
+/// the same store (DESIGN.md Plan F t-008).
+fn store_export_import_round_trips(f: &Fixture) {
+    use agentstategraph::sync::bundle::BundleLimits;
+    use control_support::*;
+
+    let source = Repository::from_shared(Arc::new(MemoryStorage::new()));
+    source.init().unwrap();
+    source
+        .set_json(
+            "main",
+            "/config",
+            &json!({"name": "prod", "list": [1, 2.5]}),
+            opts("init"),
+        )
+        .unwrap();
+    source.branch("feature", "main").unwrap();
+    source
+        .set_json("feature", "/feature", &json!(true), opts("feature"))
+        .unwrap();
+    let taint = source
+        .taint("main", "/config", taint_params("pii"))
+        .unwrap();
+    source.create_epoch("e", "work", vec![]).unwrap();
+    source.seal_epoch("e", "done").unwrap();
+    let (bytes, exported) = source.export_store(Vec::new()).unwrap();
+
+    let here = f.open();
+    let imported = here
+        .import_store(&bytes[..], BundleLimits::default())
+        .unwrap();
+    assert_eq!(imported.commits, exported.commits);
+    assert_eq!(here.get_json("feature", "/feature").unwrap(), json!(true));
+    assert_eq!(
+        here.get_json("main", "/config").unwrap(),
+        source.get_json("main", "/config").unwrap()
+    );
+    assert!(
+        here.get_taint(&taint).unwrap().is_some(),
+        "the taint table is rebuilt"
+    );
+    assert_eq!(
+        here.get_epoch("e").unwrap().seal_hash,
+        source.get_epoch("e").unwrap().seal_hash
+    );
+
+    let (again, _) = f.open().export_store(Vec::new()).unwrap();
+    let back = Repository::from_shared(Arc::new(MemoryStorage::new()));
+    back.import_store(&again[..], BundleLimits::default())
+        .unwrap();
+    assert_eq!(
+        back.list_branches(None).unwrap(),
+        source.list_branches(None).unwrap()
+    );
+    assert!(back.get_taint(&taint).unwrap().is_some());
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -1065,5 +1123,13 @@ fn control_ref_cut_short() {
     run(
         "a_write_cut_short_is_taken_from_the_table",
         a_write_cut_short_is_taken_from_the_table,
+    );
+}
+
+#[test]
+fn store_export_import() {
+    run(
+        "store_export_import_round_trips",
+        store_export_import_round_trips,
     );
 }
