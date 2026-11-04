@@ -40,7 +40,7 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 77 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 83 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
@@ -200,7 +200,7 @@ OPTIONS:
 
 Each commit records the trace it was made in, shown as `trace_id` and `span_id` in `log` and `blame`; set `ASG_TRACE_LINKS=off` to stop recording them. Set `ASG_SQL_SPANS=on` to trace each SQL statement as a span. Set `ASG_COMMIT_EVENTS=on` to log each commit as an `asg.commit` event, for a log backend or SIEM; it never carries values. See [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md).
 
-## Available Tools (77)
+## Available Tools (83)
 
 The most-used tools are listed below by category. See the full [MCP Tools Reference](/reference/mcp-tools/) for every tool with parameters and example payloads.
 
@@ -329,6 +329,17 @@ See the [Taint & Quarantine guide](/guides/taint/).
 | `agentstategraph_reminder_remind_me` | Get all currently due reminders, by priority. |
 | `agentstategraph_reminder_snooze` / `agentstategraph_reminder_approve` / `agentstategraph_reminder_cancel` | Manage reminder state. |
 | `agentstategraph_reminder_record_execution` | Record an execution result; advances repeating schedules. |
+
+### Sync
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_remote_add` / `agentstategraph_remote_list` / `agentstategraph_remote_remove` | Name a hub to sync with. Its API key comes from an environment variable the remote names, never from the store. |
+| `agentstategraph_fetch` | Fetch branches from a remote, without changing local ones. |
+| `agentstategraph_push` | Push a branch: only forward, and never secrets, local-only branches, or credential-like values unless each finding is overridden. |
+| `agentstategraph_pull` | Fetch, renumber colliding task ids, and merge. |
+
+Fetch, push and pull need a build with the `sync-client` feature, as the release binaries and the Docker image are; without it they answer `sync_unavailable`. The same calls are HTTP routes: `GET /api/remotes`, `POST /api/sync/fetch`, `/api/sync/push` and `/api/sync/pull` (refused for namespace-bound keys), and `POST /api/admin/remotes` and `/api/admin/remotes/remove` with an admin key. See [Sync hub](#sync-hub).
 
 See the [Reminders guide](/guides/reminders/).
 

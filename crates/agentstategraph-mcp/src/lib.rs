@@ -11,6 +11,7 @@ pub mod hub;
 pub mod policy_signing;
 pub mod server;
 pub mod store_gauges;
+pub mod sync_ops;
 
 /// The trace the current work belongs to, from oxtel's current span context,
 /// as a commit links to it (DESIGN.md Plan H t-009). The server passes it to

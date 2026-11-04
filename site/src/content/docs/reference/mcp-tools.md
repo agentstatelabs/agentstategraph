@@ -3,7 +3,7 @@ title: MCP Tools Reference
 description: Complete reference for all AgentStateGraph MCP tools with parameters and examples.
 ---
 
-> **77 tools** — 4 core state · 7 branching/speculation · 10 query/blame/explore · 4 namespaces · 7 epochs · 4 sessions · 4 maintenance (GC and history) · 10 plans/tasks · 12 policy · 8 taint · 7 reminders. Also available as HTTP REST endpoints via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
+> **83 tools** — 4 core state · 7 branching/speculation · 10 query/blame/explore · 4 namespaces · 7 epochs · 4 sessions · 4 maintenance (GC and history) · 10 plans/tasks · 12 policy · 8 taint · 7 reminders · 6 sync. Also available as HTTP REST endpoints via `--http` mode. The `agentstategraph-mcp` binary additionally offers a [`migrate` subcommand](/guides/mcp-server/) for schema upgrades — it's a one-shot CLI, not an MCP tool.
 >
 > **Namespace override:** the 17 ref-touching tools (`get`, `set`, `delete`, `branch`, `list_branches`, `merge`, `log`, `diff`, `speculate`, `query`, `blame`, `list_paths`, `get_tree`, `search`, `stats`, `commit_graph`, `intent_tree`) also accept an optional `namespace` field that overrides the server's configured namespace for that call. See [Namespaces](/guides/namespaces/).
 
@@ -2146,3 +2146,77 @@ Record the result of executing a reminder. If the reminder has a repeating sched
   "notes": "Server process was not running; nothing to terminate."
 }
 ```
+
+---
+
+## Sync (6 tools)
+
+Push, fetch and pull between this store and a hub (`agentstategraph-mcp --hub`, or any host serving `/sync/v1`), by the remote's name. A remote's API key is read from the environment variable it names each time it's used, and is never stored. Fetch, push and pull need a build with the `sync-client` feature (the release binaries and the Docker image have it); without it they answer `Error [sync_unavailable]`.
+
+### agentstategraph_remote_add
+
+Add a remote, or change where it is.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `name` | string | yes | | The remote's name: letters, digits, `-`, `_` or `.` |
+| `url` | string | yes | | The hub's base URL, `https://…` |
+| `store` | string | no | `"default"` | The store on the hub (its tenant id) |
+| `token_env` | string | no | | The environment variable holding the hub's API key |
+
+**Example input:**
+```json
+{ "name": "hub", "url": "https://hub.example.com", "token_env": "ASG_HUB_TOKEN" }
+```
+
+### agentstategraph_remote_list
+
+The remotes, with where each of their branches was at the last fetch or push. No parameters.
+
+### agentstategraph_remote_remove
+
+Remove a remote and where its branches were last seen.
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `name` | string | yes | | The remote's name |
+
+### agentstategraph_fetch
+
+Fetch branches, recording where they are as `remotes/<remote>/<branch>` without changing local branches. The remote's taints, reminders and epochs always come, and are merged into this store's.
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `remote` | string | yes | | The remote's name |
+| `refs` | string[] | no | every branch | Branches to fetch |
+| `namespace` | string | no | server's | Namespace to fetch into |
+
+### agentstategraph_push
+
+Push a branch. It only moves the remote forward: if another store pushed first, the push is rejected (`push_rejected`); pull, then push again. Anything under `/_meta/_secret`, a branch marked local-only, and values that look like credentials are refused before anything is sent (`push_blocked`, listing each finding's id, rule and path, never its value).
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `remote` | string | yes | | The remote's name |
+| `ref` | string | no | `"main"` | The branch to push |
+| `overrides` | object[] | no | | `{ "finding": "<id>", "reason": "…" }` for each finding to let through; the hub records them in its push log |
+| `namespace` | string | no | server's | Namespace to push from |
+
+**Example input:**
+```json
+{ "remote": "hub", "ref": "main", "overrides": [{ "finding": "sg_1a2b3c4d5e6f", "reason": "a revoked test key" }] }
+```
+
+### agentstategraph_pull
+
+Fetch a branch, renumber local tasks in `/plans` whose ids the remote also used (rewriting references to them), and merge it into the local branch. The answer lists the renumbered tasks and any plan both sides created apart.
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `remote` | string | yes | | The remote's name |
+| `ref` | string | no | `"main"` | The branch to pull |
+| `intent_description` | string | no | `"pull from <remote>"` | For a merge commit, if one is made |
+| `namespace` | string | no | server's | Namespace to pull into |
+

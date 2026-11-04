@@ -23,7 +23,9 @@ default = []
 postgres = ["agentstategraph-storage/postgres", "dep:tokio"]
 
 [dependencies]
-agentstategraph = { workspace = true, features = ["sqlite"] }
+agentstategraph = { workspace = true, features = ["sqlite", "sync"] }
+# Push, fetch and pull over HTTPS (ureq and rustls), for the sync.* calls.
+agentstategraph-sync-http = { workspace = true, features = ["client"] }
 agentstategraph-core = { workspace = true }
 agentstategraph-storage = { workspace = true, features = ["sqlite"] }
 agentstategraph-tasks = { workspace = true }
@@ -39,3 +41,9 @@ serde_json = { workspace = true }
 [package.metadata.docs.rs]
 # Document the optional backends and evaluators too.
 all-features = true
+
+[dev-dependencies]
+# tests/sync_ffi.rs serves a hub on a local port.
+agentstategraph-sync-http = { workspace = true, features = ["server", "client"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }

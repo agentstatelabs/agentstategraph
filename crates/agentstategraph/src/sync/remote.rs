@@ -81,6 +81,10 @@ pub enum SyncError {
     #[error("the remote has no ref {0}")]
     NoSuchRef(String),
 
+    /// No remote of this name is set ([`Repository::set_remote`]).
+    #[error("no remote is named {0}")]
+    NoSuchRemote(String),
+
     /// A push filter found something in what the push would send
     /// ([`crate::sync::filter`]).
     #[error("{name} wasn't pushed: {}", filter::describe(findings))]
@@ -132,6 +136,7 @@ impl SyncError {
             SyncError::Rejected { .. } => "push_rejected",
             SyncError::NotFastForward { .. } => "not_fast_forward",
             SyncError::NoSuchRef(_) => "no_such_ref",
+            SyncError::NoSuchRemote(_) => "no_such_remote",
             SyncError::Blocked { .. } => "push_blocked",
             SyncError::LocalOnly(_) => "local_only_ref",
             SyncError::Refused(_) => "push_refused",
@@ -302,7 +307,7 @@ pub fn tracking_ref(remote: &str, name: &str) -> String {
     format!("{TRACKING_PREFIX}{remote}/{name}")
 }
 
-fn check_remote_name(remote: &str) -> Result<(), SyncError> {
+pub(crate) fn check_remote_name(remote: &str) -> Result<(), SyncError> {
     if remote.is_empty()
         || remote.starts_with('_')
         || remote.contains('/')

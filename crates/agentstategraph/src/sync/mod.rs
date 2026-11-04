@@ -15,12 +15,14 @@
 //! - [`push_log`]: the receiving side's record of the pushes it took (t-006).
 //! - [`shallow`]: history that starts at a chosen commit, and the
 //!   boundaries a store records (t-007).
+//! - [`remotes`]: named remotes a store keeps, without their tokens (t-008).
 
 pub mod bundle;
 pub mod filter;
 pub mod missing;
 pub mod push_log;
 pub mod remote;
+pub mod remotes;
 pub mod shallow;
 pub mod store;
 
@@ -37,5 +39,6 @@ pub use remote::{
     FetchReport, FetchRequest, InProcessRemote, PullOutcome, PullReport, PushOutcome, PushReport,
     RefChange, RefUpdate, Remote, SyncError, tracking_ref,
 };
+pub use remotes::{REMOTES_REF, RemoteConfig};
 pub use shallow::{FetchOptions, SHALLOW_PREFIX};
 pub use store::{ExportReport, ImportReport, TransferError};

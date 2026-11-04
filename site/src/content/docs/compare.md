@@ -29,7 +29,7 @@ They are not competitors to each other. They occupy different layers of the stac
 | **Multi-tenancy / isolation** | Per-workspace state | None | Tenants partitioned in a shared Postgres database (one tenant per server). Namespaces give each project its own branches within a store; an API key bound to a namespace confines a client to it |
 | **Audit surface** | Encrypted state at rest, RBAC, history | Optional thread checkpoints | Tamper-evident sealed epochs, archivable and exportable as self-contained audit bundles |
 | **Language / bindings** | Rust + Go, backs the Terraform CLI | Python only | Rust core with Python, TypeScript, Go, Swift, .NET, WASM, and C FFI bindings |
-| **Primary interface** | `terraform` / `opentofu` CLI | Python library imports | MCP server (77 tools), library calls, HTTP REST, migrate CLI |
+| **Primary interface** | `terraform` / `opentofu` CLI | Python library imports | MCP server (83 tools), library calls, HTTP REST, migrate CLI |
 | **Storage backends** | PostgreSQL | Process memory (+ optional checkpointer) | Memory, SQLite, Postgres (tenant-partitioned, TLS), IndexedDB (browser) |
 | **Closest analogy** | A better database under Terraform | A state machine inside your agent | Git for agent-era state |
 

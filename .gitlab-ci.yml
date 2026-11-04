@@ -135,8 +135,9 @@ test:
     ASG_REQUIRE_POSTGRES: "1"
   script:
     - if sh .ci/already-tested.sh; then exit 0; fi
-    # The ASD proxy is behind the off-by-default `providers` feature.
-    - cargo test --locked -p agentstategraph-mcp --features providers --test asd_proxy
+    # The ASD proxy and the sync routes' client are behind the off-by-default
+    # `providers` and `sync-client` features.
+    - cargo test --locked -p agentstategraph-mcp --features providers,sync-client --test asd_proxy --test sync_routes
     - cargo test --workspace --locked --exclude agentstategraph-python
     # Postgres TLS is opt-in (postgres-tls); compile and unit-test it too.
     - cargo test --locked -p agentstategraph-storage --features postgres-tls,memory --lib

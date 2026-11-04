@@ -178,6 +178,11 @@ pub fn build_router_with(
         .route("/gc/dry-run", get(gc_dry_run))
         .route("/gc/sweep", post(gc_sweep))
         .route("/gc/vacuum", post(gc_vacuum))
+        // Sync through named remotes (DESIGN.md Plan G t-008)
+        .route("/remotes", get(list_remotes))
+        .route("/sync/fetch", post(sync_fetch))
+        .route("/sync/push", post(sync_push))
+        .route("/sync/pull", post(sync_pull))
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::auth_middleware,
@@ -196,6 +201,9 @@ pub fn build_router_with(
         .route("/api/admin/keys", post(create_key))
         .route("/api/admin/keys/revoke", post(revoke_key))
         .route("/api/admin/keys/rotate", post(rotate_key))
+        // Adding a remote points the server at a URL, so only an admin may.
+        .route("/api/admin/remotes", post(add_remote))
+        .route("/api/admin/remotes/remove", post(remove_remote))
         .route_layer(middleware::from_fn_with_state(
             tenant_mgr.clone(),
             auth::admin_auth_middleware,
@@ -1382,6 +1390,150 @@ async fn merge_branches(
     .await
 }
 
+// ─── Sync (DESIGN.md Plan G t-008) ───────────────────────────
+
+impl From<crate::sync_ops::SyncFailure> for AppError {
+    fn from(e: crate::sync_ops::SyncFailure) -> Self {
+        AppError::new(e.code, e.message)
+    }
+}
+
+/// Sync moves the whole store, every namespace and its taints, reminders
+/// and epochs, so a key bound to one namespace can't.
+fn refuse_namespace_bound(ctx: &AuthContext) -> Result<(), AppError> {
+    match &ctx.namespace_id {
+        Some(ns) => Err(AppError::new(
+            "key_bound_to_namespace",
+            format!("this key is bound to the namespace {ns:?}, and sync moves the whole store"),
+        )),
+        None => Ok(()),
+    }
+}
+
+async fn list_remotes(
+    Extension(repo): Extension<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    blocking(move || Ok(Json(crate::sync_ops::remotes(&repo)?))).await
+}
+
+#[derive(Deserialize)]
+struct AddRemoteRequest {
+    name: String,
+    url: String,
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    token_env: Option<String>,
+}
+
+async fn add_remote(
+    State(mgr): State<Arc<TenantManager>>,
+    Json(req): Json<AddRemoteRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let repo = Arc::clone(mgr.default_repo());
+    blocking(move || {
+        let store = req.store.as_deref().unwrap_or("default");
+        Ok(Json(crate::sync_ops::add_remote(
+            &repo,
+            &req.name,
+            &req.url,
+            store,
+            req.token_env,
+        )?))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct RemoveRemoteRequest {
+    name: String,
+}
+
+async fn remove_remote(
+    State(mgr): State<Arc<TenantManager>>,
+    Json(req): Json<RemoveRemoteRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let repo = Arc::clone(mgr.default_repo());
+    blocking(move || Ok(Json(crate::sync_ops::remove_remote(&repo, &req.name)?))).await
+}
+
+#[derive(Deserialize)]
+struct SyncFetchRequest {
+    remote: String,
+    #[serde(default)]
+    refs: Vec<String>,
+}
+
+async fn sync_fetch(
+    Extension(repo): Extension<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<SyncFetchRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    refuse_namespace_bound(&ctx)?;
+    blocking(move || Ok(Json(crate::sync_ops::fetch(&repo, &req.remote, &req.refs)?))).await
+}
+
+#[derive(Deserialize)]
+struct SyncPushRequest {
+    remote: String,
+    #[serde(default, rename = "ref")]
+    ref_name: Option<String>,
+    #[serde(default)]
+    overrides: Vec<agentstategraph::sync::PushOverride>,
+}
+
+async fn sync_push(
+    Extension(repo): Extension<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<SyncPushRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    refuse_namespace_bound(&ctx)?;
+    blocking(move || {
+        let ref_name = req.ref_name.as_deref().unwrap_or("main");
+        Ok(Json(crate::sync_ops::push(
+            &repo,
+            &req.remote,
+            ref_name,
+            req.overrides,
+        )?))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SyncPullRequest {
+    remote: String,
+    #[serde(default, rename = "ref")]
+    ref_name: Option<String>,
+    #[serde(default)]
+    intent_description: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+async fn sync_pull(
+    Extension(repo): Extension<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<SyncPullRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    refuse_namespace_bound(&ctx)?;
+    let agent = resolve_agent(&ctx, req.agent);
+    blocking(move || {
+        let ref_name = req.ref_name.as_deref().unwrap_or("main");
+        let description = req
+            .intent_description
+            .unwrap_or_else(|| format!("pull from {}", req.remote));
+        let options = CommitOptions::new(agent, IntentCategory::Merge, description);
+        Ok(Json(crate::sync_ops::pull(
+            repo,
+            &req.remote,
+            ref_name,
+            options,
+        )?))
+    })
+    .await
+}
+
 // ─── Epochs ─────────────────────────────────────────────────
 
 async fn list_epochs(
@@ -1548,7 +1700,17 @@ fn status_for(code: &str) -> StatusCode {
         | "commit_ref_not_allowed"
         | "key_bound_to_namespace"
         | "cross_namespace_denied"
-        | "taint_blocked" => StatusCode::FORBIDDEN,
+        | "taint_blocked"
+        | "reserved_ref"
+        | "push_blocked"
+        | "local_only_ref"
+        | "push_refused" => StatusCode::FORBIDDEN,
+        // Sync: what isn't there, what has moved, and what's out of reach.
+        "no_such_remote" | "no_such_ref" => StatusCode::NOT_FOUND,
+        "push_rejected" | "not_fast_forward" => StatusCode::CONFLICT,
+        "bundle_incomplete" => StatusCode::BAD_REQUEST,
+        "remote_error" => StatusCode::BAD_GATEWAY,
+        "sync_unavailable" => StatusCode::NOT_IMPLEMENTED,
         "too_many_speculations" => StatusCode::TOO_MANY_REQUESTS,
         "not_initialized" => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,

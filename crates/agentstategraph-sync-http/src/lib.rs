@@ -8,12 +8,17 @@
 //! - [`client`] (feature `client`): [`client::HttpRemote`], the
 //!   [`Remote`](agentstategraph::sync::Remote) a store pushes to and
 //!   fetches from.
+//! - [`named`] (feature `client`): push, fetch and pull by a remote's name,
+//!   as the store keeps it.
+//! - [`report`]: reports and errors as JSON, for the surfaces that pass
+//!   them on.
 //! - [`wire`]: what goes between them.
 //!
 //! The receiving side's work, checks and push log are the library's own
 //! ([`agentstategraph::Repository::sync_receive`] and the rest); this crate
 //! only carries them.
 
+pub mod report;
 pub mod wire;
 
 #[cfg(feature = "server")]
@@ -21,6 +26,9 @@ pub mod server;
 
 #[cfg(feature = "client")]
 pub mod client;
+
+#[cfg(feature = "client")]
+pub mod named;
 
 #[cfg(feature = "client")]
 pub use client::HttpRemote;

@@ -83,6 +83,11 @@ providers = ["dep:reqwest"]
 # release builds and the Docker image turn it on, and still send nothing until
 # an endpoint is set.
 otlp = ["oxtel/otlp"]
+# Reach sync remotes over HTTPS (ureq and rustls) for the fetch, push and pull
+# tools and routes (DESIGN.md Plan G t-008). Like `otlp`, it's opt-in;
+# release builds and the Docker image turn it on. Without it, those calls
+# answer `sync_unavailable`.
+sync-client = ["agentstategraph-sync-http/client"]
 
 [dev-dependencies]
 agentstategraph-sync-http = { workspace = true, features = ["server", "client"] }
