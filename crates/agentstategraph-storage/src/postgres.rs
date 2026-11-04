@@ -323,6 +323,8 @@ mod tls {
 /// 5: the tenant policy on every tenant table, for row-level security (Plan F
 /// t-003). It's added after `SCHEMA_DDL`, from [`TENANT_TABLES`].
 /// 6: `asg_schema.compatible_from` (Plan F t-009).
+/// 7: `objects.exact` and `commits.exact`, which hold a row's JSON exactly
+/// when it has a U+0000 that JSONB can't (see [`row_json`]).
 ///
 /// Several builds can share one database during a rolling deploy, so
 /// migrations expand, then contract. An expand migration only adds (a table,
@@ -331,15 +333,18 @@ mod tls {
 /// migration removes or changes what an older build uses, and ships only once
 /// no build that needs it is still running; it raises
 /// [`SCHEMA_COMPATIBLE_FROM`] to its own version.
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 /// The oldest schema version a build must understand to use a database this
 /// build has set up, stamped as `asg_schema.compatible_from`. A build refuses
 /// a database whose stamp is above its own [`SCHEMA_VERSION`], and uses one
-/// stamped by a newer build otherwise, without migrating it. Version 5's
-/// tenant policy is what an older build can't use: with row-level security
-/// on, a build that doesn't set the tenant on its connections sees no rows.
-const SCHEMA_COMPATIBLE_FROM: i32 = 5;
+/// stamped by a newer build otherwise, without migrating it. Version 7's
+/// `exact` columns are what an older build can't use: it would read a row
+/// holding U+0000 from `data`, with U+FFFD in its place, and hand back
+/// content that doesn't match its id. (Before that, version 5's tenant
+/// policy: with row-level security on, a build that doesn't set the tenant on
+/// its connections sees no rows.)
+const SCHEMA_COMPATIBLE_FROM: i32 = 7;
 
 /// Every table, column and index, each `IF NOT EXISTS` so it's safe to re-run
 /// over any earlier schema, plus the version stamp table.
@@ -614,6 +619,11 @@ const SCHEMA_DDL: &str = "
                 -- this database (version 6). See SCHEMA_COMPATIBLE_FROM.
                 ALTER TABLE asg_schema
                     ADD COLUMN IF NOT EXISTS compatible_from INTEGER NOT NULL DEFAULT 1;
+
+                -- A row's exact JSON, when it has a U+0000, which JSONB can't
+                -- hold (version 7). NULL otherwise. See row_json.
+                ALTER TABLE objects ADD COLUMN IF NOT EXISTS exact BYTEA;
+                ALTER TABLE commits ADD COLUMN IF NOT EXISTS exact BYTEA;
 ";
 
 /// The session setting that names the tenant a connection works for. Every
@@ -1383,19 +1393,14 @@ impl ObjectStore for PostgresStorage {
 
             let row = client
                 .query_opt(
-                    "SELECT data FROM objects WHERE tenant_id = $1 AND id = $2",
+                    "SELECT data, exact FROM objects WHERE tenant_id = $1 AND id = $2",
                     &[&self.tenant_id, &id.as_bytes().as_slice()],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("get object: {}", e)))?;
 
             match row {
-                Some(row) => {
-                    let data: serde_json::Value = row.get("data");
-                    let obj: Object = serde_json::from_value(data)
-                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                    Ok(Some(obj))
-                }
+                Some(row) => Ok(Some(from_row_json(row.get("data"), row.get("exact"))?)),
                 None => Ok(None),
             }
         })
@@ -1403,8 +1408,7 @@ impl ObjectStore for PostgresStorage {
 
     fn put_object(&self, obj: &Object) -> Result<ObjectId, StorageError> {
         let id = obj.id();
-        let data =
-            serde_json::to_value(obj).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let (data, exact) = row_json(obj)?;
 
         self.block_on(async {
             let client = self.client().await?;
@@ -1412,10 +1416,10 @@ impl ObjectStore for PostgresStorage {
             client
                 .execute(
                     &format!(
-                        "INSERT INTO objects (tenant_id, id, data) VALUES ($1, $2, $3)
+                        "INSERT INTO objects (tenant_id, id, data, exact) VALUES ($1, $2, $3, $4)
                          {FRESHEN_ON_CONFLICT}"
                     ),
-                    &[&self.tenant_id, &id.as_bytes().as_slice(), &data],
+                    &[&self.tenant_id, &id.as_bytes().as_slice(), &data, &exact],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("put object: {}", e)))?;
@@ -1428,21 +1432,17 @@ impl ObjectStore for PostgresStorage {
     /// merge write a batch as a unit, and the trait's default made one
     /// independent round trip per object.
     fn batch_put_objects(&self, objs: &[Object]) -> Result<Vec<ObjectId>, StorageError> {
-        // Each row is two parameters ($1 is the tenant), well under Postgres's
-        // 65,535 per statement.
+        // Each row is three parameters ($1 is the tenant), well under
+        // Postgres's 65,535 per statement.
         const CHUNK: usize = 1000;
         let ids: Vec<ObjectId> = objs.iter().map(Object::id).collect();
         // One row per id: an upsert may not touch a row twice in a statement.
         let mut seen = std::collections::HashSet::with_capacity(ids.len());
-        let rows: Vec<(ObjectId, serde_json::Value)> = objs
+        let rows: Vec<(ObjectId, serde_json::Value, Option<Vec<u8>>)> = objs
             .iter()
             .zip(&ids)
             .filter(|(_, id)| seen.insert(**id))
-            .map(|(obj, id)| {
-                serde_json::to_value(obj)
-                    .map(|data| (*id, data))
-                    .map_err(|e| StorageError::Serialization(e.to_string()))
-            })
+            .map(|(obj, id)| row_json(obj).map(|(data, exact)| (*id, data, exact)))
             .collect::<Result<_, _>>()?;
         if rows.is_empty() {
             return Ok(Vec::new());
@@ -1456,20 +1456,26 @@ impl ObjectStore for PostgresStorage {
             for chunk in rows.chunks(CHUNK) {
                 let ids: Vec<&[u8]> = chunk
                     .iter()
-                    .map(|(id, _)| id.as_bytes().as_slice())
+                    .map(|(id, _, _)| id.as_bytes().as_slice())
                     .collect();
                 let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                    Vec::with_capacity(1 + chunk.len() * 2);
+                    Vec::with_capacity(1 + chunk.len() * 3);
                 params.push(&self.tenant_id);
                 let mut values = Vec::with_capacity(chunk.len());
-                for (i, (_, data)) in chunk.iter().enumerate() {
-                    values.push(format!("($1, ${}, ${})", 2 + i * 2, 3 + i * 2));
+                for (i, (_, data, exact)) in chunk.iter().enumerate() {
+                    values.push(format!(
+                        "($1, ${}, ${}, ${})",
+                        2 + i * 3,
+                        3 + i * 3,
+                        4 + i * 3
+                    ));
                     params.push(&ids[i]);
                     params.push(data);
+                    params.push(exact);
                 }
                 tx.execute(
                     &format!(
-                        "INSERT INTO objects (tenant_id, id, data) VALUES {}
+                        "INSERT INTO objects (tenant_id, id, data, exact) VALUES {}
                          {FRESHEN_ON_CONFLICT}",
                         values.join(", ")
                     ),
@@ -1496,7 +1502,7 @@ impl ObjectStore for PostgresStorage {
             let client = self.client().await?;
             let rows = client
                 .query(
-                    "SELECT id, data FROM objects WHERE tenant_id = $1 AND id = ANY($2)",
+                    "SELECT id, data, exact FROM objects WHERE tenant_id = $1 AND id = ANY($2)",
                     &[&self.tenant_id, &wanted],
                 )
                 .await
@@ -1504,9 +1510,7 @@ impl ObjectStore for PostgresStorage {
             let mut found = std::collections::HashMap::with_capacity(rows.len());
             for row in rows {
                 let id: Vec<u8> = row.get("id");
-                let data: serde_json::Value = row.get("data");
-                let obj: Object = serde_json::from_value(data)
-                    .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                let obj: Object = from_row_json(row.get("data"), row.get("exact"))?;
                 found.insert(id, obj);
             }
             Ok(found)
@@ -1559,10 +1563,13 @@ impl ObjectStore for PostgresStorage {
                 return Ok(());
             }
             if !removed_paths.is_empty() {
+                let removed: Vec<std::borrow::Cow<'_, str>> =
+                    removed_paths.iter().map(|p| leaf_text(p)).collect();
+                let removed: Vec<&str> = removed.iter().map(|p| p.as_ref()).collect();
                 tx.execute(
                     "DELETE FROM leaf_rows
                      WHERE tenant_id = $1 AND namespace = $2 AND ref = $3 AND path = ANY($4)",
-                    &[&self.tenant_id, &namespace, &ref_name, &removed_paths],
+                    &[&self.tenant_id, &namespace, &ref_name, &removed],
                 )
                 .await
                 .map_err(|e| leaf_error("apply delete", &e))?;
@@ -1646,10 +1653,13 @@ impl ObjectStore for PostgresStorage {
                 return Ok(false);
             }
             if !removed_paths.is_empty() {
+                let removed: Vec<std::borrow::Cow<'_, str>> =
+                    removed_paths.iter().map(|p| leaf_text(p)).collect();
+                let removed: Vec<&str> = removed.iter().map(|p| p.as_ref()).collect();
                 tx.execute(
                     "DELETE FROM leaf_rows
                      WHERE tenant_id = $1 AND namespace = $2 AND ref = $3 AND path = ANY($4)",
-                    &[&self.tenant_id, &namespace, &ref_name, &removed_paths],
+                    &[&self.tenant_id, &namespace, &ref_name, &removed],
                 )
                 .await
                 .map_err(|e| leaf_error("advance delete", &e))?;
@@ -1727,8 +1737,7 @@ impl CommitStore for PostgresStorage {
         let Some(trace) = trace else {
             return self.put_commit(commit);
         };
-        let data =
-            serde_json::to_value(commit).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let (data, exact) = row_json(commit)?;
         let timestamp = commit.timestamp;
         self.block_on(async {
             let client = self.client().await?;
@@ -1736,8 +1745,8 @@ impl CommitStore for PostgresStorage {
             client
                 .execute(
                     "WITH stored AS (
-                         INSERT INTO commits (tenant_id, id, data, timestamp)
-                         VALUES ($1, $2, $3, $4)
+                         INSERT INTO commits (tenant_id, id, data, timestamp, exact)
+                         VALUES ($1, $2, $3, $4, $7)
                          ON CONFLICT (tenant_id, id) DO NOTHING
                      )
                      INSERT INTO commit_traces (tenant_id, commit_id, trace_id, span_id)
@@ -1750,6 +1759,7 @@ impl CommitStore for PostgresStorage {
                         &timestamp,
                         &trace.trace_id,
                         &trace.span_id,
+                        &exact,
                     ],
                 )
                 .await
@@ -1830,27 +1840,21 @@ impl CommitStore for PostgresStorage {
 
             let row = client
                 .query_opt(
-                    "SELECT data FROM commits WHERE tenant_id = $1 AND id = $2",
+                    "SELECT data, exact FROM commits WHERE tenant_id = $1 AND id = $2",
                     &[&self.tenant_id, &id.as_bytes().as_slice()],
                 )
                 .await
                 .map_err(|e| StorageError::Backend(format!("get commit: {}", e)))?;
 
             match row {
-                Some(row) => {
-                    let data: serde_json::Value = row.get("data");
-                    let commit: Commit = serde_json::from_value(data)
-                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
-                    Ok(Some(commit))
-                }
+                Some(row) => Ok(Some(commit_from_row(&row)?)),
                 None => Ok(None),
             }
         })
     }
 
     fn put_commit(&self, commit: &Commit) -> Result<(), StorageError> {
-        let data =
-            serde_json::to_value(commit).map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let (data, exact) = row_json(commit)?;
         let timestamp = commit.timestamp;
 
         self.block_on(async {
@@ -1858,13 +1862,15 @@ impl CommitStore for PostgresStorage {
 
             client
                 .execute(
-                    "INSERT INTO commits (tenant_id, id, data, timestamp) VALUES ($1, $2, $3, $4)
+                    "INSERT INTO commits (tenant_id, id, data, timestamp, exact)
+                     VALUES ($1, $2, $3, $4, $5)
                      ON CONFLICT (tenant_id, id) DO NOTHING",
                     &[
                         &self.tenant_id,
                         &commit.id.as_bytes().as_slice(),
                         &data,
                         &timestamp,
+                        &exact,
                     ],
                 )
                 .await
@@ -1900,20 +1906,21 @@ impl CommitStore for PostgresStorage {
             let client = self.client().await?;
             let rows = client
                 .query(
-                    "WITH RECURSIVE line(data, n) AS (
-                         SELECT data, 1::BIGINT FROM commits WHERE tenant_id = $1 AND id = $2
+                    "WITH RECURSIVE line(data, exact, n) AS (
+                         SELECT data, exact, 1::BIGINT FROM commits
+                         WHERE tenant_id = $1 AND id = $2
                        UNION ALL
-                         SELECT parent.data, line.n + 1
+                         SELECT parent.data, parent.exact, line.n + 1
                          FROM line
                          CROSS JOIN LATERAL (
-                             SELECT c.data FROM commits c
+                             SELECT c.data, c.exact FROM commits c
                              WHERE c.data -> 'id' = line.data -> 'parents' -> 0
                                AND c.tenant_id = $1
                              LIMIT 1
                          ) parent
                          WHERE line.n < $3
                      )
-                     SELECT data FROM line ORDER BY n",
+                     SELECT data, exact FROM line ORDER BY n",
                     &[
                         &self.tenant_id,
                         &from.as_bytes().as_slice(),
@@ -1922,9 +1929,7 @@ impl CommitStore for PostgresStorage {
                 )
                 .await
                 .map_err(|e| StorageError::Backend(with_causes("list commits", &e)))?;
-            rows.iter()
-                .map(|row| commit_from_row(row, "data"))
-                .collect()
+            rows.iter().map(commit_from_row).collect()
         })
     }
 
@@ -1958,7 +1963,7 @@ impl CommitStore for PostgresStorage {
                          SELECT id, row_number() OVER () AS n
                          FROM (SELECT id FROM walk LIMIT $3) first
                      )
-                     SELECT c.data
+                     SELECT c.data, c.exact
                      FROM reached JOIN commits c ON c.tenant_id = $1 AND c.id = reached.id
                      ORDER BY reached.n",
                     &[
@@ -1970,7 +1975,7 @@ impl CommitStore for PostgresStorage {
                 .await
                 .map_err(|e| StorageError::Backend(with_causes("list commits dag", &e)))?;
             rows.iter()
-                .map(|row| commit_from_row(row, "data"))
+                .map(commit_from_row)
                 .collect::<Result<Vec<_>, _>>()
         })?;
         let truncated = commits.len() > limit;
@@ -2022,7 +2027,8 @@ impl CommitStore for PostgresStorage {
             let rows = loop {
                 let rows = tx
                     .query(
-                        "SELECT c.xid, c.id, c.data, COALESCE(s.scope_namespace, $4) AS namespace
+                        "SELECT c.xid, c.id, c.data, c.exact,
+                                COALESCE(s.scope_namespace, $4) AS namespace
                          FROM commits c
                          LEFT JOIN sessions s
                            ON s.tenant_id = c.tenant_id AND s.id = c.session_id
@@ -2065,7 +2071,7 @@ impl CommitStore for PostgresStorage {
 
             let mut fold = HistoryFold::default();
             for row in &rows {
-                let commit = commit_from_row(row, "data")?;
+                let commit = commit_from_row(row)?;
                 fold.add(&commit, row.get("namespace"));
             }
             fold.write(&tx, &self.tenant_id).await?;
@@ -2522,7 +2528,7 @@ async fn gc_mark(
                      WHERE id IN (SELECT id FROM gc_frontier LIMIT $2)
                      RETURNING id
                  )
-                 SELECT o.data FROM next
+                 SELECT o.data, o.exact FROM next
                  LEFT JOIN objects o ON o.tenant_id = $1 AND o.id = next.id",
                 &[&tenant_id, &batch],
             )
@@ -2536,8 +2542,10 @@ async fn gc_mark(
             let Some(data) = row.get::<_, Option<serde_json::Value>>(0) else {
                 continue;
             };
-            let obj: Object = serde_json::from_value(data)
-                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            // The exact JSON when there is one: with U+FFFD in place of
+            // U+0000, two of a map's keys can become one in `data`, and the
+            // mark would miss a child.
+            let obj: Object = from_row_json(data, row.get(1))?;
             children.extend(child_ids(&obj));
         }
         let children: Vec<&[u8]> = children.iter().map(|c| c.as_bytes().as_slice()).collect();
@@ -2707,11 +2715,15 @@ async fn upsert_leaves(
     leaves: &[(String, String)],
 ) -> Result<(), StorageError> {
     const CHUNK: usize = 1000;
-    let latest: std::collections::HashMap<&str, &str> = leaves
+    let latest: std::collections::HashMap<std::borrow::Cow<'_, str>, std::borrow::Cow<'_, str>> =
+        leaves
+            .iter()
+            .map(|(path, value)| (leaf_text(path), leaf_text(value)))
+            .collect();
+    let latest: Vec<(&str, &str)> = latest
         .iter()
-        .map(|(path, value)| (path.as_str(), value.as_str()))
+        .map(|(p, v)| (p.as_ref(), v.as_ref()))
         .collect();
-    let latest: Vec<(&str, &str)> = latest.into_iter().collect();
     for chunk in latest.chunks(CHUNK) {
         let paths: Vec<&str> = chunk.iter().map(|(p, _)| *p).collect();
         let values: Vec<&str> = chunk.iter().map(|(_, v)| *v).collect();
@@ -2735,7 +2747,8 @@ fn like_contains(needle: &str) -> String {
         if matches!(ch, '%' | '_' | '\\') {
             pattern.push('\\');
         }
-        pattern.push(ch);
+        // As the index keeps it (see leaf_text).
+        pattern.push(if ch == '\0' { '\u{FFFD}' } else { ch });
     }
     pattern.push('%');
     pattern
@@ -2759,9 +2772,83 @@ fn object_id_from_bytes(bytes: &[u8]) -> Option<ObjectId> {
     <[u8; 32]>::try_from(bytes).ok().map(ObjectId::from_bytes)
 }
 
-fn commit_from_row(row: &tokio_postgres::Row, column: &str) -> Result<Commit, StorageError> {
-    let data: serde_json::Value = row.get(column);
-    serde_json::from_value(data).map_err(|e| StorageError::Serialization(e.to_string()))
+/// A value as an `objects` or `commits` row holds it: `data`, and `exact`
+/// when `data` can't hold it exactly.
+///
+/// JSONB has no U+0000 (Postgres rejects the `\u0000` escape), though an
+/// object or commit may hold one in any string, a map key included. Such a
+/// value goes in `data` with each U+0000 as U+FFFD, which keeps it queryable:
+/// the queries that read `data`'s structure (`id`, `parents`, `state_root`)
+/// see ids, which are never strings. Its exact JSON goes in `exact`, which
+/// every read of the whole value prefers, so what comes back hashes to its id.
+fn row_json<T: serde::Serialize>(
+    value: &T,
+) -> Result<(serde_json::Value, Option<Vec<u8>>), StorageError> {
+    let mut data =
+        serde_json::to_value(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
+    if !has_nul(&data) {
+        return Ok((data, None));
+    }
+    let exact =
+        serde_json::to_vec(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
+    replace_nul(&mut data);
+    Ok((data, Some(exact)))
+}
+
+fn has_nul(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains('\0'),
+        serde_json::Value::Array(items) => items.iter().any(has_nul),
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| k.contains('\0') || has_nul(v)),
+        _ => false,
+    }
+}
+
+fn replace_nul(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.contains('\0') {
+                *s = s.replace('\0', "\u{FFFD}");
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(replace_nul),
+        serde_json::Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (key, mut v) in entries {
+                replace_nul(&mut v);
+                map.insert(key.replace('\0', "\u{FFFD}"), v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The value a row holds: its `exact` JSON if it has one, else `data`.
+fn from_row_json<T: serde::de::DeserializeOwned>(
+    data: serde_json::Value,
+    exact: Option<Vec<u8>>,
+) -> Result<T, StorageError> {
+    match exact {
+        Some(bytes) => serde_json::from_slice(&bytes),
+        None => serde_json::from_value(data),
+    }
+    .map_err(|e| StorageError::Serialization(e.to_string()))
+}
+
+/// A commit from a row that selected its `data` and `exact` columns.
+fn commit_from_row(row: &tokio_postgres::Row) -> Result<Commit, StorageError> {
+    from_row_json(row.get("data"), row.get("exact"))
+}
+
+/// Text for the search index. Postgres TEXT can't hold U+0000 either, so the
+/// index keeps U+FFFD in its place; it's rebuilt from the tree, and no search
+/// can ask for U+0000.
+fn leaf_text(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\0') {
+        std::borrow::Cow::Owned(s.replace('\0', "\u{FFFD}"))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
 }
 
 fn history_error(step: &str, e: &tokio_postgres::Error) -> StorageError {

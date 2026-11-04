@@ -482,9 +482,7 @@ fn commits_recompute_to_their_ids(f: &Fixture) {
     let parent = commit(s, "parent", &[]);
     let c = CommitBuilder::new(root, "agent/conformance", authority, intent)
         .parent(parent.id)
-        // No NUL: Postgres JSONB can't hold U+0000, so no Postgres store
-        // keeps a commit with one.
-        .reasoning("line\nbreak, \u{1} control")
+        .reasoning("line\nbreak, \u{1} control, \u{0} nul")
         .confidence(0.1)
         .tool_calls(vec![ToolCall {
             tool_name: "set".into(),
@@ -507,6 +505,88 @@ fn commits_recompute_to_their_ids(f: &Fixture) {
     assert_eq!(walk.commits.len(), 2);
     for walked in walk.commits {
         assert_eq!(walked.compute_id(), walked.id, "list_commits_dag");
+    }
+}
+
+/// U+0000 round-trips in objects (in a string, and in map keys that would
+/// collide if it were replaced), in commits, and through the search index
+/// and a GC mark. Postgres keeps such rows' exact JSON beside the JSONB,
+/// which can't hold it.
+fn nul_round_trips(f: &Fixture) {
+    use agentstategraph_core::ToolCall;
+    let s = f.store();
+    let nul = Object::string("before\u{0}after");
+    let other = Object::string("other");
+    // Two keys that are one if U+0000 becomes U+FFFD.
+    let map = map(&[
+        ("k\u{0}", s.put_object(&nul).unwrap()),
+        ("k\u{FFFD}", s.put_object(&other).unwrap()),
+    ]);
+    let root = s.put_object(&map).unwrap();
+    assert_eq!(root, map.id());
+    for object in [&nul, &other, &map] {
+        let back = s.get_object(&object.id()).unwrap().expect("stored");
+        assert_eq!(&back, object);
+        assert_eq!(back.id(), object.id());
+    }
+    let batch = s.batch_get_objects(&[nul.id(), map.id()]).unwrap();
+    assert_eq!(batch, vec![Some(nul.clone()), Some(map.clone())]);
+    assert_eq!(
+        s.batch_put_objects(&[Object::string("again\u{0}"), nul.clone()])
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        s.get_object(&Object::string("again\u{0}").id()).unwrap(),
+        Some(Object::string("again\u{0}"))
+    );
+
+    // A mark from the map reaches both children, where a backend has GC.
+    if let Ok(reach) = s.history_gc_reachability(&[root], 100)
+        && reach.roots_walked > 0
+    {
+        assert_eq!(reach.live_objects, 3, "{reach:?}");
+    }
+
+    let parent = commit(s, "parent\u{0}", &[]);
+    let c = CommitBuilder::new(
+        root,
+        "agent/conformance",
+        Authority::simple("conformance"),
+        Intent::new(IntentCategory::Fix, "nul \u{0} in the description"),
+    )
+    .parent(parent.id)
+    .reasoning("nul \u{0} in the reasoning")
+    .tool_calls(vec![ToolCall {
+        tool_name: "set".into(),
+        arguments: serde_json::json!({"key\u{0}": "value\u{0}"}),
+        result: Some("\u{0}".into()),
+        timestamp: Utc::now(),
+    }])
+    .build();
+    s.put_commit(&c).unwrap();
+    let back = s.get_commit(&c.id).unwrap().expect("stored");
+    assert_eq!(back.reasoning, c.reasoning);
+    assert_eq!(back.compute_id(), c.id);
+    let line = s.list_commits(&c.id, 10).unwrap();
+    assert_eq!(line.len(), 2, "the first-parent walk follows past it");
+    let walk = s.list_commits_dag(&c.id, 10).unwrap();
+    assert_eq!(walk.commits.len(), 2);
+    for walked in line.iter().chain(&walk.commits) {
+        assert_eq!(walked.compute_id(), walked.id);
+    }
+
+    // The search index takes it, where a backend has one.
+    let built = s.leaf_index_build(
+        "default",
+        "main",
+        &[("/k\u{0}".into(), "before\u{0}after".into())],
+    );
+    if built.is_ok()
+        && let Some(found) = s.leaf_index_search("default", "main", "after", 10).unwrap()
+    {
+        assert_eq!(found.len(), 1, "{found:?}");
     }
 }
 
@@ -1672,6 +1752,11 @@ fn objects_batch() {
 #[test]
 fn commits() {
     run("commits_and_walks", commits_and_walks);
+}
+
+#[test]
+fn nul() {
+    run("nul_round_trips", nul_round_trips);
 }
 
 #[test]
