@@ -20,11 +20,19 @@ workflow:
       when: never
     # Detached pipeline for merge requests (feature-branch validation).
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # A tag pipeline publishes; a newer pipeline never cancels it.
     - if: $CI_COMMIT_TAG
+      auto_cancel:
+        on_new_commit: none
     # Don't also run a branch pipeline when that branch has an open MR — the
     # merge_request_event pipeline above already covers the same commits.
     - if: '$CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
       when: never
+    # A release-prep commit's pipeline creates the release tag, so a merge
+    # landing meanwhile must not cancel it.
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /^release-prep: v/'
+      auto_cancel:
+        on_new_commit: none
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - when: never
 
@@ -56,6 +64,11 @@ default:
     - rustc --version && cargo --version && python3 --version && sccache --version
   after_script:
     - if command -v sccache >/dev/null 2>&1; then sccache --show-stats || true; fi
+  # A newer pipeline on the same merge request or branch cancels this one
+  # (auto-cancel redundant pipelines), so a re-push doesn't build twice.
+  # Publish and release jobs set interruptible: false, and tag pipelines
+  # never auto-cancel.
+  interruptible: true
 
 variables:
   # CI-only: developer/release profiles remain unchanged.
@@ -172,6 +185,7 @@ version-guard:
 # existing, and twine 7 refuses --skip-existing outright for any repository but
 # PyPI and TestPyPI ("UnsupportedConfiguration"), which failed v1.3.1's upload.
 publish-wheel:
+  interruptible: false
   stage: publish
   allow_failure: true   # internal GitLab-PyPI wheel; never block the release/mirror
   rules:
@@ -211,6 +225,7 @@ publish-wheel:
 # a repeat publish and the job passes, but a background step then rejects the
 # duplicate and leaves an errored 0.0.0-<uuid> package in the registry.
 publish-npm:
+  interruptible: false
   stage: publish
   allow_failure: true
   rules:
@@ -254,6 +269,7 @@ publish-npm:
 # no longer the tag's ancestor, so the leak scan covers the tag's whole history
 # and takes a few minutes.
 publish-github:
+  interruptible: false
   stage: publish
   image: debian:bookworm-slim
   variables:
@@ -284,6 +300,7 @@ publish-github:
 # evaluated when a pipeline is created, so a tag pipeline created before the
 # token existed has no publish-crates job: run a new pipeline for the tag.
 publish-crates:
+  interruptible: false
   stage: publish
   needs:
     - job: publish-github
@@ -309,6 +326,7 @@ publish-crates:
 # main is unchanged and the tag lands on the prep commit — the release still
 # ships. Rust, TS/npm, Python/wheel, and the GitHub mirror all key off this tag.
 create-release-tag:
+  interruptible: false
   stage: release
   image: alpine:latest
   before_script: []
@@ -345,6 +363,7 @@ create-release-tag:
 # allow_failure so a swift-only problem never blocks the release: if it fails,
 # main is unchanged and create-release-tag simply tags the prep commit.
 prepare-swift-release:
+  interruptible: false
   stage: package
   image: debian:bookworm-slim
   allow_failure: true
@@ -364,6 +383,7 @@ prepare-swift-release:
 # assets already on the GitHub release with the staged bytes are skipped, not
 # deleted and re-uploaded, and the SwiftPM verification runs again.
 publish-swift-release:
+  interruptible: false
   stage: release
   image: debian:bookworm-slim
   allow_failure: true   # swift is opt-in; a tag cut without a staged xcframework must not fail
@@ -412,6 +432,7 @@ ci-guard:
 # script only moves the version forward, and pushes nothing when releases.json
 # already shows this tag or a newer one.
 site-version:
+  interruptible: false
   stage: .post
   image: debian:bookworm-slim
   before_script: []
