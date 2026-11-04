@@ -36,7 +36,11 @@ stages:
   - release
 
 default:
-  image: "$CI_REGISTRY_IMAGE/rust-ci@sha256:e86b7b3df2f4914349211bff4af93cce657e2df8ab0b949fdbe53b9f3a4da0ad"
+  # This project's build of the shared rust-ci image (infra/gitops
+  # bootstrap/rust-ci), with RUST_CI_EXTRA_TOOLCHAINS=1.96.0: the toolchain
+  # rust-toolchain.toml pins is installed, so jobs don't download it at start.
+  # Rebuild with the same setting when that pin changes.
+  image: "$CI_REGISTRY_IMAGE/rust-ci@sha256:939a51523983c1b5d0011d35f420bec3114b70d0f93408b17c206a696c64159e"
   # One writer archives downloads; compiler objects go directly to scoped S3.
   cache: &rust_dependency_cache
     key:

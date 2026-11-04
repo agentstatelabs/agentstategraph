@@ -1,10 +1,14 @@
 #!/bin/sh
 # Source in a fresh CI job before starting the sccache server. Never enable xtrace.
+#
+# A protected ref (main, a tag) uses only the trusted cache. It never reads the
+# untrusted one, which merge request and branch jobs write; without trusted
+# cache variables it compiles with a local, per-job cache instead.
 if [ "${CI_COMMIT_REF_PROTECTED:-false}" = true ] && [ -n "${RUST_CACHE_BUCKET:-}" ]; then
   export SCCACHE_BUCKET="$RUST_CACHE_BUCKET" SCCACHE_ENDPOINT="$RUST_CACHE_ENDPOINT"
   export SCCACHE_REGION=us-east-1 SCCACHE_S3_USE_SSL=true
   export AWS_ACCESS_KEY_ID="$RUST_CACHE_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$RUST_CACHE_SECRET_ACCESS_KEY"
-elif [ -n "${RUST_UNTRUSTED_CACHE_BUCKET:-}" ]; then
+elif [ "${CI_COMMIT_REF_PROTECTED:-false}" != true ] && [ -n "${RUST_UNTRUSTED_CACHE_BUCKET:-}" ]; then
   export SCCACHE_BUCKET="$RUST_UNTRUSTED_CACHE_BUCKET" SCCACHE_ENDPOINT="$RUST_UNTRUSTED_CACHE_ENDPOINT"
   export SCCACHE_REGION=us-east-1 SCCACHE_S3_USE_SSL=true
   export AWS_ACCESS_KEY_ID="$RUST_UNTRUSTED_CACHE_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$RUST_UNTRUSTED_CACHE_SECRET_ACCESS_KEY"
