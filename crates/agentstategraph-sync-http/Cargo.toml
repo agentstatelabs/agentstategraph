@@ -29,4 +29,10 @@ ureq = { version = "3.4", default-features = false, features = ["rustls"], optio
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
-agentstategraph-storage = { workspace = true, features = ["memory"] }
+# tests/e2e.rs runs a hub on every built-in backend, Postgres included when
+# TEST_DATABASE_URL is set.
+agentstategraph-storage = { workspace = true, features = ["memory", "sqlite", "postgres"] }
+agentstategraph-reminders = { workspace = true }
+agentstategraph-taint = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
