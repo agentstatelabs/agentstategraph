@@ -81,7 +81,8 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
     // A current database with a merge in its history, rewound to look like
     // one from before the version stamp (version 1), epoch seal digests, the
     // version 2 history and search tables, the version 3 GC columns, the
-    // version 4 commit traces, and the version 5 tenant policies.
+    // version 4 commit traces, the version 5 tenant policies, and the version
+    // 7 exact columns.
     let old = PostgresStorage::connect_tenant_blocking(&db, "t", 2).unwrap();
     let commit = |tag: &str, parents: &[ObjectId]| -> Commit {
         let root = old.put_object(&Object::string(tag)).unwrap();
@@ -109,7 +110,8 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
          ALTER TABLE commits DROP COLUMN xid;
          DROP TABLE asg_history_cursor, asg_history_commit_rollup, asg_history_milestone,
                     leaf_rows, leaf_index_refs, gc_pending_roots, commit_traces;
-         ALTER TABLE objects DROP COLUMN written_at;
+         ALTER TABLE objects DROP COLUMN written_at, DROP COLUMN exact;
+         ALTER TABLE commits DROP COLUMN exact;
          DO $$ DECLARE t text; BEGIN
              FOR t IN SELECT tablename FROM pg_policies WHERE policyname = 'asg_tenant' LOOP
                  EXECUTE format('DROP POLICY asg_tenant ON %I', t);
@@ -130,7 +132,7 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             &db,
             "SELECT version::BIGINT FROM asg_schema WHERE component = 'postgres'"
         ),
-        6,
+        7,
         "the upgrade stamps the schema version"
     );
     assert_eq!(
@@ -138,8 +140,19 @@ fn an_older_database_is_upgraded_once_and_then_left_alone() {
             &db,
             "SELECT compatible_from::BIGINT FROM asg_schema WHERE component = 'postgres'"
         ),
-        5,
+        7,
         "and the oldest version a build must understand"
+    );
+    // Rows from before the exact column read as before, and new ones can
+    // hold U+0000.
+    assert_eq!(storage.get_commit(&merge.id).unwrap().unwrap().id, merge.id);
+    let nul = Object::string("\u{0}");
+    let id = storage.put_object(&nul).unwrap();
+    assert_eq!(storage.get_object(&id).unwrap(), Some(nul));
+    assert_eq!(
+        query_one_i64(&db, "SELECT COUNT(*) FROM objects WHERE exact IS NOT NULL"),
+        1,
+        "only a row holding U+0000 keeps an exact copy"
     );
     assert_eq!(
         policies(&db),
