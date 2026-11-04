@@ -12,10 +12,12 @@
 //!   one, with remote-tracking refs (t-004).
 //! - [`filter`]: what a push refuses to send: secrets, local-only refs, and
 //!   whatever its [`PushFilter`]s find, such as credentials (t-011, t-005).
+//! - [`push_log`]: the receiving side's record of the pushes it took (t-006).
 
 pub mod bundle;
 pub mod filter;
 pub mod missing;
+pub mod push_log;
 pub mod remote;
 pub mod store;
 
@@ -27,6 +29,7 @@ pub use filter::{
     CredentialFilter, Finding, LOCAL_ONLY_PATH, PushFilter, PushOptions, PushOverride,
 };
 pub use missing::{MissingSet, missing_set};
+pub use push_log::{PUSH_LOG_REF, PushLogEntry};
 pub use remote::{
     FetchReport, FetchRequest, InProcessRemote, PullOutcome, PullReport, PushOutcome, PushReport,
     RefChange, RefUpdate, Remote, SyncError, tracking_ref,

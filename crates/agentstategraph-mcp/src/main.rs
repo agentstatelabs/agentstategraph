@@ -54,6 +54,10 @@ pub struct ServeArgs {
     /// (0 for none), `--max-concurrent-requests`. Env: `ASG_MAX_BODY_BYTES`,
     /// `ASG_REQUEST_TIMEOUT_SECS`, `ASG_MAX_CONCURRENT_REQUESTS`.
     pub bounds: http::RequestBounds,
+    /// Also serve `/sync/v1/<tenant>/…`, so stores can push to this store and
+    /// pull from it (DESIGN.md Plan G t-006). Needs `--http` and `--auth`.
+    /// CLI: `--hub`. Env: `ASG_HUB=1`.
+    pub hub: bool,
     /// What MCP policy tools and `commit_spec` do when no policy matches:
     /// `deny` (default) or `allow`. `commit_spec` applies it only to changes
     /// that carry tokens. CLI: `--policy-fail-safe`. Env: `ASG_POLICY_FAIL_SAFE`.
@@ -281,6 +285,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
     let mut external_evaluators: Vec<String> = Vec::new();
     let mut asd_url: Option<String> = std::env::var("ASG_ASD_URL").ok().filter(|s| !s.is_empty());
     let mut metrics = std::env::var("ASG_METRICS").is_ok_and(|v| !v.is_empty() && v != "0");
+    let mut hub = std::env::var("ASG_HUB").is_ok_and(|v| !v.is_empty() && v != "0");
     let defaults = http::RequestBounds::default();
     let mut max_body_bytes: usize =
         env_number("ASG_MAX_BODY_BYTES").unwrap_or(defaults.max_body_bytes);
@@ -404,6 +409,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
             "--metrics" => {
                 metrics = true;
             }
+            "--hub" => {
+                hub = true;
+            }
             "--max-body-bytes" => {
                 i += 1;
                 if let Some(v) = args.get(i).and_then(|v| v.parse().ok()) {
@@ -493,6 +501,9 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
                 );
                 eprintln!(
                     "      --metrics         Serve Prometheus metrics at /metrics (admin key needed with --auth; env ASG_METRICS=1)"
+                );
+                eprintln!(
+                    "      --hub             Also serve /sync/v1/<tenant>/ so stores can push and pull here (needs --http and --auth; env ASG_HUB=1)"
                 );
                 eprintln!(
                     "      --max-body-bytes <N>  Largest request body (default: 4194304; env ASG_MAX_BODY_BYTES)"
@@ -599,6 +610,7 @@ pub fn parse_args(args: &[String]) -> ServeArgs {
             allowed_hosts_cli
         },
         metrics,
+        hub,
         bounds: http::RequestBounds {
             max_body_bytes,
             timeout: match timeout_secs {
@@ -624,6 +636,10 @@ pub fn cmd_serve_with(
     meters: Option<oxtel::sdk::metrics::MeterProvider>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("AgentStateGraph Server v{}", env!("CARGO_PKG_VERSION"));
+    // A hub takes pushes that rewrite the store, so it only runs behind keys.
+    if args.hub && !(args.http_mode && args.auth_enabled) {
+        return Err("--hub needs --http and --auth (or --keys-file)".into());
+    }
     // A typo mustn't quietly pick a side.
     if !matches!(args.policy_fail_safe.as_str(), "deny" | "allow") {
         return Err(format!(
@@ -814,7 +830,24 @@ pub fn cmd_serve_with(
                 #[cfg(feature = "providers")]
                 let extra = args.asd_url.map(http::asd_proxy_router);
                 #[cfg(not(feature = "providers"))]
-                let extra = None;
+                let extra: Option<axum::Router> = None;
+                // So is the sync hub.
+                let extra = if args.hub {
+                    eprintln!(
+                        "Sync hub: /sync/v1/{}/ (refs, fetch, push), keys not bound to a namespace",
+                        args.tenant_id
+                    );
+                    let hub = agentstategraph_mcp::hub::router(
+                        args.tenant_id.clone(),
+                        agentstategraph::sync::BundleLimits::default(),
+                    );
+                    Some(match extra {
+                        Some(routes) => routes.merge(hub),
+                        None => hub,
+                    })
+                } else {
+                    extra
+                };
                 let app =
                     http::build_router_with(Arc::clone(&tenant_mgr), args.rate_limit_rpm, extra);
                 let app = http::with_server_layers(
@@ -1100,6 +1133,20 @@ mod tests {
             vec!["https://a.example", "https://b.example"]
         );
         assert_eq!(parsed.allowed_hosts, vec!["asg.internal"]);
+    }
+
+    #[test]
+    fn hub_is_off_unless_asked() {
+        assert!(!super::parse_args(&[]).hub);
+        let parsed = super::parse_args(&["--http".into(), "--auth".into(), "--hub".into()]);
+        assert!(parsed.hub && parsed.http_mode && parsed.auth_enabled);
+    }
+
+    #[test]
+    fn hub_refuses_to_run_without_keys() {
+        let parsed = super::parse_args(&["--http".into(), "--hub".into()]);
+        let err = super::cmd_serve(parsed).unwrap_err();
+        assert!(err.to_string().contains("--hub needs"), "{err}");
     }
 
     #[test]

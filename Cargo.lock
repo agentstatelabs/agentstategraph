@@ -83,6 +83,7 @@ dependencies = [
  "agentstategraph-policy-wasm",
  "agentstategraph-reminders",
  "agentstategraph-storage",
+ "agentstategraph-sync-http",
  "agentstategraph-taint",
  "agentstategraph-tasks",
  "axum",
@@ -266,6 +267,20 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "agentstategraph-sync-http"
+version = "1.5.0"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]

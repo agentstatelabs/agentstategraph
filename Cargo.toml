@@ -13,6 +13,7 @@ members = [
     "crates/agentstategraph-taint",
     "crates/agentstategraph-reminders",
     "crates/agentstategraph-migrate",
+    "crates/agentstategraph-sync-http",
     "crates/agentstategraph-mcp",
     "crates/agentstategraph-ffi",
     "crates/agentstategraph-wasm",
@@ -46,6 +47,7 @@ agentstategraph-policy-cedar = { path = "crates/agentstategraph-policy-cedar", v
 agentstategraph-taint = { path = "crates/agentstategraph-taint", version = "1.5.0" }
 agentstategraph-reminders = { path = "crates/agentstategraph-reminders", version = "1.5.0" }
 agentstategraph-migrate = { path = "crates/agentstategraph-migrate", version = "1.5.0" }
+agentstategraph-sync-http = { path = "crates/agentstategraph-sync-http", version = "1.5.0", default-features = false }
 agentstategraph-ffi = { path = "crates/agentstategraph-ffi", version = "1.5.0" }
 
 blake3 = "1"

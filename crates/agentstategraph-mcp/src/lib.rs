@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod http;
+pub mod hub;
 pub mod policy_signing;
 pub mod server;
 pub mod store_gauges;

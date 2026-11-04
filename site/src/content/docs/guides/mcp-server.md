@@ -133,6 +133,24 @@ Browser pages served from localhost (any port) can call the API. To let a page f
 
 Bound to loopback, as it is by default, the server only answers requests addressed to `localhost`, `127.0.0.1` or `[::1]`. That stops another website from reaching it through DNS rebinding, where the site points a domain it controls at your machine. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host asg.example.com` (or `ASG_ALLOWED_HOSTS`). Bound to another address, the server answers any host name unless you list some.
 
+### Sync hub
+
+With `--hub` (or `ASG_HUB=1`), the server is also a hub that other stores push to and pull from, as git remotes are: each store keeps its own copy, and sends and fetches only what the other side lacks. It needs `--http` and `--auth`, and takes the same API keys as the API, except keys bound to a namespace: a sync moves the whole store, every namespace and its taints, reminders and epochs. The store is served under its tenant id, `default` unless `--tenant` says otherwise, at `/sync/v1/<tenant>/`.
+
+From Rust, with the `agentstategraph-sync-http` crate:
+
+```rust
+use agentstategraph_sync_http::HttpRemote;
+
+let hub = HttpRemote::new("https://hub.example.com", "default").with_token(api_key);
+repo.pull("hub", &hub, "main", commit_options)?;
+repo.push("hub", &hub, "main")?;
+```
+
+A push only moves the hub forward. If another store pushed first, it's rejected; pull (which fetches and merges), then push again. A push that would send something under `/_meta/_secret`, a ref marked local-only, or a value that looks like a credential is refused before anything is sent. A store whose `main` holds only the empty first commit `init` makes, as a new hub's does, takes the other side's history on the first pull or push.
+
+The hub records every push it takes, with the key's id, in its push log (`Repository::push_log`). A push may be up to 256 MiB, whatever `--max-body-bytes` says, but the request timeout still applies: raise `--request-timeout-secs` before a large store's first push.
+
 Full endpoint list:
 
 | Method | Endpoint | Description |
@@ -157,6 +175,9 @@ Full endpoint list:
 | POST | `/api/epochs` | Create epoch |
 | POST | `/api/epochs/seal` | Seal epoch |
 | GET | `/api/intents/:ref` | Intent decomposition tree |
+| GET | `/sync/v1/:tenant/refs` | With `--hub`: the refs a store can fetch |
+| POST | `/sync/v1/:tenant/fetch` | With `--hub`: a bundle of the named refs |
+| POST | `/sync/v1/:tenant/push` | With `--hub`: move a ref forward, with a bundle |
 
 ## Connect to Other MCP Clients
 

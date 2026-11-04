@@ -42,6 +42,7 @@ use crate::sync::filter::{
     self, Finding, PushOptions, PushOverride, tree_holds_secrets, tree_is_local_only,
 };
 use crate::sync::missing::missing_set;
+use crate::sync::push_log::PushLogEntry;
 use crate::sync::store::{Received, TransferError, store_records, write_set};
 
 /// How many times folding in a fetched control ref rebuilds on a moved head.
@@ -194,6 +195,7 @@ pub trait Remote {
 pub struct InProcessRemote<'a> {
     repo: &'a Repository,
     limits: BundleLimits,
+    pusher: String,
 }
 
 impl<'a> InProcessRemote<'a> {
@@ -201,12 +203,20 @@ impl<'a> InProcessRemote<'a> {
         Self {
             repo,
             limits: BundleLimits::default(),
+            pusher: "in-process".to_string(),
         }
     }
 
     /// Bound what a push to this remote may send.
     pub fn with_limits(mut self, limits: BundleLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Who the remote's push log says delivered this remote's pushes
+    /// (default `in-process`).
+    pub fn as_pusher(mut self, pusher: impl Into<String>) -> Self {
+        self.pusher = pusher.into();
         self
     }
 }
@@ -222,7 +232,8 @@ impl Remote for InProcessRemote<'_> {
     }
 
     fn push(&self, update: &RefUpdate, bundle: &[u8]) -> Result<PushOutcome, SyncError> {
-        self.repo.sync_receive(update, bundle, self.limits.clone())
+        self.repo
+            .sync_receive(update, bundle, self.limits.clone(), &self.pusher)
     }
 }
 
@@ -417,15 +428,18 @@ impl Repository {
         Ok(write_set(store, &set, &refs, out)?)
     }
 
-    /// Answer a push: store and check `bundle`, then move the ref, only
-    /// from where the update says it is and only forward. A push to the
-    /// control ref rebuilds the taint, reminder and epoch tables. The ref
-    /// moves only once the whole bundle has been read and checked.
+    /// Answer a push from `pusher` (as the caller authenticated them):
+    /// store and check `bundle`, then move the ref, only from where the
+    /// update says it is and only forward. A push to the control ref
+    /// rebuilds the taint, reminder and epoch tables. The ref moves only
+    /// once the whole bundle has been read and checked, and each push that
+    /// moves it is recorded in the push log ([`Repository::push_log`]).
     pub fn sync_receive<R: Read>(
         &self,
         update: &RefUpdate,
         bundle: R,
         limits: BundleLimits,
+        pusher: &str,
     ) -> Result<PushOutcome, SyncError> {
         if !is_synced_ref(&update.namespace, &update.name) {
             return Err(SyncError::Refused(format!(
@@ -458,8 +472,11 @@ impl Repository {
                 update.namespace, update.name
             )));
         }
+        // Only forward, except from the empty first commit `init` makes,
+        // which holds nothing to lose.
         if let Some(old) = update.old
             && !is_ancestor(store, &old, &update.new)?
+            && !self.is_fresh_root(&old)?
         {
             return Ok(PushOutcome::NotFastForward);
         }
@@ -489,6 +506,27 @@ impl Repository {
                 None => store.create_ref(&update.namespace, &update.name, update.new)?,
             }
         };
+        if landed {
+            let entry = PushLogEntry {
+                at: chrono::Utc::now(),
+                pusher: pusher.to_string(),
+                namespace: update.namespace.to_string(),
+                name: update.name.clone(),
+                old: update.old.map(|id| id.to_hex()),
+                new: update.new.to_hex(),
+                overrides: update.overrides.clone(),
+            };
+            if let Err(e) = self.append_push_log(&entry) {
+                // The ref has moved; failing the push now would only make
+                // the pusher retry one that landed.
+                tracing::warn!(
+                    error.type = e.code(),
+                    "couldn't record a push of {}/{} in the push log: {e}",
+                    update.namespace,
+                    update.name
+                );
+            }
+        }
         Ok(if landed {
             PushOutcome::Updated
         } else {
@@ -744,10 +782,12 @@ impl Repository {
     /// Fetch `ref_name` from `remote` and merge it into the local one.
     /// `options` describe a merge commit, if one is made.
     ///
-    /// A local ref that's absent, or holds only the empty first commit
-    /// [`Repository::init`] makes, takes the remote's head: two stores that
-    /// each ran `init` would otherwise have unrelated histories, which
-    /// [`Repository::merge`] refuses.
+    /// A ref holding only the empty first commit [`Repository::init`] makes
+    /// counts as empty, on either side: two stores that each ran `init`
+    /// would otherwise have unrelated histories, which [`Repository::merge`]
+    /// refuses. A local ref that's absent or holds only that takes the
+    /// remote's head; a remote ref that holds only that has nothing to
+    /// take, and a push may replace it.
     pub fn pull(
         &self,
         remote_name: &str,
@@ -780,6 +820,9 @@ impl Repository {
         let outcome = match get_ref(store, &ns, ref_name)? {
             None if store.create_ref(&ns, ref_name, theirs)? => PullOutcome::Created(theirs),
             Some(ours) if is_ancestor(store, &theirs, &ours)? => PullOutcome::UpToDate,
+            // The remote's ref holds only `init`'s empty first commit: there's
+            // nothing to take, and the next push replaces it.
+            Some(_) if self.is_fresh_root(&theirs)? => PullOutcome::UpToDate,
             Some(ours)
                 if self.is_fresh_root(&ours)?
                     && self.fast_forward_ref(&ns, ref_name, ours, theirs)? =>
@@ -818,6 +861,7 @@ impl Repository {
         }
         if let Some(old) = old
             && !is_ancestor(store, &old, &head)?
+            && !self.is_fresh_root(&old)?
         {
             return Err(SyncError::NotFastForward {
                 name: name.to_string(),
@@ -1094,6 +1138,38 @@ mod tests {
     }
 
     #[test]
+    fn a_hub_that_ran_init_takes_a_stores_history_after_one_pull() {
+        let hub = repo();
+        hub.init().unwrap();
+        let a = repo();
+        a.init().unwrap();
+        a.set_json("main", "/x", &json!(1), opts("x")).unwrap();
+        assert!(
+            matches!(
+                a.push("hub", &InProcessRemote::new(&hub), "main"),
+                Err(SyncError::Rejected { .. })
+            ),
+            "the hub's main exists, and a hasn't seen it"
+        );
+        let pulled = a
+            .pull("hub", &InProcessRemote::new(&hub), "main", merge_opts())
+            .unwrap();
+        assert_eq!(pulled.outcome, PullOutcome::UpToDate, "nothing to take");
+        a.push("hub", &InProcessRemote::new(&hub), "main").unwrap();
+        assert_eq!(hub.head("main").unwrap(), a.head("main").unwrap());
+
+        // Only init's empty commit gives way: a hub ref with work doesn't.
+        let b = repo();
+        b.init().unwrap();
+        b.set_json("main", "/y", &json!(2), opts("y")).unwrap();
+        b.fetch("hub", &InProcessRemote::new(&hub), &[]).unwrap();
+        assert!(matches!(
+            b.push("hub", &InProcessRemote::new(&hub), "main"),
+            Err(SyncError::NotFastForward { .. })
+        ));
+    }
+
+    #[test]
     fn a_second_push_sends_only_what_the_remote_lacks() {
         let (hub, a) = hub_and_a();
         a.set_json("main", "/y", &json!({"deep": {"er": 2}}), opts("y"))
@@ -1172,7 +1248,7 @@ mod tests {
             overrides: Vec::new(),
         };
         assert_eq!(
-            hub.sync_receive(&update, &bundle[..], BundleLimits::default())
+            hub.sync_receive(&update, &bundle[..], BundleLimits::default(), "test")
                 .unwrap(),
             PushOutcome::NotFastForward
         );
@@ -1194,7 +1270,7 @@ mod tests {
             };
             assert!(
                 matches!(
-                    hub.sync_receive(&update, &[][..], BundleLimits::default()),
+                    hub.sync_receive(&update, &[][..], BundleLimits::default(), "test"),
                     Err(SyncError::Refused(_))
                 ),
                 "{name:?}"
@@ -1224,7 +1300,7 @@ mod tests {
         let at = bytes.len() - 3;
         bytes[at] ^= 0xff;
         assert!(
-            hub.sync_receive(&update, &bytes[..], BundleLimits::default())
+            hub.sync_receive(&update, &bytes[..], BundleLimits::default(), "test")
                 .is_err()
         );
         assert_eq!(hub.head("main").unwrap(), old);
@@ -1240,6 +1316,7 @@ mod tests {
             &update,
             &bundle.to_bytes().unwrap()[..],
             BundleLimits::default(),
+            "test",
         ) {
             Err(e) => assert_eq!(e.code(), "bundle_incomplete", "{e}"),
             other => panic!("expected an incomplete bundle, got {other:?}"),
@@ -1364,6 +1441,52 @@ mod tests {
         CommitOptions::new("agent/sync", IntentCategory::Migrate, what)
     }
 
+    #[test]
+    fn the_receiver_logs_each_push_it_takes() {
+        let (hub, a) = hub_and_a();
+        let first = hub.push_log(10).unwrap();
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].pusher, "in-process");
+        assert_eq!(first[0].name, "main");
+        assert_eq!(first[0].old, None);
+        assert_eq!(first[0].new, a.head("main").unwrap().to_hex());
+
+        let old = a.head("main").unwrap();
+        a.taint("main", "/x", taint_params("pii")).unwrap();
+        a.set_json("main", "/y", &json!(2), opts("y")).unwrap();
+        let remote = InProcessRemote::new(&hub).as_pusher("key/alice");
+        a.push("hub", &remote, "main").unwrap();
+        let log = hub.push_log(10).unwrap();
+        let names: Vec<(&str, &str)> = log
+            .iter()
+            .map(|e| (e.name.as_str(), e.pusher.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("main", "key/alice"),
+                ("_control", "key/alice"),
+                ("main", "in-process")
+            ],
+            "newest first: the control ref went before main"
+        );
+        assert_eq!(log[0].old, Some(old.to_hex()));
+        assert_eq!(hub.push_log(1).unwrap().len(), 1);
+        assert!(
+            hub.list_branches(None)
+                .unwrap()
+                .iter()
+                .all(|(n, _)| n == "main"),
+            "the push log isn't a branch"
+        );
+        let offered = InProcessRemote::new(&hub).list_refs().unwrap();
+        assert!(
+            offered
+                .iter()
+                .all(|r| r.name != crate::sync::push_log::PUSH_LOG_REF)
+        );
+    }
+
     /// A remote that remembers the updates pushed to it.
     struct Recording<'a> {
         inner: InProcessRemote<'a>,
@@ -1434,6 +1557,10 @@ mod tests {
             }]
         );
         drop(updates);
+        let logged = hub.push_log(1).unwrap();
+        assert_eq!(logged[0].name, "main");
+        assert_eq!(logged[0].overrides.len(), 1);
+        assert_eq!(logged[0].overrides[0].finding, finding.id);
 
         // Once the remote has the value, later pushes don't send it again
         // and aren't blocked by it.
@@ -1503,7 +1630,7 @@ mod tests {
             new: head,
             overrides: Vec::new(),
         };
-        match hub.sync_receive(&update, &bundle[..], BundleLimits::default()) {
+        match hub.sync_receive(&update, &bundle[..], BundleLimits::default(), "test") {
             Err(e @ SyncError::Refused(_)) => assert!(e.to_string().contains("_secret"), "{e}"),
             other => panic!("expected a refusal, got {other:?}"),
         }
