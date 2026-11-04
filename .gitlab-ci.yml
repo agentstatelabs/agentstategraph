@@ -1,12 +1,17 @@
 # Only run pipelines that matter, and never the same SHA twice:
 #  * merge requests get a detached pipeline so feature branches are validated
-#    (fmt/clippy/build/test) BEFORE they merge — the team workflow lands all
+#    (fmt/clippy/test) BEFORE they merge — the team workflow lands all
 #    feature work via MR;
 #  * a plain push of an internal working branch (claude/*, worktree-agent-*, …)
 #    with no open MR gets no pipeline — the MR pipeline covers it;
 #  * a `release: vX` commit on main is validated by its tag pipeline (pushed
 #    right after — same SHA, plus the publish stage), so its branch pipeline is
-#    skipped to avoid a duplicate full compile.
+#    skipped to avoid a duplicate full compile;
+#  * a merge to main whose tree is identical to the merged MR's head was
+#    already tested by that MR's pipeline, so clippy and test skip their work
+#    (.ci/already-tested.sh) and the pipeline only mirrors to GitHub, where
+#    GitHub Actions tests main again. A merge that combined other changes, a
+#    direct push and "Run pipeline" all run in full.
 # A new pipeline on an already-released tag is safe: every publish job skips
 # what is already published (RELEASE.md, "Re-running a tag pipeline").
 workflow:
@@ -82,22 +87,22 @@ release-script-contract:
     - bash scripts/test-github-actions-ci.sh
     - bash scripts/test-publish-crates.sh
 
+# The builder has two job slots, so a pipeline runs two heavy jobs, clippy and
+# test, and both start at once. There is no separate build job: test compiles
+# everything it did, and builds the one crate the tests leave out.
 clippy:
   stage: check
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - rustup component add clippy
     - cargo clippy --workspace --all-targets -- -D clippy::correctness
 
-build:
+test:
+  stage: test
+  needs: []
   cache:
     <<: *rust_dependency_cache
     policy: pull-push
-  stage: check
-  script:
-    - cargo build --workspace --locked
-
-test:
-  stage: test
   # Postgres for the backend conformance suites (DESIGN.md Plan D t-001).
   # Without TEST_DATABASE_URL their Postgres legs skip. The alias resolves on
   # both the docker and kubernetes executors.
@@ -112,11 +117,15 @@ test:
     # Fail rather than skip if the database is ever missing.
     ASG_REQUIRE_POSTGRES: "1"
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     # The ASD proxy is behind the off-by-default `providers` feature.
     - cargo test --locked -p agentstategraph-mcp --features providers --test asd_proxy
     - cargo test --workspace --locked --exclude agentstategraph-python
     # Postgres TLS is opt-in (postgres-tls); compile and unit-test it too.
     - cargo test --locked -p agentstategraph-storage --features postgres-tls,memory --lib
+    # The tests exclude the Python extension, so build it here (it used to
+    # be built only by the old build job).
+    - cargo build --locked -p agentstategraph-python
 
 # version-guard: on a release tag, prove every version the publish stage will
 # stamp agrees with the tag BEFORE anything publishes. This is the backstop for

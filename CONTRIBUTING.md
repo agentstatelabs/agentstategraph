@@ -126,7 +126,7 @@ contributors use the GitHub PR flow above.
    glab mr create --fill --target-branch main --remove-source-branch
    ```
 3. Merge through the MR (`glab mr merge <id>`), so origin history reflects
-   review. Merge requests get a detached CI pipeline (fmt, clippy, build, test)
+   review. Merge requests get a detached CI pipeline (fmt, clippy, test)
    that must be green before merge.
 4. **Traceability:** record the MR URL as the completion evidence for the unit
    of work (e.g. in the closing summary of the plan/branch it belongs to), so
