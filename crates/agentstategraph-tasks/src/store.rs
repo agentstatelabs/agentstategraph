@@ -89,12 +89,16 @@ impl TaskStore {
         &self.agent_id
     }
 
+    pub(crate) fn repo(&self) -> &Arc<Repository> {
+        &self.repo
+    }
+
     // -----------------------------------------------------------------------
     // Plan operations
     // -----------------------------------------------------------------------
 
     /// Maximum number of CAS retries for concurrent write operations.
-    const MAX_CAS_RETRIES: u32 = 32;
+    pub(crate) const MAX_CAS_RETRIES: u32 = 32;
 
     /// Create a new plan. Fails if a plan with the same name already exists.
     ///
@@ -906,7 +910,7 @@ impl TaskStore {
         Err(TaskStoreError::WriteConflict)
     }
 
-    fn commit_opts(&self, description: impl Into<String>) -> CommitOptions {
+    pub(crate) fn commit_opts(&self, description: impl Into<String>) -> CommitOptions {
         CommitOptions::new(&self.agent_id, IntentCategory::Plan, description)
     }
 }

@@ -756,6 +756,22 @@ impl Repository {
         options: CommitOptions,
     ) -> Result<PullReport, SyncError> {
         let fetch = self.fetch(remote_name, remote, &[ref_name])?;
+        let outcome = self.merge_fetched(remote_name, ref_name, options)?;
+        Ok(PullReport { fetch, outcome })
+    }
+
+    /// The second half of [`Repository::pull`]: merge `ref_name` as the
+    /// last fetch from `remote_name` left it into the local one. A caller
+    /// that prepares the merge first fetches, prepares, then calls this:
+    /// `agentstategraph_tasks::TaskStore::renumber_before_merge` renumbers
+    /// colliding task ids this way.
+    pub fn merge_fetched(
+        &self,
+        remote_name: &str,
+        ref_name: &str,
+        options: CommitOptions,
+    ) -> Result<PullOutcome, SyncError> {
+        check_remote_name(remote_name)?;
         let store = self.taint_storage();
         let ns = self.active_namespace()?;
         let tracking = tracking_ref(remote_name, ref_name);
@@ -779,7 +795,7 @@ impl Repository {
                 }
             }
         };
-        Ok(PullReport { fetch, outcome })
+        Ok(outcome)
     }
 
     /// Push one ref: `name` in `ns`, at `head` here.
@@ -1548,6 +1564,49 @@ mod tests {
             }
             other => panic!("expected a blocked push, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_merge_base_is_readable_with_branch_refs_only() {
+        let limited = Repository::from_shared(
+            Arc::new(MemoryStorage::new()) as Arc<dyn Storage + Send + Sync>
+        )
+        .with_branch_refs_only();
+        limited.init().unwrap();
+        limited
+            .set_json("main", "/v", &json!(1), opts("v1"))
+            .unwrap();
+        limited.branch("side", "main").unwrap();
+        limited
+            .set_json("main", "/v", &json!(2), opts("v2"))
+            .unwrap();
+        limited
+            .set_json("side", "/v", &json!(3), opts("v3"))
+            .unwrap();
+        assert_eq!(
+            limited
+                .get_json_at_merge_base("side", "main", "/v")
+                .unwrap(),
+            Some(json!(1))
+        );
+        assert_eq!(
+            limited
+                .get_json_at_merge_base("side", "main", "/nope")
+                .unwrap(),
+            None
+        );
+
+        // Unrelated histories have no merge base.
+        let (x, y) = (repo(), repo());
+        x.init().unwrap();
+        x.set_json("main", "/v", &json!("x"), opts("x")).unwrap();
+        y.init().unwrap();
+        y.fetch("x", &InProcessRemote::new(&x), &[]).unwrap();
+        assert_eq!(
+            y.get_json_at_merge_base("remotes/x/main", "main", "/v")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

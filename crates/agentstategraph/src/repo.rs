@@ -1286,6 +1286,40 @@ impl Repository {
         self.find_common_ancestor(&source_commit_id, &target_commit_id)
     }
 
+    /// The value at `path` where `source` and `target` last met: in their
+    /// merge base ([`Repository::merge_base`]). `None` when they share no
+    /// history, or the path wasn't there yet. The base comes from the two
+    /// refs rather than from the caller, so this works in a repository
+    /// limited to branch names ([`Repository::with_branch_refs_only`]). A
+    /// domain merge policy uses it to tell what each side changed.
+    pub fn get_json_at_merge_base(
+        &self,
+        source: &str,
+        target: &str,
+        path: &str,
+    ) -> Result<Option<serde_json::Value>, RepoError> {
+        if path_is_secret(path) {
+            return Err(RepoError::ReservedPath(path.to_string()));
+        }
+        let base = match self.merge_base(source, target) {
+            Ok(base) => base,
+            // Unrelated histories: no common ancestor.
+            Err(RepoError::RefNotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let commit = self
+            .storage
+            .get_commit(&base)?
+            .ok_or_else(|| RepoError::CommitNotFound(base.to_string()))?;
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        match tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path) {
+            Ok(obj) => Ok(Some(tree::tree_to_json(self.storage.as_ref(), &obj)?)),
+            Err(TreeError::PathNotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Compute what merging `source` into `target` WOULD do, without advancing
     /// any ref or storing a commit. Returns a summary of top-level additions,
     /// changes, and removals plus any conflicts — the basis for a `--dry-run`.
