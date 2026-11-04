@@ -288,6 +288,7 @@ impl Repository {
             store.set_ref(&r.namespace, &r.name, r.target)?;
         }
         report.refs = refs.len();
+        self.record_shallow(shallow.iter().copied())?;
         report.control = self.reconcile_control()?;
         Ok(report)
     }

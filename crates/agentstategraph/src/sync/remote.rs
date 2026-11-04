@@ -43,6 +43,7 @@ use crate::sync::filter::{
 };
 use crate::sync::missing::missing_set;
 use crate::sync::push_log::PushLogEntry;
+use crate::sync::shallow::{FetchOptions, depth_boundary};
 use crate::sync::store::{Received, TransferError, store_records, write_set};
 
 /// How many times folding in a fetched control ref rebuilds on a moved head.
@@ -147,6 +148,9 @@ pub struct FetchRequest {
     /// Commits the fetching store has, so the remote can leave out what
     /// they reach. A remote ignores the ones it hasn't got.
     pub haves: Vec<ObjectId>,
+    /// Send at most this many commits along each line from a ref's head
+    /// ([`crate::sync::shallow`]).
+    pub depth: Option<u32>,
 }
 
 /// What a push asks a remote to do: move `name` in `namespace` from `old`
@@ -424,7 +428,11 @@ impl Repository {
         let mut heads: Vec<ObjectId> = refs.iter().map(|r| r.target).collect();
         heads.sort();
         heads.dedup();
-        let set = missing_set(store, &heads, &request.haves, &[])?;
+        let shallow = match request.depth {
+            Some(depth) => depth_boundary(store, &heads, depth)?,
+            None => Vec::new(),
+        };
+        let set = missing_set(store, &heads, &request.haves, &shallow)?;
         Ok(write_set(store, &set, &refs, out)?)
     }
 
@@ -507,6 +515,7 @@ impl Repository {
             }
         };
         if landed {
+            self.record_shallow(received.shallow.iter().copied())?;
             let entry = PushLogEntry {
                 at: chrono::Utc::now(),
                 pusher: pusher.to_string(),
@@ -622,6 +631,19 @@ impl Repository {
         remote: &dyn Remote,
         refs: &[&str],
     ) -> Result<FetchReport, SyncError> {
+        self.fetch_with(remote_name, remote, refs, &FetchOptions::default())
+    }
+
+    /// [`Repository::fetch`], limited as `options` say: a `depth` takes only
+    /// that much history and records where it stops
+    /// ([`crate::sync::shallow`]).
+    pub fn fetch_with(
+        &self,
+        remote_name: &str,
+        remote: &dyn Remote,
+        refs: &[&str],
+        options: &FetchOptions,
+    ) -> Result<FetchReport, SyncError> {
         check_remote_name(remote_name)?;
         let store = self.taint_storage();
         let ns = self.active_namespace()?;
@@ -658,10 +680,15 @@ impl Repository {
         let mut report = FetchReport::default();
         let mut request = FetchRequest {
             refs: Vec::new(),
-            haves: self.fetch_haves(remote_name, &ns)?,
+            haves: if options.unshallow {
+                Vec::new()
+            } else {
+                self.fetch_haves(remote_name, &ns)?
+            },
+            depth: options.depth,
         };
         for r in &wanted {
-            if !self.has_whole(&r.target)? {
+            if options.unshallow || !self.has_whole(&r.target)? {
                 request.refs.push((r.namespace.clone(), r.name.clone()));
             }
         }
@@ -681,6 +708,7 @@ impl Repository {
             }
             report.commits = received.commits.len();
             report.objects = received.objects;
+            self.record_shallow(received.shallow.iter().copied())?;
         }
         for r in &wanted {
             self.check_target(&r.target)?;
@@ -868,7 +896,7 @@ impl Repository {
             });
         }
         let haves = self.tracking_targets(remote_name, ns)?;
-        let set = missing_set(store, &[head], &haves, &[])?;
+        let set = missing_set(store, &[head], &haves, &options.shallow)?;
         let findings = filter::scan(store, &set, &options.filters)?;
         let (allowed, blocking) = filter::apply_overrides(findings, &options.overrides);
         if !blocking.is_empty() {

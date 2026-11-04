@@ -43,6 +43,8 @@ pub struct WireRefName {
 pub struct WireFetch {
     pub refs: Vec<WireRefName>,
     pub haves: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
 }
 
 /// A push's update.
@@ -112,6 +114,7 @@ impl From<&FetchRequest> for WireFetch {
                 })
                 .collect(),
             haves: r.haves.iter().map(|h| h.to_hex()).collect(),
+            depth: r.depth,
         }
     }
 }
@@ -129,6 +132,7 @@ impl WireFetch {
                 .iter()
                 .map(|h| id(h))
                 .collect::<Result<_, String>>()?,
+            depth: self.depth,
         })
     }
 }

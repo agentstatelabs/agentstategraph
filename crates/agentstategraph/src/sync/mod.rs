@@ -13,12 +13,15 @@
 //! - [`filter`]: what a push refuses to send: secrets, local-only refs, and
 //!   whatever its [`PushFilter`]s find, such as credentials (t-011, t-005).
 //! - [`push_log`]: the receiving side's record of the pushes it took (t-006).
+//! - [`shallow`]: history that starts at a chosen commit, and the
+//!   boundaries a store records (t-007).
 
 pub mod bundle;
 pub mod filter;
 pub mod missing;
 pub mod push_log;
 pub mod remote;
+pub mod shallow;
 pub mod store;
 
 pub use bundle::{
@@ -34,4 +37,5 @@ pub use remote::{
     FetchReport, FetchRequest, InProcessRemote, PullOutcome, PullReport, PushOutcome, PushReport,
     RefChange, RefUpdate, Remote, SyncError, tracking_ref,
 };
+pub use shallow::{FetchOptions, SHALLOW_PREFIX};
 pub use store::{ExportReport, ImportReport, TransferError};

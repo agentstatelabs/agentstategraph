@@ -83,6 +83,10 @@ pub struct PushOptions {
     /// whatever this holds.
     pub filters: Vec<Arc<dyn PushFilter>>,
     pub overrides: Vec<PushOverride>,
+    /// Commits to send without their parents, so the remote's history starts
+    /// there ([`crate::sync::shallow`]). Empty sends the whole history the
+    /// remote lacks.
+    pub shallow: Vec<ObjectId>,
 }
 
 impl Default for PushOptions {
@@ -90,6 +94,7 @@ impl Default for PushOptions {
         Self {
             filters: vec![Arc::new(CredentialFilter::new())],
             overrides: Vec::new(),
+            shallow: Vec::new(),
         }
     }
 }
@@ -102,6 +107,7 @@ impl std::fmt::Debug for PushOptions {
                 &self.filters.iter().map(|x| x.name()).collect::<Vec<_>>(),
             )
             .field("overrides", &self.overrides)
+            .field("shallow", &self.shallow)
             .finish()
     }
 }
@@ -112,7 +118,14 @@ impl PushOptions {
         Self {
             filters: Vec::new(),
             overrides: Vec::new(),
+            shallow: Vec::new(),
         }
+    }
+
+    /// Start the remote's history at `commit`: send it without its parents.
+    pub fn shallow_from(mut self, commit: ObjectId) -> Self {
+        self.shallow.push(commit);
+        self
     }
 
     pub fn with_filter(mut self, filter: Arc<dyn PushFilter>) -> Self {
@@ -308,6 +321,7 @@ pub(crate) fn scan(
     filters: &[Arc<dyn PushFilter>],
 ) -> Result<Vec<Finding>, SyncError> {
     let sent: HashSet<ObjectId> = set.objects.iter().copied().collect();
+    let shallow: HashSet<ObjectId> = set.shallow.iter().copied().collect();
     let mut found: BTreeMap<String, Finding> = BTreeMap::new();
     let mut add = |filter: &str, rule: String, path: &str, atom: &ObjectId, commit: ObjectId| {
         let id = ObjectId::hash(format!("{filter}\0{rule}\0{path}\0{atom}").as_bytes()).short();
@@ -328,7 +342,10 @@ pub(crate) fn scan(
             // Sent without its tree: there's nothing of it to check.
             continue;
         }
+        // A commit sent without its parents goes with its whole tree, so all
+        // of it is checked.
         let base = match commit.parents.first() {
+            Some(_) if shallow.contains(commit_id) => None,
             Some(p) => match store.get_commit(p)? {
                 Some(c) if store.has_object(&c.state_root)? => Some(c.state_root),
                 _ => None,

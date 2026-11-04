@@ -1149,6 +1149,43 @@ fn a_client_on_this_backend(f: &Fixture) {
     );
 }
 
+/// This backend as a hub that takes a shallow push: its history starts at
+/// the boundary, which it records, walks and blame stop there, a sweep runs,
+/// and a store that fetches from it gets the same boundary.
+fn a_shallow_history_on_this_backend(f: &Fixture) {
+    use agentstategraph::sync::PushOptions;
+    use sync_support::*;
+
+    let source = memory();
+    source.init().unwrap();
+    source
+        .set_json("main", "/keep", &json!("old"), opts("keep"))
+        .unwrap();
+    let ids: Vec<_> = (0..4)
+        .map(|i| source.set_json("main", "/v", &json!(i), opts("v")).unwrap())
+        .collect();
+    let central = f.open();
+    let options = PushOptions::default().shallow_from(ids[1]);
+    source
+        .push_with("hub", &hub(&central), "main", &options)
+        .unwrap();
+
+    assert_eq!(central.shallow_commits().unwrap(), vec![ids[1]]);
+    assert_eq!(central.get_json("main", "/keep").unwrap(), json!("old"));
+    assert_eq!(central.log("main", 100).unwrap().len(), 3);
+    assert_eq!(central.log_dag("main", 100).unwrap().commits.len(), 3);
+    assert_eq!(
+        central.blame("main", "/keep").unwrap().commit_id,
+        ids[1].short()
+    );
+    central.gc_sweep(keep_only_tips(), true, false).unwrap();
+    assert_eq!(central.get_json("main", "/v").unwrap(), json!(3));
+
+    let other = memory();
+    other.fetch("hub", &hub(&central), &[]).unwrap();
+    assert_eq!(other.shallow_commits().unwrap(), vec![ids[1]]);
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -1265,4 +1302,12 @@ fn sync_hub() {
 #[test]
 fn sync_client() {
     run("a_client_on_this_backend", a_client_on_this_backend);
+}
+
+#[test]
+fn sync_shallow() {
+    run(
+        "a_shallow_history_on_this_backend",
+        a_shallow_history_on_this_backend,
+    );
 }
