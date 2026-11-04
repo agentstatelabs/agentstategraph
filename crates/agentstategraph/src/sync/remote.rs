@@ -38,6 +38,9 @@ use crate::control::{self, CONTROL_REF, EpochConflict};
 use crate::control_repo::{ControlReport, is_reserved_ref, system_options};
 use crate::repo::{CommitOptions, RepoError, Repository, TRACKING_PREFIX, is_tracking_ref};
 use crate::sync::bundle::{BundleError, BundleLimits, BundleReader, BundleRef};
+use crate::sync::filter::{
+    self, Finding, PushOptions, PushOverride, tree_holds_secrets, tree_is_local_only,
+};
 use crate::sync::missing::missing_set;
 use crate::sync::store::{Received, TransferError, store_records, write_set};
 
@@ -75,6 +78,18 @@ pub enum SyncError {
 
     #[error("the remote has no ref {0}")]
     NoSuchRef(String),
+
+    /// A push filter found something in what the push would send
+    /// ([`crate::sync::filter`]).
+    #[error("{name} wasn't pushed: {}", filter::describe(findings))]
+    Blocked {
+        name: String,
+        findings: Vec<Finding>,
+    },
+
+    /// The ref is marked local-only ([`Repository::set_local_only`]).
+    #[error("{0} is marked local-only, so it isn't pushed")]
+    LocalOnly(String),
 
     /// The receiving side won't move this ref.
     #[error("refused: {0}")]
@@ -115,6 +130,8 @@ impl SyncError {
             SyncError::Rejected { .. } => "push_rejected",
             SyncError::NotFastForward { .. } => "not_fast_forward",
             SyncError::NoSuchRef(_) => "no_such_ref",
+            SyncError::Blocked { .. } => "push_blocked",
+            SyncError::LocalOnly(_) => "local_only_ref",
             SyncError::Refused(_) => "push_refused",
             SyncError::Remote(_) => "remote_error",
         }
@@ -132,13 +149,15 @@ pub struct FetchRequest {
 }
 
 /// What a push asks a remote to do: move `name` in `namespace` from `old`
-/// (absent: create it) to `new`.
+/// (absent: create it) to `new`. `overrides` are the push filter findings
+/// the pusher let through, for the remote's push log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefUpdate {
     pub namespace: Namespace,
     pub name: String,
     pub old: Option<ObjectId>,
     pub new: ObjectId,
+    pub overrides: Vec<PushOverride>,
 }
 
 /// How a remote answered a push.
@@ -238,6 +257,9 @@ pub struct PushReport {
     pub updated: Vec<RefChange>,
     pub commits: usize,
     pub objects: usize,
+    /// Push filter findings that went through, with the override that let
+    /// each one.
+    pub overridden: Vec<(Finding, PushOverride)>,
 }
 
 /// How [`Repository::pull`] left the local ref.
@@ -354,7 +376,7 @@ impl Repository {
         let mut refs = Vec::new();
         for ns in store.list_namespaces()? {
             for (name, target) in list_refs(store, &ns, "")? {
-                if is_synced_ref(&ns, &name) {
+                if is_synced_ref(&ns, &name) && !self.commit_is_local_only(&target)? {
                     refs.push(BundleRef {
                         namespace: ns.clone(),
                         name,
@@ -373,10 +395,13 @@ impl Repository {
         let store = self.taint_storage();
         let mut refs = Vec::with_capacity(request.refs.len());
         for (ns, name) in &request.refs {
-            let target = if is_synced_ref(ns, name) {
-                get_ref(store, ns, name)?
-            } else {
-                None
+            let target = match is_synced_ref(ns, name) {
+                true => get_ref(store, ns, name)?,
+                false => None,
+            };
+            let target = match target {
+                Some(t) if self.commit_is_local_only(&t)? => None,
+                other => other,
             };
             let target = target.ok_or_else(|| SyncError::NoSuchRef(format!("{ns}/{name}")))?;
             refs.push(BundleRef {
@@ -419,6 +444,20 @@ impl Repository {
         let received = store_records(store, BundleReader::new(bundle, limits)?)?;
         self.check_received(&received)?;
         self.check_target(&update.new)?;
+        // Secrets never sync, and a local-only ref stays where it is.
+        for (id, root, _) in &received.commits {
+            if store.has_object(root)? && tree_holds_secrets(store, root)? {
+                return Err(SyncError::Refused(format!(
+                    "commit {id} holds /_meta/_secret, which never syncs"
+                )));
+            }
+        }
+        if update.name != CONTROL_REF && self.commit_is_local_only(&update.new)? {
+            return Err(SyncError::Refused(format!(
+                "{}/{} is marked local-only",
+                update.namespace, update.name
+            )));
+        }
         if let Some(old) = update.old
             && !is_ancestor(store, &old, &update.new)?
         {
@@ -642,12 +681,27 @@ impl Repository {
     /// this store calls `remote_name`: a fast-forward of the remote's ref
     /// from where it was at the last fetch. The control ref goes first.
     /// A remote that has moved is [`SyncError::Rejected`]: fetch and merge,
-    /// then push again.
+    /// then push again. What the push sends goes through the built-in
+    /// credential filter first ([`PushOptions::default`]); a finding is
+    /// [`SyncError::Blocked`].
     pub fn push(
         &self,
         remote_name: &str,
         remote: &dyn Remote,
         ref_name: &str,
+    ) -> Result<PushReport, SyncError> {
+        self.push_with(remote_name, remote, ref_name, &PushOptions::default())
+    }
+
+    /// [`Repository::push`] with the filters and overrides `options` give.
+    /// Anything under `/_meta/_secret` and any ref marked local-only are
+    /// refused whatever they are.
+    pub fn push_with(
+        &self,
+        remote_name: &str,
+        remote: &dyn Remote,
+        ref_name: &str,
+        options: &PushOptions,
     ) -> Result<PushReport, SyncError> {
         check_remote_name(remote_name)?;
         let store = self.taint_storage();
@@ -657,6 +711,9 @@ impl Repository {
         }
         let head = get_ref(store, &ns, ref_name)?
             .ok_or_else(|| RepoError::BranchNotFound(ref_name.to_string()))?;
+        if self.commit_is_local_only(&head)? {
+            return Err(SyncError::LocalOnly(ref_name.to_string()));
+        }
         // So the control ref carries every taint, reminder and epoch write.
         self.reconcile_control()?;
         let mut report = PushReport::default();
@@ -668,10 +725,19 @@ impl Repository {
                 &default_ns,
                 CONTROL_REF,
                 control,
+                options,
                 &mut report,
             )?;
         }
-        self.push_one(remote_name, remote, &ns, ref_name, head, &mut report)?;
+        self.push_one(
+            remote_name,
+            remote,
+            &ns,
+            ref_name,
+            head,
+            options,
+            &mut report,
+        )?;
         Ok(report)
     }
 
@@ -717,6 +783,7 @@ impl Repository {
     }
 
     /// Push one ref: `name` in `ns`, at `head` here.
+    #[allow(clippy::too_many_arguments)]
     fn push_one(
         &self,
         remote_name: &str,
@@ -724,6 +791,7 @@ impl Repository {
         ns: &Namespace,
         name: &str,
         head: ObjectId,
+        options: &PushOptions,
         report: &mut PushReport,
     ) -> Result<(), SyncError> {
         let store = self.taint_storage();
@@ -741,18 +809,28 @@ impl Repository {
         }
         let haves = self.tracking_targets(remote_name, ns)?;
         let set = missing_set(store, &[head], &haves, &[])?;
+        let findings = filter::scan(store, &set, &options.filters)?;
+        let (allowed, blocking) = filter::apply_overrides(findings, &options.overrides);
+        if !blocking.is_empty() {
+            return Err(SyncError::Blocked {
+                name: name.to_string(),
+                findings: blocking,
+            });
+        }
         let bundle = write_set(store, &set, &[], Vec::new())?;
         let update = RefUpdate {
             namespace: ns.clone(),
             name: name.to_string(),
             old,
             new: head,
+            overrides: allowed.iter().map(|(_, o)| o.clone()).collect(),
         };
         match remote.push(&update, &bundle)? {
             PushOutcome::Updated => {
                 store.set_ref(ns, &tracking, head)?;
                 report.commits += set.commits.len();
                 report.objects += set.objects.len();
+                report.overridden.extend(allowed);
                 report.updated.push(RefChange {
                     namespace: ns.clone(),
                     name: name.to_string(),
@@ -821,6 +899,18 @@ impl Repository {
         }
         Ok(match store.get_object(&commit.state_root)? {
             Some(Object::Node(Node::Map(entries))) => entries.keys().all(|k| k == "_meta"),
+            _ => false,
+        })
+    }
+
+    /// Whether `commit`'s tree marks its ref local-only. A commit that isn't
+    /// here, or lacks its tree, isn't marked.
+    fn commit_is_local_only(&self, commit: &ObjectId) -> Result<bool, SyncError> {
+        let store = self.taint_storage();
+        Ok(match store.get_commit(commit)? {
+            Some(c) if store.has_object(&c.state_root)? => {
+                tree_is_local_only(store, &c.state_root)?
+            }
             _ => false,
         })
     }
@@ -1063,6 +1153,7 @@ mod tests {
             name: "main".into(),
             old: Some(old),
             new: head,
+            overrides: Vec::new(),
         };
         assert_eq!(
             hub.sync_receive(&update, &bundle[..], BundleLimits::default())
@@ -1083,6 +1174,7 @@ mod tests {
                 name: name.into(),
                 old: None,
                 new: hub.head("main").unwrap(),
+                overrides: Vec::new(),
             };
             assert!(
                 matches!(
@@ -1108,6 +1200,7 @@ mod tests {
             name: "main".into(),
             old: Some(old),
             new: head,
+            overrides: Vec::new(),
         };
 
         // A bundle with one byte flipped near the end fails to verify.
@@ -1243,6 +1336,218 @@ mod tests {
             b_team.remote_refs("hub").unwrap(),
             vec![("main".to_string(), team.head("main").unwrap())]
         );
+    }
+
+    /// Credential-shaped text, put together at run time so no source file
+    /// holds one.
+    fn fake_token() -> String {
+        ["gh", "p_", &"a1".repeat(18)].concat()
+    }
+
+    fn migrate(what: &str) -> CommitOptions {
+        CommitOptions::new("agent/sync", IntentCategory::Migrate, what)
+    }
+
+    /// A remote that remembers the updates pushed to it.
+    struct Recording<'a> {
+        inner: InProcessRemote<'a>,
+        updates: std::sync::Mutex<Vec<RefUpdate>>,
+    }
+
+    impl Remote for Recording<'_> {
+        fn list_refs(&self) -> Result<Vec<BundleRef>, SyncError> {
+            self.inner.list_refs()
+        }
+        fn fetch(&self, request: &FetchRequest) -> Result<Box<dyn Read + Send + '_>, SyncError> {
+            self.inner.fetch(request)
+        }
+        fn push(&self, update: &RefUpdate, bundle: &[u8]) -> Result<PushOutcome, SyncError> {
+            self.updates.lock().unwrap().push(update.clone());
+            self.inner.push(update, bundle)
+        }
+    }
+
+    #[test]
+    fn a_credential_blocks_the_push_until_it_is_overridden() {
+        let (hub, a) = hub_and_a();
+        let before = hub.head("main").unwrap();
+        a.set_json(
+            "main",
+            "/notes/n1",
+            &json!(format!("use {}", fake_token())),
+            opts("n1"),
+        )
+        .unwrap();
+        let finding = match a.push("hub", &InProcessRemote::new(&hub), "main") {
+            Err(e @ SyncError::Blocked { .. }) => {
+                assert_eq!(e.code(), "push_blocked");
+                assert!(
+                    !e.to_string().contains(&fake_token()),
+                    "the error never shows the value: {e}"
+                );
+                let SyncError::Blocked { name, findings } = e else {
+                    unreachable!()
+                };
+                assert_eq!(name, "main");
+                assert_eq!(findings.len(), 1, "{findings:?}");
+                assert_eq!(findings[0].rule, "github-token");
+                assert_eq!(findings[0].path, "/notes/n1");
+                assert!(findings[0].overridable);
+                findings[0].clone()
+            }
+            other => panic!("expected a blocked push, got {other:?}"),
+        };
+        assert_eq!(hub.head("main").unwrap(), before, "nothing was sent");
+
+        let remote = Recording {
+            inner: InProcessRemote::new(&hub),
+            updates: Default::default(),
+        };
+        let options = PushOptions::default().allow(finding.id.clone(), "a revoked test token");
+        let report = a.push_with("hub", &remote, "main", &options).unwrap();
+        assert_eq!(report.overridden.len(), 1);
+        assert_eq!(report.overridden[0].0, finding);
+        assert_eq!(hub.head("main").unwrap(), a.head("main").unwrap());
+        let updates = remote.updates.lock().unwrap();
+        let main = updates.iter().find(|u| u.name == "main").unwrap();
+        assert_eq!(
+            main.overrides,
+            vec![PushOverride {
+                finding: finding.id.clone(),
+                reason: "a revoked test token".into(),
+            }]
+        );
+        drop(updates);
+
+        // Once the remote has the value, later pushes don't send it again
+        // and aren't blocked by it.
+        a.set_json("main", "/other", &json!(2), opts("other"))
+            .unwrap();
+        a.push("hub", &InProcessRemote::new(&hub), "main").unwrap();
+    }
+
+    #[test]
+    fn a_credential_added_and_removed_before_the_push_still_blocks_it() {
+        let (hub, a) = hub_and_a();
+        a.set_json("main", "/notes/n", &json!(fake_token()), opts("add"))
+            .unwrap();
+        a.delete("main", "/notes/n", opts("remove")).unwrap();
+        assert!(
+            matches!(
+                a.push("hub", &InProcessRemote::new(&hub), "main"),
+                Err(SyncError::Blocked { .. })
+            ),
+            "the history ships, so the value would too"
+        );
+        // Without filters, only the rules that always apply are checked.
+        a.push_with(
+            "hub",
+            &InProcessRemote::new(&hub),
+            "main",
+            &PushOptions::unfiltered(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn secrets_never_sync_even_overridden() {
+        let (hub, a) = hub_and_a();
+        a.set_json("main", "/_meta/_secret/key", &json!("k"), migrate("secret"))
+            .unwrap();
+        let finding = match a.push("hub", &InProcessRemote::new(&hub), "main") {
+            Err(SyncError::Blocked { findings, .. }) => {
+                assert_eq!(findings.len(), 1, "{findings:?}");
+                assert_eq!(findings[0].filter, "secrets");
+                assert!(!findings[0].overridable);
+                findings[0].clone()
+            }
+            other => panic!("expected a blocked push, got {other:?}"),
+        };
+        let options = PushOptions::unfiltered().allow(finding.id, "please");
+        assert!(matches!(
+            a.push_with("hub", &InProcessRemote::new(&hub), "main", &options),
+            Err(SyncError::Blocked { .. })
+        ));
+    }
+
+    #[test]
+    fn the_receiver_refuses_secrets_however_they_arrive() {
+        let (hub, a) = hub_and_a();
+        let old = hub.head("main").unwrap();
+        a.set_json("main", "/_meta/_secret/key", &json!("k"), migrate("secret"))
+            .unwrap();
+        let head = a.head("main").unwrap();
+        let store = a.taint_storage();
+        let set = missing_set(store, &[head], &[old], &[]).unwrap();
+        let bundle = write_set(store, &set, &[], Vec::new()).unwrap();
+        let update = RefUpdate {
+            namespace: Namespace::default_ns(),
+            name: "main".into(),
+            old: Some(old),
+            new: head,
+            overrides: Vec::new(),
+        };
+        match hub.sync_receive(&update, &bundle[..], BundleLimits::default()) {
+            Err(e @ SyncError::Refused(_)) => assert!(e.to_string().contains("_secret"), "{e}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(hub.head("main").unwrap(), old);
+    }
+
+    #[test]
+    fn a_local_only_ref_is_never_pushed_or_offered() {
+        let (hub, a) = hub_and_a();
+        a.branch("index", "main").unwrap();
+        a.set_local_only("index", true).unwrap();
+        assert!(a.is_local_only("index").unwrap());
+        assert!(!a.is_local_only("main").unwrap());
+        match a.push("hub", &InProcessRemote::new(&hub), "index") {
+            Err(e @ SyncError::LocalOnly(_)) => assert_eq!(e.code(), "local_only_ref"),
+            other => panic!("expected a local-only refusal, got {other:?}"),
+        }
+
+        // A hub's own local-only ref isn't offered or fetchable.
+        hub.branch("hub-index", "main").unwrap();
+        hub.set_local_only("hub-index", true).unwrap();
+        let offered = InProcessRemote::new(&hub).list_refs().unwrap();
+        assert!(offered.iter().all(|r| r.name != "hub-index"), "{offered:?}");
+        assert!(matches!(
+            a.fetch("hub", &InProcessRemote::new(&hub), &["hub-index"]),
+            Err(SyncError::NoSuchRef(_))
+        ));
+
+        // Cleared, it pushes.
+        a.set_local_only("index", false).unwrap();
+        a.push("hub", &InProcessRemote::new(&hub), "index").unwrap();
+        assert!(hub.head("index").is_ok());
+    }
+
+    #[test]
+    fn an_embedders_filter_applies() {
+        struct NoInternalIds;
+        impl crate::sync::PushFilter for NoInternalIds {
+            fn name(&self) -> &str {
+                "internal"
+            }
+            fn check(&self, _path: &str, value: &str) -> Vec<String> {
+                if value.contains("INTERNAL-") {
+                    vec!["internal-id".into()]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+        let (hub, a) = hub_and_a();
+        a.set_json("main", "/n", &json!("ticket INTERNAL-42"), opts("n"))
+            .unwrap();
+        let options = PushOptions::default().with_filter(std::sync::Arc::new(NoInternalIds));
+        match a.push_with("hub", &InProcessRemote::new(&hub), "main", &options) {
+            Err(SyncError::Blocked { findings, .. }) => {
+                assert_eq!(findings[0].filter, "internal");
+                assert_eq!(findings[0].rule, "internal-id");
+            }
+            other => panic!("expected a blocked push, got {other:?}"),
+        }
     }
 
     #[test]

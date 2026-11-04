@@ -10,8 +10,11 @@
 //!   (Plan F t-008).
 //! - [`remote`]: the [`Remote`] trait, and push, fetch and pull through
 //!   one, with remote-tracking refs (t-004).
+//! - [`filter`]: what a push refuses to send: secrets, local-only refs, and
+//!   whatever its [`PushFilter`]s find, such as credentials (t-011, t-005).
 
 pub mod bundle;
+pub mod filter;
 pub mod missing;
 pub mod remote;
 pub mod store;
@@ -19,6 +22,9 @@ pub mod store;
 pub use bundle::{
     Bundle, BundleError, BundleLimits, BundleReader, BundleRef, BundleWriter, FORMAT_VERSION,
     Record,
+};
+pub use filter::{
+    CredentialFilter, Finding, LOCAL_ONLY_PATH, PushFilter, PushOptions, PushOverride,
 };
 pub use missing::{MissingSet, missing_set};
 pub use remote::{

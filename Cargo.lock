@@ -28,6 +28,7 @@ dependencies = [
  "chrono",
  "metrics",
  "oxtel-sdk",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

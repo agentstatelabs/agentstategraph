@@ -1082,6 +1082,14 @@ fn a_hub_on_this_backend(f: &Fixture) {
     assert_eq!(central.get_json("main", "/a").unwrap(), json!("a"));
     assert_eq!(central.get_json("main", "/b").unwrap(), json!("b"));
     assert_eq!(central.head("main").unwrap(), b.head("main").unwrap());
+
+    // The hub's own local-only ref isn't offered.
+    central.branch("index", "main").unwrap();
+    central.set_local_only("index", true).unwrap();
+    assert!(matches!(
+        a.fetch("hub", &hub(&central), &["index"]),
+        Err(SyncError::NoSuchRef(_))
+    ));
 }
 
 /// This backend as a client: it pulls from a memory hub, has its tables
