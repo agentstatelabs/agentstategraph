@@ -8,9 +8,12 @@
 //!   both sides' history and a thin diff of the new trees (t-003).
 //! - [`store`]: a whole store exported to a bundle and imported from one
 //!   (Plan F t-008).
+//! - [`remote`]: the [`Remote`] trait, and push, fetch and pull through
+//!   one, with remote-tracking refs (t-004).
 
 pub mod bundle;
 pub mod missing;
+pub mod remote;
 pub mod store;
 
 pub use bundle::{
@@ -18,4 +21,8 @@ pub use bundle::{
     Record,
 };
 pub use missing::{MissingSet, missing_set};
+pub use remote::{
+    FetchReport, FetchRequest, InProcessRemote, PullOutcome, PullReport, PushOutcome, PushReport,
+    RefChange, RefUpdate, Remote, SyncError, tracking_ref,
+};
 pub use store::{ExportReport, ImportReport, TransferError};
