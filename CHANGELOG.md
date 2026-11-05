@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.5.1] — 2026-11-04
+
+Stores can sync: push, fetch and pull between stores through a `Remote`, over HTTP through a hub (the new `agentstategraph-sync-http` crate), from the MCP server, the HTTP API and the bindings, with filters that refuse secrets and local-only refs. Taints, reminders and epochs move onto a control ref so sync can carry them. Tasks gain notes, and every binding can close a plan.
+
 ### Added
 - **A build refuses a database that a newer build has changed in a way it can't use,** instead of running on it. Several builds can share one database during a rolling deploy, so schema changes now expand, then contract: a change that only adds leaves older builds working, and one that removes what an older build uses ships only once no such build is still running. Each database records its schema version and the oldest version a build must understand to use it, in `asg_schema`. A build below that fails to open the database with `StorageError::SchemaTooNew` (code `schema_too_new`) and changes nothing; otherwise a newer build's database is used as it is, so a replica that restarts mid-deploy, or a rolled-back one, still starts. Builds from before this one don't check.
   - Postgres adds the `compatible_from` column. Connecting to an older database runs the setup once, as every schema bump does.
