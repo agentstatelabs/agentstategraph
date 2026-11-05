@@ -134,6 +134,13 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_taskstore_close_plan(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string summary);
+
+    [DllImport(Lib)]
     internal static extern IntPtr agentstategraph_taskstore_delete_plan(
         IntPtr store,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,

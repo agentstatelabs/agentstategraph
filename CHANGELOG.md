@@ -25,7 +25,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ### Fixed
 - **A Postgres store can hold U+0000.** Postgres keeps objects and commits as JSONB, which has no U+0000, so storing any value with one in a string or a map key failed with a database error, though SQLite and memory took it. A store holding one, such as a transcript with a NUL in it, couldn't be imported into or synced to a Postgres store. Such a row now keeps its exact JSON beside the JSONB, which holds U+FFFD in its place for the queries that read its structure; everything that reads a value back reads the exact copy, so it hashes to its id. Rows without U+0000, nearly all of them, are unchanged. The search index keeps U+FFFD for U+0000 too.
   - Postgres moves to schema version 7 and is stamped as needing it: a build before 7 would read such a row with U+FFFD in place of U+0000, and hand back content that doesn't match its id.
-- **Python and TypeScript can close a plan.** Since finishing a plan's last task stopped completing the plan, a plan is completed only by `close_plan` with a summary, which neither binding had, so a plan made from either could never be completed. `TaskStore.close_plan(ref, plan, summary)` in Python and `closePlan(ref, plan, summary)` in TypeScript now do it, and a plan read from either includes `summary`, `closed_at` and `closed_by`. Their tests had still expected the old completion and are fixed.
+- **Every binding can close a plan.** Since finishing a plan's last task stopped completing the plan, a plan is completed only by `close_plan` with a summary, which no binding had, so a plan made from any of them could never be completed. Each now has it, and a plan read from any binding includes `summary`, `closed_at` and `closed_by`:
+  - C ABI: `agentstategraph_taskstore_close_plan(store, ref_name, name, summary)`, declared in the Swift and Go headers.
+  - Python `TaskStore.close_plan(ref, plan, summary)`, TypeScript `closePlan(ref, plan, summary)` and WASM `tasksClosePlan(prefix, agentId, ref, plan, summary)`.
+  - Swift `closePlan(_:summary:ref:)`, Go `ClosePlan(ref, name, summary)` and .NET `ClosePlan(refName, name, summary)`.
+  - The Python and TypeScript tests had still expected the old completion and are fixed.
 
 ## [v1.5.0] — 2026-10-28
 

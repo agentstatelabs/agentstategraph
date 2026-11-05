@@ -107,6 +107,35 @@ fn full_taskstore_round_trip_via_ffi() {
         assert_eq!(completed_val["proof"]["kind"], "commit");
         assert_eq!(completed_val["proof"]["value"], "deadbeef");
 
+        // Finishing the last task leaves the plan open; closing it takes a
+        // summary, and a null one is empty.
+        let plan_now = read(agentstategraph_taskstore_get_plan(
+            store,
+            ref_main.as_ptr(),
+            plan_name.as_ptr(),
+        ));
+        let plan_now: serde_json::Value = serde_json::from_str(&plan_now).unwrap();
+        assert_eq!(plan_now["status"], "active");
+        let refused = read(agentstategraph_taskstore_close_plan(
+            store,
+            ref_main.as_ptr(),
+            plan_name.as_ptr(),
+            std::ptr::null(),
+        ));
+        assert!(refused.contains("summary"), "{refused}");
+        let summary = c("Hero rewritten");
+        let closed = read(agentstategraph_taskstore_close_plan(
+            store,
+            ref_main.as_ptr(),
+            plan_name.as_ptr(),
+            summary.as_ptr(),
+        ));
+        let closed: serde_json::Value = serde_json::from_str(&closed).unwrap();
+        assert_eq!(closed["status"], "completed");
+        assert_eq!(closed["summary"], "Hero rewritten");
+        assert_eq!(closed["closed_by"], "ffi-test-agent");
+        assert!(closed["closed_at"].is_string());
+
         // Migrate check on a fresh repo should be up_to_date.
         let check = read(agentstategraph_migrate_check(
             repo,
@@ -127,6 +156,47 @@ fn full_taskstore_round_trip_via_ffi() {
         let run_val: serde_json::Value = serde_json::from_str(&run).unwrap();
         assert_eq!(run_val["mode"], "dry-run");
 
+        agentstategraph_taskstore_free(store);
+        agentstategraph_free(repo);
+    }
+}
+
+#[test]
+fn close_plan_refuses_open_work_via_ffi() {
+    unsafe {
+        let repo = agentstategraph_new_memory();
+        let store = agentstategraph_taskstore_new(repo, c("/plans").as_ptr(), c("a").as_ptr());
+        let (main, plan, summary) = (c("main"), c("p"), c("done"));
+        read(agentstategraph_taskstore_create_plan(
+            store,
+            main.as_ptr(),
+            plan.as_ptr(),
+            std::ptr::null(),
+        ));
+        let empty = read(agentstategraph_taskstore_close_plan(
+            store,
+            main.as_ptr(),
+            plan.as_ptr(),
+            summary.as_ptr(),
+        ));
+        assert!(empty.contains("no tasks"), "{empty}");
+        read(agentstategraph_taskstore_add_task(
+            store,
+            main.as_ptr(),
+            plan.as_ptr(),
+            c("x").as_ptr(),
+            c("medium").as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+        ));
+        let open = read(agentstategraph_taskstore_close_plan(
+            store,
+            main.as_ptr(),
+            plan.as_ptr(),
+            summary.as_ptr(),
+        ));
+        assert!(open.contains("t-001"), "{open}");
         agentstategraph_taskstore_free(store);
         agentstategraph_free(repo);
     }

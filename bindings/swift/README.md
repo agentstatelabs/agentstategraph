@@ -113,6 +113,9 @@ let t = try tasks.addTask(plan: "launch", title: "cut release", priority: .high)
 _ = try tasks.startTask(plan: "launch", id: t.id)
 _ = try tasks.completeTask(plan: "launch", id: t.id,
                            proof: Proof(kind: .commit, value: "abc123"))
+// Finishing the last task leaves the plan active. Close it with a summary
+// once every task is done or abandoned:
+try tasks.closePlan("launch", summary: "Release cut")
 ```
 
 ## Memory & threading

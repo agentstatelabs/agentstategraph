@@ -45,12 +45,18 @@ public struct Plan: Codable, Sendable, Equatable {
     public let createdAt: String
     public let createdBy: String
     public let archivedAt: String?
+    /// What the plan did, set when it's closed.
+    public let summary: String?
+    public let closedAt: String?
+    public let closedBy: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, status
+        case name, description, status, summary
         case createdAt = "created_at"
         case createdBy = "created_by"
         case archivedAt = "archived_at"
+        case closedAt = "closed_at"
+        case closedBy = "closed_by"
     }
 }
 
@@ -210,6 +216,20 @@ public final class TaskStore {
         let cRef = sgDup(ref); defer { free(cRef) }
         let cName = sgDup(name); defer { free(cName) }
         return try decodeJSON(try consume(agentstategraph_taskstore_archive_plan(s, cRef, cName), "archive_plan"))
+    }
+
+    /// Mark a plan `completed` with a summary of what it did. Finishing
+    /// the last task doesn't do this. Every task must be done or abandoned
+    /// first, and the summary can't be empty. Closing a completed plan
+    /// returns it as it is.
+    @discardableResult
+    public func closePlan(_ name: String, summary: String, ref: String = "main") throws -> Plan {
+        let s = try h()
+        let cRef = sgDup(ref); defer { free(cRef) }
+        let cName = sgDup(name); defer { free(cName) }
+        let cSummary = sgDup(summary); defer { free(cSummary) }
+        return try decodeJSON(try consume(
+            agentstategraph_taskstore_close_plan(s, cRef, cName, cSummary), "close_plan"))
     }
 
     /// Permanently delete a plan and its tasks.

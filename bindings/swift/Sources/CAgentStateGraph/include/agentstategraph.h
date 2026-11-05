@@ -49,6 +49,8 @@ extern char* agentstategraph_taskstore_list_plans_by_status(SgTaskStore store, c
     const char* status);
 extern char* agentstategraph_taskstore_get_plan(SgTaskStore store, const char* ref_name, const char* name);
 extern char* agentstategraph_taskstore_archive_plan(SgTaskStore store, const char* ref_name, const char* name);
+extern char* agentstategraph_taskstore_close_plan(SgTaskStore store, const char* ref_name, const char* name,
+    const char* summary);
 extern char* agentstategraph_taskstore_delete_plan(SgTaskStore store, const char* ref_name, const char* name);
 extern char* agentstategraph_taskstore_add_task(SgTaskStore store, const char* ref_name, const char* plan,
     const char* title, const char* priority, const char* parent_id, const char* blockers_json,

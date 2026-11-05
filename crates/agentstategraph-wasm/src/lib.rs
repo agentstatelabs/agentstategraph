@@ -551,6 +551,24 @@ impl WasmAgentStateGraph {
         serde_json::to_string(&plan).map_err(js_err)
     }
 
+    /// Mark a plan `completed` with a summary of what it did. Finishing
+    /// the last task doesn't do this. Every task must be done or abandoned
+    /// first, and the summary can't be empty. Closing a completed plan
+    /// returns it as it is.
+    #[wasm_bindgen(js_name = tasksClosePlan)]
+    pub fn tasks_close_plan(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        name: &str,
+        summary: &str,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let plan = store.close_plan(ref_name, name, summary).map_err(js_err)?;
+        serde_json::to_string(&plan).map_err(js_err)
+    }
+
     #[wasm_bindgen(js_name = tasksDeletePlan)]
     pub fn tasks_delete_plan(
         &self,
