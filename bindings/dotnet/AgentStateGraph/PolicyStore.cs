@@ -158,6 +158,11 @@ public sealed class PolicyStore : IDisposable
     /// Runs the authorization evaluator (POLICY_V1.md §5).
     /// <paramref name="situation"/> is a flat fact map.
     /// </summary>
+    /// <param name="tenantFilter">
+    /// Optional tenant scope (0.7.5 §3b). When set, only policies for that
+    /// tenant and policies with no tenant are considered, so a tenant with
+    /// no policy of its own falls back to the global ones.
+    /// </param>
     public Decision Evaluate(
         string refName,
         IReadOnlyDictionary<string, string>? situation,
@@ -167,27 +172,27 @@ public sealed class PolicyStore : IDisposable
     {
         ThrowIfDisposed();
         var situationJson = Json.Serialize(situation ?? new Dictionary<string, string>());
-        var ptr = NativeMethods.agentstategraph_policy_evaluate(
-            H, refName, situationJson, action, agentId);
-        var decision = Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate");
-        return ApplyTenantFilter(refName, decision, tenantFilter);
+        var ptr = tenantFilter is null
+            ? NativeMethods.agentstategraph_policy_evaluate(H, refName, situationJson, action, agentId)
+            : NativeMethods.agentstategraph_policy_evaluate_scoped(
+                H, refName, situationJson, action, agentId, tenantFilter);
+        return Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate");
     }
 
     /// <summary>Runs the change-proposal evaluator (POLICY_V1.md §22.2).</summary>
     /// <param name="tenantFilter">
-    /// Optional tenant scope (0.7.5-beta.1 §5c). When non-null and the decision's
-    /// <c>matched_policy</c> carries a non-null <see cref="Policy.TenantId"/> that
-    /// disagrees, the decision is rewritten to <see cref="Decision.NoPolicyMatch"/>.
-    /// Matches the Go §5c client-side filter until a tenant-aware FFI ships.
+    /// Optional tenant scope, as for <see cref="Evaluate"/>.
     /// </param>
     public Decision EvaluateChange(string refName, ChangeProposal proposal, string? tenantFilter = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(proposal);
-        var ptr = NativeMethods.agentstategraph_policy_evaluate_change(
-            H, refName, Json.Serialize(proposal));
-        var decision = Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate_change");
-        return ApplyTenantFilter(refName, decision, tenantFilter);
+        var proposalJson = Json.Serialize(proposal);
+        var ptr = tenantFilter is null
+            ? NativeMethods.agentstategraph_policy_evaluate_change(H, refName, proposalJson)
+            : NativeMethods.agentstategraph_policy_evaluate_change_scoped(
+                H, refName, proposalJson, tenantFilter);
+        return Json.Deserialize<Decision>(Strings.ConsumeUtf8(ptr), "evaluate_change");
     }
 
     /// <summary>
@@ -229,11 +234,13 @@ public sealed class PolicyStore : IDisposable
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Invokes <c>agentstategraph_policy_sign</c>. The Rust implementation
-    /// currently returns a stub envelope describing the signature that
-    /// would be computed; callers parse the <see cref="JsonDocument"/>
-    /// themselves. Pass <paramref name="signerKeyId"/> as <c>null</c> to
-    /// let the FFI pick a default.
+    /// Invokes <c>agentstategraph_policy_sign</c> and returns its envelope
+    /// unchanged, as the Go binding does. A signer can't be registered
+    /// through the C ABI yet, so today the envelope is always
+    /// <c>{"error": "no signer registered"}</c>; callers parse the
+    /// <see cref="JsonDocument"/> themselves. Pass
+    /// <paramref name="signerKeyId"/> as <c>null</c> to let the FFI pick a
+    /// default.
     /// </summary>
     public JsonDocument Sign(string refName, string path, string? signerKeyId = null)
     {
@@ -241,7 +248,9 @@ public sealed class PolicyStore : IDisposable
         ArgumentNullException.ThrowIfNull(refName);
         ArgumentNullException.ThrowIfNull(path);
         var ptr = NativeMethods.agentstategraph_policy_sign(H, refName, path, signerKeyId);
-        var raw = Json.ThrowIfError(Strings.ConsumeUtf8(ptr), "policy_sign");
+        var raw = Strings.ConsumeUtf8(ptr)
+            ?? throw new AgentStateGraphException("policy_sign", "native FFI returned null");
+        // Not error-checked: the envelope is the result, error or not.
         return JsonDocument.Parse(raw);
     }
 
@@ -312,43 +321,6 @@ public sealed class PolicyStore : IDisposable
             }
         }
         return filtered;
-    }
-
-    private Decision ApplyTenantFilter(string refName, Decision decision, string? filter)
-    {
-        if (filter is null)
-        {
-            return decision;
-        }
-        var matchedPath = decision switch
-        {
-            Decision.Allow a => a.MatchedPolicy,
-            Decision.Deny d => d.MatchedPolicy,
-            Decision.RequireApproval r => r.MatchedPolicy,
-            _ => null,
-        };
-        if (string.IsNullOrEmpty(matchedPath))
-        {
-            return decision;
-        }
-        // matched_policy is `path@version` — strip the version to look up
-        // the policy by path.
-        var atIdx = matchedPath.IndexOf('@');
-        var pathOnly = atIdx >= 0 ? matchedPath[..atIdx] : matchedPath;
-        try
-        {
-            var matched = Get(refName, pathOnly);
-            if (TenantMatches(matched, filter))
-            {
-                return decision;
-            }
-        }
-        catch (AgentStateGraphException)
-        {
-            // If the lookup fails we err on the side of the original decision.
-            return decision;
-        }
-        return new Decision.NoPolicyMatch();
     }
 
     public void Dispose()

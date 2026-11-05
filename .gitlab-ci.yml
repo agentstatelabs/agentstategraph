@@ -144,6 +144,50 @@ test:
     # The tests exclude the Python extension, so build it here (it used to
     # be built only by the old build job).
     - cargo build --locked -p agentstategraph-python
+  # The C library these tests built, for the dotnet job, so testing .NET
+  # adds no Rust compile.
+  artifacts:
+    paths: [target/debug/deps/libagentstategraph_ffi.so]
+    expire_in: 1 day
+
+# The .NET binding's tests (bindings/dotnet), in the .NET SDK image on a light
+# slot, against the C library the test job built. They run when something
+# .NET reaches changes; a merge to main that the merge request already tested
+# skips, as the test job does, which also leaves no library behind.
+dotnet:
+  tags: [macbook-amd64]
+  stage: test
+  # Ubuntu 26.04: its glibc is newer than the rust-ci image's, so the library
+  # built there loads here.
+  image: mcr.microsoft.com/dotnet/sdk:10.0-resolute
+  needs:
+    - job: test
+      artifacts: true
+  before_script: []
+  after_script: []
+  cache: []
+  variables:
+    DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    DOTNET_NOLOGO: "1"
+    # The tests target net8.0 and net10.0; the image has only the 10 runtime.
+    DOTNET_ROLL_FORWARD: Major
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - bindings/dotnet/**/*
+        - crates/**/*
+        - spec/**/*
+        - Cargo.lock
+        - .gitlab-ci.yml
+  script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
+    - mkdir -p ffi && cp target/debug/deps/libagentstategraph_ffi.so ffi/
+    # NativeLibraryLoaderTests points AGENTSTATEGRAPH_FFI_PATH at a missing
+    # directory and expects the default search to find the library, so put it
+    # on both.
+    - export AGENTSTATEGRAPH_FFI_PATH="$CI_PROJECT_DIR/ffi" LD_LIBRARY_PATH="$CI_PROJECT_DIR/ffi"
+    - cd bindings/dotnet
+    - dotnet test -c Release
 
 # version-guard: on a release tag, prove every version the publish stage will
 # stamp agrees with the tag BEFORE anything publishes. This is the backstop for

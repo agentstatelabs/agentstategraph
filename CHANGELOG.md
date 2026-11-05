@@ -7,6 +7,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **In .NET, a tenant with no policy of its own now falls back to the global policies,** as in the other bindings. With a tenant filter, `Evaluate` and `EvaluateChange` evaluated every policy and then, if the match was another tenant's, answered `NoPolicyMatch`, so a global policy behind it was never reached. They now use the C ABI's scoped evaluators, which leave other tenants' policies out before matching.
+- **.NET `PolicyStore.Sign` returns the C ABI's envelope as it is,** as Go does, instead of throwing. A signer can't be registered through the C ABI yet, so the envelope is always `{"error": "no signer registered"}` for now.
+- **CI runs the .NET binding's tests,** on .NET 8 and 10, in merge requests that change it or the crates beneath it. It uses the C library the Rust tests already build.
+
 ## [v1.5.1] — 2026-11-04
 
 Stores can sync: push, fetch and pull between stores through a `Remote`, over HTTP through a hub (the new `agentstategraph-sync-http` crate), from the MCP server, the HTTP API and the bindings, with filters that refuse secrets and local-only refs. Taints, reminders and epochs move onto a control ref so sync can carry them. Tasks gain notes, and every binding can close a plan.
