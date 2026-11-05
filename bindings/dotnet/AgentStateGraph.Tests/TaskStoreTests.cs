@@ -189,6 +189,33 @@ public sealed class TaskStoreTests
     }
 
     [Fact]
+    public void Notes_AddSetAndClear()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ts = new TaskStore(repo, "/plans", "xunit");
+        ts.CreatePlan(Ref, "p", null);
+        const string brief = "Repo: infra/gitops.\n\n1. Write the manifests.\n2. Ask the user. ✓\n";
+        var a = ts.AddTask(Ref, "p", "a", Priority.Low, new AddTaskOptions(Notes: brief));
+        Assert.Equal(brief, a.Notes);
+        Assert.Null(ts.AddTask(Ref, "p", "b", Priority.Low).Notes);
+        var ext = ts.AddTaskWithExtensions(
+            Ref, "p", "c", Priority.Low, new AddTaskOptions(Notes: "ext notes"), parentChange: "spec@1");
+        Assert.Equal("ext notes", ext.Notes);
+        Assert.Equal("spec@1", ext.ParentChange);
+
+        ts.StartTask(Ref, "p", a.Id);
+        var edited = ts.SetNotes(Ref, "p", a.Id, "line one\nline two");
+        Assert.Equal("line one\nline two", edited.Notes);
+        Assert.Equal(TaskStatus.InProgress, edited.Status);
+        var refused = Assert.Throws<AgentStateGraphException>(
+            () => ts.SetNotes(Ref, "p", a.Id, new string('x', 16 * 1024 + 1)));
+        Assert.Contains("16384", refused.Message);
+        Assert.Null(ts.SetNotes(Ref, "p", a.Id, null).Notes);
+        ts.SetNotes(Ref, "p", a.Id, "again");
+        Assert.Null(ts.SetNotes(Ref, "p", a.Id, "").Notes);
+    }
+
+    [Fact]
     public void SetBlockers_AcceptsJsonArray()
     {
         using var repo = TestHelpers.FreshRepo();

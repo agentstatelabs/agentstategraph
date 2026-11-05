@@ -57,6 +57,7 @@ pub use renumber::Renumbering;
 pub use state::Transition;
 pub use store::{AddTaskOptions, TaskStore};
 pub use types::{
-    OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
+    MAX_NOTES_BYTES, OnCompleteHook, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId,
+    TaskStatus,
 };
 pub use verifier::{NoopVerifier, Verifier, VerifyEntry, VerifyReport, VerifyResult};

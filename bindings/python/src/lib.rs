@@ -808,6 +808,7 @@ fn task_to_dict(py: Python<'_>, t: &Task) -> PyResult<PyObject> {
     let d = pyo3::types::PyDict::new(py);
     d.set_item("id", t.id.as_str())?;
     d.set_item("title", &t.title)?;
+    d.set_item("notes", t.notes.clone())?;
     d.set_item("status", status_str(t.status))?;
     d.set_item("priority", priority_str(t.priority))?;
     d.set_item(
@@ -1007,7 +1008,7 @@ impl TaskStore {
 
     // --- Task ops ---
 
-    #[pyo3(signature = (ref_name, plan, title, priority="medium", parent_id=None, blocked_by=None, assigned_to=None, payload=None, parent_change=None, on_complete=None))]
+    #[pyo3(signature = (ref_name, plan, title, priority="medium", parent_id=None, blocked_by=None, assigned_to=None, payload=None, parent_change=None, on_complete=None, notes=None))]
     #[allow(clippy::too_many_arguments)]
     fn add_task(
         &self,
@@ -1022,6 +1023,7 @@ impl TaskStore {
         payload: Option<&Bound<'_, PyAny>>,
         parent_change: Option<String>,
         on_complete: Option<&Bound<'_, PyAny>>,
+        notes: Option<String>,
     ) -> PyResult<PyObject> {
         let pri = parse_priority(priority)?;
         let parent = parent_id.map(TaskId);
@@ -1059,6 +1061,7 @@ impl TaskStore {
                     payload: payload_val,
                     parent_change,
                     on_complete: on_complete_val,
+                    notes,
                 },
             )
             .map_err(task_err)?;
@@ -1170,6 +1173,24 @@ impl TaskStore {
         let t = self
             .inner
             .set_title(ref_name, plan, &TaskId(id.to_string()), title)
+            .map_err(task_err)?;
+        task_to_dict(py, &t)
+    }
+
+    /// Replace a task's notes (multi-line, at most 16 KiB of UTF-8); None or
+    /// blank text clears them. Works at any status.
+    #[pyo3(signature = (ref_name, plan, id, notes=None))]
+    fn set_notes(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        plan: &str,
+        id: &str,
+        notes: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let t = self
+            .inner
+            .set_notes(ref_name, plan, &TaskId(id.to_string()), notes)
             .map_err(task_err)?;
         task_to_dict(py, &t)
     }

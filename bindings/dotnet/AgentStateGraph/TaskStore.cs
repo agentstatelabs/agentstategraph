@@ -132,7 +132,7 @@ public sealed class TaskStore : IDisposable
         {
             blockersJson = Json.Serialize(options.Blockers);
         }
-        var ptr = NativeMethods.agentstategraph_taskstore_add_task(
+        var ptr = NativeMethods.agentstategraph_taskstore_add_task_with_notes(
             H,
             refName,
             plan,
@@ -140,8 +140,12 @@ public sealed class TaskStore : IDisposable
             PriorityWire(priority),
             options?.ParentId,
             blockersJson,
-            options?.AssignedTo);
-        return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "add_task");
+            options?.AssignedTo,
+            null,
+            null,
+            null,
+            options?.Notes);
+        return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "add_task_with_notes");
     }
 
     /// <summary>
@@ -183,7 +187,7 @@ public sealed class TaskStore : IDisposable
 
         string? onCompleteJson = onComplete is null ? null : Json.Serialize(onComplete);
 
-        var ptr = NativeMethods.agentstategraph_taskstore_add_task_ex(
+        var ptr = NativeMethods.agentstategraph_taskstore_add_task_with_notes(
             H,
             refName,
             plan,
@@ -194,8 +198,9 @@ public sealed class TaskStore : IDisposable
             options?.AssignedTo,
             payloadJson,
             parentChange,
-            onCompleteJson);
-        return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "add_task_ex");
+            onCompleteJson,
+            options?.Notes);
+        return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "add_task_with_notes");
     }
 
     public IReadOnlyList<Task> ListTasks(string refName, string plan)
@@ -262,6 +267,17 @@ public sealed class TaskStore : IDisposable
         ArgumentNullException.ThrowIfNull(title);
         var ptr = NativeMethods.agentstategraph_taskstore_set_title(H, refName, plan, taskId, title);
         return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "set_title");
+    }
+
+    /// <summary>
+    /// Replaces a task's notes: free text that may span lines, at most
+    /// 16 KiB of UTF-8. Null or blank text clears them. Works at any status.
+    /// </summary>
+    public Task SetNotes(string refName, string plan, string taskId, string? notes)
+    {
+        ThrowIfDisposed();
+        var ptr = NativeMethods.agentstategraph_taskstore_set_notes(H, refName, plan, taskId, notes);
+        return Json.Deserialize<Task>(Strings.ConsumeUtf8(ptr), "set_notes");
     }
 
     public Task SetBlockers(string refName, string plan, string taskId, IReadOnlyList<string> blockers)

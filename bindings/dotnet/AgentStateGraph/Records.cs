@@ -269,7 +269,11 @@ public sealed record Task(
     /// </summary>
     [property: JsonPropertyName("payload")] JsonElement? Payload = null,
     [property: JsonPropertyName("parent_change")] string? ParentChange = null,
-    [property: JsonPropertyName("on_complete")] OnCompleteHook? OnComplete = null);
+    [property: JsonPropertyName("on_complete")] OnCompleteHook? OnComplete = null,
+    /// <summary>
+    /// Free-form notes, multi-line, at most 16 KiB of UTF-8; null when none.
+    /// </summary>
+    [property: JsonPropertyName("notes")] string? Notes = null);
 
 /// <summary>
 /// Options bundle for <see cref="TaskStore.AddTask"/>.
@@ -277,7 +281,12 @@ public sealed record Task(
 public sealed record AddTaskOptions(
     string? ParentId = null,
     IReadOnlyList<string>? Blockers = null,
-    string? AssignedTo = null);
+    string? AssignedTo = null,
+    /// <summary>
+    /// The task's notes: free text that may span lines, at most 16 KiB of
+    /// UTF-8. Null or blank adds the task without notes.
+    /// </summary>
+    string? Notes = null);
 
 /// <summary>
 /// Lightweight index entry for an epoch (Rust:

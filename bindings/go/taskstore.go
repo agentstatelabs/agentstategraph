@@ -85,6 +85,7 @@ type Plan struct {
 type Task struct {
 	ID              string     `json:"id"`
 	Title           string     `json:"title"`
+	Notes           *string    `json:"notes,omitempty"`
 	Status          TaskStatus `json:"status"`
 	Priority        Priority   `json:"priority"`
 	ParentID        *string    `json:"parent_id,omitempty"`
@@ -328,6 +329,9 @@ type AddTaskOptions struct {
 	ParentID   *string
 	Blockers   []string
 	AssignedTo *string
+	// Notes: free text that may span lines, at most 16 KiB of UTF-8.
+	// "" (or only whitespace) adds the task without notes.
+	Notes string
 }
 
 // AddTaskExtOptions — optional fields for AddTaskWithExtensions.
@@ -341,51 +345,11 @@ type AddTaskExtOptions struct {
 
 // AddTask appends a new task to a plan.
 func (ts *TaskStore) AddTask(ref, plan, title string, priority Priority, opts *AddTaskOptions) (*Task, error) {
-	cRef := C.CString(ref)
-	defer C.free(unsafe.Pointer(cRef))
-	cPlan := C.CString(plan)
-	defer C.free(unsafe.Pointer(cPlan))
-	cTitle := C.CString(title)
-	defer C.free(unsafe.Pointer(cTitle))
-	cPrio := C.CString(string(priority))
-	defer C.free(unsafe.Pointer(cPrio))
-
-	var cParent *C.char
-	var cBlockers *C.char
-	var cAssigned *C.char
+	var ext *AddTaskExtOptions
 	if opts != nil {
-		if opts.ParentID != nil {
-			cParent = C.CString(*opts.ParentID)
-			defer C.free(unsafe.Pointer(cParent))
-		}
-		if len(opts.Blockers) > 0 {
-			b, err := json.Marshal(opts.Blockers)
-			if err != nil {
-				return nil, err
-			}
-			cBlockers = C.CString(string(b))
-			defer C.free(unsafe.Pointer(cBlockers))
-		}
-		if opts.AssignedTo != nil {
-			cAssigned = C.CString(*opts.AssignedTo)
-			defer C.free(unsafe.Pointer(cAssigned))
-		}
+		ext = &AddTaskExtOptions{AddTaskOptions: *opts}
 	}
-
-	raw, err := consume(
-		C.agentstategraph_taskstore_add_task(
-			ts.handle, cRef, cPlan, cTitle, cPrio, cParent, cBlockers, cAssigned,
-		),
-		"add_task",
-	)
-	if err != nil {
-		return nil, err
-	}
-	var t Task
-	if err := decodeOrErr(raw, &t); err != nil {
-		return nil, err
-	}
-	return &t, nil
+	return ts.AddTaskWithExtensions(ref, plan, title, priority, ext)
 }
 
 // AddTaskWithExtensions appends a new task to a plan, threading the
@@ -402,7 +366,7 @@ func (ts *TaskStore) AddTaskWithExtensions(ref, plan, title string, priority Pri
 	cPrio := C.CString(string(priority))
 	defer C.free(unsafe.Pointer(cPrio))
 
-	var cParent, cBlockers, cAssigned, cPayload, cParentChange, cOnComplete *C.char
+	var cParent, cBlockers, cAssigned, cPayload, cParentChange, cOnComplete, cNotes *C.char
 	if opts != nil {
 		if opts.ParentID != nil {
 			cParent = C.CString(*opts.ParentID)
@@ -432,14 +396,18 @@ func (ts *TaskStore) AddTaskWithExtensions(ref, plan, title string, priority Pri
 			cOnComplete = C.CString(string(opts.OnComplete))
 			defer C.free(unsafe.Pointer(cOnComplete))
 		}
+		if opts.Notes != "" {
+			cNotes = C.CString(opts.Notes)
+			defer C.free(unsafe.Pointer(cNotes))
+		}
 	}
 
 	raw, err := consume(
-		C.agentstategraph_taskstore_add_task_ex(
+		C.agentstategraph_taskstore_add_task_with_notes(
 			ts.handle, cRef, cPlan, cTitle, cPrio, cParent, cBlockers, cAssigned,
-			cPayload, cParentChange, cOnComplete,
+			cPayload, cParentChange, cOnComplete, cNotes,
 		),
-		"add_task_ex",
+		"add_task_with_notes",
 	)
 	if err != nil {
 		return nil, err
@@ -629,6 +597,31 @@ func (ts *TaskStore) SetTitle(ref, plan, id, title string) (*Task, error) {
 	raw, err := consume(
 		C.agentstategraph_taskstore_set_title(ts.handle, cRef, cPlan, cID, cTitle),
 		"set_title",
+	)
+	if err != nil {
+		return nil, err
+	}
+	var t Task
+	if err := decodeOrErr(raw, &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// SetNotes replaces a task's notes: free text that may span lines, at most
+// 16 KiB of UTF-8. "" (or only whitespace) clears them. Works at any status.
+func (ts *TaskStore) SetNotes(ref, plan, id, notes string) (*Task, error) {
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	cPlan := C.CString(plan)
+	defer C.free(unsafe.Pointer(cPlan))
+	cID := C.CString(id)
+	defer C.free(unsafe.Pointer(cID))
+	cNotes := C.CString(notes)
+	defer C.free(unsafe.Pointer(cNotes))
+	raw, err := consume(
+		C.agentstategraph_taskstore_set_notes(ts.handle, cRef, cPlan, cID, cNotes),
+		"set_notes",
 	)
 	if err != nil {
 		return nil, err

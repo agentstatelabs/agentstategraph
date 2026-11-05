@@ -67,6 +67,26 @@ def test_close_plan_refuses_open_work(store):
     assert ts.close_plan("main", "p", "dropped")["status"] == "completed"
 
 
+def test_notes_add_set_and_clear(store):
+    _, ts = store
+    ts.create_plan("main", "p", None)
+    brief = "Repo: infra/gitops.\n\n1. Write the manifests.\n2. Ask the user. \u2713\n"
+    a = ts.add_task("main", "p", "a", "high", notes=brief)
+    assert a["notes"] == brief
+    assert ts.add_task("main", "p", "b", "high")["notes"] is None
+    assert ts.get_task("main", "p", a["id"])["notes"] == brief
+
+    ts.start_task("main", "p", a["id"])
+    edited = ts.set_notes("main", "p", a["id"], "line one\nline two")
+    assert edited["notes"] == "line one\nline two"
+    assert edited["status"] == "in_progress"
+    with pytest.raises(Exception, match="16384"):
+        ts.set_notes("main", "p", a["id"], "x" * (16 * 1024 + 1))
+    assert ts.set_notes("main", "p", a["id"], None)["notes"] is None
+    ts.set_notes("main", "p", a["id"], "again")
+    assert ts.set_notes("main", "p", a["id"], "")["notes"] is None
+
+
 def test_blocker_nonexistent_rejected(store):
     _, ts = store
     ts.create_plan("main", "p", None)
