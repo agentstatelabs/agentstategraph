@@ -45,6 +45,10 @@ const report = tasks.verifyPlanWithKinds('main', 'website-v2', {
   file: true,
 });
 console.log(report.summary);
+
+// Finishing the last task leaves the plan active. Close it with a summary
+// once every task is done or abandoned:
+tasks.closePlan('main', 'website-v2', 'Hero rewritten and shipped');
 ```
 
 Enums (all passed as strings):

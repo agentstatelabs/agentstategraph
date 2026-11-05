@@ -921,6 +921,9 @@ fn plan_to_json(p: &Plan) -> serde_json::Value {
         "created_at": p.created_at.to_rfc3339(),
         "created_by": p.created_by,
         "archived_at": p.archived_at.map(|t| t.to_rfc3339()),
+        "summary": p.summary,
+        "closed_at": p.closed_at.map(|t| t.to_rfc3339()),
+        "closed_by": p.closed_by,
     })
 }
 
@@ -1072,6 +1075,24 @@ impl TaskStore {
         let p = self
             .inner
             .archive_plan(&ref_name, &name)
+            .map_err(task_err)?;
+        Ok(plan_to_json(&p))
+    }
+
+    /// Mark a plan `completed` with a summary of what it did. Finishing
+    /// the last task doesn't do this. Every task must be done or abandoned
+    /// first, and the summary can't be empty. Closing a completed plan
+    /// returns it as it is.
+    #[napi]
+    pub fn close_plan(
+        &self,
+        ref_name: String,
+        name: String,
+        summary: String,
+    ) -> napi::Result<serde_json::Value> {
+        let p = self
+            .inner
+            .close_plan(&ref_name, &name, &summary)
             .map_err(task_err)?;
         Ok(plan_to_json(&p))
     }

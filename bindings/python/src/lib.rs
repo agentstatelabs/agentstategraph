@@ -796,6 +796,9 @@ fn plan_to_dict(py: Python<'_>, p: &Plan) -> PyResult<PyObject> {
     d.set_item("created_at", p.created_at.to_rfc3339())?;
     d.set_item("created_by", &p.created_by)?;
     d.set_item("archived_at", p.archived_at.map(|t| t.to_rfc3339()))?;
+    d.set_item("summary", p.summary.clone())?;
+    d.set_item("closed_at", p.closed_at.map(|t| t.to_rfc3339()))?;
+    d.set_item("closed_by", p.closed_by.clone())?;
     Ok(d.into())
 }
 
@@ -975,6 +978,24 @@ impl TaskStore {
 
     fn archive_plan(&self, py: Python<'_>, ref_name: &str, name: &str) -> PyResult<PyObject> {
         let p = self.inner.archive_plan(ref_name, name).map_err(task_err)?;
+        plan_to_dict(py, &p)
+    }
+
+    /// Mark a plan `completed` with a summary of what it did. Finishing
+    /// the last task doesn't do this. Every task must be done or abandoned
+    /// first, and the summary can't be empty. Closing a completed plan
+    /// returns it as it is.
+    fn close_plan(
+        &self,
+        py: Python<'_>,
+        ref_name: &str,
+        name: &str,
+        summary: &str,
+    ) -> PyResult<PyObject> {
+        let p = self
+            .inner
+            .close_plan(ref_name, name, summary)
+            .map_err(task_err)?;
         plan_to_dict(py, &p)
     }
 

@@ -42,9 +42,29 @@ def test_start_complete_flow(store):
     assert done["proof"]["value"] == "abc123"
     assert done["proof"]["note"] == "verified"
 
-    # plan auto-promoted to completed
-    plan = ts.get_plan("main", "p")
+    # Finishing the last task leaves the plan open: closing it is a
+    # separate step, with a summary.
+    assert ts.get_plan("main", "p")["status"] == "active"
+    with pytest.raises(RuntimeError, match="summary"):
+        ts.close_plan("main", "p", "  ")
+    plan = ts.close_plan("main", "p", "shipped the thing")
     assert plan["status"] == "completed"
+    assert plan["summary"] == "shipped the thing"
+    assert plan["closed_by"] == "pytest"
+    assert plan["closed_at"] is not None
+    assert ts.get_plan("main", "p")["status"] == "completed"
+
+
+def test_close_plan_refuses_open_work(store):
+    _, ts = store
+    ts.create_plan("main", "p", None)
+    with pytest.raises(RuntimeError, match="no tasks"):
+        ts.close_plan("main", "p", "nothing to do")
+    t = ts.add_task("main", "p", "thing", "high")
+    with pytest.raises(RuntimeError, match=t["id"]):
+        ts.close_plan("main", "p", "too early")
+    ts.abandon_task("main", "p", t["id"], "not needed")
+    assert ts.close_plan("main", "p", "dropped")["status"] == "completed"
 
 
 def test_blocker_nonexistent_rejected(store):
