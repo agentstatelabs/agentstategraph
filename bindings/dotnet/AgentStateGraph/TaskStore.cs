@@ -95,6 +95,19 @@ public sealed class TaskStore : IDisposable
         return Json.Deserialize<Plan>(Strings.ConsumeUtf8(ptr), "archive_plan");
     }
 
+    /// <summary>
+    /// Marks a plan completed with a summary of what it did. Finishing the
+    /// last task doesn't do this. Every task must be done or abandoned
+    /// first, and the summary can't be empty. Closing a completed plan
+    /// returns it as it is.
+    /// </summary>
+    public Plan ClosePlan(string refName, string name, string summary)
+    {
+        ThrowIfDisposed();
+        var ptr = NativeMethods.agentstategraph_taskstore_close_plan(H, refName, name, summary);
+        return Json.Deserialize<Plan>(Strings.ConsumeUtf8(ptr), "close_plan");
+    }
+
     public void DeletePlan(string refName, string name)
     {
         ThrowIfDisposed();

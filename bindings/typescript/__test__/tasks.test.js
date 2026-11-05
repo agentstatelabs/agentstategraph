@@ -29,8 +29,26 @@ test('create plan, add tasks, start, complete', () => {
   assert.equal(done.proof.kind, 'commit');
   assert.equal(done.proof.value, 'abc123');
 
-  const plan2 = ts.getPlan('main', 'website-v2');
-  assert.equal(plan2.status, 'completed');
+  // Finishing the last task leaves the plan open: closing it is a
+  // separate step, with a summary.
+  assert.equal(ts.getPlan('main', 'website-v2').status, 'active');
+  assert.throws(() => ts.closePlan('main', 'website-v2', '  '), /summary/);
+  const closed = ts.closePlan('main', 'website-v2', 'hero rewritten');
+  assert.equal(closed.status, 'completed');
+  assert.equal(closed.summary, 'hero rewritten');
+  assert.equal(closed.closed_by, 'node-test');
+  assert.ok(closed.closed_at);
+  assert.equal(ts.getPlan('main', 'website-v2').status, 'completed');
+});
+
+test('closePlan refuses a plan with open work', () => {
+  const { ts } = freshStore();
+  ts.createPlan('main', 'p', null);
+  assert.throws(() => ts.closePlan('main', 'p', 'nothing to do'), /no tasks/);
+  const t = ts.addTask('main', 'p', 'x', 'medium');
+  assert.throws(() => ts.closePlan('main', 'p', 'too early'), new RegExp(t.id));
+  ts.abandonTask('main', 'p', t.id, 'not needed');
+  assert.equal(ts.closePlan('main', 'p', 'dropped').status, 'completed');
 });
 
 test('blocker to nonexistent task rejected', () => {

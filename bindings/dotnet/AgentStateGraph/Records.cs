@@ -229,7 +229,10 @@ public sealed record Plan(
     [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
     [property: JsonPropertyName("created_by")] string CreatedBy,
     [property: JsonPropertyName("description")] string? Description = null,
-    [property: JsonPropertyName("archived_at")] DateTimeOffset? ArchivedAt = null);
+    [property: JsonPropertyName("archived_at")] DateTimeOffset? ArchivedAt = null,
+    [property: JsonPropertyName("summary")] string? Summary = null,
+    [property: JsonPropertyName("closed_at")] DateTimeOffset? ClosedAt = null,
+    [property: JsonPropertyName("closed_by")] string? ClosedBy = null);
 
 /// <summary>
 /// A unit of work inside a <see cref="Plan"/>. Includes the 0.6.0 task

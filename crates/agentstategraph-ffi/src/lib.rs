@@ -1153,6 +1153,30 @@ pub extern "C" fn agentstategraph_taskstore_archive_plan(
     }
 }
 
+/// Mark a plan `completed` with a summary of what it did. Finishing the
+/// last task doesn't do this. Every task must be done or abandoned first,
+/// and the summary can't be empty (a null one is empty). Closing a
+/// completed plan returns it as it is. Returns the Plan as JSON, or
+/// `{"error": ...}`.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_close_plan(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    name: *const c_char,
+    summary: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let name = unsafe { c_to_str(name) };
+    let summary = unsafe { c_to_str(summary) };
+    match store.inner.close_plan(&ref_name, &name, &summary) {
+        Ok(p) => json_ok(&p),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn agentstategraph_taskstore_delete_plan(
     store: *const SgTaskStore,

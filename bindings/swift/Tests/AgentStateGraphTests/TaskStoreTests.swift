@@ -36,6 +36,28 @@ final class TaskStoreTests: XCTestCase {
         let done = try ts.completeTask(plan: "work", id: task.id, proof: proof)
         XCTAssertEqual(done.status, .done)
         XCTAssertEqual(done.proof?.value, "abc123")
+
+        // Finishing the last task leaves the plan open; closing it takes a
+        // summary.
+        XCTAssertEqual(try ts.getPlan("work").status, .active)
+        XCTAssertThrowsError(try ts.closePlan("work", summary: "  "))
+        let closed = try ts.closePlan("work", summary: "thing done")
+        XCTAssertEqual(closed.status, .completed)
+        XCTAssertEqual(closed.summary, "thing done")
+        XCTAssertEqual(closed.closedBy, "tester")
+        XCTAssertNotNil(closed.closedAt)
+        XCTAssertEqual(try ts.getPlan("work").status, .completed)
+    }
+
+    func testClosePlanRefusesOpenWork() throws {
+        let (asg, ts) = try store()
+        defer { asg.close(); ts.close() }
+        try ts.createPlan("p")
+        XCTAssertThrowsError(try ts.closePlan("p", summary: "nothing to do"))
+        let task = try ts.addTask(plan: "p", title: "x", priority: .medium)
+        XCTAssertThrowsError(try ts.closePlan("p", summary: "too early"))
+        try ts.abandonTask(plan: "p", id: task.id, reason: "not needed")
+        XCTAssertEqual(try ts.closePlan("p", summary: "dropped").status, .completed)
     }
 
     func testNextTaskRespectsBlockers() throws {

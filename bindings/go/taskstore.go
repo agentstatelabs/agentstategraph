@@ -75,6 +75,10 @@ type Plan struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	CreatedBy   string     `json:"created_by"`
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+	// Summary says what the plan did; it's set when the plan is closed.
+	Summary  *string    `json:"summary,omitempty"`
+	ClosedAt *time.Time `json:"closed_at,omitempty"`
+	ClosedBy *string    `json:"closed_by,omitempty"`
 }
 
 // Task — a unit of work in a plan.
@@ -263,6 +267,31 @@ func (ts *TaskStore) ArchivePlan(ref, name string) (*Plan, error) {
 	raw, err := consume(
 		C.agentstategraph_taskstore_archive_plan(ts.handle, cRef, cName),
 		"archive_plan",
+	)
+	if err != nil {
+		return nil, err
+	}
+	var p Plan
+	if err := decodeOrErr(raw, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ClosePlan marks a plan completed with a summary of what it did.
+// Finishing the last task doesn't do this. Every task must be done or
+// abandoned first, and the summary can't be empty. Closing a completed
+// plan returns it as it is.
+func (ts *TaskStore) ClosePlan(ref, name, summary string) (*Plan, error) {
+	cRef := C.CString(ref)
+	defer C.free(unsafe.Pointer(cRef))
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cSummary := C.CString(summary)
+	defer C.free(unsafe.Pointer(cSummary))
+	raw, err := consume(
+		C.agentstategraph_taskstore_close_plan(ts.handle, cRef, cName, cSummary),
+		"close_plan",
 	)
 	if err != nil {
 		return nil, err

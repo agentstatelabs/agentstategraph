@@ -48,6 +48,10 @@ report = tasks.verify_plan_with_kinds(
     "main", "website-v2", {"commit": True, "file": True}
 )
 print(report["summary"])
+
+# Finishing the last task leaves the plan active. Close it with a summary
+# once every task is done or abandoned:
+tasks.close_plan("main", "website-v2", "Hero rewritten and shipped")
 ```
 
 Priority values: `"low"`, `"medium"`, `"high"`, `"critical"`.

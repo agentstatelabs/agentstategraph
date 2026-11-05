@@ -69,6 +69,29 @@ func TestTaskStore_RoundTrip(t *testing.T) {
 		t.Fatalf("unexpected proof: %+v", done.Proof)
 	}
 
+	// Finishing the last task leaves the plan open; closing it takes a
+	// summary.
+	open, err := ts.GetPlan("main", "website-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if open.Status != PlanStatusActive {
+		t.Fatalf("expected the plan still active, got %s", open.Status)
+	}
+	if _, err := ts.ClosePlan("main", "website-v2", "  "); err == nil || !strings.Contains(err.Error(), "summary") {
+		t.Fatalf("expected an empty summary refused, got %v", err)
+	}
+	closed, err := ts.ClosePlan("main", "website-v2", "Hero rewritten")
+	if err != nil {
+		t.Fatalf("ClosePlan: %v", err)
+	}
+	if closed.Status != PlanStatusCompleted || closed.Summary == nil || *closed.Summary != "Hero rewritten" {
+		t.Fatalf("unexpected closed plan: %+v", closed)
+	}
+	if closed.ClosedBy == nil || *closed.ClosedBy != "go-test" || closed.ClosedAt == nil {
+		t.Fatalf("unexpected close fields: %+v", closed)
+	}
+
 	// Migrate check on a fresh in-memory repo should be up_to_date.
 	report, err := asg.MigrateCheck("main", "")
 	if err != nil {
@@ -85,6 +108,40 @@ func TestTaskStore_RoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(run, "dry-run") {
 		t.Fatalf("expected dry-run mode in report, got %s", run)
+	}
+}
+
+func TestTaskStore_ClosePlanRefusesOpenWork(t *testing.T) {
+	asg, err := NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer asg.Close()
+	ts, err := NewTaskStore(asg, "/plans", "go-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	if _, err := ts.CreatePlan("main", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.ClosePlan("main", "p", "nothing to do"); err == nil || !strings.Contains(err.Error(), "no tasks") {
+		t.Fatalf("expected a plan with no tasks refused, got %v", err)
+	}
+	task, err := ts.AddTask("main", "p", "x", PriorityMedium, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ts.ClosePlan("main", "p", "too early"); err == nil || !strings.Contains(err.Error(), task.ID) {
+		t.Fatalf("expected an open task refused, got %v", err)
+	}
+	if _, err := ts.AbandonTask("main", "p", task.ID, "not needed"); err != nil {
+		t.Fatal(err)
+	}
+	closed, err := ts.ClosePlan("main", "p", "dropped")
+	if err != nil || closed.Status != PlanStatusCompleted {
+		t.Fatalf("expected the plan closed, got %+v, %v", closed, err)
 	}
 }
 

@@ -102,6 +102,32 @@ public sealed class TaskStoreTests
         Assert.NotNull(done.Proof);
         Assert.Equal(ProofKind.Test, done.Proof!.Kind);
         Assert.Equal("policy_store_tests", done.Proof.Value);
+
+        // Finishing the last task leaves the plan open; closing it takes a
+        // summary.
+        Assert.Equal(PlanStatus.Active, ts.GetPlan(Ref, "p").Status);
+        var refused = Assert.Throws<AgentStateGraphException>(() => ts.ClosePlan(Ref, "p", "  "));
+        Assert.Contains("summary", refused.Message);
+        var closed = ts.ClosePlan(Ref, "p", "ran it");
+        Assert.Equal(PlanStatus.Completed, closed.Status);
+        Assert.Equal("ran it", closed.Summary);
+        Assert.Equal("xunit", closed.ClosedBy);
+        Assert.NotNull(closed.ClosedAt);
+    }
+
+    [Fact]
+    public void ClosePlan_RefusesOpenWork()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ts = new TaskStore(repo, "/plans", "xunit");
+        ts.CreatePlan(Ref, "p", null);
+        var empty = Assert.Throws<AgentStateGraphException>(() => ts.ClosePlan(Ref, "p", "nothing to do"));
+        Assert.Contains("no tasks", empty.Message);
+        var t = ts.AddTask(Ref, "p", "x", Priority.Medium);
+        var open = Assert.Throws<AgentStateGraphException>(() => ts.ClosePlan(Ref, "p", "too early"));
+        Assert.Contains(t.Id, open.Message);
+        ts.AbandonTask(Ref, "p", t.Id, "not needed");
+        Assert.Equal(PlanStatus.Completed, ts.ClosePlan(Ref, "p", "dropped").Status);
     }
 
     [Fact]
