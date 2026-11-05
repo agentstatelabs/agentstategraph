@@ -1026,6 +1026,166 @@ fn store_export_import_round_trips(f: &Fixture) {
     assert!(back.get_taint(&taint).unwrap().is_some());
 }
 
+// Sync (DESIGN.md Plan G t-004) ---------------------------------------------
+
+mod sync_support {
+    use super::*;
+    use agentstategraph::sync::InProcessRemote;
+
+    pub fn memory() -> Repository {
+        Repository::from_shared(Arc::new(MemoryStorage::new()))
+    }
+
+    pub fn hub(repo: &Repository) -> InProcessRemote<'_> {
+        InProcessRemote::new(repo)
+    }
+
+    pub fn merge_opts() -> CommitOptions {
+        CommitOptions::new("agent/conformance", IntentCategory::Merge, "pull")
+    }
+}
+
+/// This backend as a hub: two memory stores push to it and pull from it,
+/// a diverged push is rejected and resolved by fetch, merge and push, and a
+/// taint made on one store holds on the other.
+fn a_hub_on_this_backend(f: &Fixture) {
+    use agentstategraph::sync::{PullOutcome, SyncError};
+    use control_support::taint_params;
+    use sync_support::*;
+
+    let central = f.open();
+    let (a, b) = (memory(), memory());
+    a.init().unwrap();
+    a.set_json("main", "/x", &json!({"n": 1}), opts("x"))
+        .unwrap();
+    let taint = a.taint("main", "/x", taint_params("pii")).unwrap();
+    a.push("hub", &hub(&central), "main").unwrap();
+    assert_eq!(central.get_json("main", "/x/n").unwrap(), json!(1));
+    assert!(central.get_taint(&taint).unwrap().is_some());
+
+    let pulled = b.pull("hub", &hub(&central), "main", merge_opts()).unwrap();
+    assert!(
+        matches!(pulled.outcome, PullOutcome::Created(_)),
+        "{pulled:?}"
+    );
+    assert!(b.get_taint(&taint).unwrap().is_some());
+
+    a.set_json("main", "/a", &json!("a"), opts("a")).unwrap();
+    a.push("hub", &hub(&central), "main").unwrap();
+    b.set_json("main", "/b", &json!("b"), opts("b")).unwrap();
+    assert!(matches!(
+        b.push("hub", &hub(&central), "main"),
+        Err(SyncError::Rejected { .. })
+    ));
+    b.pull("hub", &hub(&central), "main", merge_opts()).unwrap();
+    b.push("hub", &hub(&central), "main").unwrap();
+    assert_eq!(central.get_json("main", "/a").unwrap(), json!("a"));
+    assert_eq!(central.get_json("main", "/b").unwrap(), json!("b"));
+    assert_eq!(central.head("main").unwrap(), b.head("main").unwrap());
+
+    // The hub's own local-only ref isn't offered.
+    central.branch("index", "main").unwrap();
+    central.set_local_only("index", true).unwrap();
+    assert!(matches!(
+        a.fetch("hub", &hub(&central), &["index"]),
+        Err(SyncError::NoSuchRef(_))
+    ));
+}
+
+/// This backend as a client: it pulls from a memory hub, has its tables
+/// rebuilt from the fetched control ref, and pushes back.
+fn a_client_on_this_backend(f: &Fixture) {
+    use agentstategraph::sync::PullOutcome;
+    use control_support::taint_params;
+    use sync_support::*;
+
+    let central = memory();
+    let other = memory();
+    other.init().unwrap();
+    other
+        .set_json("main", "/config", &json!({"name": "prod"}), opts("init"))
+        .unwrap();
+    let taint = other.taint("main", "/config", taint_params("pii")).unwrap();
+    other.create_epoch("e", "work", vec![]).unwrap();
+    other.seal_epoch("e", "done").unwrap();
+    other.push("hub", &hub(&central), "main").unwrap();
+
+    // It ran init, as an embedder's store does: its empty first commit
+    // gives way to the hub's history.
+    let here = f.open();
+    here.init().unwrap();
+    let pulled = here
+        .pull("hub", &hub(&central), "main", merge_opts())
+        .unwrap();
+    assert!(
+        matches!(pulled.outcome, PullOutcome::Created(_)),
+        "{pulled:?}"
+    );
+    assert_eq!(
+        here.get_json("main", "/config/name").unwrap(),
+        json!("prod")
+    );
+    assert!(here.get_taint(&taint).unwrap().is_some());
+    assert_eq!(
+        here.get_epoch("e").unwrap().seal_hash,
+        other.get_epoch("e").unwrap().seal_hash
+    );
+    assert_eq!(
+        here.list_branches(None).unwrap(),
+        vec![("main".to_string(), central.head("main").unwrap())],
+        "the tracking ref isn't a branch"
+    );
+
+    here.set_json("main", "/here", &json!(true), opts("here"))
+        .unwrap();
+    here.push("hub", &hub(&central), "main").unwrap();
+    assert_eq!(central.get_json("main", "/here").unwrap(), json!(true));
+
+    // A reopened repository sees the same tracking refs.
+    let reopened = f.open();
+    assert_eq!(
+        reopened.remote_refs("hub").unwrap(),
+        vec![("main".to_string(), here.head("main").unwrap())]
+    );
+}
+
+/// This backend as a hub that takes a shallow push: its history starts at
+/// the boundary, which it records, walks and blame stop there, a sweep runs,
+/// and a store that fetches from it gets the same boundary.
+fn a_shallow_history_on_this_backend(f: &Fixture) {
+    use agentstategraph::sync::PushOptions;
+    use sync_support::*;
+
+    let source = memory();
+    source.init().unwrap();
+    source
+        .set_json("main", "/keep", &json!("old"), opts("keep"))
+        .unwrap();
+    let ids: Vec<_> = (0..4)
+        .map(|i| source.set_json("main", "/v", &json!(i), opts("v")).unwrap())
+        .collect();
+    let central = f.open();
+    let options = PushOptions::default().shallow_from(ids[1]);
+    source
+        .push_with("hub", &hub(&central), "main", &options)
+        .unwrap();
+
+    assert_eq!(central.shallow_commits().unwrap(), vec![ids[1]]);
+    assert_eq!(central.get_json("main", "/keep").unwrap(), json!("old"));
+    assert_eq!(central.log("main", 100).unwrap().len(), 3);
+    assert_eq!(central.log_dag("main", 100).unwrap().commits.len(), 3);
+    assert_eq!(
+        central.blame("main", "/keep").unwrap().commit_id,
+        ids[1].short()
+    );
+    central.gc_sweep(keep_only_tips(), true, false).unwrap();
+    assert_eq!(central.get_json("main", "/v").unwrap(), json!(3));
+
+    let other = memory();
+    other.fetch("hub", &hub(&central), &[]).unwrap();
+    assert_eq!(other.shallow_commits().unwrap(), vec![ids[1]]);
+}
+
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
@@ -1131,5 +1291,23 @@ fn store_export_import() {
     run(
         "store_export_import_round_trips",
         store_export_import_round_trips,
+    );
+}
+
+#[test]
+fn sync_hub() {
+    run("a_hub_on_this_backend", a_hub_on_this_backend);
+}
+
+#[test]
+fn sync_client() {
+    run("a_client_on_this_backend", a_client_on_this_backend);
+}
+
+#[test]
+fn sync_shallow() {
+    run(
+        "a_shallow_history_on_this_backend",
+        a_shallow_history_on_this_backend,
     );
 }

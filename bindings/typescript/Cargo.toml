@@ -11,7 +11,9 @@ license = "MIT OR Apache-2.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-agentstategraph = { workspace = true, features = ["sqlite"] }
+agentstategraph = { workspace = true, features = ["sqlite", "sync"] }
+# Push, fetch and pull over HTTPS (ureq and rustls), for the sync methods.
+agentstategraph-sync-http = { workspace = true, features = ["client"] }
 agentstategraph-core = { workspace = true }
 agentstategraph-migrate = { workspace = true }
 agentstategraph-storage = { workspace = true, features = ["sqlite"] }

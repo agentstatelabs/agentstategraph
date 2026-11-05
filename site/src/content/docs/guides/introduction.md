@@ -39,7 +39,7 @@ Every state change in AgentStateGraph captures the **full provenance chain**:
 - **Multi-agent orchestration** — scoped sessions, delegation, intent trees
 - **Namespaces** — a separate set of branches per project in one store; an API key bound to a namespace confines a client to it
 - **Epochs** — sealable, tamper-evident audit bundles you can archive and export
-- **77 MCP tools** — any agent can connect immediately
+- **83 MCP tools** — any agent can connect immediately
 - **HTTP REST API** — run with `--http`
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **8 language bindings** — Rust, Python, TypeScript, Go, Swift, .NET / C#, WASM, C FFI

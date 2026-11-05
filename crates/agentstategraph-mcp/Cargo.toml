@@ -26,7 +26,8 @@ name = "overhead"
 harness = false
 
 [dependencies]
-agentstategraph = { workspace = true, features = ["sqlite"] }
+agentstategraph = { workspace = true, features = ["sqlite", "sync"] }
+agentstategraph-sync-http = { workspace = true, features = ["server"] }
 agentstategraph-core = { workspace = true }
 agentstategraph-migrate = { workspace = true }
 agentstategraph-tasks = { workspace = true }
@@ -82,8 +83,14 @@ providers = ["dep:reqwest"]
 # release builds and the Docker image turn it on, and still send nothing until
 # an endpoint is set.
 otlp = ["oxtel/otlp"]
+# Reach sync remotes over HTTPS (ureq and rustls) for the fetch, push and pull
+# tools and routes (DESIGN.md Plan G t-008). Like `otlp`, it's opt-in;
+# release builds and the Docker image turn it on. Without it, those calls
+# answer `sync_unavailable`.
+sync-client = ["agentstategraph-sync-http/client"]
 
 [dev-dependencies]
+agentstategraph-sync-http = { workspace = true, features = ["server", "client"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # tests/mcp_tool_errors.rs connects a client over an in-memory pipe.

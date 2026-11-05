@@ -10,6 +10,17 @@ public struct RepositoryCapabilities: Codable, Sendable, Equatable {
     }
 }
 
+/// A push filter finding to let through, with why (DESIGN.md Plan G t-008).
+public struct PushOverride: Codable, Sendable, Equatable {
+    public let finding: String
+    public let reason: String
+
+    public init(finding: String, reason: String) {
+        self.finding = finding
+        self.reason = reason
+    }
+}
+
 public struct MergePreview: Codable, Sendable, Equatable {
     public let fastForward: Bool
     public let added: [String]
@@ -182,6 +193,7 @@ public struct Epoch: Codable, Sendable, Equatable {
 private struct EmptyRequest: Encodable {}
 private struct StringResponse: Decodable { let commit: String }
 private struct BoolResponse: Decodable { let deleted: Bool }
+private struct RemovedResponse: Decodable { let removed: Bool }
 private struct HeadResponse: Decodable { let head: String }
 private struct NamespaceResponse: Decodable { let namespace: String }
 private struct HandleResponse: Decodable { let handle: UInt64 }
@@ -492,5 +504,63 @@ extension AgentStateGraph {
     public func setActiveEpoch(_ id: String?) throws {
         struct Request: Encodable { let id: String? }
         let _: JSONValue = try advanced("epoch.active.set", Request(id: id))
+    }
+
+
+    // MARK: Sync (DESIGN.md Plan G t-008)
+
+    /// Every sync remote, with where its branches were at the last fetch or
+    /// push.
+    public func remotes() throws -> JSONValue {
+        try advanced("remote.list", EmptyRequest())
+    }
+
+    /// Add a sync remote, or change where it is. `tokenEnv` names the
+    /// environment variable holding the hub's API key; the key itself is
+    /// never stored.
+    public func addRemote(
+        _ name: String, url: String, store: String = "default", tokenEnv: String? = nil
+    ) throws {
+        struct Request: Encodable {
+            let name: String; let url: String; let store: String; let token_env: String?
+        }
+        let _: JSONValue = try advanced(
+            "remote.add", Request(name: name, url: url, store: store, token_env: tokenEnv))
+    }
+
+    /// Remove a sync remote and where its branches were last seen.
+    @discardableResult public func removeRemote(_ name: String) throws -> Bool {
+        struct Request: Encodable { let name: String }
+        return try advanced("remote.remove", Request(name: name), as: RemovedResponse.self).removed
+    }
+
+    /// Fetch branches from a remote (all of them when `refs` is empty),
+    /// recording where they are as `remotes/<remote>/<branch>`.
+    public func fetch(from remote: String, refs: [String] = []) throws -> JSONValue {
+        struct Request: Encodable { let remote: String; let refs: [String] }
+        return try advanced("sync.fetch", Request(remote: remote, refs: refs))
+    }
+
+    /// Push a branch to a remote: only forward, and never secrets,
+    /// local-only branches, or credential-like values unless `overrides`
+    /// lets each finding through.
+    public func push(
+        to remote: String, ref: String = "main", overrides: [PushOverride] = []
+    ) throws -> JSONValue {
+        struct Request: Encodable { let remote: String; let ref: String; let overrides: [PushOverride] }
+        return try advanced("sync.push", Request(remote: remote, ref: ref, overrides: overrides))
+    }
+
+    /// Fetch a branch from a remote and merge it into the local one.
+    public func pull(
+        from remote: String, ref: String = "main", description: String? = nil,
+        agentId: String = "swift"
+    ) throws -> JSONValue {
+        struct Request: Encodable {
+            let remote: String; let ref: String; let description: String?; let agent_id: String
+        }
+        return try advanced(
+            "sync.pull",
+            Request(remote: remote, ref: ref, description: description, agent_id: agentId))
     }
 }

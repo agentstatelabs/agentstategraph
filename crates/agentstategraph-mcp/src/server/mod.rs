@@ -226,6 +226,83 @@ pub struct ListBranchesParams {
     pub namespace: Option<String>,
 }
 
+fn default_store() -> String {
+    "default".to_string()
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RemoteAddParams {
+    /// The remote's name, as fetch, push and pull call it: letters, digits,
+    /// `-`, `_` or `.`.
+    pub name: String,
+    /// The hub's base URL, such as `https://hub.example.com`.
+    pub url: String,
+    /// The store on the hub (default: "default").
+    #[serde(default = "default_store")]
+    pub store: String,
+    /// The environment variable holding the hub's API key, which this
+    /// server reads when it syncs. The key itself is never stored.
+    #[serde(default)]
+    pub token_env: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RemoteNameParams {
+    /// The remote's name.
+    pub name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FetchParams {
+    /// The remote's name (see agentstategraph_remote_add).
+    pub remote: String,
+    /// Branches to fetch (default: every branch the remote has in this
+    /// namespace). The remote's taints, reminders and epochs always come.
+    #[serde(default)]
+    pub refs: Vec<String>,
+    /// Optional namespace override.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PushOverrideParam {
+    /// A finding's id, from a blocked push's error.
+    pub finding: String,
+    /// Why it may go anyway: recorded in the remote's push log.
+    pub reason: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PushParams {
+    /// The remote's name (see agentstategraph_remote_add).
+    pub remote: String,
+    /// The branch to push (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub r#ref: String,
+    /// Findings of a blocked push to let through, each with a reason.
+    #[serde(default)]
+    pub overrides: Vec<PushOverrideParam>,
+    /// Optional namespace override.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PullParams {
+    /// The remote's name (see agentstategraph_remote_add).
+    pub remote: String,
+    /// The branch to pull (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub r#ref: String,
+    /// Why, for a merge commit if one is made (default: "pull from <remote>").
+    #[serde(default)]
+    pub intent_description: Option<String>,
+    /// Optional namespace override.
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct MergeParams {
     /// Branch with changes to merge from.
@@ -2490,6 +2567,116 @@ impl AgentStateGraphServer {
     ) -> String {
         self.impl_reminder_record(params.0)
     }
+
+    // -- Sync (DESIGN.md Plan G t-008) ------------------------------------
+
+    /// The repository a sync tool works in, shared for the blocking pool.
+    fn sync_repo(&self, namespace: Option<&str>) -> Result<Arc<Repository>, String> {
+        Ok(match self.ns_repo(namespace)? {
+            Some(forked) => Arc::new(forked),
+            None => Arc::clone(&self.repo),
+        })
+    }
+
+    #[tool(
+        description = "Add a sync remote, or change where it is: a hub this store can fetch from, push to and pull from by name. Give the environment variable that holds the hub's API key, never the key."
+    )]
+    async fn agentstategraph_remote_add(&self, params: Parameters<RemoteAddParams>) -> String {
+        let p = params.0;
+        match crate::sync_ops::add_remote(&self.repo, &p.name, &p.url, &p.store, p.token_env) {
+            Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            Err(e) => e.to_tool_text(),
+        }
+    }
+
+    #[tool(
+        description = "List the sync remotes, with where each of their branches was at the last fetch or push."
+    )]
+    async fn agentstategraph_remote_list(&self) -> String {
+        match crate::sync_ops::remotes(&self.repo) {
+            Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            Err(e) => e.to_tool_text(),
+        }
+    }
+
+    #[tool(description = "Remove a sync remote and where its branches were last seen.")]
+    async fn agentstategraph_remote_remove(&self, params: Parameters<RemoteNameParams>) -> String {
+        match crate::sync_ops::remove_remote(&self.repo, &params.0.name) {
+            Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            Err(e) => e.to_tool_text(),
+        }
+    }
+
+    #[tool(
+        description = "Fetch branches from a sync remote, recording where they are as remotes/<remote>/<branch>, without changing local branches. The remote's taints, reminders and epochs are merged in."
+    )]
+    async fn agentstategraph_fetch(&self, params: Parameters<FetchParams>) -> String {
+        let p = params.0;
+        let repo = match self.sync_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let done =
+            tokio::task::spawn_blocking(move || crate::sync_ops::fetch(&repo, &p.remote, &p.refs))
+                .await;
+        match done {
+            Ok(Ok(v)) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            Ok(Err(e)) => e.to_tool_text(),
+            Err(e) => format!("Error: the fetch stopped: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Push a branch to a sync remote. Only moves the remote forward: if another store pushed first, pull and push again. Refuses anything under /_meta/_secret, local-only branches, and credential-like values unless each finding is overridden with a reason."
+    )]
+    async fn agentstategraph_push(&self, params: Parameters<PushParams>) -> String {
+        let p = params.0;
+        let repo = match self.sync_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let overrides = p
+            .overrides
+            .into_iter()
+            .map(|o| agentstategraph::sync::PushOverride {
+                finding: o.finding,
+                reason: o.reason,
+            })
+            .collect();
+        let done = tokio::task::spawn_blocking(move || {
+            crate::sync_ops::push(&repo, &p.remote, &p.r#ref, overrides)
+        })
+        .await;
+        match done {
+            Ok(Ok(v)) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            Ok(Err(e)) => e.to_tool_text(),
+            Err(e) => format!("Error: the push stopped: {e}"),
+        }
+    }
+
+    #[tool(
+        description = "Pull a branch from a sync remote: fetch it, renumber local tasks whose ids the remote also used, and merge it into the local branch."
+    )]
+    async fn agentstategraph_pull(&self, params: Parameters<PullParams>) -> String {
+        let p = params.0;
+        let repo = match self.sync_repo(p.namespace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: {e}"),
+        };
+        let description = p
+            .intent_description
+            .unwrap_or_else(|| format!("pull from {}", p.remote));
+        let options = CommitOptions::new("mcp-agent", IntentCategory::Merge, description);
+        let done = tokio::task::spawn_blocking(move || {
+            crate::sync_ops::pull(repo, &p.remote, &p.r#ref, options)
+        })
+        .await;
+        match done {
+            Ok(Ok(v)) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            Ok(Err(e)) => e.to_tool_text(),
+            Err(e) => format!("Error: the pull stopped: {e}"),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -3129,5 +3316,54 @@ mod tests {
             opts,
         )
         .expect("direct IntentCategory::Migrate must still be allowed");
+    }
+
+    /// The sync tools keep and list remotes with no network. Fetch, push and
+    /// pull need the `sync-client` feature, and say so without it; with it,
+    /// a remote whose token isn't set says that instead of trying unsigned.
+    #[tokio::test]
+    async fn sync_tools_keep_remotes_and_say_what_they_need() {
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        let server = AgentStateGraphServer::new(Arc::clone(&repo));
+        let add = |url: &str| {
+            server.agentstategraph_remote_add(Parameters(RemoteAddParams {
+                name: "hub".into(),
+                url: url.into(),
+                store: "default".into(),
+                token_env: Some("ASG_SYNC_TOOL_TEST_TOKEN_UNSET".into()),
+            }))
+        };
+        let added = add("https://hub.example.com").await;
+        assert!(added.contains("hub.example.com"), "{added}");
+        let bad = add("ftp://hub.example.com").await;
+        assert!(bad.starts_with("Error [invalid_operation]"), "{bad}");
+
+        let listed: serde_json::Value =
+            serde_json::from_str(&server.agentstategraph_remote_list().await).unwrap();
+        assert_eq!(listed[0]["name"], "hub");
+        assert_eq!(listed[0]["token_env"], "ASG_SYNC_TOOL_TEST_TOKEN_UNSET");
+
+        let fetched = server
+            .agentstategraph_fetch(Parameters(FetchParams {
+                remote: "hub".into(),
+                refs: vec![],
+                namespace: None,
+            }))
+            .await;
+        #[cfg(not(feature = "sync-client"))]
+        assert!(fetched.starts_with("Error [sync_unavailable]"), "{fetched}");
+        #[cfg(feature = "sync-client")]
+        assert!(
+            fetched.contains("set ASG_SYNC_TOOL_TEST_TOKEN_UNSET"),
+            "{fetched}"
+        );
+
+        let removed = server
+            .agentstategraph_remote_remove(Parameters(RemoteNameParams { name: "hub".into() }))
+            .await;
+        assert!(removed.contains("\"removed\": true"), "{removed}");
     }
 }

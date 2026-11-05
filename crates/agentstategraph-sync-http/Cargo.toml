@@ -1,0 +1,38 @@
+[package]
+name = "agentstategraph-sync-http"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+documentation = "https://docs.rs/agentstategraph-sync-http"
+keywords.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Push and pull AgentStateGraph stores over HTTP: an embeddable sync router and a client"
+
+[features]
+default = ["server", "client"]
+# The /sync/v1 router a host mounts (axum), behind its own auth.
+server = ["dep:axum", "dep:tokio"]
+# HttpRemote, a blocking client (ureq with rustls).
+client = ["dep:ureq"]
+
+[dependencies]
+agentstategraph = { workspace = true, features = ["sync"] }
+agentstategraph-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+ureq = { version = "3.4", default-features = false, features = ["rustls"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+# tests/e2e.rs runs a hub on every built-in backend, Postgres included when
+# TEST_DATABASE_URL is set.
+agentstategraph-storage = { workspace = true, features = ["memory", "sqlite", "postgres"] }
+agentstategraph-reminders = { workspace = true }
+agentstategraph-taint = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

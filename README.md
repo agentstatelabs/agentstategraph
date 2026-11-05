@@ -155,7 +155,7 @@ and iOS Simulator arm64/x86_64 slices.
 
 ## Features
 
-- **77 MCP tools** — any agent can connect immediately
+- **83 MCP tools** — any agent can connect immediately
 - **HTTP REST API** — `--http` mode for scripts, and for browser pages on localhost or origins you allow
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **8 language bindings** — Rust, Python, TypeScript, Go, Swift, .NET / C#, WASM, C FFI
@@ -214,7 +214,7 @@ AgentStateGraph/
 │   ├── agentstategraph-core/     # Types, diff, merge, schema — zero I/O
 │   ├── agentstategraph-storage/  # Pluggable backends (memory, SQLite, Postgres, IndexedDB)
 │   ├── agentstategraph/          # High-level Repository API
-│   ├── agentstategraph-mcp/      # MCP server (77 tools over stdio) + HTTP + migrate CLI
+│   ├── agentstategraph-mcp/      # MCP server (83 tools over stdio) + HTTP + migrate CLI
 │   ├── agentstategraph-tasks/    # Shared Plan/Task store — state machine, proofs, assignment
 │   ├── agentstategraph-reminders/# Pull-based reminder scheduling with approval gating
 │   ├── agentstategraph-policy/   # Authorization + cost-of-change gating with fallback actions

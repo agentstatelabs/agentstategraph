@@ -92,9 +92,20 @@ fn check_secret_read_guard(path: &str, intent: &Intent) -> Result<(), RepoError>
     Ok(())
 }
 
-/// Refuse an ordinary write to the control ref or a ref beside it.
+/// Remote-tracking refs start with this: `remotes/<remote>/<ref>` is where
+/// `<ref>` pointed on `<remote>` at the last fetch or push (DESIGN.md Plan G
+/// t-004).
+pub const TRACKING_PREFIX: &str = "remotes/";
+
+/// Whether `name` is a remote-tracking ref, which only fetch and push move.
+pub fn is_tracking_ref(name: &str) -> bool {
+    name.starts_with(TRACKING_PREFIX)
+}
+
+/// Refuse an ordinary write to the control ref or a ref beside it, or to a
+/// remote-tracking ref.
 fn refuse_reserved_ref(name: &str) -> Result<(), RepoError> {
-    if crate::control_repo::is_reserved_ref(name) {
+    if crate::control_repo::is_reserved_ref(name) || is_tracking_ref(name) {
         return Err(RepoError::ReservedRef(name.to_string()));
     }
     Ok(())
@@ -439,11 +450,12 @@ pub enum RepoError {
     #[error("'{0}' looks like a commit id; only branch names are accepted here")]
     CommitRefNotAllowed(String),
 
-    /// A write to the control ref (`_control`) or a ref beside it. Taints,
-    /// reminders and epochs change it through their own APIs (DESIGN.md
-    /// Plan G t-001).
+    /// A write to the control ref (`_control`) or a ref beside it, which
+    /// taints, reminders and epochs change through their own APIs (DESIGN.md
+    /// Plan G t-001), or to a remote-tracking ref (`remotes/...`), which
+    /// only fetch and push move (t-004).
     #[error(
-        "ref '{0}' is reserved: refs starting with _control change only through the taint, reminder and epoch APIs"
+        "ref '{0}' is reserved: refs starting with _control change only through the taint, reminder and epoch APIs, and refs starting with remotes/ only through fetch and push"
     )]
     ReservedRef(String),
 
@@ -1136,15 +1148,18 @@ impl Repository {
         Ok(self.storage.cas_delete_ref(&ns, name, expected)?)
     }
 
-    /// List all branches, optionally filtered by prefix. The control ref
-    /// and the refs beside it aren't branches, so they're left out.
+    /// List all branches, optionally filtered by prefix. The control ref,
+    /// the refs beside it and remote-tracking refs aren't branches, so
+    /// they're left out.
     pub fn list_branches(
         &self,
         prefix: Option<&str>,
     ) -> Result<Vec<(String, ObjectId)>, RepoError> {
         let ns = self.active_namespace()?;
         let mut refs = self.storage.list_refs(&ns, prefix.unwrap_or(""))?;
-        refs.retain(|(name, _)| !crate::control_repo::is_reserved_ref(name));
+        refs.retain(|(name, _)| {
+            !crate::control_repo::is_reserved_ref(name) && !is_tracking_ref(name)
+        });
         Ok(refs)
     }
 
@@ -1269,6 +1284,40 @@ impl Repository {
         let source_commit_id = self.resolve_ref(source)?;
         let target_commit_id = self.resolve_ref(target)?;
         self.find_common_ancestor(&source_commit_id, &target_commit_id)
+    }
+
+    /// The value at `path` where `source` and `target` last met: in their
+    /// merge base ([`Repository::merge_base`]). `None` when they share no
+    /// history, or the path wasn't there yet. The base comes from the two
+    /// refs rather than from the caller, so this works in a repository
+    /// limited to branch names ([`Repository::with_branch_refs_only`]). A
+    /// domain merge policy uses it to tell what each side changed.
+    pub fn get_json_at_merge_base(
+        &self,
+        source: &str,
+        target: &str,
+        path: &str,
+    ) -> Result<Option<serde_json::Value>, RepoError> {
+        if path_is_secret(path) {
+            return Err(RepoError::ReservedPath(path.to_string()));
+        }
+        let base = match self.merge_base(source, target) {
+            Ok(base) => base,
+            // Unrelated histories: no common ancestor.
+            Err(RepoError::RefNotFound(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let commit = self
+            .storage
+            .get_commit(&base)?
+            .ok_or_else(|| RepoError::CommitNotFound(base.to_string()))?;
+        let state_path =
+            StatePath::parse(path).map_err(|e| TreeError::PathNotFound(e.to_string()))?;
+        match tree::tree_get(self.storage.as_ref(), &commit.state_root, &state_path) {
+            Ok(obj) => Ok(Some(tree::tree_to_json(self.storage.as_ref(), &obj)?)),
+            Err(TreeError::PathNotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Compute what merging `source` into `target` WOULD do, without advancing
@@ -2138,7 +2187,7 @@ impl Repository {
     /// Priority: active session's `scope_namespace` > repository's configured
     /// `namespace`. Falls back to `Namespace::default_ns()` only when no
     /// session is active and no namespace was configured.
-    fn active_namespace(&self) -> Result<Namespace, RepoError> {
+    pub(crate) fn active_namespace(&self) -> Result<Namespace, RepoError> {
         if let Some(ns) = self
             .active_session_namespace
             .read()
@@ -3368,7 +3417,7 @@ impl Repository {
     /// adds over `base_root`: a subtree whose id is unchanged from the base is
     /// committed state and is skipped. Cost tracks the size of the change, not
     /// the store — cheap enough to gate every speculation commit.
-    fn first_missing_new(
+    pub(crate) fn first_missing_new(
         &self,
         base_root: &ObjectId,
         new_root: &ObjectId,
@@ -3406,7 +3455,10 @@ impl Repository {
         Ok(None)
     }
 
-    fn first_missing_reachable(&self, root: &ObjectId) -> Result<Option<ObjectId>, RepoError> {
+    pub(crate) fn first_missing_reachable(
+        &self,
+        root: &ObjectId,
+    ) -> Result<Option<ObjectId>, RepoError> {
         use agentstategraph_core::Node;
         let mut seen = std::collections::HashSet::new();
         let mut stack = vec![*root];
@@ -3630,6 +3682,34 @@ impl Repository {
         }
         self.update_leaf_index(&ns, ref_name, old_root.as_ref(), &new_target);
         self.commit_landed(&ns, ref_name, &new_target);
+        Ok(true)
+    }
+
+    /// Move `ref_name` in `ns` from `expected` to `new_target`, a
+    /// fast-forward the caller has checked, keeping the leaf index and
+    /// commit events as [`Self::advance_ref`] does. A fast-forward orphans
+    /// no commit, so no epoch seal can be broken. `Ok(false)` means the ref
+    /// wasn't at `expected`. A push lands through this (DESIGN.md Plan G
+    /// t-004), in the namespace the push names rather than this
+    /// repository's.
+    pub(crate) fn fast_forward_ref(
+        &self,
+        ns: &Namespace,
+        ref_name: &str,
+        expected: ObjectId,
+        new_target: ObjectId,
+    ) -> Result<bool, RepoError> {
+        let old_root = self
+            .storage
+            .get_commit(&expected)
+            .ok()
+            .flatten()
+            .map(|c| c.state_root);
+        if !self.storage.cas_ref(ns, ref_name, expected, new_target)? {
+            return Ok(false);
+        }
+        self.update_leaf_index(ns, ref_name, old_root.as_ref(), &new_target);
+        self.commit_landed(ns, ref_name, &new_target);
         Ok(true)
     }
 

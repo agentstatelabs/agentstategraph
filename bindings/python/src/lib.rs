@@ -19,6 +19,8 @@
 
 use std::sync::Arc;
 
+mod sync;
+
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 

@@ -46,12 +46,14 @@
 
 pub mod error;
 pub mod paths;
+pub mod renumber;
 pub mod state;
 pub mod store;
 pub mod types;
 pub mod verifier;
 
 pub use error::TaskStoreError;
+pub use renumber::Renumbering;
 pub use state::Transition;
 pub use store::{AddTaskOptions, TaskStore};
 pub use types::{

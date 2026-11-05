@@ -8,6 +8,23 @@ final class AdvancedRepositoryTests: XCTestCase {
         XCTAssertTrue(capabilities.operations.contains("namespace.list"))
         XCTAssertTrue(capabilities.operations.contains("session.create"))
         XCTAssertTrue(capabilities.operations.contains("query.commits"))
+        XCTAssertTrue(capabilities.operations.contains("sync.pull"))
+    }
+
+    func testRemotesAreKeptListedAndRemoved() throws {
+        let asg = try AgentStateGraph()
+        defer { asg.close() }
+        try asg.addRemote("hub", url: "https://hub.example.com", tokenEnv: "ASG_HUB_TOKEN")
+        guard case .array(let remotes) = try asg.remotes(),
+              case .object(let hub)? = remotes.first else {
+            return XCTFail("expected one remote")
+        }
+        XCTAssertEqual(hub["name"], .string("hub"))
+        XCTAssertEqual(hub["token_env"], .string("ASG_HUB_TOKEN"))
+        XCTAssertThrowsError(try asg.addRemote("bad", url: "ftp://nope"))
+        XCTAssertThrowsError(try asg.fetch(from: "nowhere"))
+        XCTAssertTrue(try asg.removeRemote("hub"))
+        XCTAssertFalse(try asg.removeRemote("hub"))
     }
 
     func testNamespaceIsolation() throws {

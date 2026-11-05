@@ -40,7 +40,7 @@ Or run from source:
 }
 ```
 
-Restart Claude Code. The 77 AgentStateGraph tools appear automatically.
+Restart Claude Code. The 83 AgentStateGraph tools appear automatically.
 
 ## HTTP REST API
 
@@ -133,6 +133,24 @@ Browser pages served from localhost (any port) can call the API. To let a page f
 
 Bound to loopback, as it is by default, the server only answers requests addressed to `localhost`, `127.0.0.1` or `[::1]`. That stops another website from reaching it through DNS rebinding, where the site points a domain it controls at your machine. Behind a reverse proxy on the same machine that forwards its own host name, allow that name with `--allowed-host asg.example.com` (or `ASG_ALLOWED_HOSTS`). Bound to another address, the server answers any host name unless you list some.
 
+### Sync hub
+
+With `--hub` (or `ASG_HUB=1`), the server is also a hub that other stores push to and pull from, as git remotes are: each store keeps its own copy, and sends and fetches only what the other side lacks. It needs `--http` and `--auth`, and takes the same API keys as the API, except keys bound to a namespace: a sync moves the whole store, every namespace and its taints, reminders and epochs. The store is served under its tenant id, `default` unless `--tenant` says otherwise, at `/sync/v1/<tenant>/`.
+
+From Rust, with the `agentstategraph-sync-http` crate:
+
+```rust
+use agentstategraph_sync_http::HttpRemote;
+
+let hub = HttpRemote::new("https://hub.example.com", "default").with_token(api_key);
+repo.pull("hub", &hub, "main", commit_options)?;
+repo.push("hub", &hub, "main")?;
+```
+
+A push only moves the hub forward. If another store pushed first, it's rejected; pull (which fetches and merges), then push again. A push that would send something under `/_meta/_secret`, a ref marked local-only, or a value that looks like a credential is refused before anything is sent. A store whose `main` holds only the empty first commit `init` makes, as a new hub's does, takes the other side's history on the first pull or push.
+
+The hub records every push it takes, with the key's id, in its push log (`Repository::push_log`). A push may be up to 256 MiB, whatever `--max-body-bytes` says, but the request timeout still applies: raise `--request-timeout-secs` before a large store's first push.
+
 Full endpoint list:
 
 | Method | Endpoint | Description |
@@ -157,6 +175,9 @@ Full endpoint list:
 | POST | `/api/epochs` | Create epoch |
 | POST | `/api/epochs/seal` | Seal epoch |
 | GET | `/api/intents/:ref` | Intent decomposition tree |
+| GET | `/sync/v1/:tenant/refs` | With `--hub`: the refs a store can fetch |
+| POST | `/sync/v1/:tenant/fetch` | With `--hub`: a bundle of the named refs |
+| POST | `/sync/v1/:tenant/push` | With `--hub`: move a ref forward, with a bundle |
 
 ## Connect to Other MCP Clients
 
@@ -179,7 +200,7 @@ OPTIONS:
 
 Each commit records the trace it was made in, shown as `trace_id` and `span_id` in `log` and `blame`; set `ASG_TRACE_LINKS=off` to stop recording them. Set `ASG_SQL_SPANS=on` to trace each SQL statement as a span. Set `ASG_COMMIT_EVENTS=on` to log each commit as an `asg.commit` event, for a log backend or SIEM; it never carries values. See [Observability](https://github.com/agentstatelabs/agentstategraph/blob/main/docs/OBSERVABILITY.md).
 
-## Available Tools (77)
+## Available Tools (83)
 
 The most-used tools are listed below by category. See the full [MCP Tools Reference](/reference/mcp-tools/) for every tool with parameters and example payloads.
 
@@ -308,6 +329,17 @@ See the [Taint & Quarantine guide](/guides/taint/).
 | `agentstategraph_reminder_remind_me` | Get all currently due reminders, by priority. |
 | `agentstategraph_reminder_snooze` / `agentstategraph_reminder_approve` / `agentstategraph_reminder_cancel` | Manage reminder state. |
 | `agentstategraph_reminder_record_execution` | Record an execution result; advances repeating schedules. |
+
+### Sync
+
+| Tool | Description |
+|------|-------------|
+| `agentstategraph_remote_add` / `agentstategraph_remote_list` / `agentstategraph_remote_remove` | Name a hub to sync with. Its API key comes from an environment variable the remote names, never from the store. |
+| `agentstategraph_fetch` | Fetch branches from a remote, without changing local ones. |
+| `agentstategraph_push` | Push a branch: only forward, and never secrets, local-only branches, or credential-like values unless each finding is overridden. |
+| `agentstategraph_pull` | Fetch, renumber colliding task ids, and merge. |
+
+Fetch, push and pull need a build with the `sync-client` feature, as the release binaries and the Docker image are; without it they answer `sync_unavailable`. The same calls are HTTP routes: `GET /api/remotes`, `POST /api/sync/fetch`, `/api/sync/push` and `/api/sync/pull` (refused for namespace-bound keys), and `POST /api/admin/remotes` and `/api/admin/remotes/remove` with an admin key. See [Sync hub](#sync-hub).
 
 See the [Reminders guide](/guides/reminders/).
 

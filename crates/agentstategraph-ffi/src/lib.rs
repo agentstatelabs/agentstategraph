@@ -21,6 +21,7 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
 
+use agentstategraph::sync::{PushOverride, RemoteConfig};
 use agentstategraph::{
     CommitOptions, CreateSessionParams, Repository, RetentionPolicy, SpecHandle, SCHEMA_VERSION,
 };
@@ -30,6 +31,7 @@ use agentstategraph_core::{
 use agentstategraph_migrate::{CheckResult, Registry, RunMode, StepStatus};
 use agentstategraph_policy::{ChangeProposal, Policy, PolicyStore, Situation};
 use agentstategraph_storage::SqliteStorage;
+use agentstategraph_sync_http as sync_http;
 use agentstategraph_taint::{
     QuarantineParams, TaintEffect, TaintKind, TaintMetadata, TaintParams, TaintSeverity,
     UntaintParams, UnwatchParams, WatchDirection, WatchParams,
@@ -446,7 +448,9 @@ pub extern "C" fn agentstategraph_repository_capabilities() -> *mut c_char {
             "session.create", "session.get", "session.list", "session.children",
             "session.update_head", "session.end", "session.active.get", "session.active.set",
             "epoch.create", "epoch.get", "epoch.list", "epoch.seal", "epoch.archive",
-            "epoch.export", "epoch.active.get", "epoch.active.set"
+            "epoch.export", "epoch.active.get", "epoch.active.set",
+            "remote.list", "remote.add", "remote.remove",
+            "sync.fetch", "sync.push", "sync.pull"
         ]
     }))
 }
@@ -872,6 +876,52 @@ fn repository_call(
         "epoch.active.set" => {
             repo.set_active_epoch(optional("id")).map_err(err_string)?;
             Ok(serde_json::json!({ "updated": true }))
+        }
+        // Sync through named remotes (DESIGN.md Plan G t-008). A remote's
+        // token comes from the environment variable it names.
+        "remote.list" => sync_http::report::remotes(repo).map_err(err_string),
+        "remote.add" => {
+            let config = RemoteConfig {
+                url: s("url")?,
+                store: optional("store").unwrap_or_else(|| "default".to_string()),
+                token_env: optional("token_env"),
+            };
+            repo.set_remote(&s("name")?, &config).map_err(err_string)?;
+            Ok(serde_json::json!({ "added": true }))
+        }
+        "remote.remove" => Ok(serde_json::json!({
+            "removed": repo.remove_remote(&s("name")?).map_err(err_string)?
+        })),
+        "sync.fetch" => {
+            let refs = match request.get("refs") {
+                Some(_) => request_string_array(request, "refs")?,
+                None => Vec::new(),
+            };
+            let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
+            let report =
+                sync_http::named::fetch(repo, &s("remote")?, &refs).map_err(|e| e.to_string())?;
+            Ok(sync_http::report::fetch(&report))
+        }
+        "sync.push" => {
+            let overrides: Vec<PushOverride> = match request.get("overrides") {
+                Some(v) => serde_json::from_value(v.clone())
+                    .map_err(|e| format!("invalid overrides: {e}"))?,
+                None => Vec::new(),
+            };
+            let report = sync_http::named::push(repo, &s("remote")?, &ref_name(), overrides)
+                .map_err(|e| e.to_string())?;
+            Ok(sync_http::report::push(&report))
+        }
+        "sync.pull" => {
+            let remote = s("remote")?;
+            let options = CommitOptions::new(
+                optional("agent_id").unwrap_or_else(|| "ffi".to_string()),
+                IntentCategory::Merge,
+                optional("description").unwrap_or_else(|| format!("pull from {remote}")),
+            );
+            let report = sync_http::named::pull(repo, &remote, &ref_name(), options)
+                .map_err(|e| e.to_string())?;
+            Ok(sync_http::report::pull(&report))
         }
         _ => Err(format!("unsupported repository operation: {operation}")),
     }

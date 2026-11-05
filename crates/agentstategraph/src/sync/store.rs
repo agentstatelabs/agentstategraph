@@ -23,7 +23,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
 
 use agentstategraph_core::{Namespace, Object, ObjectId};
-use agentstategraph_storage::StorageError;
+use agentstategraph_storage::{Storage, StorageError};
 
 use crate::control::CONTROL_REF;
 use crate::control_repo::{ControlReport, is_reserved_ref};
@@ -31,7 +31,7 @@ use crate::repo::{RepoError, Repository};
 use crate::sync::bundle::{
     BundleError, BundleLimits, BundleReader, BundleRef, BundleWriter, Record,
 };
-use crate::sync::missing::missing_set;
+use crate::sync::missing::{MissingSet, missing_set};
 
 /// How many objects one storage read or write handles.
 const BATCH: usize = 1024;
@@ -97,6 +97,81 @@ pub struct ImportReport {
     pub control: ControlReport,
 }
 
+/// Write `set` and `refs` to `out` as a bundle: objects, then commits
+/// parents first, then shallow commits, then refs.
+pub(crate) fn write_set<W: Write>(
+    store: &dyn Storage,
+    set: &MissingSet,
+    refs: &[BundleRef],
+    out: W,
+) -> Result<W, TransferError> {
+    let mut writer = BundleWriter::new(out)?;
+    for chunk in set.objects.chunks(BATCH) {
+        for (id, object) in chunk.iter().zip(store.batch_get_objects(chunk)?) {
+            let object = object.ok_or_else(|| StorageError::ObjectNotFound(id.to_string()))?;
+            writer.write_object(&object)?;
+        }
+    }
+    for id in &set.commits {
+        let commit = store
+            .get_commit(id)?
+            .ok_or_else(|| StorageError::CommitNotFound(id.to_string()))?;
+        writer.write_commit(&commit)?;
+    }
+    for id in &set.shallow {
+        writer.write_shallow(id)?;
+    }
+    for r in refs {
+        writer.write_ref(r)?;
+    }
+    Ok(writer.finish()?)
+}
+
+/// What [`store_records`] stored.
+#[derive(Debug, Default)]
+pub(crate) struct Received {
+    pub refs: Vec<BundleRef>,
+    pub shallow: HashSet<ObjectId>,
+    /// Each commit's id, tree and parents, in the bundle's order.
+    pub commits: Vec<(ObjectId, ObjectId, Vec<ObjectId>)>,
+    pub objects: usize,
+}
+
+/// Store every object and commit a bundle holds as `reader` verifies them,
+/// returning its refs and shallow commits. Moves no ref.
+pub(crate) fn store_records<R: Read>(
+    store: &dyn Storage,
+    mut reader: BundleReader<R>,
+) -> Result<Received, TransferError> {
+    let mut received = Received::default();
+    let mut pending: Vec<Object> = Vec::with_capacity(BATCH);
+    while let Some(record) = reader.next_record()? {
+        match record {
+            Record::Object(_, object) => {
+                pending.push(object);
+                if pending.len() == BATCH {
+                    store.batch_put_objects(&pending)?;
+                    received.objects += pending.len();
+                    pending.clear();
+                }
+            }
+            Record::Commit(commit) => {
+                store.put_commit(&commit)?;
+                received
+                    .commits
+                    .push((commit.id, commit.state_root, commit.parents.clone()));
+            }
+            Record::Shallow(id) => {
+                received.shallow.insert(id);
+            }
+            Record::Ref(r) => received.refs.push(r),
+        }
+    }
+    store.batch_put_objects(&pending)?;
+    received.objects += pending.len();
+    Ok(received)
+}
+
 impl Repository {
     /// Write the whole store to `out` as a bundle, returning `out`.
     pub fn export_store<W: Write>(&self, out: W) -> Result<(W, ExportReport), TransferError> {
@@ -123,27 +198,7 @@ impl Repository {
             .into_iter()
             .collect();
         let set = missing_set(store, &heads, &[], &[])?;
-
-        let mut writer = BundleWriter::new(out)?;
-        for chunk in set.objects.chunks(BATCH) {
-            for (id, object) in chunk.iter().zip(store.batch_get_objects(chunk)?) {
-                let object = object.ok_or_else(|| StorageError::ObjectNotFound(id.to_string()))?;
-                writer.write_object(&object)?;
-            }
-        }
-        for id in &set.commits {
-            let commit = store
-                .get_commit(id)?
-                .ok_or_else(|| StorageError::CommitNotFound(id.to_string()))?;
-            writer.write_commit(&commit)?;
-        }
-        for id in &set.shallow {
-            writer.write_shallow(id)?;
-        }
-        for r in &refs {
-            writer.write_ref(r)?;
-        }
-        let out = writer.finish()?;
+        let out = write_set(store, &set, &refs, out)?;
         Ok((
             out,
             ExportReport {
@@ -168,35 +223,17 @@ impl Repository {
         limits: BundleLimits,
     ) -> Result<ImportReport, TransferError> {
         let store = self.taint_storage();
-        let mut reader = BundleReader::new(input, limits)?;
-        let mut report = ImportReport::default();
-        let mut refs = Vec::new();
-        let mut shallow = HashSet::new();
-        let mut commits: Vec<(ObjectId, ObjectId, Vec<ObjectId>)> = Vec::new();
-        let mut pending: Vec<Object> = Vec::with_capacity(BATCH);
-        while let Some(record) = reader.next_record()? {
-            match record {
-                Record::Object(_, object) => {
-                    pending.push(object);
-                    if pending.len() == BATCH {
-                        store.batch_put_objects(&pending)?;
-                        report.objects += pending.len();
-                        pending.clear();
-                    }
-                }
-                Record::Commit(commit) => {
-                    store.put_commit(&commit)?;
-                    commits.push((commit.id, commit.state_root, commit.parents.clone()));
-                }
-                Record::Shallow(id) => {
-                    shallow.insert(id);
-                }
-                Record::Ref(r) => refs.push(r),
-            }
-        }
-        store.batch_put_objects(&pending)?;
-        report.objects += pending.len();
-        report.commits = commits.len();
+        let Received {
+            refs,
+            shallow,
+            commits,
+            objects,
+        } = store_records(store, BundleReader::new(input, limits)?)?;
+        let mut report = ImportReport {
+            objects,
+            commits: commits.len(),
+            ..ImportReport::default()
+        };
         report.shallow = shallow.len();
 
         // Everything each ref needs is here.
@@ -251,6 +288,7 @@ impl Repository {
             store.set_ref(&r.namespace, &r.name, r.target)?;
         }
         report.refs = refs.len();
+        self.record_shallow(shallow.iter().copied())?;
         report.control = self.reconcile_control()?;
         Ok(report)
     }
