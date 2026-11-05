@@ -369,6 +369,22 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string proposalJson);
 
     [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_policy_evaluate_scoped(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string situationJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string action,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string agentId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? tenantFilter);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_policy_evaluate_change_scoped(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string proposalJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? tenantFilter);
+
+    [DllImport(Lib)]
     internal static extern IntPtr agentstategraph_policy_check_tokens(
         IntPtr store,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,

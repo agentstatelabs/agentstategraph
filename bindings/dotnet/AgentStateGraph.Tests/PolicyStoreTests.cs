@@ -213,6 +213,40 @@ public sealed class PolicyStoreTests
     }
 
     [Fact]
+    public void EvaluateChange_TenantFilter_FallsBackToGlobalPolicy()
+    {
+        using var repo = TestHelpers.FreshRepo();
+        using var ps = new PolicyStore(repo, "/policies", "xunit");
+
+        ApprovalRule[] approval =
+        {
+            new ApprovalRule("promote", new[] { "human" }, new FallbackAction.LowestRiskAlternative()),
+        };
+        ps.Propose(Ref, TestHelpers.SkeletonPolicy(
+            "infra/acme", triggers: new[] { "reindex" }, requireApproval: approval) with { TenantId = "acme" });
+        ps.Ratify(Ref, "infra/acme", "ops", "acme's own rule");
+        ps.Propose(Ref, TestHelpers.SkeletonPolicy(
+            "infra/global", triggers: new[] { "reindex" }, requireApproval: approval));
+        ps.Ratify(Ref, "infra/global", "ops", "everyone else");
+
+        var proposal = new ChangeProposal(
+            Action: "promote",
+            AgentId: "agent-1",
+            Intent: "reindex",
+            PreferredOption: "spec-1",
+            Alternatives: Array.Empty<string>(),
+            Tokens: new[] { "reindex" },
+            AttachedFields: new Dictionary<string, string>());
+
+        // acme sees its own policy; a tenant with none falls back to the
+        // global one rather than matching nothing.
+        var acme = Assert.IsType<Decision.RequireApproval>(ps.EvaluateChange(Ref, proposal, "acme"));
+        Assert.StartsWith("infra/acme@", acme.MatchedPolicy);
+        var other = Assert.IsType<Decision.RequireApproval>(ps.EvaluateChange(Ref, proposal, "other"));
+        Assert.StartsWith("infra/global@", other.MatchedPolicy);
+    }
+
+    [Fact]
     public void EvaluateChange_MissingRequiredFields_ShortCircuitsToApproval()
     {
         using var repo = TestHelpers.FreshRepo();

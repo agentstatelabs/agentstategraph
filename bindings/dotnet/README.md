@@ -52,11 +52,22 @@ cargo build -p agentstategraph-ffi --release
 cd bindings/dotnet
 dotnet build -c Release
 
-# 3. Run the tests — the test host sets AGENTSTATEGRAPH_FFI_PATH
-#    to the cargo target dir so the native library is found.
+# 3. Run the tests. AGENTSTATEGRAPH_FFI_PATH tells the binding where the
+#    native library is. One test checks that a wrong AGENTSTATEGRAPH_FFI_PATH
+#    falls back to the system search, so put the directory on that too
+#    (LD_LIBRARY_PATH on Linux, DYLD_LIBRARY_PATH on macOS).
 AGENTSTATEGRAPH_FFI_PATH=$PWD/../../target/release \
+LD_LIBRARY_PATH=$PWD/../../target/release \
   dotnet test -c Release
 ```
+
+The tests target net8.0 and net10.0. With only the .NET 10 runtime
+installed, set `DOTNET_ROLL_FORWARD=Major` to run both.
+
+Without a local .NET SDK, run them in a container:
+`mcr.microsoft.com/dotnet/sdk:10.0` with the repository mounted and a Linux
+build of the library for the container's architecture. CI's `dotnet` job does
+this with the library its `test` job builds.
 
 ## Use
 
