@@ -63,6 +63,74 @@ jobs:
           }
           EOF
 
-      - name: Resolve, build, and run
+      # Build and run are separate steps. On macos-15 (Xcode 16.4), a one-shot
+      # `swift run Smoke` was killed with SIGKILL the moment it started, for
+      # the 1.5.0 and 1.5.1 packages alike, though both build and run
+      # elsewhere. SwiftPM re-signs the executable in place right before
+      # `swift run` launches it.
+      - name: Resolve and build
         working-directory: consumer
-        run: swift run Smoke
+        run: swift build --product Smoke
+
+      - name: Check signature and run
+        id: run
+        working-directory: consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$(swift build --show-bin-path)/Smoke"
+          codesign --verify --strict --verbose=2 "$bin"
+          "$bin"
+
+      # Records whether a one-shot `swift run` from a clean build is still
+      # killed on this runner image. It doesn't decide the result.
+      - name: One-shot swift run (informational)
+        continue-on-error: true
+        working-directory: consumer
+        run: |
+          rm -rf .build
+          swift run Smoke
+
+      - name: Diagnose a failed run
+        if: failure() && steps.run.outcome == 'failure'
+        working-directory: consumer
+        shell: bash
+        run: |
+          set +e
+          bin="$(swift build --show-bin-path)/Smoke"
+          sw_vers
+          xcodebuild -version
+          swift --version
+          ls -l "$bin"
+          vtool -show-build "$bin"
+          codesign -dvvv --entitlements - "$bin"
+
+          # A copy is a new file, so the kernel holds no signature for it. If
+          # the copy runs, the original's cached signature was stale; if only
+          # the re-signed copy runs, the signature on disk was bad.
+          cp "$bin" "$RUNNER_TEMP/Smoke-copy"
+          "$RUNNER_TEMP/Smoke-copy"
+          echo "fresh copy exit=$?"
+          cp "$bin" "$RUNNER_TEMP/Smoke-resigned"
+          codesign --force --sign - "$RUNNER_TEMP/Smoke-resigned"
+          "$RUNNER_TEMP/Smoke-resigned"
+          echo "re-signed copy exit=$?"
+
+          for f in ~/Library/Logs/DiagnosticReports/Smoke*.ips /Library/Logs/DiagnosticReports/Smoke*.ips; do
+            [ -f "$f" ] || continue
+            echo "== $f"
+            python3 - "$f" <<'PY'
+          import json
+          import sys
+
+          _, _, body = open(sys.argv[1]).read().partition("\n")
+          report = json.loads(body)
+          for key in ("termination", "exception", "codeSigningID", "codeSigningFlags",
+                      "codeSigningValidationCategory", "codeSigningTrustLevel"):
+              if key in report:
+                  print(key, "=", json.dumps(report[key]))
+          PY
+          done
+          sudo log show --last 10m --style compact --predicate \
+            '(process == "kernel" AND eventMessage CONTAINS[c] "Smoke") OR process == "amfid" OR subsystem == "com.apple.MobileFileIntegrity"' \
+            | tail -n 80
