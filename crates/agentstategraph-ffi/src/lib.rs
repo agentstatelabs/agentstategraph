@@ -1336,6 +1336,72 @@ pub extern "C" fn agentstategraph_taskstore_add_task_ex(
     parent_change: *const c_char,
     on_complete_json: *const c_char,
 ) -> *mut c_char {
+    add_task_with_options(
+        store,
+        ref_name,
+        plan,
+        title,
+        priority,
+        parent_id,
+        blockers_json,
+        assigned_to,
+        payload_json,
+        parent_change,
+        on_complete_json,
+        ptr::null(),
+    )
+}
+
+/// `add_task_ex` plus the task's `notes`: free text that may span lines, at
+/// most 16 KiB of UTF-8. NULL or blank text adds the task without notes.
+/// Returns the Task as JSON or `{"error": "..."}`.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn agentstategraph_taskstore_add_task_with_notes(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    title: *const c_char,
+    priority: *const c_char,
+    parent_id: *const c_char,
+    blockers_json: *const c_char,
+    assigned_to: *const c_char,
+    payload_json: *const c_char,
+    parent_change: *const c_char,
+    on_complete_json: *const c_char,
+    notes: *const c_char,
+) -> *mut c_char {
+    add_task_with_options(
+        store,
+        ref_name,
+        plan,
+        title,
+        priority,
+        parent_id,
+        blockers_json,
+        assigned_to,
+        payload_json,
+        parent_change,
+        on_complete_json,
+        notes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_task_with_options(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    title: *const c_char,
+    priority: *const c_char,
+    parent_id: *const c_char,
+    blockers_json: *const c_char,
+    assigned_to: *const c_char,
+    payload_json: *const c_char,
+    parent_change: *const c_char,
+    on_complete_json: *const c_char,
+    notes: *const c_char,
+) -> *mut c_char {
     let Some(store) = taskstore_ref(store) else {
         return ptr::null_mut();
     };
@@ -1433,6 +1499,7 @@ pub extern "C" fn agentstategraph_taskstore_add_task_ex(
             payload,
             parent_change: parent_change_opt,
             on_complete: on_complete_opt,
+            notes: (!notes.is_null()).then(|| unsafe { c_to_str(notes) }),
         },
     ) {
         Ok(t) => json_ok(&t),
@@ -1614,6 +1681,29 @@ pub extern "C" fn agentstategraph_taskstore_set_title(
     let id = TaskId(unsafe { c_to_str(task_id) });
     let title = unsafe { c_to_str(title) };
     match store.inner.set_title(&ref_name, &plan, &id, &title) {
+        Ok(t) => json_ok(&t),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+/// Replace a task's notes: free text that may span lines, at most 16 KiB of
+/// UTF-8. NULL or blank text clears them. Works at any status.
+#[no_mangle]
+pub extern "C" fn agentstategraph_taskstore_set_notes(
+    store: *const SgTaskStore,
+    ref_name: *const c_char,
+    plan: *const c_char,
+    task_id: *const c_char,
+    notes: *const c_char,
+) -> *mut c_char {
+    let Some(store) = taskstore_ref(store) else {
+        return ptr::null_mut();
+    };
+    let ref_name = unsafe { c_to_str(ref_name) };
+    let plan = unsafe { c_to_str(plan) };
+    let id = TaskId(unsafe { c_to_str(task_id) });
+    let notes = unsafe { c_to_str(notes) };
+    match store.inner.set_notes(&ref_name, &plan, &id, Some(&notes)) {
         Ok(t) => json_ok(&t),
         Err(e) => json_err(&e.to_string()),
     }

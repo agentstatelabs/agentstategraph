@@ -22,7 +22,10 @@ regex = "1"
 once_cell = "1"
 
 [dev-dependencies]
-agentstategraph-storage = { workspace = true, default-features = false }
+# tests/task_notes.rs runs on every built-in backend, Postgres included when
+# TEST_DATABASE_URL is set.
+agentstategraph-storage = { workspace = true, default-features = false, features = ["sqlite", "memory", "postgres"] }
+uuid = { workspace = true }
 # Sync for the renumbering tests (DESIGN.md Plan G t-010), which the library
 # itself doesn't need, and SQLite, which every test opens, so the tests build
 # on their own as well as with the workspace.

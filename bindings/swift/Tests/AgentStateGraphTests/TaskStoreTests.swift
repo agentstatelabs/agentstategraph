@@ -91,6 +91,34 @@ final class TaskStoreTests: XCTestCase {
         XCTAssertThrowsError(try ts.setBlockers(plan: "p", id: a.id, blockers: [b.id]))
     }
 
+    func testNotes() throws {
+        let (asg, ts) = try store()
+        defer { asg.close(); ts.close() }
+        try ts.createPlan("p")
+        let brief = "Repo: infra/gitops.\n\n1. Write the manifests.\n2. Ask the user. ✓\n"
+        let a = try ts.addTask(
+            plan: "p", title: "a", priority: .medium, options: AddTaskOptions(notes: brief))
+        XCTAssertEqual(a.notes, brief)
+        let b = try ts.addTask(plan: "p", title: "b", priority: .medium)
+        XCTAssertNil(b.notes)
+        let ext = try ts.addTask(
+            plan: "p", title: "c", priority: .medium,
+            withExtensions: AddTaskExtOptions(
+                base: AddTaskOptions(notes: "ext notes"), parentChange: "spec@1"))
+        XCTAssertEqual(ext.notes, "ext notes")
+        XCTAssertEqual(ext.parentChange, "spec@1")
+
+        try ts.startTask(plan: "p", id: a.id)
+        let edited = try ts.setNotes(plan: "p", id: a.id, notes: "line one\nline two")
+        XCTAssertEqual(edited.notes, "line one\nline two")
+        XCTAssertEqual(edited.status, .inProgress)
+        XCTAssertThrowsError(
+            try ts.setNotes(plan: "p", id: a.id, notes: String(repeating: "x", count: 16 * 1024 + 1)))
+        XCTAssertNil(try ts.setNotes(plan: "p", id: a.id, notes: nil).notes)
+        try ts.setNotes(plan: "p", id: a.id, notes: "again")
+        XCTAssertNil(try ts.setNotes(plan: "p", id: a.id, notes: "").notes)
+    }
+
     func testAssignAndFilter() throws {
         let (asg, ts) = try store()
         defer { asg.close(); ts.close() }

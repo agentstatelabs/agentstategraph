@@ -59,6 +59,11 @@ extern char* agentstategraph_taskstore_add_task_ex(SgTaskStore store, const char
     const char* title, const char* priority, const char* parent_id, const char* blockers_json,
     const char* assigned_to, const char* payload_json, const char* parent_change,
     const char* on_complete_json);
+/* add_task_ex plus notes: free text, at most 16 KiB of UTF-8; NULL or blank for none. */
+extern char* agentstategraph_taskstore_add_task_with_notes(SgTaskStore store, const char* ref_name,
+    const char* plan, const char* title, const char* priority, const char* parent_id,
+    const char* blockers_json, const char* assigned_to, const char* payload_json,
+    const char* parent_change, const char* on_complete_json, const char* notes);
 extern char* agentstategraph_taskstore_list_tasks(SgTaskStore store, const char* ref_name, const char* plan);
 extern char* agentstategraph_taskstore_task_ids(SgTaskStore store, const char* ref_name, const char* plan);
 extern char* agentstategraph_taskstore_get_task(SgTaskStore store, const char* ref_name, const char* plan,
@@ -73,6 +78,9 @@ extern char* agentstategraph_taskstore_set_priority(SgTaskStore store, const cha
     const char* task_id, const char* priority);
 extern char* agentstategraph_taskstore_set_title(SgTaskStore store, const char* ref_name, const char* plan,
     const char* task_id, const char* title);
+/* Replace a task's notes; NULL or blank text clears them. */
+extern char* agentstategraph_taskstore_set_notes(SgTaskStore store, const char* ref_name, const char* plan,
+    const char* task_id, const char* notes);
 extern char* agentstategraph_taskstore_set_blockers(SgTaskStore store, const char* ref_name, const char* plan,
     const char* task_id, const char* blockers_json);
 extern char* agentstategraph_taskstore_assign_task(SgTaskStore store, const char* ref_name, const char* plan,

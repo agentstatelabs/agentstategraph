@@ -448,6 +448,7 @@ fn task_extension_fields_roundtrip() {
                 payload,
                 parent_change: Some("spec-7@42".to_string()),
                 on_complete,
+                notes: None,
             },
         )
         .unwrap();

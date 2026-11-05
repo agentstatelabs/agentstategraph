@@ -933,6 +933,7 @@ fn task_to_json(t: &Task) -> serde_json::Value {
     serde_json::json!({
         "id": t.id.as_str(),
         "title": t.title,
+        "notes": t.notes,
         "status": status_str(t.status),
         "priority": priority_str(t.priority),
         "parent_id": t.parent_id.as_ref().map(|i| i.as_str().to_string()),
@@ -1119,6 +1120,7 @@ impl TaskStore {
         payload: Option<serde_json::Value>,
         parent_change: Option<String>,
         on_complete: Option<serde_json::Value>,
+        notes: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let pri = parse_priority(&priority.unwrap_or_else(|| "medium".to_string()))?;
         let parent = parent_id.map(TaskId);
@@ -1150,6 +1152,7 @@ impl TaskStore {
                     payload: payload_val,
                     parent_change,
                     on_complete: on_complete_val,
+                    notes,
                 },
             )
             .map_err(task_err)?;
@@ -1268,6 +1271,23 @@ impl TaskStore {
         let t = self
             .inner
             .set_title(&ref_name, &plan, &TaskId(id), &title)
+            .map_err(task_err)?;
+        Ok(task_to_json(&t))
+    }
+
+    /// Replace a task's notes (multi-line, at most 16 KiB of UTF-8); null,
+    /// undefined or blank text clears them. Works at any status.
+    #[napi]
+    pub fn set_notes(
+        &self,
+        ref_name: String,
+        plan: String,
+        id: String,
+        notes: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let t = self
+            .inner
+            .set_notes(&ref_name, &plan, &TaskId(id), notes.as_deref())
             .map_err(task_err)?;
         Ok(task_to_json(&t))
     }

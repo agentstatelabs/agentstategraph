@@ -25,6 +25,7 @@ pub fn make_task(id: &str, title: &str) -> Task {
     Task {
         id: TaskId(id.to_string()),
         title: title.to_string(),
+        notes: None,
         status: TaskStatus::Pending,
         priority: Priority::Medium,
         parent_id: None,

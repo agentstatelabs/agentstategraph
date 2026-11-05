@@ -171,6 +171,21 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? parentChange,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? onCompleteJson);
 
+    [DllImport(Lib, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr agentstategraph_taskstore_add_task_with_notes(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string plan,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string title,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string priority,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? parentId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? blockersJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? assignedTo,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? payloadJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? parentChange,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? onCompleteJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? notes);
+
     [DllImport(Lib)]
     internal static extern IntPtr agentstategraph_taskstore_list_tasks(
         IntPtr store,
@@ -230,6 +245,14 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string plan,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string taskId,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string title);
+
+    [DllImport(Lib)]
+    internal static extern IntPtr agentstategraph_taskstore_set_notes(
+        IntPtr store,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string refName,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string plan,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string taskId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? notes);
 
     [DllImport(Lib)]
     internal static extern IntPtr agentstategraph_taskstore_set_blockers(

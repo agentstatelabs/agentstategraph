@@ -28,11 +28,26 @@ pub struct Plan {
     pub closed_by: Option<String>,
 }
 
+/// The most a task's notes may hold: 16 KiB of UTF-8, counted in bytes.
+///
+/// Notes are a brief, decisions or links, not a document store: this is
+/// several times a long brief (the lane briefs that prompted the field run
+/// about 2 KB) and about 4,000 tokens. The cap bounds what a task costs
+/// everywhere it goes: every read of a plan's tasks reads each one whole,
+/// and every edit stores a new copy of the task that history keeps.
+pub const MAX_NOTES_BYTES: usize = 16 * 1024;
+
 /// A unit of work inside a plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Task {
     pub id: TaskId,
     pub title: String,
+    /// Free-form notes: a brief, decisions, links. They may span lines and
+    /// hold at most [`MAX_NOTES_BYTES`]. `TaskStore::set_notes` edits them
+    /// at any status. `None` when a task has none, as every task stored
+    /// before the field existed reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     pub status: TaskStatus,
     pub priority: Priority,
     pub parent_id: Option<TaskId>,
@@ -274,6 +289,7 @@ mod tests {
         let task = Task {
             id: TaskId::new(1),
             title: "Rewrite hero".to_string(),
+            notes: Some("Keep the old copy.\nLink the brand doc.".to_string()),
             status: TaskStatus::Pending,
             priority: Priority::High,
             parent_id: None,
@@ -295,6 +311,23 @@ mod tests {
         let json = serde_json::to_value(&task).unwrap();
         let back: Task = serde_json::from_value(json).unwrap();
         assert_eq!(task, back);
+    }
+
+    #[test]
+    fn a_task_stored_before_notes_reads_with_none_and_writes_back_unchanged() {
+        let stored = serde_json::json!({
+            "id": "t-001", "title": "Rewrite hero", "status": "pending",
+            "priority": "high", "parent_id": null, "blocked_by": [],
+            "created_at": "2026-10-01T00:00:00Z", "created_by": "claude-code",
+            "started_at": null, "started_by": null, "completed_at": null,
+            "completed_by": null, "proof": null, "abandoned_at": null,
+            "abandoned_reason": null,
+        });
+        let task: Task = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(task.notes, None);
+        // No `notes` key is written for a task without notes, so the stored
+        // JSON, and the tree object it hashes to, stay as they were.
+        assert_eq!(serde_json::to_value(&task).unwrap(), stored);
     }
 
     #[test]

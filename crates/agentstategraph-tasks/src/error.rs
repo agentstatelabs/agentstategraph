@@ -45,6 +45,9 @@ pub enum TaskStoreError {
     #[error("a task's title must not be blank")]
     TitleRequired,
 
+    #[error("notes are {len} bytes; a task's notes hold at most {max} bytes")]
+    NotesTooLong { len: usize, max: usize },
+
     #[error("blockers would form a cycle, leaving these tasks blocked for good: {cycle:?}")]
     BlockerCycle { cycle: Vec<TaskId> },
 

@@ -217,6 +217,57 @@ func TestTaskStore_EditTask(t *testing.T) {
 	}
 }
 
+func TestTaskStore_Notes(t *testing.T) {
+	asg, _ := NewMemory()
+	defer asg.Close()
+	ts, err := NewTaskStore(asg, "/plans", "go-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ts.Close()
+
+	if _, err := ts.CreatePlan("main", "p", nil); err != nil {
+		t.Fatal(err)
+	}
+	brief := "Repo: infra/gitops.\n\n1. Write the manifests.\n2. Ask the user. ✓\n"
+	a, err := ts.AddTask("main", "p", "a", PriorityHigh, &AddTaskOptions{Notes: brief})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Notes == nil || *a.Notes != brief {
+		t.Fatalf("AddTask notes: %v", a.Notes)
+	}
+	b, err := ts.AddTask("main", "p", "b", PriorityHigh, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Notes != nil {
+		t.Fatalf("a task added without notes has notes: %q", *b.Notes)
+	}
+
+	if _, err := ts.StartTask("main", "p", a.ID); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := ts.SetNotes("main", "p", a.ID, "line one\nline two")
+	if err != nil {
+		t.Fatalf("SetNotes: %v", err)
+	}
+	if edited.Notes == nil || *edited.Notes != "line one\nline two" || edited.Status != TaskStatusInProgress {
+		t.Fatalf("unexpected task after SetNotes: %+v", edited)
+	}
+	if _, err := ts.SetNotes("main", "p", a.ID, strings.Repeat("x", 16*1024+1)); err == nil ||
+		!strings.Contains(err.Error(), "16384") {
+		t.Fatalf("expected the notes cap to refuse 16385 bytes, got %v", err)
+	}
+	cleared, err := ts.SetNotes("main", "p", a.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Notes != nil {
+		t.Fatalf("SetNotes(\"\") left notes: %q", *cleared.Notes)
+	}
+}
+
 func TestTaskStore_AddTaskWithExtensions(t *testing.T) {
 	asg, _ := NewMemory()
 	defer asg.Close()

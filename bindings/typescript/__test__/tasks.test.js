@@ -51,6 +51,25 @@ test('closePlan refuses a plan with open work', () => {
   assert.equal(ts.closePlan('main', 'p', 'dropped').status, 'completed');
 });
 
+test('notes: add, set and clear', () => {
+  const { ts } = freshStore();
+  ts.createPlan('main', 'p', null);
+  const brief = 'Repo: infra/gitops.\n\n1. Write the manifests.\n2. Ask the user. \u2713\n';
+  const a = ts.addTask('main', 'p', 'a', 'high', null, null, null, null, null, null, brief);
+  assert.equal(a.notes, brief);
+  assert.equal(ts.addTask('main', 'p', 'b', 'high').notes, null);
+  assert.equal(ts.getTask('main', 'p', a.id).notes, brief);
+
+  ts.startTask('main', 'p', a.id);
+  const edited = ts.setNotes('main', 'p', a.id, 'line one\nline two');
+  assert.equal(edited.notes, 'line one\nline two');
+  assert.equal(edited.status, 'in_progress');
+  assert.throws(() => ts.setNotes('main', 'p', a.id, 'x'.repeat(16 * 1024 + 1)), /16384/);
+  assert.equal(ts.setNotes('main', 'p', a.id, null).notes, null);
+  ts.setNotes('main', 'p', a.id, 'again');
+  assert.equal(ts.setNotes('main', 'p', a.id, '').notes, null);
+});
+
 test('blocker to nonexistent task rejected', () => {
   const { ts } = freshStore();
   ts.createPlan('main', 'p', null);

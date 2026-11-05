@@ -1,4 +1,5 @@
-//! Closing a plan through the wasm-bindgen task methods. Native, like
+//! Closing a plan, and a task's notes, through the wasm-bindgen task
+//! methods. Native, like
 //! `persistence.rs`: the success path is plain Rust. The refusals build a
 //! `JsValue`, which only works on wasm32; the tasks crate and the other
 //! bindings test those.
@@ -38,4 +39,55 @@ fn a_plan_closes_with_a_summary_after_its_last_task() {
     assert_eq!(closed["summary"], "shipped");
     assert_eq!(closed["closed_by"], "wasm-test");
     assert!(closed["closed_at"].is_string());
+}
+
+#[test]
+fn notes_are_added_set_and_cleared() {
+    let asg = WasmAgentStateGraph::new(None).unwrap();
+    let (prefix, agent) = ("/plans", "wasm-test");
+    asg.tasks_create_plan(prefix, agent, "main", "p", None)
+        .unwrap();
+    let brief = "Repo: infra/gitops.\n\n1. Write the manifests.\n2. Ask the user. \u{2713}\n";
+    let task = parse(
+        asg.tasks_add_task_with_extensions(
+            prefix,
+            agent,
+            "main",
+            "p",
+            "x",
+            "high",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(brief.to_string()),
+        )
+        .unwrap(),
+    );
+    assert_eq!(task["notes"], brief);
+    let id = task["id"].as_str().unwrap();
+
+    asg.tasks_start_task(prefix, agent, "main", "p", id)
+        .unwrap();
+    let edited = parse(
+        asg.tasks_set_notes(
+            prefix,
+            agent,
+            "main",
+            "p",
+            id,
+            Some("line one\nline two".into()),
+        )
+        .unwrap(),
+    );
+    assert_eq!(edited["notes"], "line one\nline two");
+    assert_eq!(edited["status"], "in_progress");
+
+    let cleared = parse(
+        asg.tasks_set_notes(prefix, agent, "main", "p", id, None)
+            .unwrap(),
+    );
+    assert!(cleared.get("notes").is_none(), "{cleared}");
 }

@@ -154,6 +154,7 @@ fn test_add_task_with_extensions_builder() {
                 payload: Some(payload.clone()),
                 parent_change: Some("spec-xyz".into()),
                 on_complete: Some(OnCompleteHook::PromoteChange),
+                notes: None,
             },
         )
         .unwrap();

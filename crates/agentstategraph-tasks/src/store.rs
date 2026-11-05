@@ -31,10 +31,26 @@ fn validate_blocker_ids(blockers: &[TaskId]) -> Result<(), TaskStoreError> {
     Ok(())
 }
 
+/// Notes as a task stores them: blank text (empty or only whitespace) is no
+/// notes, anything else is kept exactly as given, up to [`MAX_NOTES_BYTES`].
+fn normalize_notes(notes: Option<&str>) -> Result<Option<String>, TaskStoreError> {
+    match notes {
+        None => Ok(None),
+        Some(text) if text.trim().is_empty() => Ok(None),
+        Some(text) if text.len() > MAX_NOTES_BYTES => Err(TaskStoreError::NotesTooLong {
+            len: text.len(),
+            max: MAX_NOTES_BYTES,
+        }),
+        Some(text) => Ok(Some(text.to_string())),
+    }
+}
+
 use crate::error::TaskStoreError;
 use crate::paths;
 use crate::state::{Transition, check_transition};
-use crate::types::{OnCompleteHook, Plan, PlanStatus, Priority, Proof, Task, TaskId, TaskStatus};
+use crate::types::{
+    MAX_NOTES_BYTES, OnCompleteHook, Plan, PlanStatus, Priority, Proof, Task, TaskId, TaskStatus,
+};
 use crate::verifier::{Verifier, VerifyEntry, VerifyReport};
 
 /// Optional extension fields for [`TaskStore::add_task_with_extensions`].
@@ -45,11 +61,14 @@ use crate::verifier::{Verifier, VerifyEntry, VerifyReport};
 ///   created from a deferred `ChangeProposal`.
 /// - `on_complete`: hook the consumer dispatches when the task transitions
 ///   to `Done`. The `-tasks` crate does not execute it.
+/// - `notes`: the task's notes, as [`TaskStore::set_notes`] takes them.
+///   Blank text is no notes; more than [`MAX_NOTES_BYTES`] is refused.
 #[derive(Default)]
 pub struct AddTaskOptions {
     pub payload: Option<serde_json::Value>,
     pub parent_change: Option<String>,
     pub on_complete: Option<OnCompleteHook>,
+    pub notes: Option<String>,
 }
 
 /// A handle bound to a `Repository` and a path prefix. All operations on
@@ -356,7 +375,8 @@ impl TaskStore {
     }
 
     /// Like `add_task` but also accepts the policy-fallback extension
-    /// fields (POLICY_V1.md §22.4). See [`AddTaskOptions`] for field docs.
+    /// fields (POLICY_V1.md §22.4) and notes. See [`AddTaskOptions`] for
+    /// field docs.
     ///
     /// Uses a CAS retry loop so concurrent writers across processes are safe.
     /// On each retry, `next_task_number` re-scans the current tree, naturally
@@ -377,7 +397,9 @@ impl TaskStore {
             payload,
             parent_change,
             on_complete,
+            notes,
         } = opts;
+        let notes = normalize_notes(notes.as_deref())?;
         if !self.plan_exists(ref_name, plan)? {
             return Err(TaskStoreError::PlanNotFound(plan.to_string()));
         }
@@ -405,6 +427,7 @@ impl TaskStore {
             let task = Task {
                 id: id.clone(),
                 title: title.to_string(),
+                notes: notes.clone(),
                 status: TaskStatus::Pending,
                 priority,
                 parent_id: parent_id.clone(),
@@ -627,6 +650,32 @@ impl TaskStore {
         let desc = format!("Retitle {}/{}", plan, id);
         self.update_task(ref_name, plan, id, desc, |task| {
             task.title = title.to_string();
+            Ok(())
+        })
+    }
+
+    /// Replace a task's notes, or clear them with `None` or blank text.
+    ///
+    /// Notes may span lines and are kept exactly as given, up to
+    /// [`MAX_NOTES_BYTES`] of UTF-8; longer notes are refused with
+    /// [`TaskStoreError::NotesTooLong`] and the task is left as it was. Like
+    /// `set_title`, this works at any status, done and abandoned included,
+    /// and leaves everything else as it is. Each edit is a commit that
+    /// records who made it.
+    pub fn set_notes(
+        &self,
+        ref_name: &str,
+        plan: &str,
+        id: &TaskId,
+        notes: Option<&str>,
+    ) -> Result<Task, TaskStoreError> {
+        let notes = normalize_notes(notes)?;
+        let desc = match notes {
+            Some(_) => format!("Set notes on {}/{}", plan, id),
+            None => format!("Clear notes on {}/{}", plan, id),
+        };
+        self.update_task(ref_name, plan, id, desc, |task| {
+            task.notes = notes.clone();
             Ok(())
         })
     }

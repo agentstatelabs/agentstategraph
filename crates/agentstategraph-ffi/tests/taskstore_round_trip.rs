@@ -203,6 +203,112 @@ fn close_plan_refuses_open_work_via_ffi() {
 }
 
 #[test]
+fn task_notes_via_ffi() {
+    unsafe {
+        let repo = agentstategraph_new_memory();
+        let store = agentstategraph_taskstore_new(repo, c("/plans").as_ptr(), c("a").as_ptr());
+        let (main, plan, medium) = (c("main"), c("p"), c("medium"));
+        let null = std::ptr::null();
+        read(agentstategraph_taskstore_create_plan(
+            store,
+            main.as_ptr(),
+            plan.as_ptr(),
+            null,
+        ));
+
+        let brief = "Repo: infra/gitops.\n\n1. Write the manifests.\n2. Ask the user. ✓\n";
+        let notes = c(brief);
+        let added: serde_json::Value =
+            serde_json::from_str(&read(agentstategraph_taskstore_add_task_with_notes(
+                store,
+                main.as_ptr(),
+                plan.as_ptr(),
+                c("with notes").as_ptr(),
+                medium.as_ptr(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                notes.as_ptr(),
+            )))
+            .unwrap();
+        assert_eq!(added["notes"], brief);
+        let id = c(added["id"].as_str().unwrap());
+
+        // add_task_ex is unchanged: no notes.
+        let plain: serde_json::Value =
+            serde_json::from_str(&read(agentstategraph_taskstore_add_task_ex(
+                store,
+                main.as_ptr(),
+                plan.as_ptr(),
+                c("without").as_ptr(),
+                medium.as_ptr(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+            )))
+            .unwrap();
+        assert!(plain.get("notes").is_none(), "{plain}");
+
+        let edited: serde_json::Value =
+            serde_json::from_str(&read(agentstategraph_taskstore_set_notes(
+                store,
+                main.as_ptr(),
+                plan.as_ptr(),
+                id.as_ptr(),
+                c("line one\nline two").as_ptr(),
+            )))
+            .unwrap();
+        assert_eq!(edited["notes"], "line one\nline two");
+        let fetched: serde_json::Value = serde_json::from_str(&read(
+            agentstategraph_taskstore_get_task(store, main.as_ptr(), plan.as_ptr(), id.as_ptr()),
+        ))
+        .unwrap();
+        assert_eq!(fetched, edited);
+
+        let too_long = c(&"x".repeat(16 * 1024 + 1));
+        let refused = read(agentstategraph_taskstore_set_notes(
+            store,
+            main.as_ptr(),
+            plan.as_ptr(),
+            id.as_ptr(),
+            too_long.as_ptr(),
+        ));
+        assert!(refused.contains("16384"), "{refused}");
+
+        // NULL and "" both clear.
+        let empty = c("");
+        for clear in [null, empty.as_ptr()] {
+            read(agentstategraph_taskstore_set_notes(
+                store,
+                main.as_ptr(),
+                plan.as_ptr(),
+                id.as_ptr(),
+                c("again").as_ptr(),
+            ));
+            let cleared: serde_json::Value =
+                serde_json::from_str(&read(agentstategraph_taskstore_set_notes(
+                    store,
+                    main.as_ptr(),
+                    plan.as_ptr(),
+                    id.as_ptr(),
+                    clear,
+                )))
+                .unwrap();
+            assert!(cleared.get("notes").is_none(), "{cleared}");
+        }
+
+        agentstategraph_taskstore_free(store);
+        agentstategraph_free(repo);
+    }
+}
+
+#[test]
 fn null_inputs_return_null() {
     let p = agentstategraph_taskstore_new(std::ptr::null(), c("/plans").as_ptr(), c("a").as_ptr());
     assert!(p.is_null());

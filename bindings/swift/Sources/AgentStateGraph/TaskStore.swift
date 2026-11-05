@@ -64,6 +64,8 @@ public struct Plan: Codable, Sendable, Equatable {
 public struct Task: Codable, Sendable, Equatable {
     public let id: String
     public let title: String
+    /// Free-form notes, multi-line, at most 16 KiB of UTF-8; nil when none.
+    public let notes: String?
     public let status: TaskStatus
     public let priority: Priority
     public let parentId: String?
@@ -83,7 +85,7 @@ public struct Task: Codable, Sendable, Equatable {
     public let onComplete: JSONValue?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, status, priority, proof, payload
+        case id, title, notes, status, priority, proof, payload
         case parentId = "parent_id"
         case blockedBy = "blocked_by"
         case createdAt = "created_at"
@@ -105,11 +107,18 @@ public struct AddTaskOptions: Sendable {
     public var parentId: String?
     public var blockers: [String]?
     public var assignedTo: String?
+    /// The task's notes: free text that may span lines, at most 16 KiB of
+    /// UTF-8. Nil or blank adds the task without notes.
+    public var notes: String?
 
-    public init(parentId: String? = nil, blockers: [String]? = nil, assignedTo: String? = nil) {
+    public init(
+        parentId: String? = nil, blockers: [String]? = nil, assignedTo: String? = nil,
+        notes: String? = nil
+    ) {
         self.parentId = parentId
         self.blockers = blockers
         self.assignedTo = assignedTo
+        self.notes = notes
     }
 }
 
@@ -260,10 +269,12 @@ public final class TaskStore {
         let blockersJSON = try options.blockers.map { try encodeJSON($0) }
         let cBlockers = sgDup(blockersJSON); defer { free(cBlockers) }
         let cAssigned = sgDup(options.assignedTo); defer { free(cAssigned) }
+        let cNotes = sgDup(options.notes); defer { free(cNotes) }
         let raw = try consume(
-            agentstategraph_taskstore_add_task(
-                s, cRef, cPlan, cTitle, cPrio, cParent, cBlockers, cAssigned),
-            "add_task")
+            agentstategraph_taskstore_add_task_with_notes(
+                s, cRef, cPlan, cTitle, cPrio, cParent, cBlockers, cAssigned,
+                nil, nil, nil, cNotes),
+            "add_task_with_notes")
         return try decodeJSON(raw)
     }
 
@@ -291,11 +302,12 @@ public final class TaskStore {
         let cParentChange = sgDup(options.parentChange); defer { free(cParentChange) }
         let onCompleteJSON = try options.onComplete.map { try encodeJSON($0) }
         let cOnComplete = sgDup(onCompleteJSON); defer { free(cOnComplete) }
+        let cNotes = sgDup(options.base.notes); defer { free(cNotes) }
         let raw = try consume(
-            agentstategraph_taskstore_add_task_ex(
+            agentstategraph_taskstore_add_task_with_notes(
                 s, cRef, cPlan, cTitle, cPrio, cParent, cBlockers, cAssigned,
-                cPayload, cParentChange, cOnComplete),
-            "add_task_ex")
+                cPayload, cParentChange, cOnComplete, cNotes),
+            "add_task_with_notes")
         return try decodeJSON(raw)
     }
 
@@ -378,6 +390,20 @@ public final class TaskStore {
         let cTitle = sgDup(title); defer { free(cTitle) }
         let raw = try consume(
             agentstategraph_taskstore_set_title(s, cRef, cPlan, cID, cTitle), "set_title")
+        return try decodeJSON(raw)
+    }
+
+    /// Replace a task's notes: free text that may span lines, at most 16 KiB
+    /// of UTF-8. Nil or blank text clears them. Works at any status.
+    @discardableResult
+    public func setNotes(plan: String, id: String, notes: String?, ref: String = "main") throws -> Task {
+        let s = try h()
+        let cRef = sgDup(ref); defer { free(cRef) }
+        let cPlan = sgDup(plan); defer { free(cPlan) }
+        let cID = sgDup(id); defer { free(cID) }
+        let cNotes = sgDup(notes); defer { free(cNotes) }
+        let raw = try consume(
+            agentstategraph_taskstore_set_notes(s, cRef, cPlan, cID, cNotes), "set_notes")
         return try decodeJSON(raw)
     }
 

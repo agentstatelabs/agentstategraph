@@ -616,10 +616,11 @@ impl WasmAgentStateGraph {
     }
 
     /// Add a task with the 0.6.0 extension fields (`payload`,
-    /// `parent_change`, `on_complete`). All three are JSON strings; pass
-    /// `None` / null for unset. `payload` is an arbitrary JSON value,
+    /// `parent_change`, `on_complete`) and its `notes`. Pass `None` / null
+    /// for any that's unset. `payload` is an arbitrary JSON value,
     /// `parent_change` a `"spec-id@version"` handle, `on_complete` a
-    /// JSON-serialized `OnCompleteHook`.
+    /// JSON-serialized `OnCompleteHook`, and `notes` free text (multi-line,
+    /// at most 16 KiB of UTF-8; blank is none).
     #[wasm_bindgen(js_name = tasksAddTaskWithExtensions)]
     #[allow(clippy::too_many_arguments)]
     pub fn tasks_add_task_with_extensions(
@@ -636,6 +637,7 @@ impl WasmAgentStateGraph {
         payload_json: Option<String>,
         parent_change: Option<String>,
         on_complete_json: Option<String>,
+        notes: Option<String>,
     ) -> Result<String, JsValue> {
         let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
         let prio = parse_priority(priority);
@@ -672,6 +674,7 @@ impl WasmAgentStateGraph {
                     payload,
                     parent_change,
                     on_complete,
+                    notes,
                 },
             )
             .map_err(js_err)?;
@@ -821,6 +824,30 @@ impl WasmAgentStateGraph {
         let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
         let task = store
             .set_title(ref_name, plan, &TaskId(task_id.to_string()), title)
+            .map_err(js_err)?;
+        serde_json::to_string(&task).map_err(js_err)
+    }
+
+    /// Replace a task's notes (multi-line, at most 16 KiB of UTF-8); null or
+    /// blank text clears them. Works at any status.
+    #[wasm_bindgen(js_name = tasksSetNotes)]
+    pub fn tasks_set_notes(
+        &self,
+        prefix: &str,
+        agent_id: &str,
+        ref_name: &str,
+        plan: &str,
+        task_id: &str,
+        notes: Option<String>,
+    ) -> Result<String, JsValue> {
+        let store = TaskStore::new(self.repo.clone(), prefix, agent_id);
+        let task = store
+            .set_notes(
+                ref_name,
+                plan,
+                &TaskId(task_id.to_string()),
+                notes.as_deref(),
+            )
             .map_err(js_err)?;
         serde_json::to_string(&task).map_err(js_err)
     }
