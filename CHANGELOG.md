@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.5.2] — 2026-11-05
+
+Fixes for the .NET binding's policies, whose tests now run in CI. The Rust crates are unchanged from 1.5.1. This release also publishes a Python wheel, which 1.5.1 didn't.
+
 ### Fixed
 - **In .NET, a tenant with no policy of its own now falls back to the global policies,** as in the other bindings. With a tenant filter, `Evaluate` and `EvaluateChange` evaluated every policy and then, if the match was another tenant's, answered `NoPolicyMatch`, so a global policy behind it was never reached. They now use the C ABI's scoped evaluators, which leave other tenants' policies out before matching.
 - **.NET `PolicyStore.Sign` returns the C ABI's envelope as it is,** as Go does, instead of throwing. A signer can't be registered through the C ABI yet, so the envelope is always `{"error": "no signer registered"}` for now.
