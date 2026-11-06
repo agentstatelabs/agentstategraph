@@ -355,6 +355,12 @@ publish-crates:
   resource_group: crates-io
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/ && $CARGO_REGISTRY_TOKEN'
+  variables:
+    # One HTTP/2 connection per host broke mid-publish on v1.5.2: cargo's
+    # verify builds failed three runs in a row with curl's "[16] Error in the
+    # HTTP2 framing layer" from index.crates.io, before anything uploaded. A
+    # pipeline with multiplexing off published all 16 crates on its first try.
+    CARGO_HTTP_MULTIPLEXING: "false"
   script:
     - |
       if [ -z "${LEAKSCAN_LOCAL:-}" ]; then

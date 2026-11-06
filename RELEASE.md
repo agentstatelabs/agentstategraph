@@ -114,6 +114,14 @@ has the ones already uploaded, for as long as each `cargo publish` uploads
 something. A failure that uploads nothing, such as a build error, fails the job
 at once.
 
+The job sets `CARGO_HTTP_MULTIPLEXING=false`, so cargo opens a connection per
+download instead of sharing one HTTP/2 connection. On v1.5.2, three runs in a
+row failed before uploading anything, with curl's `[16] Error in the HTTP2
+framing layer` from `index.crates.io` during the verify builds. A new pipeline
+for the tag with that variable set published every crate on its first try. A
+tag cut before the job set it can get it the same way: run a new pipeline for
+the tag with the variable `CARGO_HTTP_MULTIPLEXING` set to `false`.
+
 ## Re-running a tag pipeline
 
 A new pipeline on a tag that has already been released is safe: every publish
