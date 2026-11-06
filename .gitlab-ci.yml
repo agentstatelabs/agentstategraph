@@ -236,7 +236,9 @@ publish-wheel:
   rules:
     - if: $CI_COMMIT_TAG
   script:
-    - apt-get install -y -qq python3-pip
+    # The rust-ci image deletes its package lists after it installs, so apt
+    # has to fetch them before it can find python3-pip.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-pip
     - pip3 install --break-system-packages --quiet maturin twine
     - cd bindings/python
     - maturin build --release -i python3 --out dist
