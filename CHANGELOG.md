@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.5.4] — 2026-11-07
+
+Writes are much faster on a store with sealed epochs. Only a move of `main` that doesn't build on its head, such as a rewind, still pays for the seal check. The API is unchanged.
+
 ### Fixed
 - **A write no longer pays for the epoch-seal check unless it could break a seal.** The check lists every epoch with its sealed commits, then walks the commit DAG from the new head. It ran on every ref move, though only a move of `main` that doesn't build on its head can orphan a sealed commit. On a 2.5 GB store with 364 epochs, every write paid 0.5 s just to list them, and up to 1.6 s where seals bound. On a copy of that store:
   - CTXone 1.3.0's one-time move of raw turns, a commit on each of 220 branches, took 48.5 s instead of 299 s;
