@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- **A write no longer pays for the epoch-seal check unless it could break a seal.** The check lists every epoch with its sealed commits, then walks the commit DAG from the new head. It ran on every ref move, though only a move of `main` that doesn't build on its head can orphan a sealed commit. On a 2.5 GB store with 364 epochs, every write paid 0.5 s just to list them, and up to 1.6 s where seals bound. On a copy of that store:
+  - CTXone 1.3.0's one-time move of raw turns, a commit on each of 220 branches, took 48.5 s instead of 299 s;
+  - an ordinary write to its busiest workspace took 4 to 9 ms instead of 0.65 to 1.6 s.
+
+  Now the check is skipped for:
+  - any ref but `main`, where a violation was never acted on;
+  - a move of `main` onto its head or onto a commit built on it. That keeps every commit reachable, as a fast-forward push does.
+
+  A rewind of `main`, or a jump to a commit that doesn't build on its head, is checked as before.
+
 ## [v1.5.3] — 2026-11-07
 
 Stores that already have history can sync (DESIGN.md Plan G t-014). Until now only a store holding nothing but `init`'s first commit could take a hub's history, and a seal over history a store never received stopped every write to its `main`.

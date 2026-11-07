@@ -3661,22 +3661,58 @@ impl Repository {
         Ok(violations)
     }
 
-    /// Enforce epoch seals against a proposed `set_ref` to `ref_name`.
+    /// Whether moving `ref_name` from `old_head` to `new_target` needs the
+    /// full seal check ([`Self::check_epoch_seal_violations`]). It doesn't
+    /// when:
+    /// - **`ref_name` isn't `main`.** `main` is the seal anchor, and a side
+    ///   branch may sit on a state without every sealed commit, so a
+    ///   violation there was never acted on.
+    /// - **The move orphans nothing:** `new_target` is `old_head`, or is
+    ///   built on it (a commit or merge with `old_head` as a parent). Every
+    ///   commit reachable before stays reachable, so no seal can break, as
+    ///   for a fast-forward push ([`Self::fast_forward_ref`]).
+    ///
+    /// The full check lists every epoch and walks the commit DAG. On a
+    /// 2.5 GB store with 364 epochs, that was 0.5 s for every write in any
+    /// namespace and up to 1.6 s where seals bound, so these come first.
+    fn seal_check_needed(
+        &self,
+        ref_name: &str,
+        old_head: Option<&ObjectId>,
+        new_target: &ObjectId,
+    ) -> Result<bool, RepoError> {
+        if ref_name != "main" {
+            return Ok(false);
+        }
+        let Some(old) = old_head else {
+            return Ok(true);
+        };
+        if old == new_target {
+            return Ok(false);
+        }
+        Ok(match self.storage.get_commit(new_target)? {
+            Some(commit) => !commit.parents.contains(old),
+            None => true,
+        })
+    }
+
+    /// Enforce epoch seals against a proposed move of `ref_name` from
+    /// `old_head` (`None` when the ref doesn't exist yet) to `new_target`.
     /// In strict mode (default) returns `RepoError::EpochSealViolated`. In
-    /// warn mode (opt-out) logs to stderr and proceeds.
-    fn enforce_epoch_seals(&self, ref_name: &str, new_target: &ObjectId) -> Result<(), RepoError> {
-        // Only `main` is the canonical seal anchor; branch/spec updates
-        // don't orphan sealed commits reachable from main because main
-        // itself hasn't moved. We still check on `main` mutations and on
-        // explicit low-level set_ref for any ref (cheap insurance).
-        let violations = self.check_epoch_seal_violations(new_target)?;
-        if violations.is_empty() {
+    /// warn mode (opt-out) logs to stderr and proceeds. Only a move of
+    /// `main` that doesn't build on its head is checked: see
+    /// [`Self::seal_check_needed`].
+    fn enforce_epoch_seals(
+        &self,
+        ref_name: &str,
+        old_head: Option<&ObjectId>,
+        new_target: &ObjectId,
+    ) -> Result<(), RepoError> {
+        if !self.seal_check_needed(ref_name, old_head, new_target)? {
             return Ok(());
         }
-        // Prefer main-only enforcement: a side-branch can legitimately sit
-        // on a state that doesn't include every sealed commit. Skip unless
-        // the ref being mutated is `main`.
-        if ref_name != "main" {
+        let violations = self.check_epoch_seal_violations(new_target)?;
+        if violations.is_empty() {
             return Ok(());
         }
         if self.epoch_seal_strict {
@@ -3708,14 +3744,12 @@ impl Repository {
     fn guarded_set_ref(&self, ref_name: &str, new_target: ObjectId) -> Result<(), RepoError> {
         refuse_reserved_ref(ref_name)?;
         let ns = self.active_namespace()?;
-        self.enforce_epoch_seals(ref_name, &new_target)?;
+        // Unreadable reads as absent, which gets the full check.
+        let old_head = self.storage.get_ref(&ns, ref_name).ok().flatten();
+        self.enforce_epoch_seals(ref_name, old_head.as_ref(), &new_target)?;
         // Capture the outgoing state root before the ref moves, so the leaf
         // index can be updated with just the delta this write introduces.
-        let old_root = self
-            .storage
-            .get_ref(&ns, ref_name)
-            .ok()
-            .flatten()
+        let old_root = old_head
             .and_then(|cid| self.storage.get_commit(&cid).ok().flatten())
             .map(|c| c.state_root);
         self.storage.set_ref(&ns, ref_name, new_target)?;
@@ -3741,7 +3775,7 @@ impl Repository {
     ) -> Result<bool, RepoError> {
         refuse_reserved_ref(ref_name)?;
         let ns = self.active_namespace()?;
-        self.enforce_epoch_seals(ref_name, &new_target)?;
+        self.enforce_epoch_seals(ref_name, Some(&expected), &new_target)?;
         let old_root = self
             .storage
             .get_commit(&expected)
@@ -5617,6 +5651,68 @@ mod tests {
         // Now the attempt to rewind past a sealed commit must fail.
         let res = repo.set_ref("main", pre_seal);
         match res {
+            Err(RepoError::EpochSealViolated { .. }) => {}
+            other => panic!("expected EpochSealViolated, got {other:?}"),
+        }
+    }
+
+    /// The full seal check lists every epoch and walks the commit DAG, so it
+    /// runs only for a move that could orphan a sealed commit: one of `main`
+    /// that doesn't build on its head. It used to run for every write, and
+    /// on a 2.5 GB store each took 0.5 to 1.6 s.
+    #[test]
+    fn the_seal_check_runs_only_for_a_main_move_off_its_head() {
+        let repo = test_repo();
+        let a = repo
+            .set("main", "/a", &Object::int(1), quick_opts("a"))
+            .unwrap();
+        let b = repo
+            .set("main", "/b", &Object::int(2), quick_opts("b"))
+            .unwrap();
+        repo.branch("side", "main").unwrap();
+        let s = repo
+            .set("side", "/s", &Object::int(3), quick_opts("s"))
+            .unwrap();
+
+        // Building on the head, or not moving at all, orphans nothing.
+        assert!(!repo.seal_check_needed("main", Some(&a), &b).unwrap());
+        assert!(!repo.seal_check_needed("main", Some(&b), &b).unwrap());
+        // A rewind, a jump past the head, or a ref with no head yet.
+        assert!(repo.seal_check_needed("main", Some(&b), &a).unwrap());
+        assert!(repo.seal_check_needed("main", Some(&a), &s).unwrap());
+        assert!(repo.seal_check_needed("main", None, &b).unwrap());
+        // Any ref but main, however it moves.
+        assert!(!repo.seal_check_needed("side", Some(&s), &a).unwrap());
+        assert!(!repo.seal_check_needed("side", None, &a).unwrap());
+    }
+
+    #[test]
+    fn a_sealed_store_takes_writes_and_still_refuses_a_rewind_of_main() {
+        let repo = Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ))
+        .with_epoch_seal_strict(true);
+        repo.init().unwrap();
+        repo.set("main", "/a", &Object::string("1"), quick_opts("a"))
+            .unwrap();
+        let pre_seal = repo
+            .set("main", "/b", &Object::string("2"), quick_opts("b"))
+            .unwrap();
+        repo.set("main", "/c", &Object::string("3"), quick_opts("c"))
+            .unwrap();
+        repo.branch("side", "main").unwrap();
+        repo.create_epoch("e1", "scoped work", vec![]).unwrap();
+        repo.seal_epoch("e1", "ship").unwrap();
+
+        // Writes on main and on a side branch build on their heads.
+        repo.set("main", "/d", &Object::string("4"), quick_opts("d"))
+            .unwrap();
+        repo.set("side", "/e", &Object::string("5"), quick_opts("e"))
+            .unwrap();
+        // A side branch may still be moved anywhere.
+        repo.set_ref("side", pre_seal).unwrap();
+        // A rewind of main past the seal is still refused.
+        match repo.set_ref("main", pre_seal) {
             Err(RepoError::EpochSealViolated { .. }) => {}
             other => panic!("expected EpochSealViolated, got {other:?}"),
         }
