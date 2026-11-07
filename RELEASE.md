@@ -73,7 +73,7 @@ expected, not a failed release.
 
 ## Publishing the crates to crates.io
 
-The 15 crates under `crates/` publish to crates.io. `bindings/python` and
+Every crate under `crates/` publishes to crates.io. `bindings/python` and
 `bindings/typescript` are `publish = false`: they ship as a wheel and an npm
 package, not as crates.
 

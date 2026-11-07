@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.5.3] — 2026-11-07
+
 Stores that already have history can sync (DESIGN.md Plan G t-014). Until now only a store holding nothing but `init`'s first commit could take a hub's history, and a seal over history a store never received stopped every write to its `main`.
 
 ### Added

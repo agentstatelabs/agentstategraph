@@ -160,7 +160,7 @@ and iOS Simulator arm64/x86_64 slices.
 - **Browser explorer** — interactive data viewer at [agentstategraph.dev/explorer/](https://agentstategraph.dev/explorer/)
 - **8 language bindings** — Rust, Python, TypeScript, Go, Swift, .NET / C#, WASM, C FFI
 - **4 storage backends** — Memory, SQLite, Postgres (tenants partitioned in a shared database, with TLS), IndexedDB (browser)
-- **15 crates** — modular core, storage, MCP, policy (+ pluggable Rego / Cedar / WASM evaluators), taint, tasks, reminders, migrate, FFI, and WASM
+- **16 crates** — modular core, storage, MCP, policy (+ pluggable Rego / Cedar / WASM evaluators), taint, tasks, reminders, migrate, HTTP sync, FFI, and WASM
 - **Namespaces** — a separate set of branches per project in one store. They partition branches but aren't a security boundary; an API key bound to a namespace confines a client to it
 - **Reminders** — pull-based scheduling with priority, recurrence, and approval gating
 - **Taint & quarantine** — `agentstategraph-taint` mark-and-sweep enforced at commit time
