@@ -1207,7 +1207,9 @@ impl Repository {
         target: &str,
         options: CommitOptions,
     ) -> Result<ObjectId, RepoError> {
-        self.merge_inner(source, target, options, false, true)
+        // As `merge` does: against an empty base nothing can be removed, and
+        // related histories join as they merge.
+        self.merge_inner(source, target, options, true, true)
     }
 
     fn merge_inner(
