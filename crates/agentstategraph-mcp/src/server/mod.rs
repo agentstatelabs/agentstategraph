@@ -298,6 +298,13 @@ pub struct PullParams {
     /// Why, for a merge commit if one is made (default: "pull from <remote>").
     #[serde(default)]
     pub intent_description: Option<String>,
+    /// Join a local branch whose history shares no commit with the
+    /// remote's, merging the two against an empty base, as git's
+    /// --allow-unrelated-histories does (default: false). Two stores that
+    /// each began on their own need this the first time one pulls the
+    /// other's.
+    #[serde(default)]
+    pub allow_unrelated: bool,
     /// Optional namespace override.
     #[serde(default)]
     pub namespace: Option<String>,
@@ -2655,7 +2662,7 @@ impl AgentStateGraphServer {
     }
 
     #[tool(
-        description = "Pull a branch from a sync remote: fetch it, renumber local tasks whose ids the remote also used, and merge it into the local branch."
+        description = "Pull a branch from a sync remote: fetch it, renumber local tasks whose ids the remote also used, and merge it into the local branch. A store that began on its own shares no history with the remote; pass allow_unrelated to join the two histories the first time."
     )]
     async fn agentstategraph_pull(&self, params: Parameters<PullParams>) -> String {
         let p = params.0;
@@ -2668,7 +2675,7 @@ impl AgentStateGraphServer {
             .unwrap_or_else(|| format!("pull from {}", p.remote));
         let options = CommitOptions::new("mcp-agent", IntentCategory::Merge, description);
         let done = tokio::task::spawn_blocking(move || {
-            crate::sync_ops::pull(repo, &p.remote, &p.r#ref, options)
+            crate::sync_ops::pull(repo, &p.remote, &p.r#ref, options, p.allow_unrelated)
         })
         .await;
         match done {

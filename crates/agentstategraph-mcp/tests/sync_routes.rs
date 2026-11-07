@@ -130,4 +130,46 @@ async fn the_api_syncs_with_a_hub_by_remote_name() {
     assert_eq!(missing.status().as_u16(), 404);
     let body: Value = missing.json().await.unwrap();
     assert_eq!(body["code"], "no_such_remote");
+
+    // A store with history of its own joins the hub's only when asked to.
+    let other = repo();
+    other
+        .set_json(
+            "main",
+            "/y",
+            &json!(2),
+            CommitOptions::new("agent/test", IntentCategory::Refine, "y"),
+        )
+        .unwrap();
+    let other_api = serve(http::build_router_with(
+        TenantManager::single_tenant(other.clone()),
+        0,
+        None,
+    ))
+    .await;
+    let post_other =
+        |path: &str, body: Value| client.post(format!("{other_api}{path}")).json(&body).send();
+    let added = post_other(
+        "/api/admin/remotes",
+        json!({"name": "hub", "url": hub_url, "token_env": TOKEN_ENV}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(added.status().as_u16(), 200);
+    let refused = post_other("/api/sync/pull", json!({"remote": "hub"}))
+        .await
+        .unwrap();
+    assert_ne!(refused.status().as_u16(), 200);
+    let joined: Value = post_other(
+        "/api/sync/pull",
+        json!({"remote": "hub", "allow_unrelated": true}),
+    )
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(joined["outcome"], "merged", "{joined}");
+    assert_eq!(other.get_json("main", "/x").unwrap(), json!(1));
+    assert_eq!(other.get_json("main", "/y").unwrap(), json!(2));
 }

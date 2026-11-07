@@ -84,8 +84,10 @@ impl AgentStateGraph {
         json_to_py(py, &done.map_err(err)?)
     }
 
-    /// Fetch a branch from a remote and merge it into the local one.
-    #[pyo3(signature = (remote, r#ref="main", description=None, agent=None))]
+    /// Fetch a branch from a remote and merge it into the local one. With
+    /// `allow_unrelated`, a branch whose history shares no commit with the
+    /// remote's joins it, merged against an empty base.
+    #[pyo3(signature = (remote, r#ref="main", description=None, agent=None, allow_unrelated=false))]
     fn pull(
         &self,
         py: Python<'_>,
@@ -93,6 +95,7 @@ impl AgentStateGraph {
         r#ref: &str,
         description: Option<String>,
         agent: Option<String>,
+        allow_unrelated: bool,
     ) -> PyResult<PyObject> {
         let repo = self.repo.clone();
         let options = CommitOptions::new(
@@ -101,7 +104,12 @@ impl AgentStateGraph {
             description.unwrap_or_else(|| format!("pull from {remote}")),
         );
         let done = py.allow_threads(move || {
-            named::pull(&repo, remote, r#ref, options).map(|r| report::pull(&r))
+            if allow_unrelated {
+                named::join(&repo, remote, r#ref, options)
+            } else {
+                named::pull(&repo, remote, r#ref, options)
+            }
+            .map(|r| report::pull(&r))
         });
         json_to_py(py, &done.map_err(err)?)
     }

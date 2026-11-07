@@ -1509,6 +1509,9 @@ struct SyncPullRequest {
     intent_description: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// Join unrelated histories (see `Repository::join`).
+    #[serde(default)]
+    allow_unrelated: bool,
 }
 
 async fn sync_pull(
@@ -1529,6 +1532,7 @@ async fn sync_pull(
             &req.remote,
             ref_name,
             options,
+            req.allow_unrelated,
         )?))
     })
     .await

@@ -131,13 +131,16 @@ pub fn push(
     Err(unavailable())
 }
 
-/// Fetch `ref_name`, renumber colliding tasks in `/plans`, then merge.
+/// Fetch `ref_name`, renumber colliding tasks in `/plans`, then merge. With
+/// `allow_unrelated`, a local branch with no commit in common with the
+/// remote's joins it, merged against an empty base (`Repository::join`).
 #[cfg(feature = "sync-client")]
 pub fn pull(
     repo: Arc<Repository>,
     remote: &str,
     ref_name: &str,
     options: CommitOptions,
+    allow_unrelated: bool,
 ) -> Result<Value, SyncFailure> {
     use agentstategraph::sync::tracking_ref;
     let fetched = agentstategraph_sync_http::named::fetch(&repo, remote, &[ref_name])?;
@@ -153,7 +156,11 @@ pub fn pull(
             message: e.to_string(),
             details: None,
         })?;
-    let outcome = repo.merge_fetched(remote, ref_name, options)?;
+    let outcome = if allow_unrelated {
+        repo.join_fetched(remote, ref_name, options)?
+    } else {
+        repo.merge_fetched(remote, ref_name, options)?
+    };
     let mut out = agentstategraph_sync_http::report::pull_outcome(&outcome);
     out["fetch"] = agentstategraph_sync_http::report::fetch(&fetched);
     out["renumbered"] = renumbered
@@ -178,6 +185,7 @@ pub fn pull(
     _remote: &str,
     _ref_name: &str,
     _options: CommitOptions,
+    _allow_unrelated: bool,
 ) -> Result<Value, SyncFailure> {
     Err(unavailable())
 }

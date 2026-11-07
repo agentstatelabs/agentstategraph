@@ -1189,6 +1189,35 @@ impl Repository {
         options: CommitOptions,
         allow_deletions: bool,
     ) -> Result<ObjectId, RepoError> {
+        self.merge_inner(source, target, options, allow_deletions, false)
+    }
+
+    /// [`Repository::merge`] that also joins histories with no commit in
+    /// common, as git's `--allow-unrelated-histories` does: against an empty
+    /// base, so the result holds what both sides hold, and a path both hold
+    /// differently is a conflict. The merge commit has both heads as
+    /// parents, even when one side's tree is empty, so neither history is
+    /// orphaned. Related histories merge as [`Repository::merge`] does.
+    ///
+    /// Two stores that each began on their own share no commit; this is how
+    /// one joins the other's history (`Repository::join`).
+    pub fn merge_unrelated(
+        &self,
+        source: &str,
+        target: &str,
+        options: CommitOptions,
+    ) -> Result<ObjectId, RepoError> {
+        self.merge_inner(source, target, options, false, true)
+    }
+
+    fn merge_inner(
+        &self,
+        source: &str,
+        target: &str,
+        options: CommitOptions,
+        allow_deletions: bool,
+        unrelated: bool,
+    ) -> Result<ObjectId, RepoError> {
         let span = write_span!("asg.repo.merge", target, options);
         telemetry::write("merge", span, || {
             // The merge is computed against the target's head at the time, so
@@ -1198,7 +1227,7 @@ impl Repository {
             for attempt in 0..MAX_REF_CAS_ATTEMPTS {
                 telemetry::cas_attempt("merge", attempt);
                 if let Some(id) =
-                    self.try_merge_checked(source, target, &options, allow_deletions)?
+                    self.try_merge_checked(source, target, &options, allow_deletions, unrelated)?
                 {
                     return Ok(id);
                 }
@@ -1216,9 +1245,10 @@ impl Repository {
         target: &str,
         options: &CommitOptions,
         allow_deletions: bool,
+        unrelated: bool,
     ) -> Result<Option<ObjectId>, RepoError> {
         let (_, target_is_branch) = self.head_for_write(target)?;
-        let comp = self.compute_merge(source, target)?;
+        let comp = self.compute_merge_with(source, target, unrelated)?;
 
         if !allow_deletions {
             let removed = self.top_level_removals(&comp)?;
@@ -1396,6 +1426,18 @@ impl Repository {
     /// Resolve, find base, and run the collecting three-way merge without
     /// committing. Shared by `merge_checked` and `preview_merge`.
     fn compute_merge(&self, source: &str, target: &str) -> Result<MergeComputation, RepoError> {
+        self.compute_merge_with(source, target, false)
+    }
+
+    /// [`Self::compute_merge`]; with `unrelated`, histories with no common
+    /// ancestor merge against an empty base, and the result is always a
+    /// merge of both, never a fast-forward that would drop one history.
+    fn compute_merge_with(
+        &self,
+        source: &str,
+        target: &str,
+        unrelated: bool,
+    ) -> Result<MergeComputation, RepoError> {
         let source_commit_id = self.resolve_ref(source)?;
         let target_commit_id = self.resolve_ref(target)?;
 
@@ -1408,25 +1450,44 @@ impl Repository {
             .get_commit(&target_commit_id)?
             .ok_or_else(|| RepoError::RefNotFound(target.to_string()))?;
 
-        let base_commit_id = self.find_common_ancestor(&source_commit_id, &target_commit_id)?;
-        let base_commit = self
-            .storage
-            .get_commit(&base_commit_id)?
-            .ok_or_else(|| RepoError::RefNotFound("base".to_string()))?;
+        let (base_root, joined) =
+            match self.find_common_ancestor(&source_commit_id, &target_commit_id) {
+                Ok(base_commit_id) => (
+                    self.storage
+                        .get_commit(&base_commit_id)?
+                        .ok_or_else(|| RepoError::RefNotFound("base".to_string()))?
+                        .state_root,
+                    false,
+                ),
+                // No commit in common: join against an empty tree.
+                Err(RepoError::RefNotFound(_)) if unrelated => {
+                    (self.storage.put_object(&Object::empty_map())?, true)
+                }
+                Err(e) => return Err(e),
+            };
 
         let resolver = StorageResolver {
             storage: self.storage.as_ref(),
         };
-        let (result, created) = agentstategraph_core::merge::try_three_way_merge_collect(
+        let (mut result, created) = agentstategraph_core::merge::try_three_way_merge_collect(
             &resolver,
-            &base_commit.state_root,
+            &base_root,
             &target_commit.state_root,
             &source_commit.state_root,
         )
         .map_err(|missing| RepoError::IntegrityViolation {
-            root: base_commit.state_root,
+            root: base_root,
             missing,
         })?;
+        // A join is always a merge commit: a fast-forward to either side
+        // would leave the other history unreachable.
+        if joined && let MergeResult::FastForward(root) = result {
+            let tree = self
+                .storage
+                .get_object(&root)?
+                .ok_or_else(|| RepoError::CommitNotFound(root.to_string()))?;
+            result = MergeResult::Success(tree);
+        }
 
         Ok(MergeComputation {
             source_commit_id,
@@ -3539,8 +3600,14 @@ impl Repository {
     }
 
     /// Given a proposed new ref target, return one `EpochViolation` per
-    /// sealed epoch whose `sealed_commits` include any commit that is NOT
-    /// reachable from the new target.
+    /// sealed epoch whose `sealed_commits` include any commit that this
+    /// store holds and that is NOT reachable from the new target.
+    ///
+    /// A sealed commit the store doesn't hold is left out: a ref move can't
+    /// orphan a commit that was never here. A seal that came by sync covers
+    /// the sealing store's history, and a store that took that history
+    /// shallow, or not at all, never held most of it. Commits are never
+    /// deleted, so one that's absent was never held.
     ///
     /// An empty result means the proposed update preserves every seal.
     /// (security threat model v3+, V8)
@@ -3574,12 +3641,14 @@ impl Repository {
             .collect();
         let mut violations = Vec::new();
         for epoch in binding.iter() {
-            let unreachable: Vec<ObjectId> = epoch
-                .sealed_commits
-                .iter()
-                .copied()
-                .filter(|c| !reachable.contains(c))
-                .collect();
+            let mut unreachable: Vec<ObjectId> = Vec::new();
+            for c in &epoch.sealed_commits {
+                // Only an unreachable commit costs a lookup, and a healthy
+                // store has none.
+                if !reachable.contains(c) && self.storage.has_commit(c)? {
+                    unreachable.push(*c);
+                }
+            }
             if !unreachable.is_empty() {
                 violations.push(EpochViolation {
                     epoch_id: epoch.id.clone(),

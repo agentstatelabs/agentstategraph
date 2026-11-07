@@ -104,6 +104,31 @@ fn stores_push_and_pull_through_a_hub_by_remote_name() {
             .contains("no remote is named nope"),
         "{missing}"
     );
+    // A store with history of its own joins only when asked to.
+    let c = agentstategraph_new_memory();
+    call(
+        c,
+        "remote.add",
+        json!({"name": "hub", "url": url, "store": "team"}),
+    );
+    let head = call(c, "head", json!({}))["head"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(
+        c,
+        "set_cas",
+        json!({"expected_head": head, "path": "/mine", "value": true, "description": "mine"}),
+    );
+    let refused = call(c, "sync.pull", json!({"remote": "hub"}));
+    assert!(refused.get("error").is_some(), "{refused}");
+    let joined = call(
+        c,
+        "sync.pull",
+        json!({"remote": "hub", "allow_unrelated": true}),
+    );
+    assert_eq!(joined["outcome"], "merged", "{joined}");
+
     assert_eq!(
         call(a, "remote.remove", json!({"name": "hub"}))["removed"],
         true

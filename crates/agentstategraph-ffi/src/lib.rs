@@ -919,8 +919,18 @@ fn repository_call(
                 IntentCategory::Merge,
                 optional("description").unwrap_or_else(|| format!("pull from {remote}")),
             );
-            let report = sync_http::named::pull(repo, &remote, &ref_name(), options)
-                .map_err(|e| e.to_string())?;
+            // `allow_unrelated` joins a history that shares no commit with
+            // the remote's (`Repository::join`).
+            let allow_unrelated = request
+                .get("allow_unrelated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let report = if allow_unrelated {
+                sync_http::named::join(repo, &remote, &ref_name(), options)
+            } else {
+                sync_http::named::pull(repo, &remote, &ref_name(), options)
+            }
+            .map_err(|e| e.to_string())?;
             Ok(sync_http::report::pull(&report))
         }
         _ => Err(format!("unsupported repository operation: {operation}")),

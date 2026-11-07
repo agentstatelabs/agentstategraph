@@ -6,7 +6,9 @@
 //! Covered: concurrent pushes lose nothing, through fetch, merge and push
 //! again; a taint made on one store holds on another once it pulls;
 //! reminders and epochs go both ways; secrets and local-only branches never
-//! leave; and a tampered bundle is refused whole.
+//! leave; a tampered bundle is refused whole; a seal over history a store
+//! never received doesn't stop its writes; a local epoch never leaves; and
+//! two stores with histories of their own join through a hub.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -361,6 +363,162 @@ fn a_tampered_bundle_is_refused(hub: &Hub) {
         hub.repo.get_json("main", "/more").unwrap(),
         json!([1, 2, 3])
     );
+}
+
+/// A seal made before a shallow push covers commits the hub and a store
+/// that pulls never get. That store can still write: a ref move there can't
+/// orphan commits it never held.
+fn a_seal_over_history_never_received_doesnt_stop_writes(hub: &Hub) {
+    let a = store();
+    for i in 0..3 {
+        a.set_json("main", &format!("/early/e{i}"), &json!(i), opts("early"))
+            .unwrap();
+    }
+    a.create_epoch("plan:default:p1", "Plan: p1", Vec::new())
+        .unwrap();
+    a.seal_epoch("plan:default:p1", "done").unwrap();
+    a.set_json("main", "/late", &json!(true), opts("late"))
+        .unwrap();
+    let head = a.head("main").unwrap();
+    a.push_with(
+        "hub",
+        &hub.remote(),
+        "main",
+        &PushOptions::default().shallow_from(head),
+    )
+    .unwrap();
+
+    let b = store();
+    b.pull("hub", &hub.remote(), "main", merge_opts()).unwrap();
+    assert_eq!(
+        b.get_epoch("plan:default:p1").unwrap().id,
+        "plan:default:p1"
+    );
+    b.set_json("main", "/from-b", &json!(1), opts("b")).unwrap();
+    b.push("hub", &hub.remote(), "main").unwrap();
+
+    // A still holds what it sealed, so a rewind there is still refused.
+    a.pull("hub", &hub.remote(), "main", merge_opts()).unwrap();
+    let early = a.log("main", 100).unwrap().last().unwrap().id;
+    match a.set_ref("main", early) {
+        Err(RepoError::EpochSealViolated { .. }) => {}
+        other => panic!("expected the seal to hold on A, got {other:?}"),
+    }
+}
+
+/// An epoch kept local never reaches the hub, nor a store that pulls; its
+/// seal still binds the store that made it, and its later writes stay local.
+fn a_local_epoch_never_leaves(hub: &Hub) {
+    let a = store();
+    a.set_json("main", "/x", &json!(1), opts("x")).unwrap();
+    a.create_epoch("legacy", "an old seal", Vec::new()).unwrap();
+    a.seal_epoch("legacy", "old").unwrap();
+    a.create_epoch("shared", "a new seal", Vec::new()).unwrap();
+    a.seal_epoch("shared", "new").unwrap();
+    assert_eq!(a.keep_epochs_local(&["legacy", "nope"]).unwrap(), 1);
+    assert_eq!(a.keep_epochs_local(&["legacy"]).unwrap(), 0);
+    assert!(a.local_epochs().unwrap().contains("legacy"));
+    // The table keeps it, and a reconcile leaves it off the control ref.
+    assert_eq!(a.get_epoch("legacy").unwrap().id, "legacy");
+    a.reconcile_control().unwrap();
+    a.archive_epoch("legacy").unwrap();
+    a.push("hub", &hub.remote(), "main").unwrap();
+
+    hub.repo.reconcile_control().unwrap();
+    assert!(
+        hub.repo.get_epoch("legacy").is_err(),
+        "the hub has no local epoch"
+    );
+    assert_eq!(hub.repo.get_epoch("shared").unwrap().id, "shared");
+    let b = store();
+    b.pull("hub", &hub.remote(), "main", merge_opts()).unwrap();
+    assert!(b.get_epoch("legacy").is_err());
+    assert_eq!(b.get_epoch("shared").unwrap().id, "shared");
+    assert_eq!(
+        a.get_epoch("legacy").unwrap().status,
+        agentstategraph_core::EpochStatus::Archived
+    );
+}
+
+/// Two stores that each began on their own join through a hub that ran
+/// `init` and made one commit of its own: a pull refuses the unrelated
+/// histories, a join merges them, and after that both push and pull as
+/// usual.
+fn stores_with_their_own_history_join(hub: &Hub) {
+    hub.repo.init().unwrap();
+    hub.repo
+        .set_json("main", "/hub/schema", &json!(4), opts("bookkeeping"))
+        .unwrap();
+    let (laptop, desktop) = (store(), store());
+    laptop
+        .set_json("main", "/memory/laptop", &json!("years of it"), opts("l"))
+        .unwrap();
+    laptop
+        .create_epoch("mine", "laptop's seal", Vec::new())
+        .unwrap();
+    laptop.seal_epoch("mine", "sealed").unwrap();
+    desktop
+        .set_json("main", "/memory/desktop", &json!("its own"), opts("d"))
+        .unwrap();
+
+    let refused = laptop.pull("hub", &hub.remote(), "main", merge_opts());
+    assert!(refused.is_err(), "a pull doesn't join unrelated histories");
+    for s in [&laptop, &desktop] {
+        let joined = s.join("hub", &hub.remote(), "main", merge_opts()).unwrap();
+        assert!(
+            matches!(
+                joined.outcome,
+                agentstategraph::sync::PullOutcome::Merged(_)
+            ),
+            "{:?}",
+            joined.outcome
+        );
+        let head = s.head("main").unwrap();
+        s.push_with(
+            "hub",
+            &hub.remote(),
+            "main",
+            &PushOptions::default().shallow_from(head),
+        )
+        .unwrap();
+    }
+    // The laptop's own seal still holds there, and its writes go on.
+    laptop
+        .set_json("main", "/memory/later", &json!(1), opts("later"))
+        .unwrap();
+    laptop
+        .pull("hub", &hub.remote(), "main", merge_opts())
+        .unwrap();
+    for (path, value) in [
+        ("/memory/laptop", json!("years of it")),
+        ("/memory/desktop", json!("its own")),
+        ("/hub/schema", json!(4)),
+    ] {
+        assert_eq!(laptop.get_json("main", path).unwrap(), value, "{path}");
+    }
+    laptop.push("hub", &hub.remote(), "main").unwrap();
+    desktop
+        .pull("hub", &hub.remote(), "main", merge_opts())
+        .unwrap();
+    assert_eq!(desktop.get_json("main", "/memory/later").unwrap(), json!(1));
+}
+
+#[test]
+fn seals_after_a_shallow_pull() {
+    run(
+        "seals_after_a_shallow_pull",
+        a_seal_over_history_never_received_doesnt_stop_writes,
+    );
+}
+
+#[test]
+fn local_epochs() {
+    run("local_epochs", a_local_epoch_never_leaves);
+}
+
+#[test]
+fn joining_stores() {
+    run("joining_stores", stores_with_their_own_history_join);
 }
 
 #[test]

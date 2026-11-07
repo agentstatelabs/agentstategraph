@@ -66,3 +66,14 @@ pub fn pull(
 ) -> Result<PullReport, SyncError> {
     repo.pull(name, &open(repo, name)?, ref_name, options)
 }
+
+/// [`Repository::join`] from the remote named `name`: a pull that also
+/// joins unrelated histories.
+pub fn join(
+    repo: &Repository,
+    name: &str,
+    ref_name: &str,
+    options: CommitOptions,
+) -> Result<PullReport, SyncError> {
+    repo.join(name, &open(repo, name)?, ref_name, options)
+}
