@@ -19,8 +19,14 @@
 //!
 //! The control ref and the refs beside it start with `_control`, and no
 //! ordinary write may move them.
+//!
+//! **Local epochs.** An epoch can be kept off the control ref, so no push
+//! carries it ([`Repository::keep_epochs_local`]): it moves to
+//! `_control-local`, which never syncs, in the same layout. The tables keep
+//! it, and its seal still binds here. Writes to it go to the local ref, and
+//! a reconcile doesn't put it back on the control ref.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use agentstategraph_core::{
     Authority, CommitBuilder, Epoch, EpochStatus, Intent, IntentCategory, Namespace, ObjectId,
@@ -38,6 +44,10 @@ pub const CONTROL_PREFIX: &str = "_control";
 
 /// The control commit the tables last matched.
 const INDEXED_REF: &str = "_control-indexed";
+
+/// The epochs this store keeps off the control ref, in its layout. Like
+/// every ref beside the control ref, it never syncs.
+pub const LOCAL_CONTROL_REF: &str = "_control-local";
 
 /// A write whose control commit hasn't landed: `<prefix><kind>/<id>/<nonce>`.
 const PENDING_PREFIX: &str = "_control-pending/";
@@ -122,10 +132,21 @@ impl Repository {
         options: &CommitOptions,
         stage: &dyn Fn(&mut ControlEdit<'_>) -> Result<(), RepoError>,
     ) -> Result<(Option<ObjectId>, ObjectId), RepoError> {
+        self.control_commit_on(CONTROL_REF, options, stage)
+    }
+
+    /// [`Self::control_commit`] on `ref_name`: the control ref, or the
+    /// local control ref.
+    fn control_commit_on(
+        &self,
+        ref_name: &str,
+        options: &CommitOptions,
+        stage: &dyn Fn(&mut ControlEdit<'_>) -> Result<(), RepoError>,
+    ) -> Result<(Option<ObjectId>, ObjectId), RepoError> {
         let store = self.control_store();
         let ns = Namespace::default_ns();
         for _ in 0..MAX_ATTEMPTS {
-            let head = store.get_ref(&ns, CONTROL_REF)?;
+            let head = store.get_ref(&ns, ref_name)?;
             let base = match head {
                 Some(h) => Some(
                     store
@@ -156,14 +177,83 @@ impl Repository {
             .build();
             store.put_commit(&commit)?;
             let landed = match head {
-                Some(h) => store.cas_ref(&ns, CONTROL_REF, h, commit.id)?,
-                None => store.create_ref(&ns, CONTROL_REF, commit.id)?,
+                Some(h) => store.cas_ref(&ns, ref_name, h, commit.id)?,
+                None => store.create_ref(&ns, ref_name, commit.id)?,
             };
             if landed {
                 return Ok((head, commit.id));
             }
         }
         Err(RepoError::WriteConflict)
+    }
+
+    /// The ids of the epochs kept local ([`Self::keep_epochs_local`]).
+    pub fn local_epochs(&self) -> Result<BTreeSet<String>, RepoError> {
+        let store = self.control_store();
+        let Some(head) = store.get_ref(&Namespace::default_ns(), LOCAL_CONTROL_REF)? else {
+            return Ok(BTreeSet::new());
+        };
+        let root = store
+            .get_commit(&head)?
+            .ok_or_else(|| RepoError::CommitNotFound(head.to_string()))?
+            .state_root;
+        control::epoch_ids(store, &root)
+    }
+
+    /// Keep the epochs `ids` off the control ref, so no push carries them:
+    /// each moves, with its membership, to the local control ref, which
+    /// never syncs. The epochs table keeps them and their seals still bind
+    /// here; later writes to them stay local too. Ids that aren't epochs
+    /// here, or are local already, are skipped. Returns how many moved.
+    ///
+    /// Call it before the first push: an epoch a push already carried stays
+    /// on the stores that took it, and a fetch from one brings it back to
+    /// the control ref.
+    pub fn keep_epochs_local(&self, ids: &[&str]) -> Result<usize, RepoError> {
+        self.reconcile_control()?;
+        let store = self.control_store();
+        let ns = Namespace::default_ns();
+        let already = self.local_epochs()?;
+        let mut moving: Vec<Epoch> = Vec::new();
+        for id in ids {
+            if already.contains(*id) || moving.iter().any(|e| e.id == *id) {
+                continue;
+            }
+            if let Some(e) = store.get_epoch(id)? {
+                moving.push(e);
+            }
+        }
+        if moving.is_empty() {
+            return Ok(0);
+        }
+        let options = system_options(
+            IntentCategory::Migrate,
+            format!("keep {} epochs local", moving.len()),
+        );
+        // Local first, so an epoch is on one ref or the other at every step.
+        self.control_commit_on(LOCAL_CONTROL_REF, &options, &|edit| {
+            for e in &moving {
+                edit.put_epoch(e)?;
+                if !e.commits.is_empty() {
+                    edit.add_members(&e.id, e.commits.iter().copied())?;
+                }
+            }
+            Ok(())
+        })?;
+        let (before, after) = self.control_commit(&options, &|edit| {
+            for e in &moving {
+                edit.remove_epoch(&e.id);
+            }
+            Ok(())
+        })?;
+        // The tables matched `before`, and still hold what moved: they match
+        // the control ref and the local one together.
+        if let Some(before) = before
+            && before != after
+        {
+            let _ = store.cas_ref(&ns, INDEXED_REF, before, after);
+        }
+        Ok(moving.len())
     }
 
     /// Put what `stage` names into `edit`, from the tables.
@@ -222,6 +312,13 @@ impl Repository {
             uuid::Uuid::new_v4().simple()
         );
         let marked = ObjectId::hash(mark.as_bytes());
+        // A local epoch's writes go to the local control ref.
+        let local = kind == Kind::Epoch && self.local_epochs().map_err(E::from)?.contains(id);
+        let target = if local {
+            LOCAL_CONTROL_REF
+        } else {
+            CONTROL_REF
+        };
         store
             .set_ref(&ns, &mark, marked)
             .map_err(|e| E::from(RepoError::from(e)))?;
@@ -233,11 +330,14 @@ impl Repository {
                 return Err(e);
             }
         };
-        match self.control_commit(&options, &|edit| self.stage_from_tables(edit, &stage)) {
+        match self.control_commit_on(target, &options, &|edit| {
+            self.stage_from_tables(edit, &stage)
+        }) {
             Ok((before, after)) => {
                 // If the tables matched the head this built on, they match
                 // the new one: this write changed both the same way.
-                if let Some(before) = before
+                if !local
+                    && let Some(before) = before
                     && before != after
                 {
                     let _ = store.cas_ref(&ns, INDEXED_REF, before, after);
@@ -306,6 +406,33 @@ impl Repository {
             // `list_epochs` leaves membership out; `get_epoch` reads it.
             epochs.push(store.get_epoch(&e.id)?.unwrap_or(e));
         }
+        // Local epochs stay off the control ref. One with a pending write
+        // goes to the local ref from the table.
+        let local = self.local_epochs()?;
+        let local_pending: Vec<&Epoch> = epochs
+            .iter()
+            .filter(|e| {
+                local.contains(&e.id) && pending_records.contains(&(Kind::Epoch, e.id.clone()))
+            })
+            .collect();
+        if !local_pending.is_empty() {
+            self.control_commit_on(
+                LOCAL_CONTROL_REF,
+                &system_options(
+                    IntentCategory::Migrate,
+                    "take pending local epochs into the local control ref".to_string(),
+                ),
+                &|edit| {
+                    for e in &local_pending {
+                        edit.put_epoch(e)?;
+                        if !e.commits.is_empty() {
+                            edit.add_members(&e.id, e.commits.iter().copied())?;
+                        }
+                    }
+                    Ok(())
+                },
+            )?;
+        }
         if head.is_none()
             && taints.is_empty()
             && reminders.is_empty()
@@ -339,7 +466,7 @@ impl Repository {
                 candidate.delete_reminder(id, now)?;
             }
         }
-        for e in &epochs {
+        for e in epochs.iter().filter(|e| !local.contains(&e.id)) {
             let mut record = e.clone();
             record.commits.clear();
             record.sealed_commits.sort();

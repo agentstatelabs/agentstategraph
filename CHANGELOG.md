@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+Stores that already have history can sync (DESIGN.md Plan G t-014). Until now only a store holding nothing but `init`'s first commit could take a hub's history, and a seal over history a store never received stopped every write to its `main`.
+
+### Added
+- **`Repository::join` and `join_fetched`: a pull that joins unrelated histories,** as git's `--allow-unrelated-histories` does. Two stores that each began on their own share no commit, so `pull` refuses to merge them.
+  - A join merges them against an empty base with the new `Repository::merge_unrelated`. The merge commit always has both heads as parents, so neither history, nor a seal over it, is orphaned. A path both sides hold differently is a conflict, reported as any merge's are.
+  - Related histories join as they pull.
+  - It's on every sync surface: `agentstategraph_sync_http::named::join`, and `allow_unrelated` on the MCP pull tool, `POST /api/sync/pull`, the C ABI's `sync.pull`, and Python's, TypeScript's and Swift's `pull`.
+- **`Repository::keep_epochs_local`: epochs that never leave this store.** Each one moves, with its membership, off the control ref to `_control-local`, a reserved ref that never syncs, so no push carries it. The epochs table keeps it, its seal still binds here, and later writes to it stay local. Call it before the first push: an epoch a push already carried stays on the stores that took it. `Repository::local_epochs` lists them.
+
+### Fixed
+- **A seal over history a store never received no longer stops its writes.** A seal covers every commit reachable from `main` when it's made. A store that pulled after a shallow push, or that took the seal through the control ref without the commits, got `EpochSealViolated` on every write to `main`. Now the check counts only sealed commits the store holds. Commits are never deleted, so one that's absent was never held, and a ref move here can't orphan it. A store that holds sealed commits is guarded as before.
+
 ## [v1.5.2] — 2026-11-05
 
 Fixes for the .NET binding's policies, whose tests now run in CI. The Rust crates are unchanged from 1.5.1. This release also publishes a Python wheel, which 1.5.1 didn't.

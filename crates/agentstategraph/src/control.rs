@@ -382,6 +382,13 @@ pub fn read(store: &dyn ObjectStore, root: &ObjectId) -> Result<ControlState, Re
     Ok(state)
 }
 
+/// The ids of the epochs in the control tree at `root`, without decoding
+/// them.
+pub fn epoch_ids(store: &dyn ObjectStore, root: &ObjectId) -> Result<BTreeSet<String>, RepoError> {
+    let sections = Sections::load(store, root)?;
+    Ok(sections.maps[EPOCHS].keys().cloned().collect())
+}
+
 /// Write `state` as a control tree, returning its root.
 pub fn write(store: &dyn ObjectStore, state: &ControlState) -> Result<ObjectId, RepoError> {
     let mut edit = ControlEdit::new(store);
@@ -487,6 +494,15 @@ impl<'s> ControlEdit<'s> {
         let tree = put_ids(self.store, &members)?;
         self.sections.map(MEMBERS).insert(epoch.to_string(), tree);
         Ok(())
+    }
+
+    /// Take an epoch out, with its membership: the epoch moves to the
+    /// local control ref ([`Repository::keep_epochs_local`]).
+    ///
+    /// [`Repository::keep_epochs_local`]: crate::Repository::keep_epochs_local
+    pub fn remove_epoch(&mut self, epoch: &str) {
+        self.sections.map(EPOCHS).remove(epoch);
+        self.sections.map(MEMBERS).remove(epoch);
     }
 
     /// Write the edited tree, returning its root.

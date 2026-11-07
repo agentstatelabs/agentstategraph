@@ -17,6 +17,9 @@
 //!   never merges.
 //! - **Pull** is a fetch, then [`Repository::merge`] of the tracking ref,
 //!   with the caller's [`CommitOptions`].
+//! - **Join** is a pull that also takes a remote's history when it shares no
+//!   commit with the local one, as two stores that each began on their own
+//!   do: [`Repository::merge_unrelated`] merges them against an empty base.
 //!
 //! The control ref, `_control`, holding taints, reminders and epochs, goes
 //! with every fetch and push. A fetched one is merged into the local one by
@@ -844,6 +847,49 @@ impl Repository {
         ref_name: &str,
         options: CommitOptions,
     ) -> Result<PullOutcome, SyncError> {
+        self.merge_fetched_inner(remote_name, ref_name, options, false)
+    }
+
+    /// [`Repository::pull`] that also joins unrelated histories. Two stores
+    /// that each began on their own share no commit, so [`Repository::pull`]
+    /// refuses to merge them; this merges them against an empty base
+    /// ([`Repository::merge_unrelated`]), as git's
+    /// `--allow-unrelated-histories` does, with both heads as the merge
+    /// commit's parents. It's how a store with its own history joins a hub
+    /// another store already pushed to. Related histories pull as
+    /// [`Repository::pull`] does.
+    pub fn join(
+        &self,
+        remote_name: &str,
+        remote: &dyn Remote,
+        ref_name: &str,
+        options: CommitOptions,
+    ) -> Result<PullReport, SyncError> {
+        let fetch = self.fetch(remote_name, remote, &[ref_name])?;
+        let outcome = self.join_fetched(remote_name, ref_name, options)?;
+        Ok(PullReport { fetch, outcome })
+    }
+
+    /// The second half of [`Repository::join`], as
+    /// [`Repository::merge_fetched`] is of [`Repository::pull`]: a caller
+    /// that renumbers colliding task ids first fetches, renumbers, then
+    /// calls this.
+    pub fn join_fetched(
+        &self,
+        remote_name: &str,
+        ref_name: &str,
+        options: CommitOptions,
+    ) -> Result<PullOutcome, SyncError> {
+        self.merge_fetched_inner(remote_name, ref_name, options, true)
+    }
+
+    fn merge_fetched_inner(
+        &self,
+        remote_name: &str,
+        ref_name: &str,
+        options: CommitOptions,
+        unrelated: bool,
+    ) -> Result<PullOutcome, SyncError> {
         check_remote_name(remote_name)?;
         let store = self.taint_storage();
         let ns = self.active_namespace()?;
@@ -863,7 +909,11 @@ impl Repository {
                 PullOutcome::Created(theirs)
             }
             _ => {
-                let id = self.merge(&tracking, ref_name, options)?;
+                let id = if unrelated {
+                    self.merge_unrelated(&tracking, ref_name, options)?
+                } else {
+                    self.merge(&tracking, ref_name, options)?
+                };
                 if id == theirs {
                     PullOutcome::FastForward(id)
                 } else {

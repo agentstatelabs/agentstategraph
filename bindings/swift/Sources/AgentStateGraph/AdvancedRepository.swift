@@ -551,16 +551,21 @@ extension AgentStateGraph {
         return try advanced("sync.push", Request(remote: remote, ref: ref, overrides: overrides))
     }
 
-    /// Fetch a branch from a remote and merge it into the local one.
+    /// Fetch a branch from a remote and merge it into the local one. With
+    /// `allowUnrelated`, a branch whose history shares no commit with the
+    /// remote's joins it, merged against an empty base.
     public func pull(
         from remote: String, ref: String = "main", description: String? = nil,
-        agentId: String = "swift"
+        agentId: String = "swift", allowUnrelated: Bool = false
     ) throws -> JSONValue {
         struct Request: Encodable {
             let remote: String; let ref: String; let description: String?; let agent_id: String
+            let allow_unrelated: Bool
         }
         return try advanced(
             "sync.pull",
-            Request(remote: remote, ref: ref, description: description, agent_id: agentId))
+            Request(
+                remote: remote, ref: ref, description: description, agent_id: agentId,
+                allow_unrelated: allowUnrelated))
     }
 }

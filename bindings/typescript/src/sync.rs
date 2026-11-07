@@ -89,7 +89,9 @@ impl AgentStateGraph {
         Ok(report::push(&pushed))
     }
 
-    /// Fetch a branch from a remote and merge it into the local one.
+    /// Fetch a branch from a remote and merge it into the local one. With
+    /// `allowUnrelated`, a branch whose history shares no commit with the
+    /// remote's joins it, merged against an empty base.
     #[napi]
     pub fn pull(
         &self,
@@ -97,6 +99,7 @@ impl AgentStateGraph {
         reference: Option<String>,
         description: Option<String>,
         agent: Option<String>,
+        allow_unrelated: Option<bool>,
     ) -> napi::Result<serde_json::Value> {
         let options = CommitOptions::new(
             agent.unwrap_or_else(|| "typescript".to_string()),
@@ -104,7 +107,12 @@ impl AgentStateGraph {
             description.unwrap_or_else(|| format!("pull from {remote}")),
         );
         let reference = reference.unwrap_or_else(|| "main".to_string());
-        let pulled = named::pull(&self.repo, &remote, &reference, options).map_err(err)?;
+        let pulled = if allow_unrelated.unwrap_or(false) {
+            named::join(&self.repo, &remote, &reference, options)
+        } else {
+            named::pull(&self.repo, &remote, &reference, options)
+        }
+        .map_err(err)?;
         Ok(report::pull(&pulled))
     }
 }
