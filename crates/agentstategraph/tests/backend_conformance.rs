@@ -203,6 +203,65 @@ fn write_branch_merge_history(f: &Fixture) {
     assert_eq!(other.head("main").unwrap(), repo.head("main").unwrap());
 }
 
+/// A commit's device survives storage on every backend, through a plain
+/// write, a merge and a speculation; a commit made without one has none and
+/// keeps its content address.
+fn device_round_trips(f: &Fixture) {
+    const LAPTOP: &str = "0123456789abcdef0123456789abcdef";
+    const SERVER: &str = "fedcba9876543210fedcba9876543210";
+    let repo = f.open();
+    repo.init().unwrap();
+
+    let plain = repo
+        .set_json("main", "/a", &json!(1), opts("no device"))
+        .unwrap();
+    let written = repo
+        .set_json(
+            "main",
+            "/b",
+            &json!(2),
+            opts("from the laptop").with_device(LAPTOP),
+        )
+        .unwrap();
+    repo.branch("feature", "main").unwrap();
+    repo.set_json("feature", "/c", &json!(3), opts("on feature"))
+        .unwrap();
+    repo.set_json("main", "/d", &json!(4), opts("diverge"))
+        .unwrap();
+    let merged = repo
+        .merge(
+            "feature",
+            "main",
+            CommitOptions::new("agent/conformance", IntentCategory::Merge, "adopt")
+                .with_device(SERVER),
+        )
+        .unwrap();
+    let spec = repo.speculate("main", Some("try".into())).unwrap();
+    repo.spec_set_json(spec, "/e", &json!(5)).unwrap();
+    let speculated = repo
+        .commit_speculation(spec, opts("speculated").with_device(LAPTOP))
+        .unwrap();
+
+    // Read back through a second repository over the same store.
+    let other = f.open();
+    let device = |id| {
+        let c = other.get_commit(&id).unwrap().unwrap();
+        assert_eq!(c.compute_id(), c.id, "content address intact");
+        c.device
+    };
+    assert_eq!(device(plain), None);
+    assert_eq!(device(written).as_deref(), Some(LAPTOP));
+    assert_eq!(device(merged).as_deref(), Some(SERVER));
+    assert_eq!(device(speculated).as_deref(), Some(LAPTOP));
+
+    // Below the repository too, and through the log.
+    let stored = f.storage().get_commit(&written).unwrap().unwrap();
+    assert_eq!(stored.device.as_deref(), Some(LAPTOP));
+    let log = other.log("main", 1).unwrap();
+    assert_eq!(log[0].id, speculated);
+    assert_eq!(log[0].device.as_deref(), Some(LAPTOP));
+}
+
 /// The v1.2.5 lost-update test, on every backend: separate repositories
 /// (separate processes, for SQLite and Postgres) append concurrently into
 /// shared parent maps, and every acknowledged write must survive.
@@ -1189,6 +1248,11 @@ fn a_shallow_history_on_this_backend(f: &Fixture) {
 #[test]
 fn write_branch_merge() {
     run("write_branch_merge_history", write_branch_merge_history);
+}
+
+#[test]
+fn device_on_commits() {
+    run("device_round_trips", device_round_trips);
 }
 
 #[test]

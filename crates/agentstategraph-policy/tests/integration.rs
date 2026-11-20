@@ -1621,3 +1621,36 @@ fn test_external_evaluator_source_variants_round_trip() {
         s
     );
 }
+
+/// `PolicyStore::with_context`: policy commits carry the host's device.
+#[test]
+fn policy_commits_carry_the_context_device() {
+    let repo = Arc::new(Repository::new(Box::new(
+        SqliteStorage::in_memory().expect("in-memory sqlite"),
+    )));
+    repo.init().unwrap();
+    let ctx = agentstategraph::CallContext::new("agent/claude")
+        .with_device("0123456789abcdef0123456789abcdef");
+    let store = PolicyStore::with_context(repo.clone(), "/policies", ctx);
+    assert_eq!(store.agent_id(), "agent/claude");
+
+    store
+        .propose(REF, skeleton("/policies/dev", Selector::Always))
+        .unwrap();
+    let proposed = repo.log(REF, 1).unwrap().remove(0);
+    assert_eq!(proposed.agent_id, "agent/claude");
+    assert_eq!(
+        proposed.device.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
+
+    store
+        .ratify(REF, "/policies/dev", "human/owner", "ok")
+        .unwrap();
+    let ratified = repo.log(REF, 1).unwrap().remove(0);
+    assert_ne!(ratified.id, proposed.id);
+    assert_eq!(
+        ratified.device.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
+}

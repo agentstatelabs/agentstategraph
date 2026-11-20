@@ -183,6 +183,10 @@ pub struct BlameEntry {
     pub path: String,
     pub commit_id: String,
     pub agent_id: String,
+    /// The device the change was made from ([`crate::Commit::device`]).
+    /// Left out of the JSON when the commit has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<crate::intent::DeviceId>,
     pub intent_category: String,
     pub intent_description: String,
     pub reasoning: Option<String>,

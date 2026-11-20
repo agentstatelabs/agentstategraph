@@ -125,7 +125,7 @@ Precise definitions for all terms used in this specification. Agents and humans 
 | **Object** | Either an Atom or a Node. The fundamental unit of state storage. |
 | **ObjectId** | A BLAKE3 hash of an Object's canonical serialization. Serves as the object's unique identifier and content address. Two objects with identical content always produce the same ObjectId. |
 | **State Tree** | A Merkle DAG of Objects rooted at a single Node. Represents the complete application state at a point in time. |
-| **Commit** | An immutable record linking a state tree root to its parent commit(s), along with metadata: agent identity, authority, intent, reasoning, confidence, and timestamp. |
+| **Commit** | An immutable record linking a state tree root to its parent commit(s), along with metadata: agent identity, the device the change came from (when known), authority, intent, reasoning, confidence, and timestamp. |
 | **Intent** | A structured declaration of *why* a state change is being made. Includes a category, description, tags, lifecycle status, and optional resolution report. |
 | **Authority** | A record of *who authorized* a state change, including the principal, scope of authorization, expiration, and delegation chain. |
 | **Resolution** | A structured report filed when an intent is fulfilled, partially fulfilled, failed, or deferred. Includes a summary, deviations from plan, commits made, branches explored, outcome status, and confidence score. |
@@ -215,6 +215,8 @@ Commit {
 
   // Identity: who performed this action
   agent_id:     String            // "user", "agent/planner-v2", "system/scheduler"
+  device:       Option<String>    // the install or machine it came from, when the
+                                  // host knows it (≤ 128 chars, no control characters)
 
   // Authority: who authorized this action
   authority:    Authority
@@ -230,6 +232,8 @@ Commit {
   tool_calls:   Vec<ToolCall>
 }
 ```
+
+`device` is optional provenance (added in 1.6). When it is absent it is left out of both the stored record and the hashed fields, so a commit without a device has the same `id` it had before the field existed, and a reader that doesn't know the field ignores it. A device is part of the hash when present. Nothing authorizes on it: it records which install the host says the change came from.
 
 #### 3.2.1 Authority
 
@@ -688,6 +692,7 @@ BlameEntry {
   value:       Value
   commit_id:   ObjectId
   agent_id:    String
+  device:      Option<String>  // the commit's device, when it has one
   intent:      Intent          // why this value was set
   reasoning:   Option<String>  // the agent's reasoning at the time
   timestamp:   DateTime<Utc>

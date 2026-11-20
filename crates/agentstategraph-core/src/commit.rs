@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::intent::{AgentId, Authority, Intent, ToolCall};
+use crate::intent::{AgentId, Authority, DeviceId, Intent, ToolCall};
 use crate::object::ObjectId;
 
 /// Maximum length (in `char`s) of `Intent::description` stored on a commit.
@@ -26,12 +26,27 @@ pub const MAX_AGENT_ID_LEN: usize = 128;
 /// silently dropped on `CommitBuilder::build`.
 pub const MAX_TOOL_CALLS: usize = 256;
 
+/// Maximum length (in `char`s) of `Commit::device`. Truncated silently.
+pub const MAX_DEVICE_LEN: usize = 128;
+
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
         s.chars().take(max).collect()
     }
+}
+
+/// A device id as a commit stores it: control characters dropped, capped at
+/// [`MAX_DEVICE_LEN`] chars. `None` when nothing printable is left, so an
+/// empty device hashes like no device at all.
+fn clean_device(device: &str) -> Option<String> {
+    let printable: String = device
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_DEVICE_LEN)
+        .collect();
+    (!printable.is_empty()).then_some(printable)
 }
 
 /// An immutable record that links a state tree to its history and provenance metadata.
@@ -49,6 +64,15 @@ pub struct Commit {
     // -- Identity: who performed this action --
     /// The agent or human who made this state change.
     pub agent_id: AgentId,
+    /// The device (install, machine) the change was made from, when the host
+    /// knows it: CTXone sends a per-install id. Provenance only — nothing
+    /// authorizes on it.
+    ///
+    /// Left out of the stored JSON and of the hashed fields when `None`, so a
+    /// commit without a device keeps the id it had before this field existed,
+    /// and readers older than 1.6 load commits that have one (they ignore it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceId>,
 
     // -- Authority: who authorized this action --
     /// The authorization chain for this action.
@@ -80,6 +104,7 @@ impl Commit {
             parents: &self.parents,
             timestamp: &self.timestamp,
             agent_id: &self.agent_id,
+            device: &self.device,
             authority: &self.authority,
             intent: &self.intent,
             reasoning: &self.reasoning,
@@ -111,6 +136,12 @@ impl Commit {
         if self.agent_id.chars().count() > MAX_AGENT_ID_LEN {
             self.agent_id = truncate_chars(&self.agent_id, MAX_AGENT_ID_LEN);
         }
+        if let Some(device) = self.device.as_deref() {
+            let cleaned = clean_device(device);
+            if cleaned.as_deref() != Some(device) {
+                self.device = cleaned;
+            }
+        }
         if self.intent.description.chars().count() > MAX_DESCRIPTION_LEN {
             self.intent.description = truncate_chars(&self.intent.description, MAX_DESCRIPTION_LEN);
         }
@@ -130,6 +161,7 @@ pub struct CommitBuilder {
     state_root: ObjectId,
     parents: Vec<ObjectId>,
     agent_id: AgentId,
+    device: Option<DeviceId>,
     authority: Authority,
     intent: Intent,
     reasoning: Option<String>,
@@ -149,6 +181,7 @@ impl CommitBuilder {
             state_root,
             parents: Vec::new(),
             agent_id: agent_id.into(),
+            device: None,
             authority,
             intent,
             reasoning: None,
@@ -166,6 +199,14 @@ impl CommitBuilder {
     /// Set a single parent commit (most common case).
     pub fn parent(mut self, parent: ObjectId) -> Self {
         self.parents = vec![parent];
+        self
+    }
+
+    /// Set the device the change was made from. Control characters are
+    /// dropped and the id is capped at [`MAX_DEVICE_LEN`] chars on build; an
+    /// id with nothing printable left is no device.
+    pub fn device(mut self, device: impl Into<DeviceId>) -> Self {
+        self.device = Some(device.into());
         self
     }
 
@@ -191,13 +232,14 @@ impl CommitBuilder {
     ///
     /// Silently truncates overlong provenance fields to their caps —
     /// `MAX_DESCRIPTION_LEN`, `MAX_REASONING_LEN`, `MAX_AGENT_ID_LEN`,
-    /// `MAX_TOOL_CALLS`. Truncation uses `chars()` so UTF-8 codepoints
-    /// are never split.
+    /// `MAX_DEVICE_LEN`, `MAX_TOOL_CALLS`. Truncation uses `chars()` so UTF-8
+    /// codepoints are never split.
     pub fn build(self) -> Commit {
         let timestamp = Utc::now();
 
         // Enforce length caps up front — see the module-level MAX_* constants.
         let agent_id = truncate_chars(&self.agent_id, MAX_AGENT_ID_LEN);
+        let device = self.device.as_deref().and_then(clean_device);
         let mut intent = self.intent;
         intent.description = truncate_chars(&intent.description, MAX_DESCRIPTION_LEN);
         let reasoning = self
@@ -215,6 +257,7 @@ impl CommitBuilder {
             parents: self.parents,
             timestamp,
             agent_id,
+            device,
             authority: self.authority,
             intent,
             reasoning,
@@ -230,12 +273,18 @@ impl CommitBuilder {
 
 /// Internal struct used for computing the commit hash.
 /// Excludes the `id` field (which is what we're computing).
+///
+/// Field order and serialization are part of every commit id: change neither.
+/// A new field must be skipped when unset, as `device` is, so commits made
+/// without it keep their ids.
 #[derive(Serialize)]
 struct CommitHashInput<'a> {
     state_root: &'a ObjectId,
     parents: &'a Vec<ObjectId>,
     timestamp: &'a DateTime<Utc>,
     agent_id: &'a AgentId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: &'a Option<DeviceId>,
     authority: &'a Authority,
     intent: &'a Intent,
     reasoning: &'a Option<String>,
@@ -436,6 +485,7 @@ mod tests {
             parents: vec![],
             timestamp: Utc::now(),
             agent_id: big_agent,
+            device: Some(format!("dev\u{7}{}", "d".repeat(MAX_DEVICE_LEN * 2))),
             authority: test_authority(),
             intent: Intent::new(IntentCategory::Checkpoint, big_desc),
             reasoning: Some(big_reasoning),
@@ -455,6 +505,9 @@ mod tests {
             MAX_REASONING_LEN
         );
         assert_eq!(commit.tool_calls.len(), MAX_TOOL_CALLS);
+        let device = commit.device.as_deref().unwrap();
+        assert_eq!(device.chars().count(), MAX_DEVICE_LEN);
+        assert!(device.starts_with("devd"), "control character dropped");
     }
 
     #[test]
@@ -467,13 +520,196 @@ mod tests {
             test_intent(),
         )
         .reasoning("short")
+        .device("0123456789abcdef0123456789abcdef")
         .build();
         let mut commit = commit_orig.clone();
         commit.enforce_caps();
         assert_eq!(commit.agent_id, commit_orig.agent_id);
         assert_eq!(commit.intent.description, commit_orig.intent.description);
         assert_eq!(commit.reasoning, commit_orig.reasoning);
+        assert_eq!(commit.device, commit_orig.device);
         assert_eq!(commit.tool_calls.len(), commit_orig.tool_calls.len());
+    }
+
+    /// The hashed fields exactly as they were before `device` existed (1.5.x).
+    #[derive(Serialize)]
+    struct HashInputBeforeDevice<'a> {
+        state_root: &'a ObjectId,
+        parents: &'a Vec<ObjectId>,
+        timestamp: &'a DateTime<Utc>,
+        agent_id: &'a AgentId,
+        authority: &'a Authority,
+        intent: &'a Intent,
+        reasoning: &'a Option<String>,
+        confidence: &'a Option<f64>,
+        tool_calls: &'a Vec<ToolCall>,
+    }
+
+    fn hash_input_before_device(c: &Commit) -> Vec<u8> {
+        serde_json::to_vec(&HashInputBeforeDevice {
+            state_root: &c.state_root,
+            parents: &c.parents,
+            timestamp: &c.timestamp,
+            agent_id: &c.agent_id,
+            authority: &c.authority,
+            intent: &c.intent,
+            reasoning: &c.reasoning,
+            confidence: &c.confidence,
+            tool_calls: &c.tool_calls,
+        })
+        .unwrap()
+    }
+
+    fn hash_input(c: &Commit) -> Vec<u8> {
+        serde_json::to_vec(&CommitHashInput {
+            state_root: &c.state_root,
+            parents: &c.parents,
+            timestamp: &c.timestamp,
+            agent_id: &c.agent_id,
+            device: &c.device,
+            authority: &c.authority,
+            intent: &c.intent,
+            reasoning: &c.reasoning,
+            confidence: &c.confidence,
+            tool_calls: &c.tool_calls,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_commit_without_a_device_hashes_as_before() {
+        let commit = CommitBuilder::new(
+            ObjectId::hash(b"root"),
+            "agent/test",
+            test_authority(),
+            test_intent(),
+        )
+        .parent(ObjectId::hash(b"parent"))
+        .reasoning("why")
+        .confidence(0.4)
+        .tool_calls(vec![ToolCall {
+            tool_name: "set".into(),
+            arguments: serde_json::json!({"path": "/a"}),
+            result: None,
+            timestamp: Utc::now(),
+        }])
+        .build();
+        assert_eq!(commit.device, None);
+        assert_eq!(hash_input(&commit), hash_input_before_device(&commit));
+        assert_eq!(
+            commit.id,
+            ObjectId::hash(&hash_input_before_device(&commit)),
+            "the id a 1.5 build would give this commit"
+        );
+        // And the stored JSON has no device key at all.
+        let stored = serde_json::to_value(&commit).unwrap();
+        assert!(stored.get("device").is_none(), "{stored}");
+    }
+
+    #[test]
+    fn a_device_is_part_of_the_id() {
+        let commit = CommitBuilder::new(
+            ObjectId::hash(b"root"),
+            "agent/test",
+            test_authority(),
+            test_intent(),
+        )
+        .device("0123456789abcdef0123456789abcdef")
+        .build();
+        assert_eq!(
+            commit.device.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(commit.compute_id(), commit.id);
+        assert_ne!(hash_input(&commit), hash_input_before_device(&commit));
+
+        let mut other = commit.clone();
+        other.device = Some("fedcba9876543210fedcba9876543210".into());
+        assert_ne!(other.compute_id(), commit.id);
+        other.device = None;
+        assert_ne!(other.compute_id(), commit.id);
+
+        // The device survives the JSON round trip storage and sync use.
+        let back: Commit = serde_json::from_slice(&serde_json::to_vec(&commit).unwrap()).unwrap();
+        assert_eq!(back.device, commit.device);
+        assert_eq!(back.compute_id(), commit.id);
+    }
+
+    #[test]
+    fn a_commit_stored_before_devices_still_loads() {
+        // A commit as 1.5.x stored it: no `device` key.
+        let commit = CommitBuilder::new(
+            ObjectId::hash(b"root"),
+            "agent/test",
+            test_authority(),
+            test_intent(),
+        )
+        .build();
+        let mut stored = serde_json::to_value(&commit).unwrap();
+        stored.as_object_mut().unwrap().remove("device");
+        let back: Commit = serde_json::from_value(stored).unwrap();
+        assert_eq!(back.device, None);
+        assert_eq!(back.compute_id(), commit.id);
+    }
+
+    #[test]
+    fn a_reader_without_devices_ignores_one() {
+        // What a 1.5.x reader does with a commit that has a device: serde
+        // skips the unknown key (nothing in Commit denies unknown fields).
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct CommitBeforeDevice {
+            id: ObjectId,
+            state_root: ObjectId,
+            parents: Vec<ObjectId>,
+            timestamp: DateTime<Utc>,
+            agent_id: AgentId,
+            authority: Authority,
+            intent: Intent,
+            reasoning: Option<String>,
+            confidence: Option<f64>,
+            tool_calls: Vec<ToolCall>,
+        }
+        let commit = CommitBuilder::new(
+            ObjectId::hash(b"root"),
+            "agent/test",
+            test_authority(),
+            test_intent(),
+        )
+        .device("laptop-1")
+        .build();
+        let old: CommitBeforeDevice =
+            serde_json::from_slice(&serde_json::to_vec(&commit).unwrap()).unwrap();
+        assert_eq!(old.id, commit.id);
+        assert_eq!(old.agent_id, commit.agent_id);
+    }
+
+    #[test]
+    fn device_is_capped_and_cleaned() {
+        let build = |device: &str| {
+            CommitBuilder::new(
+                ObjectId::hash(b"s"),
+                "agent/test",
+                test_authority(),
+                test_intent(),
+            )
+            .device(device)
+            .build()
+        };
+        let long = build(&"é".repeat(MAX_DEVICE_LEN + 7));
+        assert_eq!(
+            long.device.as_deref().unwrap().chars().count(),
+            MAX_DEVICE_LEN
+        );
+        assert_eq!(
+            build("dev\nice\u{0}\t\u{1b}[31m").device.as_deref(),
+            Some("device[31m")
+        );
+        // Nothing printable left is no device, and hashes like none.
+        let blank = build("\n\r\t");
+        assert_eq!(blank.device, None);
+        assert_eq!(hash_input(&blank), hash_input_before_device(&blank));
+        assert_eq!(build("").device, None);
     }
 
     #[test]

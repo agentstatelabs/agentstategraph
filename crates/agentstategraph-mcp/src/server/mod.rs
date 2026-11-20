@@ -1539,6 +1539,7 @@ impl AgentStateGraphServer {
                         let entry = serde_json::json!({
                             "id": c.id.short(),
                             "agent": c.agent_id,
+                            "device": c.device,
                             "intent": {
                                 "category": format!("{:?}", c.intent.category),
                                 "description": c.intent.description,
@@ -1820,6 +1821,7 @@ impl AgentStateGraphServer {
                         serde_json::json!({
                             "id": c.id.short(),
                             "agent": c.agent_id,
+                            "device": c.device,
                             "intent": {
                                 "category": format!("{:?}", c.intent.category),
                                 "description": c.intent.description,

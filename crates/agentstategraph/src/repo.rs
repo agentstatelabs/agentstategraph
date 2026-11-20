@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use agentstategraph_core::{
-    Authority, Commit, CommitBuilder, Conflict, DiffOp, Intent, IntentCategory, MergeResult,
-    Namespace, Object, ObjectId, ObjectResolver, StatePath, ToolCall,
+    Authority, Commit, CommitBuilder, Conflict, DeviceId, DiffOp, Intent, IntentCategory,
+    MergeResult, Namespace, Object, ObjectId, ObjectResolver, StatePath, ToolCall,
 };
 use agentstategraph_storage::{
     CommitTrace, CommitWalk, HistoryMilestoneRow, HistoryRollupRow, Storage, StorageError,
@@ -307,6 +307,10 @@ pub struct CommitOptions {
     /// provenance; empty by default. Capped at [`Commit`]'s tool-call limit on
     /// build (excess is truncated).
     pub tool_calls: Vec<ToolCall>,
+    /// The device the change was made from, when the host knows it. Stored
+    /// on the commit as [`Commit::device`]; `None` by default, and a commit
+    /// without one keeps the id it would have had before devices existed.
+    pub device: Option<DeviceId>,
 }
 
 impl CommitOptions {
@@ -332,6 +336,7 @@ impl CommitOptions {
             reasoning: None,
             confidence: None,
             tool_calls: Vec::new(),
+            device: None,
         }
     }
 
@@ -373,6 +378,15 @@ impl CommitOptions {
     /// Set tags on the intent.
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.intent.tags = tags;
+        self
+    }
+
+    /// Set the device the change was made from (see [`Commit::device`]).
+    /// Control characters are dropped and the id is capped at
+    /// [`agentstategraph_core::commit::MAX_DEVICE_LEN`] chars when the
+    /// commit is built.
+    pub fn with_device(mut self, device: impl Into<DeviceId>) -> Self {
+        self.device = Some(device.into());
         self
     }
 }
@@ -2106,6 +2120,7 @@ impl Repository {
             path: path.to_string(),
             commit_id: commit.id.short(),
             agent_id: commit.agent_id.clone(),
+            device: commit.device.clone(),
             intent_category: format!("{:?}", commit.intent.category),
             intent_description: commit.intent.description.clone(),
             reasoning: commit.reasoning.clone(),
@@ -2752,6 +2767,7 @@ impl Repository {
             "latest_commit": commits.first().map(|c| serde_json::json!({
                 "id": c.id.short(),
                 "agent": c.agent_id,
+                "device": c.device,
                 "intent": c.intent.description,
                 "timestamp": c.timestamp.to_rfc3339(),
             })),
@@ -3317,6 +3333,7 @@ impl Repository {
                     "full_id": c.id.to_string(),
                     "parents": c.parents.iter().map(|p| p.short()).collect::<Vec<_>>(),
                     "agent": c.agent_id,
+                    "device": c.device,
                     "category": format!("{:?}", c.intent.category),
                     "description": c.intent.description,
                     "confidence": c.confidence,
@@ -3388,6 +3405,7 @@ impl Repository {
                 "id": commit.id.short(),
                 "intent_id": commit.intent.id,
                 "agent": commit.agent_id,
+                "device": commit.device,
                 "category": format!("{:?}", commit.intent.category),
                 "description": commit.intent.description,
                 "reasoning": commit.reasoning,
@@ -4007,6 +4025,9 @@ impl Repository {
         }
         if !options.tool_calls.is_empty() {
             builder = builder.tool_calls(options.tool_calls);
+        }
+        if let Some(device) = options.device {
+            builder = builder.device(device);
         }
 
         let commit = builder.build();
