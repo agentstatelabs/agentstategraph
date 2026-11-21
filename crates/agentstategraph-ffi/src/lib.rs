@@ -398,6 +398,7 @@ pub extern "C" fn agentstategraph_log(
                     serde_json::json!({
                         "id": c.id.short(),
                         "agent": c.agent_id,
+                        "device": c.device,
                         "intent_category": format!("{:?}", c.intent.category),
                         "intent_description": c.intent.description,
                         "reasoning": c.reasoning,
@@ -538,6 +539,9 @@ fn repository_call(
         if !tool_calls.is_empty() {
             options = options.with_tool_calls(tool_calls);
         }
+        if let Some(device) = optional("device") {
+            options = options.with_device(device);
+        }
         Ok(options)
     };
 
@@ -587,7 +591,7 @@ fn repository_call(
                 )
                 .map_err(err_string)?;
             Ok(serde_json::Value::Array(commits.iter().map(|commit| serde_json::json!({
-                "id": commit.id.to_string(), "agent_id": commit.agent_id,
+                "id": commit.id.to_string(), "agent_id": commit.agent_id, "device": commit.device,
                 "intent_category": format!("{:?}", commit.intent.category),
                 "intent_description": commit.intent.description, "tags": commit.intent.tags,
                 "reasoning": commit.reasoning, "confidence": commit.confidence,

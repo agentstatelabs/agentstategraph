@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, RepoError, Repository};
+use agentstategraph::{CallContext, CommitOptions, RepoError, Repository};
 use agentstategraph_core::IntentCategory;
 use chrono::Utc;
 use once_cell::sync::Lazy;
@@ -76,7 +76,7 @@ pub struct AddTaskOptions {
 pub struct TaskStore {
     repo: Arc<Repository>,
     prefix: String,
-    agent_id: String,
+    context: CallContext,
 }
 
 impl TaskStore {
@@ -84,10 +84,25 @@ impl TaskStore {
     /// repository. The prefix must NOT end with a slash.
     ///
     /// `agent_id` is used as the commit author for every task operation.
+    /// Same as [`TaskStore::with_context`] with `CallContext::new(agent_id)`.
     pub fn new(
         repo: Arc<Repository>,
         prefix: impl Into<String>,
         agent_id: impl Into<String>,
+    ) -> Self {
+        Self::with_context(repo, prefix, CallContext::new(agent_id))
+    }
+
+    /// Create a task store whose commits carry `context`'s provenance: its
+    /// agent, authorizing principal, delegation chain and device. A host
+    /// that knows who is calling builds a store per caller this way, so plan
+    /// commits are attributed the same as its other writes. The
+    /// `created_by`, `started_by`, `completed_by` and `closed_by` fields
+    /// record the context's agent id.
+    pub fn with_context(
+        repo: Arc<Repository>,
+        prefix: impl Into<String>,
+        context: CallContext,
     ) -> Self {
         let mut prefix = prefix.into();
         if prefix.ends_with('/') {
@@ -96,7 +111,7 @@ impl TaskStore {
         Self {
             repo,
             prefix,
-            agent_id: agent_id.into(),
+            context,
         }
     }
 
@@ -105,7 +120,12 @@ impl TaskStore {
     }
 
     pub fn agent_id(&self) -> &str {
-        &self.agent_id
+        &self.context.agent_id
+    }
+
+    /// The provenance this store's commits carry.
+    pub fn context(&self) -> &CallContext {
+        &self.context
     }
 
     pub(crate) fn repo(&self) -> &Arc<Repository> {
@@ -145,7 +165,7 @@ impl TaskStore {
                 description: description.clone(),
                 status: PlanStatus::Active,
                 created_at: Utc::now(),
-                created_by: self.agent_id.clone(),
+                created_by: self.context.agent_id.clone(),
                 archived_at: None,
                 summary: None,
                 closed_at: None,
@@ -312,7 +332,7 @@ impl TaskStore {
             plan.status = PlanStatus::Completed;
             plan.summary = Some(summary.trim().to_string());
             plan.closed_at = Some(Utc::now());
-            plan.closed_by = Some(self.agent_id.clone());
+            plan.closed_by = Some(self.context.agent_id.clone());
 
             let value = serde_json::to_value(&plan)?;
             match self.repo.set_json_cas(
@@ -433,7 +453,7 @@ impl TaskStore {
                 parent_id: parent_id.clone(),
                 blocked_by: blocked_by.clone(),
                 created_at: Utc::now(),
-                created_by: self.agent_id.clone(),
+                created_by: self.context.agent_id.clone(),
                 started_at: None,
                 started_by: None,
                 completed_at: None,
@@ -556,7 +576,7 @@ impl TaskStore {
 
                 task.status = TaskStatus::InProgress;
                 task.started_at = Some(Utc::now());
-                task.started_by = Some(self.agent_id.clone());
+                task.started_by = Some(self.context.agent_id.clone());
                 Ok(())
             },
         )
@@ -586,7 +606,7 @@ impl TaskStore {
                 task.status = TaskStatus::Done;
                 task.proof = Some(proof.clone());
                 task.completed_at = Some(Utc::now());
-                task.completed_by = Some(self.agent_id.clone());
+                task.completed_by = Some(self.context.agent_id.clone());
                 Ok(())
             },
         )
@@ -960,7 +980,8 @@ impl TaskStore {
     }
 
     pub(crate) fn commit_opts(&self, description: impl Into<String>) -> CommitOptions {
-        CommitOptions::new(&self.agent_id, IntentCategory::Plan, description)
+        self.context
+            .commit_options(IntentCategory::Plan, description)
     }
 }
 

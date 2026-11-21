@@ -639,6 +639,7 @@ pub struct CallContext {
     pub principal: Principal,              // who is authorized (a person or service)
     pub agent_id: AgentId,                 // who is acting
     pub delegation: Vec<DelegationLink>,   // principal → … → agent
+    pub device: Option<DeviceId>,          // the install the call came from
     pub session: Option<SessionId>,
     pub epoch: Option<String>,
     pub request_id: Option<String>,        // correlates audit events
@@ -648,6 +649,15 @@ let repo = hosts_cache.open(&store_id)?; // F t-003: for_tenant on one shared po
 let scoped = repo.scoped(ctx);           // F t-001: per-call handle
 scoped.set("main", "/x", &value, intent)?;   // provenance from ctx; authorized; audited
 ```
+
+*Shipped first (1.6): the provenance slice.* `CallContext` exists with
+`agent_id`, `principal` (optional, defaulting to the agent), `delegation`
+and `device`, and is `#[non_exhaustive]` so t-001 adds namespace, session,
+epoch and request id rather than replacing it. `commit_options` builds
+`CommitOptions` from it; `TaskStore::with_context` and
+`PolicyStore::with_context` stamp their commits with it. Commits gained an
+optional `device`, left out of the hash when unset so existing ids hold.
+There is no `ScopedRepo`, `Authorizer` or `AuditSink` yet.
 
 - **`ScopedRepo`** exposes the `Repository` operations. Every one of
   them:

@@ -7,6 +7,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+Commits can record the device a change came from, and a host can hand ASG who is calling once, as a `CallContext`, instead of building each commit's provenance itself (DESIGN.md Plan F t-001, its provenance slice).
+
+### Added
+- **`Commit::device`: the install or machine a change came from.** It's optional: `CommitOptions::with_device` and `CommitBuilder::device` set it, and nothing sets it by default. On build, control characters are dropped and it's capped at `MAX_DEVICE_LEN` (128) chars; `enforce_caps` does the same for stored commits.
+  - A commit without a device hashes exactly as before, so existing commit ids don't change. A device is part of the id when present.
+  - It's left out of the stored JSON when unset. 1.5.x readers load commits that have one and ignore it. No storage migration.
+  - Log, query, commit-graph, intent-tree and stats output show it next to the agent, on MCP, the HTTP server, the FFI, WASM and the Python and TypeScript bindings. `BlameEntry` has it, so blame shows it everywhere. Swift's `LogEntry` and `CommitQueryResult` and .NET's `Commit` record have it.
+  - The FFI's JSON operations (`set_cas`, `merge.checked`, `spec.commit`) take a `device` field.
+- **`CallContext`: provenance from the host, in one place.** `CallContext::new(agent_id)` with `with_principal`, `with_delegation` and `with_device`; `commit_options(category, description)` builds `CommitOptions` with the agent, an authority carrying the principal (the agent when unset) and the delegation chain, and the device. It is `#[non_exhaustive]`: the rest of Plan F t-001 adds namespace, session and epoch to it.
+- **`TaskStore::with_context` and `PolicyStore::with_context`.** Their commits carry the context's agent, principal, delegation and device. `new(repo, prefix, agent_id)` is unchanged and means `with_context(repo, prefix, CallContext::new(agent_id))`. `created_by`, `started_by`, `completed_by`, `closed_by` and `proposed_by` still record the agent id.
+
+### Changed
+- **`Commit`, `CommitOptions` and `BlameEntry` have a new public field, `device`.** Code that builds one with a struct literal needs `device: None` (or `..`). Builders and `CommitOptions::new` are unaffected.
+
 ## [v1.5.4] — 2026-11-07
 
 Writes are much faster on a store with sealed epochs. Only a move of `main` that doesn't build on its head, such as a rewind, still pays for the seal check. The API is unchanged.

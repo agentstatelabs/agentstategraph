@@ -28,7 +28,7 @@ public sealed record BranchEntry(
 /// <summary>
 /// Entry in a commit log. Matches the JSON array shape emitted by
 /// <c>agentstategraph_log</c>: short id + agent + intent category / description
-/// + reasoning + confidence.
+/// + reasoning + confidence, and the device when the commit has one.
 /// </summary>
 public sealed record Commit(
     [property: JsonPropertyName("id")] string Id,
@@ -36,7 +36,12 @@ public sealed record Commit(
     [property: JsonPropertyName("intent_category")] string IntentCategory,
     [property: JsonPropertyName("intent_description")] string IntentDescription,
     [property: JsonPropertyName("reasoning")] string? Reasoning = null,
-    [property: JsonPropertyName("confidence")] double? Confidence = null);
+    [property: JsonPropertyName("confidence")] double? Confidence = null)
+{
+    /// <summary>The device the change was made from, when the host recorded one.</summary>
+    [JsonPropertyName("device")]
+    public string? Device { get; init; }
+}
 
 /// <summary>
 /// One <c>allow</c> or <c>deny</c> rule on a <see cref="Policy"/>.

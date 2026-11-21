@@ -259,6 +259,7 @@ impl AgentStateGraph {
                 serde_json::json!({
                     "id": c.id.short(),
                     "agent": c.agent_id,
+                    "device": c.device,
                     "intent": {
                         "category": format!("{:?}", c.intent.category),
                         "description": c.intent.description,
@@ -378,6 +379,7 @@ impl AgentStateGraph {
                 serde_json::json!({
                     "id": c.id.short(),
                     "agent": c.agent_id,
+                    "device": c.device,
                     "intent": {
                         "category": format!("{:?}", c.intent.category),
                         "description": c.intent.description,

@@ -30,9 +30,10 @@ pub use epoch::{
 };
 pub use error::CoreError;
 pub use intent::{
-    AgentId, AuthScope, Authority, DelegationLink, Deviation, DeviationImpact, FormatHint, Intent,
-    IntentCategory, IntentId, IntentLifecycle, IntentStatus, NotificationPolicy, Outcome,
-    Principal, Resolution, SessionId, TAG_GIT_REVISION, TAG_PIN_STATE, ToolCall, Urgency,
+    AgentId, AuthScope, Authority, DelegationLink, Deviation, DeviationImpact, DeviceId,
+    FormatHint, Intent, IntentCategory, IntentId, IntentLifecycle, IntentStatus,
+    NotificationPolicy, Outcome, Principal, Resolution, SessionId, TAG_GIT_REVISION, TAG_PIN_STATE,
+    ToolCall, Urgency,
 };
 pub use lifecycle::{LifecycleError, is_valid_transition, transition};
 pub use merge::{Conflict, ConflictValue, MergeResult};

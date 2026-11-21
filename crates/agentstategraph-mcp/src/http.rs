@@ -1089,6 +1089,7 @@ async fn get_log(
                     "id": c.id.short(),
                     "full_id": c.id.to_string(),
                     "agent": c.agent_id,
+                    "device": c.device,
                     "intent": {
                         "category": format!("{:?}", c.intent.category),
                         "description": c.intent.description,
@@ -1183,6 +1184,7 @@ async fn query_commits(
                 serde_json::json!({
                     "id": c.id.short(),
                     "agent": c.agent_id,
+                    "device": c.device,
                     "intent": {
                         "category": format!("{:?}", c.intent.category),
                         "description": c.intent.description,

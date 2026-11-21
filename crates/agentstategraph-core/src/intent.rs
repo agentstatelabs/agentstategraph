@@ -23,6 +23,10 @@ pub type SessionId = String;
 /// Unique identifier for a principal (human, agent, team, or policy).
 pub type Principal = String;
 
+/// Identifier for the device (install, machine) a change was made from, as
+/// the host reports it. CTXone uses a 32-hex-digit id per install.
+pub type DeviceId = String;
+
 // ---------------------------------------------------------------------------
 // Well-known intent tags
 // ---------------------------------------------------------------------------

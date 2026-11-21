@@ -167,14 +167,17 @@ impl Repository {
             {
                 return Ok((head, h));
             }
-            let commit = CommitBuilder::new(
+            let mut builder = CommitBuilder::new(
                 root,
                 options.agent_id.clone(),
                 options.authority.clone(),
                 options.intent.clone(),
             )
-            .parents(head.into_iter().collect())
-            .build();
+            .parents(head.into_iter().collect());
+            if let Some(device) = options.device.clone() {
+                builder = builder.device(device);
+            }
+            let commit = builder.build();
             store.put_commit(&commit)?;
             let landed = match head {
                 Some(h) => store.cas_ref(&ns, ref_name, h, commit.id)?,

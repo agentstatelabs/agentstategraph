@@ -15,6 +15,7 @@
 //! let mut repo = Repository::new(Box::new(storage));
 //! ```
 
+pub mod context;
 pub mod control;
 pub mod control_repo;
 pub mod repo;
@@ -33,6 +34,7 @@ pub use agentstategraph_storage as storage;
 
 // Re-export primary types
 pub use agentstategraph_storage::CommitTrace;
+pub use context::CallContext;
 pub use control_repo::ControlReport;
 pub use repo::{
     CommitOptions, HistoryExtractReport, META_PATH_PREFIX, META_SCHEMA_VERSION_PATH, RepoError,

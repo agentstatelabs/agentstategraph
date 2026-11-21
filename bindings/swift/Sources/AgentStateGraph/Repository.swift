@@ -50,13 +50,15 @@ public struct BranchEntry: Codable, Sendable, Equatable {
 public struct LogEntry: Codable, Sendable, Equatable {
     public let id: String
     public let agent: String
+    /// The device the change was made from, when the host recorded one.
+    public let device: String?
     public let intentCategory: String
     public let intentDescription: String
     public let reasoning: String?
     public let confidence: Double?
 
     enum CodingKeys: String, CodingKey {
-        case id, agent, reasoning, confidence
+        case id, agent, device, reasoning, confidence
         case intentCategory = "intent_category"
         case intentDescription = "intent_description"
     }

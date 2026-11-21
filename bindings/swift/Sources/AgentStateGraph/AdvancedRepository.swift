@@ -72,6 +72,8 @@ public struct CommitQuery: Encodable, Sendable, Equatable {
 public struct CommitQueryResult: Codable, Sendable, Equatable {
     public let id: String
     public let agentId: String
+    /// The device the change was made from, when the host recorded one.
+    public let device: String?
     public let intentCategory: String
     public let intentDescription: String
     public let tags: [String]
@@ -80,7 +82,7 @@ public struct CommitQueryResult: Codable, Sendable, Equatable {
     public let parents: [String]
     public let timestamp: String
     enum CodingKeys: String, CodingKey {
-        case id, tags, reasoning, confidence, parents, timestamp
+        case id, device, tags, reasoning, confidence, parents, timestamp
         case agentId = "agent_id"; case intentCategory = "intent_category"
         case intentDescription = "intent_description"
     }

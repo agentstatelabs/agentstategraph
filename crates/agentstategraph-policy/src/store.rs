@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, RepoError, Repository};
+use agentstategraph::{CallContext, CommitOptions, RepoError, Repository};
 use agentstategraph_core::IntentCategory;
 use chrono::Utc;
 
@@ -80,7 +80,9 @@ fn evaluation(
 pub struct PolicyStore {
     repo: Arc<Repository>,
     prefix: String,
-    agent_id: String,
+    /// The provenance this store's commits carry; its agent id is also
+    /// `proposed_by` on the policies it writes.
+    context: CallContext,
     /// Optional signature verifier. When `None` the store is in
     /// pass-through mode and never inspects `Policy::signature`
     /// (back-compat with pre-0.7.5 callers).
@@ -98,10 +100,23 @@ pub struct PolicyStore {
 }
 
 impl PolicyStore {
+    /// A store whose commits are made by `agent_id`. Same as
+    /// [`PolicyStore::with_context`] with `CallContext::new(agent_id)`.
     pub fn new(
         repo: Arc<Repository>,
         prefix: impl Into<String>,
         agent_id: impl Into<String>,
+    ) -> Self {
+        Self::with_context(repo, prefix, CallContext::new(agent_id))
+    }
+
+    /// A store whose commits carry `context`'s provenance: its agent,
+    /// authorizing principal, delegation chain and device. `proposed_by`
+    /// records the context's agent id.
+    pub fn with_context(
+        repo: Arc<Repository>,
+        prefix: impl Into<String>,
+        context: CallContext,
     ) -> Self {
         let mut prefix = prefix.into();
         if prefix.ends_with('/') {
@@ -110,7 +125,7 @@ impl PolicyStore {
         Self {
             repo,
             prefix,
-            agent_id: agent_id.into(),
+            context,
             verifier: None,
             require_signed: false,
             external_evaluators: None,
@@ -153,7 +168,12 @@ impl PolicyStore {
     }
 
     pub fn agent_id(&self) -> &str {
-        &self.agent_id
+        &self.context.agent_id
+    }
+
+    /// The provenance this store's commits carry.
+    pub fn context(&self) -> &CallContext {
+        &self.context
     }
 
     // -----------------------------------------------------------------
@@ -172,7 +192,7 @@ impl PolicyStore {
         let normalized = paths::normalize(&policy.path)?;
         policy.path = normalized.clone();
         policy.version = 1;
-        policy.proposed_by = self.agent_id.clone();
+        policy.proposed_by = self.context.agent_id.clone();
         policy.proposed_at = Utc::now();
         policy.ratified_by = None;
         policy.ratified_at = None;
@@ -275,7 +295,7 @@ impl PolicyStore {
 
             new_policy.path = normalized.clone();
             new_policy.version = old.version + 1;
-            new_policy.proposed_by = self.agent_id.clone();
+            new_policy.proposed_by = self.context.agent_id.clone();
             new_policy.proposed_at = Utc::now();
             new_policy.supersedes = Some(old.handle());
 
@@ -806,7 +826,7 @@ impl PolicyStore {
         category: IntentCategory,
         description: impl Into<String>,
     ) -> CommitOptions {
-        CommitOptions::new(&self.agent_id, category, description)
+        self.context.commit_options(category, description)
     }
 }
 
