@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **Taints, epochs and reminders can commit as a caller** (DESIGN.md Plan F, the rest of its provenance slice). In 1.6.0 they couldn't carry a device: they took only an agent id, or committed as `system`. Now each has a way to take a `CallContext`, and its commits carry the caller's agent, authority and device.
+  - **Taints:** `taint_with_context`, `untaint_with_context`, `quarantine_with_context`, `unquarantine_with_context`, `watch_path_with_context` and `unwatch_with_context`. The intent commit on the ref and the control-ref commit both carry the caller. The caller's agent stands in for the params' `agent_id`, on the taint record (`agent_id`, `resolved_by`) as well.
+  - **Epochs:** `create_epoch_with_context`, `create_epoch_scoped_with_context`, `seal_epoch_with_context` and `archive_epoch_with_context`. Their control-ref commits carry the caller.
+  - **Reminders:** `ContextReminderStore::new(repo, context)` is a `ReminderStore` whose writes commit to the control ref as the caller. Give one to a `ReminderManager`.
+
+  The methods without a context are unchanged. A taint commits as its params' `agent_id`; an epoch or reminder write, and an epoch's membership commit, commit as `system`. None of them carries a device. No binding, MCP or HTTP surface changes: taking a context there is Plan F t-007.
+
 ## [v1.6.0] — 2026-11-20
 
 Commits can record the device a change came from, and a host can hand ASG who is calling once, as a `CallContext`, instead of building each commit's provenance itself (DESIGN.md Plan F t-001, its provenance slice).

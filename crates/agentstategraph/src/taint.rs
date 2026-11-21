@@ -18,6 +18,7 @@ use agentstategraph_taint::{
 };
 use chrono::Utc;
 
+use crate::context::CallContext;
 use crate::repo::{CommitOptions, RepoError, Repository};
 use crate::telemetry::{self, op_span};
 
@@ -26,15 +27,31 @@ impl Repository {
     // CRUD — create a taint / quarantine / watch + intent commit
     // -----------------------------------------------------------------------
 
-    /// Apply a taint to `path`. Returns the new taint id.
+    /// Apply a taint to `path`. Returns the new taint id. Its commits carry
+    /// `params.agent_id`; [`Self::taint_with_context`] takes a whole caller.
     pub fn taint(
         &self,
         ref_name: &str,
         path: &str,
         params: TaintParams,
     ) -> Result<String, RepoError> {
+        let caller = CallContext::new(params.agent_id.clone());
+        self.taint_with_context(ref_name, path, params, &caller)
+    }
+
+    /// [`Self::taint`] for `caller` (DESIGN.md Plan F): the taint records the
+    /// caller's agent in place of `params.agent_id`, and both of its commits,
+    /// the intent commit on `ref_name` and the control-ref commit, carry the
+    /// caller's agent, authority and device.
+    pub fn taint_with_context(
+        &self,
+        ref_name: &str,
+        path: &str,
+        mut params: TaintParams,
+        caller: &CallContext,
+    ) -> Result<String, RepoError> {
+        params.agent_id = caller.agent_id.clone();
         let id = uuid::Uuid::new_v4().to_string();
-        let agent_id = params.agent_id.clone();
         let reason = params.reason.clone();
         let name = params.name.clone();
         let taint = Taint {
@@ -57,13 +74,13 @@ impl Repository {
             metadata: params.metadata,
         };
         let description = format!("taint {name} on {path}: {reason}");
-        self.taint_through(&id, &agent_id, IntentCategory::Taint, &description, || {
+        self.taint_through(&id, caller, IntentCategory::Taint, &description, || {
             self.taint_storage().create_taint(&taint)?;
             let commit_id = self.write_taint_intent(
                 ref_name,
                 IntentCategory::Taint,
                 description.clone(),
-                &agent_id,
+                caller,
                 Some(reason),
             )?;
             self.taint_storage()
@@ -81,14 +98,22 @@ impl Repository {
         taint_name: &str,
         params: UntaintParams,
     ) -> Result<(), RepoError> {
-        self.resolve_kind(
-            ref_name,
-            path,
-            taint_name,
-            TaintKind::Taint,
-            IntentCategory::Untaint,
-            params,
-        )
+        let caller = CallContext::new(params.agent_id.clone());
+        self.untaint_with_context(ref_name, path, taint_name, params, &caller)
+    }
+
+    /// [`Self::untaint`] for `caller`: it resolves the taint as the caller's
+    /// agent, in place of `params.agent_id`, and its commits carry the
+    /// caller's agent, authority and device.
+    pub fn untaint_with_context(
+        &self,
+        ref_name: &str,
+        path: &str,
+        taint_name: &str,
+        params: UntaintParams,
+        caller: &CallContext,
+    ) -> Result<(), RepoError> {
+        self.resolve_kind(ref_name, path, taint_name, TaintKind::Taint, params, caller)
     }
 
     /// Apply a quarantine — restricts access to the
@@ -99,8 +124,22 @@ impl Repository {
         path: &str,
         params: QuarantineParams,
     ) -> Result<String, RepoError> {
+        let caller = CallContext::new(params.agent_id.clone());
+        self.quarantine_with_context(ref_name, path, params, &caller)
+    }
+
+    /// [`Self::quarantine`] for `caller`: the quarantine records the caller's
+    /// agent in place of `params.agent_id`, and its commits carry the
+    /// caller's agent, authority and device.
+    pub fn quarantine_with_context(
+        &self,
+        ref_name: &str,
+        path: &str,
+        mut params: QuarantineParams,
+        caller: &CallContext,
+    ) -> Result<String, RepoError> {
+        params.agent_id = caller.agent_id.clone();
         let id = uuid::Uuid::new_v4().to_string();
-        let agent_id = params.agent_id.clone();
         let reason = params.reason.clone();
         let name = params.name.clone();
         let mut metadata = TaintMetadata::new();
@@ -130,7 +169,7 @@ impl Repository {
         let description = format!("quarantine {name} on {path}: {reason}");
         self.taint_through(
             &id,
-            &agent_id,
+            caller,
             IntentCategory::Quarantine,
             &description,
             || {
@@ -139,7 +178,7 @@ impl Repository {
                     ref_name,
                     IntentCategory::Quarantine,
                     description.clone(),
-                    &agent_id,
+                    caller,
                     Some(reason),
                 )?;
                 self.taint_storage()
@@ -158,13 +197,27 @@ impl Repository {
         taint_name: &str,
         params: UnquarantineParams,
     ) -> Result<(), RepoError> {
+        let caller = CallContext::new(params.agent_id.clone());
+        self.unquarantine_with_context(ref_name, path, taint_name, params, &caller)
+    }
+
+    /// [`Self::unquarantine`] for `caller`, as [`Self::untaint_with_context`]
+    /// is for a taint.
+    pub fn unquarantine_with_context(
+        &self,
+        ref_name: &str,
+        path: &str,
+        taint_name: &str,
+        params: UnquarantineParams,
+        caller: &CallContext,
+    ) -> Result<(), RepoError> {
         self.resolve_kind(
             ref_name,
             path,
             taint_name,
             TaintKind::Quarantine,
-            IntentCategory::Unquarantine,
             params,
+            caller,
         )
     }
 
@@ -175,8 +228,22 @@ impl Repository {
         path: &str,
         params: WatchParams,
     ) -> Result<String, RepoError> {
+        let caller = CallContext::new(params.agent_id.clone());
+        self.watch_path_with_context(ref_name, path, params, &caller)
+    }
+
+    /// [`Self::watch_path`] for `caller`: the watch records the caller's
+    /// agent in place of `params.agent_id`, and its commits carry the
+    /// caller's agent, authority and device.
+    pub fn watch_path_with_context(
+        &self,
+        ref_name: &str,
+        path: &str,
+        mut params: WatchParams,
+        caller: &CallContext,
+    ) -> Result<String, RepoError> {
+        params.agent_id = caller.agent_id.clone();
         let id = uuid::Uuid::new_v4().to_string();
-        let agent_id = params.agent_id.clone();
         let reason = params.reason.clone();
         let name = params.name.clone();
         let mut metadata = TaintMetadata::new();
@@ -212,13 +279,13 @@ impl Repository {
             metadata,
         };
         let description = format!("watch {name} on {path}: {reason}");
-        self.taint_through(&id, &agent_id, IntentCategory::Watch, &description, || {
+        self.taint_through(&id, caller, IntentCategory::Watch, &description, || {
             self.taint_storage().create_taint(&taint)?;
             let commit_id = self.write_taint_intent(
                 ref_name,
                 IntentCategory::Watch,
                 description.clone(),
-                &agent_id,
+                caller,
                 Some(reason),
             )?;
             self.taint_storage()
@@ -236,18 +303,32 @@ impl Repository {
         watch_name: &str,
         params: UnwatchParams,
     ) -> Result<(), RepoError> {
+        let caller = CallContext::new(params.agent_id.clone());
+        self.unwatch_with_context(ref_name, path, watch_name, params, &caller)
+    }
+
+    /// [`Self::unwatch`] for `caller`, as [`Self::untaint_with_context`] is
+    /// for a taint.
+    pub fn unwatch_with_context(
+        &self,
+        ref_name: &str,
+        path: &str,
+        watch_name: &str,
+        params: UnwatchParams,
+        caller: &CallContext,
+    ) -> Result<(), RepoError> {
         let reason = params.reason.clone().unwrap_or_default();
         self.resolve_kind(
             ref_name,
             path,
             watch_name,
             TaintKind::Watch,
-            IntentCategory::Unwatch,
             UntaintParams {
                 reason,
                 proof: None,
                 agent_id: params.agent_id,
             },
+            caller,
         )
     }
 
@@ -469,9 +550,14 @@ impl Repository {
         path: &str,
         taint_name: &str,
         kind: TaintKind,
-        intent: IntentCategory,
         params: UntaintParams,
+        caller: &CallContext,
     ) -> Result<(), RepoError> {
+        let intent = match kind {
+            TaintKind::Taint => IntentCategory::Untaint,
+            TaintKind::Quarantine => IntentCategory::Unquarantine,
+            TaintKind::Watch => IntentCategory::Unwatch,
+        };
         let candidates = self
             .taint_storage()
             .list_taints(Some(path), Some(kind), false)?;
@@ -484,45 +570,39 @@ impl Repository {
                 )))
             })?;
         let description = format!("resolve {kind:?} {taint_name} on {path}");
-        self.taint_through(
-            &target.id,
-            &params.agent_id,
-            intent.clone(),
-            &description,
-            || {
-                self.taint_storage().resolve_taint(
-                    &target.id,
-                    &params.agent_id,
-                    &params.reason,
-                    params.proof.as_deref(),
-                    Utc::now(),
-                )?;
-                self.write_taint_intent(
-                    ref_name,
-                    intent,
-                    description.clone(),
-                    &params.agent_id,
-                    Some(params.reason),
-                )?;
-                Ok(())
-            },
-        )
+        self.taint_through(&target.id, caller, intent.clone(), &description, || {
+            self.taint_storage().resolve_taint(
+                &target.id,
+                &caller.agent_id,
+                &params.reason,
+                params.proof.as_deref(),
+                Utc::now(),
+            )?;
+            self.write_taint_intent(
+                ref_name,
+                intent,
+                description.clone(),
+                caller,
+                Some(params.reason),
+            )?;
+            Ok(())
+        })
     }
 
     /// Run a taint table write, then commit the taint to the control ref
     /// (DESIGN.md Plan G t-001), with the same provenance as its intent
-    /// commit.
+    /// commit: `caller`'s.
     fn taint_through(
         &self,
         id: &str,
-        agent_id: &str,
+        caller: &CallContext,
         category: IntentCategory,
         description: &str,
         table: impl FnOnce() -> Result<(), RepoError>,
     ) -> Result<(), RepoError> {
         self.write_through(
             crate::control_repo::Stage::Record(crate::control_repo::Kind::Taint, id),
-            CommitOptions::new(agent_id, category, description),
+            caller.commit_options(category, description),
             table,
         )
     }

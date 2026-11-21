@@ -776,6 +776,163 @@ mod control_support {
     }
 }
 
+/// A taint, epoch or reminder write given a caller commits as it: the taint
+/// family's intent commits and every control-ref commit carry the caller's
+/// agent and device. The same writes without one carry what they always did,
+/// the params' agent for a taint and `system` for an epoch or a reminder, and
+/// no device.
+fn control_writes_carry_the_callers_device(f: &Fixture) {
+    use agentstategraph::{CallContext, ContextReminderStore};
+    use agentstategraph_reminders::ReminderManager;
+    use agentstategraph_taint::{QuarantineParams, UntaintParams, UnwatchParams, WatchParams};
+    use control_support::*;
+    const LAPTOP: &str = "0123456789abcdef0123456789abcdef";
+
+    let repo = Arc::new(f.open());
+    repo.init().unwrap();
+    let store = f.storage();
+    let caller = CallContext::new("agent/laptop").with_device(LAPTOP);
+    let on_laptop = ("agent/laptop".to_string(), Some(LAPTOP.to_string()));
+    let as_who = |agent: &str| (agent.to_string(), None::<String>);
+    // (agent, device) of the newest commit on the control ref, and on main.
+    let control = || {
+        let c = store
+            .get_commit(&head(store.as_ref()).expect("a control ref"))
+            .unwrap()
+            .unwrap();
+        (c.agent_id, c.device)
+    };
+    let main = || {
+        let c = repo.log("main", 1).unwrap().remove(0);
+        (c.agent_id, c.device)
+    };
+    let resolve = |reason: &str| UntaintParams {
+        reason: reason.into(),
+        proof: None,
+        // The caller's agent stands in for this one.
+        agent_id: "agent/params".into(),
+    };
+
+    // Taint, quarantine and watch, each made and resolved by the caller.
+    let mut params = taint_params("pii");
+    params.agent_id = "agent/params".into();
+    let taint = repo
+        .taint_with_context("main", "/users", params, &caller)
+        .unwrap();
+    assert_eq!(main(), on_laptop, "taint intent");
+    assert_eq!(control(), on_laptop, "taint control");
+    assert_eq!(
+        state(store.as_ref()).taints[&taint].agent_id,
+        "agent/laptop"
+    );
+    repo.untaint_with_context("main", "/users", "pii", resolve("scrubbed"), &caller)
+        .unwrap();
+    assert_eq!((main(), control()), (on_laptop.clone(), on_laptop.clone()));
+    assert_eq!(
+        state(store.as_ref()).taints[&taint].resolved_by.as_deref(),
+        Some("agent/laptop")
+    );
+
+    let quarantine = repo
+        .quarantine_with_context(
+            "main",
+            "/vault",
+            QuarantineParams {
+                name: "lock".into(),
+                reason: "audit".into(),
+                severity: Default::default(),
+                authorized_agents: vec!["agent/laptop".into()],
+                expires_at: None,
+                propagate: true,
+                agent_id: "agent/params".into(),
+            },
+            &caller,
+        )
+        .unwrap();
+    assert_eq!((main(), control()), (on_laptop.clone(), on_laptop.clone()));
+    repo.unquarantine_with_context("main", "/vault", "lock", resolve("done"), &caller)
+        .unwrap();
+    assert_eq!((main(), control()), (on_laptop.clone(), on_laptop.clone()));
+    assert_eq!(
+        state(store.as_ref()).taints[&quarantine]
+            .resolved_by
+            .as_deref(),
+        Some("agent/laptop")
+    );
+
+    repo.watch_path_with_context(
+        "main",
+        "/load",
+        WatchParams {
+            name: "hot".into(),
+            reason: "capacity".into(),
+            metric: None,
+            threshold: None,
+            direction: Default::default(),
+            check_interval_secs: None,
+            expires_at: None,
+            severity: Default::default(),
+            propagate: true,
+            agent_id: "agent/params".into(),
+        },
+        &caller,
+    )
+    .unwrap();
+    assert_eq!((main(), control()), (on_laptop.clone(), on_laptop.clone()));
+    repo.unwatch_with_context(
+        "main",
+        "/load",
+        "hot",
+        UnwatchParams {
+            reason: None,
+            agent_id: "agent/params".into(),
+        },
+        &caller,
+    )
+    .unwrap();
+    assert_eq!((main(), control()), (on_laptop.clone(), on_laptop.clone()));
+
+    // Without a caller, a taint's commits carry the params' agent.
+    repo.taint("main", "/other", taint_params("plain")).unwrap();
+    let conformance = as_who("agent/conformance");
+    assert_eq!((main(), control()), (conformance.clone(), conformance));
+
+    // Epochs: created, sealed and archived by the caller; `system` without.
+    repo.create_epoch_with_context("e1", "work", vec![], &caller)
+        .unwrap();
+    assert_eq!(control(), on_laptop, "epoch create");
+    repo.seal_epoch_with_context("e1", "done", &caller).unwrap();
+    assert_eq!(control(), on_laptop, "epoch seal");
+    repo.archive_epoch_with_context("e1", &caller).unwrap();
+    assert_eq!(control(), on_laptop, "epoch archive");
+    repo.create_epoch_scoped_with_context(
+        "e2",
+        "one plan",
+        vec![],
+        agentstategraph_core::EpochScope::Plan("p".into()),
+        &caller,
+    )
+    .unwrap();
+    assert_eq!(control(), on_laptop, "scoped epoch create");
+    repo.create_epoch("e3", "work", vec![]).unwrap();
+    assert_eq!(control(), as_who("system"));
+
+    // Reminders: written through a ContextReminderStore, as the caller;
+    // through the repository itself, as `system`.
+    let mine = ReminderManager::new(Arc::new(ContextReminderStore::new(
+        repo.clone(),
+        caller.clone(),
+    )));
+    let r = mine.create(reminder("on the laptop")).unwrap();
+    assert_eq!(control(), on_laptop, "reminder save");
+    mine.cancel(&r.id).unwrap();
+    assert_eq!(control(), on_laptop, "reminder update");
+    ReminderManager::new(repo.clone())
+        .create(reminder("plain"))
+        .unwrap();
+    assert_eq!(control(), as_who("system"));
+}
+
 /// Every taint, reminder and epoch change lands on the control ref, the ref
 /// is guarded from ordinary writes, and a repository opened on tables that
 /// match it changes nothing.
@@ -1253,6 +1410,14 @@ fn write_branch_merge() {
 #[test]
 fn device_on_commits() {
     run("device_round_trips", device_round_trips);
+}
+
+#[test]
+fn device_on_control_writes() {
+    run(
+        "control_writes_carry_the_callers_device",
+        control_writes_carry_the_callers_device,
+    );
 }
 
 #[test]

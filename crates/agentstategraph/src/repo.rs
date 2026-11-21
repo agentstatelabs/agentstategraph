@@ -2345,7 +2345,9 @@ impl Repository {
     // Epoch operations
     // -----------------------------------------------------------------------
 
-    /// Create a new epoch, persisted via the storage backend.
+    /// Create a new epoch, persisted via the storage backend. Its
+    /// control-ref commit is the store's own (`system`);
+    /// [`Self::create_epoch_with_context`] makes it the caller's.
     pub fn create_epoch(
         &self,
         id: &str,
@@ -2354,8 +2356,21 @@ impl Repository {
     ) -> Result<agentstategraph_core::Epoch, RepoError> {
         let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
             .with_namespace(self.active_namespace()?.as_str());
-        self.epoch_through(id, "create", || Ok(self.storage.create_epoch(&epoch)?))?;
-        Ok(epoch)
+        self.put_new_epoch(epoch, None)
+    }
+
+    /// [`Self::create_epoch`] for `caller` (DESIGN.md Plan F): the epoch's
+    /// control-ref commit carries the caller's agent, authority and device.
+    pub fn create_epoch_with_context(
+        &self,
+        id: &str,
+        description: &str,
+        root_intents: Vec<String>,
+        caller: &crate::context::CallContext,
+    ) -> Result<agentstategraph_core::Epoch, RepoError> {
+        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
+            .with_namespace(self.active_namespace()?.as_str());
+        self.put_new_epoch(epoch, Some(caller))
     }
 
     /// Create an epoch that declares what it covers. See [`EpochScope`].
@@ -2369,7 +2384,35 @@ impl Repository {
         let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
             .with_namespace(self.active_namespace()?.as_str())
             .with_scope(scope);
-        self.epoch_through(id, "create", || Ok(self.storage.create_epoch(&epoch)?))?;
+        self.put_new_epoch(epoch, None)
+    }
+
+    /// [`Self::create_epoch_scoped`] for `caller`, as
+    /// [`Self::create_epoch_with_context`] is for an unscoped epoch.
+    pub fn create_epoch_scoped_with_context(
+        &self,
+        id: &str,
+        description: &str,
+        root_intents: Vec<String>,
+        scope: agentstategraph_core::EpochScope,
+        caller: &crate::context::CallContext,
+    ) -> Result<agentstategraph_core::Epoch, RepoError> {
+        let epoch = agentstategraph_core::Epoch::new(id, description, root_intents)
+            .with_namespace(self.active_namespace()?.as_str())
+            .with_scope(scope);
+        self.put_new_epoch(epoch, Some(caller))
+    }
+
+    /// Store a new epoch and commit it to the control ref, as `caller` or
+    /// else as the store itself.
+    fn put_new_epoch(
+        &self,
+        epoch: agentstategraph_core::Epoch,
+        caller: Option<&crate::context::CallContext>,
+    ) -> Result<agentstategraph_core::Epoch, RepoError> {
+        self.epoch_through(&epoch.id, "create", caller, || {
+            Ok(self.storage.create_epoch(&epoch)?)
+        })?;
         Ok(epoch)
     }
 
@@ -2409,7 +2452,30 @@ impl Repository {
     /// violations (a rewind of main that would orphan a sealed commit).
     /// Persisted via the storage backend — survives process restart.
     /// (security threat model v3+, V8)
+    ///
+    /// The seal's control-ref commit is the store's own (`system`);
+    /// [`Self::seal_epoch_with_context`] makes it the caller's.
     pub fn seal_epoch(&self, id: &str, summary: &str) -> Result<(), RepoError> {
+        self.seal_epoch_as(id, summary, None)
+    }
+
+    /// [`Self::seal_epoch`] for `caller` (DESIGN.md Plan F): the seal's
+    /// control-ref commit carries the caller's agent, authority and device.
+    pub fn seal_epoch_with_context(
+        &self,
+        id: &str,
+        summary: &str,
+        caller: &crate::context::CallContext,
+    ) -> Result<(), RepoError> {
+        self.seal_epoch_as(id, summary, Some(caller))
+    }
+
+    fn seal_epoch_as(
+        &self,
+        id: &str,
+        summary: &str,
+        caller: Option<&crate::context::CallContext>,
+    ) -> Result<(), RepoError> {
         let ns = self.active_namespace()?;
         let epoch = self.get_epoch(id)?;
 
@@ -2425,7 +2491,7 @@ impl Repository {
         };
 
         let seal_hash = Self::compute_seal_hash(id, &sealed_commits);
-        self.epoch_through(id, "seal", || {
+        self.epoch_through(id, "seal", caller, || {
             Ok(self.storage.seal_epoch(
                 id,
                 summary,
@@ -2436,16 +2502,19 @@ impl Repository {
         })
     }
 
-    /// Run an epoch table write, then commit the epoch to the control ref.
+    /// Run an epoch table write, then commit the epoch to the control ref,
+    /// as `caller` or else as the store itself (`system`).
     fn epoch_through<T>(
         &self,
         id: &str,
         what: &str,
+        caller: Option<&crate::context::CallContext>,
         table: impl FnOnce() -> Result<T, RepoError>,
     ) -> Result<T, RepoError> {
         self.write_through(
             crate::control_repo::Stage::Record(crate::control_repo::Kind::Epoch, id),
-            crate::control_repo::system_options(
+            crate::control_repo::control_options(
+                caller,
                 IntentCategory::Checkpoint,
                 format!("epoch {id}: {what}"),
             ),
@@ -2495,7 +2564,7 @@ impl Repository {
         // then never match any real workspace on read.
         Namespace::new(namespace)
             .map_err(|e| RepoError::InvalidOperation(format!("invalid namespace: {e}")))?;
-        self.epoch_through(id, "assign namespace", || {
+        self.epoch_through(id, "assign namespace", None, || {
             self.storage
                 .assign_epoch_namespace(id, namespace)
                 .map_err(RepoError::Storage)
@@ -2531,9 +2600,29 @@ impl Repository {
             .ok_or_else(|| RepoError::RefNotFound(format!("epoch not found: {}", id)))
     }
 
-    /// Transition a sealed epoch to Archived.
+    /// Transition a sealed epoch to Archived. Its control-ref commit is the
+    /// store's own (`system`); [`Self::archive_epoch_with_context`] makes it
+    /// the caller's.
     pub fn archive_epoch(&self, id: &str) -> Result<(), RepoError> {
-        self.epoch_through(id, "archive", || {
+        self.archive_epoch_as(id, None)
+    }
+
+    /// [`Self::archive_epoch`] for `caller` (DESIGN.md Plan F): the control-ref
+    /// commit carries the caller's agent, authority and device.
+    pub fn archive_epoch_with_context(
+        &self,
+        id: &str,
+        caller: &crate::context::CallContext,
+    ) -> Result<(), RepoError> {
+        self.archive_epoch_as(id, Some(caller))
+    }
+
+    fn archive_epoch_as(
+        &self,
+        id: &str,
+        caller: Option<&crate::context::CallContext>,
+    ) -> Result<(), RepoError> {
+        self.epoch_through(id, "archive", caller, || {
             self.storage.archive_epoch(id).map_err(RepoError::Storage)
         })
     }
@@ -4081,16 +4170,17 @@ impl Repository {
 
     /// Write a bare "intent-only" commit with no state-tree change —
     /// used by the taint / quarantine / watch family to stamp an
-    /// audit commit without mutating state. Returns the new commit id.
+    /// audit commit, with `caller`'s provenance, without mutating state.
+    /// Returns the new commit id.
     pub(crate) fn write_taint_intent(
         &self,
         ref_name: &str,
         category: IntentCategory,
         description: String,
-        agent_id: &str,
+        caller: &crate::context::CallContext,
         reasoning: Option<String>,
     ) -> Result<ObjectId, RepoError> {
-        let mut options = CommitOptions::new(agent_id, category, description);
+        let mut options = caller.commit_options(category, description);
         if let Some(r) = reasoning {
             options = options.with_reasoning(r);
         }
@@ -4117,7 +4207,7 @@ impl agentstategraph_reminders::ReminderStore for Repository {
         &self,
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
-        self.reminder_through(&reminder.id, "save", || self.storage.save(reminder))
+        self.reminder_through(&reminder.id, "save", None, || self.storage.save(reminder))
     }
 
     fn get(
@@ -4132,7 +4222,9 @@ impl agentstategraph_reminders::ReminderStore for Repository {
         &self,
         reminder: &agentstategraph_reminders::Reminder,
     ) -> Result<(), agentstategraph_reminders::ReminderError> {
-        self.reminder_through(&reminder.id, "update", || self.storage.update(reminder))
+        self.reminder_through(&reminder.id, "update", None, || {
+            self.storage.update(reminder)
+        })
     }
 
     fn update_if_unchanged(
@@ -4140,13 +4232,13 @@ impl agentstategraph_reminders::ReminderStore for Repository {
         expected: &agentstategraph_reminders::Reminder,
         new: &agentstategraph_reminders::Reminder,
     ) -> Result<bool, agentstategraph_reminders::ReminderError> {
-        self.reminder_through(&new.id, "update", || {
+        self.reminder_through(&new.id, "update", None, || {
             self.storage.update_if_unchanged(expected, new)
         })
     }
 
     fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
-        self.reminder_through(id, "delete", || self.storage.delete(id))
+        self.reminder_through(id, "delete", None, || self.storage.delete(id))
     }
 
     fn list(
@@ -4160,21 +4252,113 @@ impl agentstategraph_reminders::ReminderStore for Repository {
 
 impl Repository {
     /// Run a reminder table write, then commit the reminder to the control
-    /// ref.
+    /// ref, as `caller` or else as the store itself (`system`).
     fn reminder_through<T>(
         &self,
         id: &str,
         what: &str,
+        caller: Option<&crate::context::CallContext>,
         table: impl FnOnce() -> Result<T, agentstategraph_reminders::ReminderError>,
     ) -> Result<T, agentstategraph_reminders::ReminderError> {
         self.write_through(
             crate::control_repo::Stage::Record(crate::control_repo::Kind::Reminder, id),
-            crate::control_repo::system_options(
+            crate::control_repo::control_options(
+                caller,
                 IntentCategory::Checkpoint,
                 format!("reminder {id}: {what}"),
             ),
             table,
         )
+    }
+}
+
+/// A [`ReminderStore`](agentstategraph_reminders::ReminderStore) on a
+/// repository whose writes commit to the control ref as one caller (DESIGN.md
+/// Plan F): its agent, authority and device. The repository's own
+/// `ReminderStore` commits them as the store itself (`system`), since a
+/// reminder write names no caller. Hand one to a `ReminderManager` per
+/// caller:
+///
+/// ```ignore
+/// let reminders = ContextReminderStore::new(repo.clone(), caller);
+/// let manager = ReminderManager::new(Arc::new(reminders));
+/// ```
+#[derive(Clone)]
+pub struct ContextReminderStore {
+    repo: Arc<Repository>,
+    context: crate::context::CallContext,
+}
+
+impl ContextReminderStore {
+    /// Reminders on `repo`, written as `context`.
+    pub fn new(repo: Arc<Repository>, context: crate::context::CallContext) -> Self {
+        Self { repo, context }
+    }
+
+    /// The caller this store's writes commit as.
+    pub fn context(&self) -> &crate::context::CallContext {
+        &self.context
+    }
+
+    /// The repository it writes to.
+    pub fn repo(&self) -> &Arc<Repository> {
+        &self.repo
+    }
+}
+
+impl agentstategraph_reminders::ReminderStore for ContextReminderStore {
+    fn save(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
+        self.repo
+            .reminder_through(&reminder.id, "save", Some(&self.context), || {
+                self.repo.storage.save(reminder)
+            })
+    }
+
+    fn get(
+        &self,
+        id: &str,
+    ) -> Result<Option<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
+        self.repo.storage.get(id)
+    }
+
+    fn update(
+        &self,
+        reminder: &agentstategraph_reminders::Reminder,
+    ) -> Result<(), agentstategraph_reminders::ReminderError> {
+        self.repo
+            .reminder_through(&reminder.id, "update", Some(&self.context), || {
+                self.repo.storage.update(reminder)
+            })
+    }
+
+    fn update_if_unchanged(
+        &self,
+        expected: &agentstategraph_reminders::Reminder,
+        new: &agentstategraph_reminders::Reminder,
+    ) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        self.repo
+            .reminder_through(&new.id, "update", Some(&self.context), || {
+                self.repo.storage.update_if_unchanged(expected, new)
+            })
+    }
+
+    fn delete(&self, id: &str) -> Result<bool, agentstategraph_reminders::ReminderError> {
+        self.repo
+            .reminder_through(id, "delete", Some(&self.context), || {
+                self.repo.storage.delete(id)
+            })
+    }
+
+    fn list(
+        &self,
+        filter: &agentstategraph_reminders::ReminderFilter,
+    ) -> Result<Vec<agentstategraph_reminders::Reminder>, agentstategraph_reminders::ReminderError>
+    {
+        self.repo.storage.list(filter)
     }
 }
 
