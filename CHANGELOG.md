@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [v1.6.0] — 2026-11-20
+
 Commits can record the device a change came from, and a host can hand ASG who is calling once, as a `CallContext`, instead of building each commit's provenance itself (DESIGN.md Plan F t-001, its provenance slice).
 
 ### Added

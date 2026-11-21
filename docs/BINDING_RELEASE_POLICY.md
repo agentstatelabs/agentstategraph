@@ -114,6 +114,15 @@ No binding calls them. Bindings surface repository errors as message strings, an
 
 1.5.3 was reviewed in its `release-prep` commit (`v1.5.2..v1.5.3`). One change reaches the bindings: `sync.pull` takes `allow_unrelated`, which joins a local branch whose history shares no commit with the remote's (`Repository::join`, through `agentstategraph_sync_http::named::join`). In the C ABI it's an optional field of the `sync.pull` request, so the operation count stays 45 and the headers are unchanged. Swift's `pull(from:ref:description:agentId:allowUnrelated:)`, Python's `pull(..., allow_unrelated=False)` and TypeScript's `pull(remote, reference, description, agent, allowUnrelated)` pass it through, defaulting to a plain pull. The rest of 1.5.3 is Rust-only: `Repository::merge_unrelated`, `join`, `join_fetched`, `keep_epochs_local` and `local_epochs`, and seal checks that skip commits a store never held. No capability changes status. The C ABI's sync test adds a join; locally the TypeScript suite passes 42 of 42 and the Python suite 47, with 1 skipped (policy verify). Swift's suite runs in GitHub CI.
 
+1.6.0 was reviewed in its `release-prep` commit (`v1.5.4..v1.6.0`). Commits can carry a `device`, and four changes reach the bindings, all additive:
+
+- **Log and query output.** The C ABI's `agentstategraph_log`, the `query.commits` operation, WASM `log`, and Python's and TypeScript's `log` and `query` emit a `device` key next to the agent. It is `null` when the commit has none. Blame entries carry `device` only when the commit has one.
+- **Typed records.** Swift's `LogEntry` and `CommitQueryResult` gain `device: String?`, decoded when present. .NET's `Commit` record gains a `Device` init property, which leaves its positional constructor unchanged.
+- **The FFI's JSON commit options** (`set_cas`, `merge.checked`, `spec.commit`) take an optional `device` field. It's a request field, not an operation, so the ABI stays at 45 operations and the headers are unchanged.
+- **Commit ids and stored commits from earlier versions are unchanged,** since a commit without a device hashes as before.
+
+Setting a device from Python, TypeScript, WASM, Go or .NET writes, from the MCP tools or from the HTTP server waits for Plan F t-007. The rest of 1.6.0 is Rust-only: `CallContext`, `CommitOptions::with_device`, `TaskStore::with_context` and `PolicyStore::with_context`. No capability changes status. Locally, the TypeScript suite passes 42 of 42 and the Python suite 47, with 1 skipped (policy verify). The .NET suite passed in the MR's `dotnet` job. Swift's suite runs in GitHub CI.
+
 ## Earlier audit — 1.2.5 (retrospective)
 
 `reviewed_core_version` moved to 1.2.5 on 2026-09-29 in the release-prep commit
