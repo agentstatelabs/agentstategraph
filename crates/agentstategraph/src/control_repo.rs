@@ -118,6 +118,20 @@ pub(crate) fn system_options(category: IntentCategory, description: String) -> C
     CommitOptions::new("system", category, description)
 }
 
+/// The options a control commit is made with: `caller`'s, when a write names
+/// one (a `*_with_context` method, or a [`crate::ContextReminderStore`]), else
+/// [`system_options`].
+pub(crate) fn control_options(
+    caller: Option<&crate::context::CallContext>,
+    category: IntentCategory,
+    description: String,
+) -> CommitOptions {
+    match caller {
+        Some(caller) => caller.commit_options(category, description),
+        None => system_options(category, description),
+    }
+}
+
 impl Repository {
     fn control_store(&self) -> &dyn Storage {
         self.taint_storage()

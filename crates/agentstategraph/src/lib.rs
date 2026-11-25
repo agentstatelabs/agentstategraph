@@ -37,8 +37,8 @@ pub use agentstategraph_storage::CommitTrace;
 pub use context::CallContext;
 pub use control_repo::ControlReport;
 pub use repo::{
-    CommitOptions, HistoryExtractReport, META_PATH_PREFIX, META_SCHEMA_VERSION_PATH, RepoError,
-    Repository, RetentionPolicy, SCHEMA_VERSION,
+    CommitOptions, ContextReminderStore, HistoryExtractReport, META_PATH_PREFIX,
+    META_SCHEMA_VERSION_PATH, RepoError, Repository, RetentionPolicy, SCHEMA_VERSION,
 };
 pub use session::{CreateSessionParams, Session, SessionError, SessionManager};
 pub use speculation::{SpecComparison, SpecHandle, SpeculationManager};
