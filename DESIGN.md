@@ -659,7 +659,7 @@ epoch and request id rather than replacing it. `commit_options` builds
 optional `device`, left out of the hash when unset so existing ids hold.
 There is no `ScopedRepo`, `Authorizer` or `AuditSink` yet.
 
-*Then (unreleased): the control writes.* Taints, epochs and reminders took
+*Then (1.7): the control writes.* Taints, epochs and reminders took
 only an agent id, or committed as `system`, so they couldn't carry a device.
 The taint family and epoch create, seal and archive now have
 `*_with_context` variants, and `ContextReminderStore` is a `ReminderStore`

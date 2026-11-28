@@ -123,6 +123,8 @@ No binding calls them. Bindings surface repository errors as message strings, an
 
 Setting a device from Python, TypeScript, WASM, Go or .NET writes, from the MCP tools or from the HTTP server waits for Plan F t-007. The rest of 1.6.0 is Rust-only: `CallContext`, `CommitOptions::with_device`, `TaskStore::with_context` and `PolicyStore::with_context`. No capability changes status. Locally, the TypeScript suite passes 42 of 42 and the Python suite 47, with 1 skipped (policy verify). The .NET suite passed in the MR's `dotnet` job. Swift's suite runs in GitHub CI.
 
+1.7.0 was reviewed in its `release-prep` commit (`v1.6.0..v1.7.0`). Nothing under `crates/agentstategraph-ffi`, `crates/agentstategraph-wasm`, `crates/agentstategraph-mcp` or `bindings/` changed apart from the version strings, so the C ABI keeps its 45 operations and the headers are unchanged. The one change is Rust-only (agentstategraph!128): the taint family and epoch create, seal and archive gain `*_with_context` variants, and `ContextReminderStore` is a `ReminderStore` that commits as one caller, so those commits can carry a device. The methods the bindings call are unchanged and commit as before: a taint as its params' agent, an epoch or reminder write as `system`, with no device. No capability changes status. Locally, the TypeScript suite passes 42 of 42 and the Python suite 47, with 1 skipped (policy verify). Swift's suite runs in GitHub CI.
+
 ## Earlier audit — 1.2.5 (retrospective)
 
 `reviewed_core_version` moved to 1.2.5 on 2026-09-29 in the release-prep commit
